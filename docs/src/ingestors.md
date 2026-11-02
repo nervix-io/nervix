@@ -13,7 +13,7 @@ CREATE BRANCH by_user
 CREATE IF NOT EXISTS KAFKA TOPIC INGESTOR kafka_notifications
   FROM kafka_main
   TOPIC 'notifications'
-  OFFSET BY CONSUMER GROUP 'nervix_consumer'
+  OFFSET BY CONSUMER GROUP 'nervix_consumer' START AT LATEST
   INSTANCES 1
   MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
   ON QUIESCE SUSPEND DECODE USING notification_codec
@@ -55,7 +55,8 @@ reference is refused when the statement is applied, with a message that names bo
 `requires a KAFKA client, but client 'cache' is a REDIS client`. `SHOW CREATE INGESTOR` renders the
 complete statement under its head. `DESCRIBE INGESTOR` prints the pair, reference and locator on
 its `from:` line, such as `from: KAFKA TOPIC kafka_main TOPIC 'Orders'`. The following rows show
-`options: OFFSET BY CONSUMER GROUP 'Readers' INSTANCES 1`, `mode: NO ACK`, and `quiesce: SUSPEND`.
+`options: OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST INSTANCES 1`, `mode: NO ACK`, and
+`quiesce: SUSPEND`.
 The shared [inspection block](connector-contract.md#shared-entity-presentation) then reports its
 envelope, batching, output flush policies and error policies. `SHOW INGESTORS` prints the pair
 alone, such as `from=KAFKA TOPIC`.
@@ -116,7 +117,10 @@ delivered. `TIMESTAMP NOW` records that snapshot. `TIMESTAMP AT <field>` reads a
 field and `TIMESTAMP AT metadata.<field>` a metadata field the source's entity declares; the field
 must be `DATETIME`, and `CREATE` and `ALTER` refuse an undeclared metadata field or one of another
 type, naming the fields the entity declares. A message that carries no value for the field is
-rejected as a null payload timestamp is. These and connector-owned event timestamps preserve the
+rejected as a null payload timestamp is, and one whose connector hands over a value no `DATETIME`
+holds is refused before selection (see the metadata rules under
+[Value Construction and Filters](#value-construction-and-filters)). These and connector-owned event
+timestamps preserve the
 external instant exactly; `TIME RATE` never scales them. The internal low
 and high watermarks initially equal the selected event time, so source event time remains distinct
 from delivery and observation time throughout the graph. The 5 ms source-idle close and the
@@ -499,7 +503,9 @@ General notes:
 - each source entity declares the typed transport metadata its messages expose as
   `metadata.<field>`, listed under Metadata in its reference below: `KAFKA TOPIC` declares
   `metadata.topic`, `metadata.partition`, `metadata.offset`, `metadata.key`, `metadata.timestamp`,
-  `metadata.timestamp_type`, and `metadata.tombstone`, `SYSLOG LISTENER` declares
+  `metadata.timestamp_type`, and `metadata.tombstone`, `RABBITMQ QUEUE` declares the delivery's
+  envelope and its AMQP basic properties, `SQS QUEUE` declares the message identity and its system
+  attributes, `SYSLOG LISTENER` declares
   `metadata.peer_addr`, `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`,
   `HTTP ENDPOINT` declares `metadata.method`, `metadata.path`, `metadata.query`,
   `metadata.remote_addr`, and `metadata.host`, `PROMETHEUS QUERY` declares `metadata.query` and
@@ -513,6 +519,13 @@ General notes:
 - an ingestor builds a metadata column only for the fields its route expressions or its
   `TIMESTAMP AT metadata.<field>` read; an ingestor that reads none visits no metadata values and
   builds no metadata columns
+- a message whose connector hands over a value its field's declared type cannot hold, such as a
+  `RABBITMQ QUEUE` AMQP timestamp after 2262-04-11, is refused once `FILTER WHERE` keeps it, wherever
+  a route or `TIMESTAMP AT` reads that field: every route's `ON MESSAGE ERROR` policy receives a
+  message error with code `validation` and operation `admit` that names `metadata.<field>` and
+  describes the value. The field never reads as null for it, and a field no program reads refuses
+  nothing. A `KAFKA TOPIC` record timestamp or an `SQS QUEUE` system attribute out of range fails
+  the read instead, as its reference states
 - supported sources expose transport headers through `read_header(name)` and `read_headers(name)`;
   header names may be any `STRING` expression, and these functions may be used in both top-level
   `FILTER WHERE` and per-route expressions
@@ -1069,7 +1082,7 @@ See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md
 ```plexus,ignore
 CREATE KAFKA TOPIC INGESTOR <name>
   FROM <client> TOPIC 'orders'
-  (OFFSET BY DOMAIN | OFFSET BY CONSUMER GROUP 'readers')
+  (OFFSET BY DOMAIN | OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST | OFFSET BY CONSUMER GROUP 'readers' START AT LATEST)
   [INSTANCES 2]
   MODE <mode>
   ON QUIESCE <quiesce>
@@ -1085,7 +1098,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | KAFKA client |
 | Locator and validation rule | TOPIC 'orders' (kafka_topic) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers'` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); optional; default 1 |
+| Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST` (string literal checked by kafka_consumer_group); `OFFSET BY CONSUMER GROUP 'readers' START AT LATEST` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL<br>metadata.key: BYTES OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.timestamp_type: STRING OPTIONAL<br>metadata.tombstone: BOOL OPTIONAL |
@@ -1103,10 +1116,11 @@ See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#
 `TOPIC` takes a string literal that Kafka accepts as a topic name: 1 to 249 ASCII letters, digits,
 `.`, `_` and `-`, other than `.` and `..`. Nervix preserves its case in both directions, so
 `TOPIC 'Orders.EU'` reads exactly that topic. `OFFSET BY CONSUMER GROUP` takes the group's name as
-a string literal of 1 to 255 bytes without control characters, passed to Kafka as written. The
-ingestor names `ON QUIESCE SUSPEND`, the only quiesce mode it declares: the topic keeps its records
-after they are read, so a suspended ingestor resumes from its position, within the topic's
-retention. It reads a record's headers through `read_header` and `read_headers`.
+a string literal of 1 to 255 bytes without control characters, passed to Kafka as written, and
+requires `START AT EARLIEST` or `START AT LATEST`. The ingestor names `ON QUIESCE SUSPEND`, the
+only quiesce mode it declares: the topic keeps its records after they are read, so a suspended
+ingestor resumes from its position, within the topic's retention. It reads a record's headers
+through `read_header` and `read_headers`.
 
 The record's metadata also exposes its key as `metadata.key` (`BYTES`), its broker timestamp as
 `metadata.timestamp` (`DATETIME`), its timestamp kind as `metadata.timestamp_type` (`STRING`), and
@@ -1129,14 +1143,26 @@ rows into a host quiesce buffer.
 
 Offset modes:
 
-- `CONSUMER GROUP '<group>'`: Kafka manages offsets
+- `CONSUMER GROUP '<group>' START AT EARLIEST|LATEST`: Kafka manages offsets, and the statement says where the group starts a partition it holds no offset for
 - `DOMAIN`: Nervix stores the next offset in replicated runtime state and commits partition-to-instance assignment in the Raft-backed domain schedule
+
+`START AT` applies only to a partition the group has no usable committed offset for: a new group,
+a partition added to the topic, or an offset the topic's retention has passed. `EARLIEST` starts it
+at the earliest retained record, and `LATEST` at the partition's end, so a new group declared
+`LATEST` skips what the topic retains and reads what is produced after it takes the partition up.
+A partition the group holds an offset for resumes there whichever position the statement declares.
+`ALTER KAFKA TOPIC INGESTOR <name> SET START AT EARLIEST|LATEST` changes the position for the next
+such partition without moving any committed offset, and `SHOW CREATE` and `DESCRIBE INGESTOR`
+print the declared position, not a report of the group's current one. Writing `START AT` with
+`OFFSET BY DOMAIN` is refused at CREATE and `SET START AT` on such an ingestor is refused at ALTER,
+leaving its definition unchanged: the domain's start point places it.
 
 `CREATE KAFKA CLIENT` requires `bootstrap.servers`, the brokers that each consumer and producer of
 the client contacts first, and refuses a client without it, which could reach no broker. It refuses
 the Nervix-owned keys `group.id`, `enable.auto.commit`, `enable.partition.eof`,
-`allow.auto.create.topics` and `delivery.report.only.error`. Other property names and values are
-checked offline by librdkafka before commitment and passed through to it.
+`allow.auto.create.topics` and `delivery.report.only.error`, and `auto.offset.reset`, naming
+`START AT`, the clause that sets it. Other property names and values are checked offline by
+librdkafka before commitment and passed through to it.
 
 librdkafka reads some properties under two names and applies whichever it is handed last, and a
 client's entries reach it in no fixed order. A Kafka client therefore accepts each such property
@@ -1154,11 +1180,10 @@ setting. Each property a client sets therefore has one name and one value on eve
 
 The statement's offset mode supplies the consumer's `group.id`. Only `OFFSET BY CONSUMER GROUP`
 with `MODE NO ACK` enables `enable.auto.commit`. Every consumer disables `enable.partition.eof`
-and `allow.auto.create.topics`. Nervix does not override
-`auto.offset.reset`; set it explicitly, for example to `earliest`, when a new consumer group must
-read records that may already exist. Under `OFFSET BY DOMAIN` in an unpaced domain the same
-setting places a partition that has no domain offset yet. These overrides also take precedence
-over the configurable driver defaults in the table above.
+and `allow.auto.create.topics`. `START AT` sets `auto.offset.reset` under
+`OFFSET BY CONSUMER GROUP`, and every `OFFSET BY DOMAIN` consumer sets it to `earliest`, so a
+position the topic's retention passed while the consumer read resumes at the next retained record.
+These overrides also take precedence over the configurable driver defaults in the table above.
 
 A Kafka ingestor never creates the topic it reads. Every consumer Nervix runs for it sets
 `allow.auto.create.topics` to `false`, whatever the broker allows, and `CREATE KAFKA CLIENT` refuses a
@@ -1183,9 +1208,9 @@ in flight, refreshing the assignment leaves and rejoins the group, and a broker 
 outlasts the group session revokes it. Whenever the group assigns the partition to the ingestor
 again, the ingestor starts it at its earliest rejected record, until a commit passes that record,
 rather than at the group's committed offset or, for a group that committed nothing, where
-`auto.offset.reset` would start it. Another member that takes the partition resumes it from the
+`START AT` would start it. Another member that takes the partition resumes it from the
 committed offset, which never passes a rejected record; where the group has committed nothing for
-the partition, that member's `auto.offset.reset` decides, and `latest` skips the rejected
+the partition, that member's `START AT` decides, and `LATEST` skips the rejected
 records. Replays after a crash or assignment change may repeat records whose output was already
 written.
 
@@ -1240,15 +1265,15 @@ Offset recovery details:
 
 - `START AT <timestamp>` and `START AT NOW` apply once per domain start generation across all instances. The first initialization persists the resolved partition positions and the applied generation together before reading. Quiescence, reconnects, rebalances, ownership changes and restarts in that generation resume acknowledged positions; they do not apply the timestamp again. A new partition without a recorded position starts at that generation's original timestamp. A later explicit `START AT` begins a new generation and replaces the positions again.
 - persisted per-partition offsets are clamped to the partition's currently available Kafka watermark range on reassignment
-- in a generation begun with plain `START`, a partition without a stored domain offset starts in a paced domain at its first record at or after the domain's current logical time, or at its end as it stood before that lookup when it has no such record yet; in an unpaced domain it starts where the client's `auto.offset.reset` says: `earliest` at its earliest retained record, `latest`, librdkafka's default, at its end when the ingestor takes the partition up, and `error` refuses to start it, which `DESCRIBE INGESTOR` shows as the ingestor's transient error
+- in a generation begun with plain `START`, a partition without a stored domain offset starts in a paced domain at its first record at or after the domain's current logical time, or at its end as it stood before that lookup when it has no such record yet; in an unpaced domain it starts at its earliest retained record, so a plain `START` reads what the topic retains and `START AT NOW` is how an unpaced domain skips it
 - the instance that takes such a partition up records its start as the partition's domain offset before it reads, so a reconnect resumes the partition there instead of placing it again past records the instance has not acknowledged
 
 Quiescing leaves a consumer group, or unassigns domain-owned partitions. Domain-owned partitions
 resume from their recorded offsets, and consumer-group
 partitions resume from the group's committed offsets or an outstanding rejection floor as described
 above. Topic time and size retention continue during the pause. For consumer-group
-offsets that age out, the client's pass-through `auto.offset.reset` setting decides whether resume
-uses the earliest retained record, skips to new records, or raises a general source error. Domain
+offsets that age out, `START AT` decides whether resume uses the earliest retained record or skips
+to new records. Domain
 offsets clamp to the partition's current low and high watermarks; records retention has removed
 cannot be recovered. Other members of a user-named group may consume and commit while Nervix is
 absent. Quiescing does not change the auto-commit loss windows of `MODE NO ACK`.
@@ -1414,7 +1439,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
-| Metadata | Not offered: The current queue declaration exposes transport headers but no typed AMQP delivery metadata namespace. |
+| Metadata | metadata.exchange: STRING OPTIONAL<br>metadata.routing_key: STRING OPTIONAL<br>metadata.delivery_tag: U64 OPTIONAL<br>metadata.redelivered: BOOL OPTIONAL<br>metadata.content_type: STRING OPTIONAL<br>metadata.content_encoding: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.correlation_id: STRING OPTIONAL<br>metadata.reply_to: STRING OPTIONAL<br>metadata.type: STRING OPTIONAL<br>metadata.app_id: STRING OPTIONAL<br>metadata.user_id: STRING OPTIONAL<br>metadata.priority: U8 OPTIONAL<br>metadata.expiration: STRING OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
@@ -1430,6 +1455,22 @@ See the [RABBITMQ QUEUE capability and mirror reference](connector-capabilities.
 Its string literal must contain 1 to 255 UTF-8 bytes, the AMQP short-string limit; a multibyte
 character contributes every byte to that limit. `SHOW CREATE INGESTOR` retains the exact queue
 name and the configured acknowledgement, retry and instance policies.
+
+Each delivery exposes its envelope and its AMQP basic properties as metadata.
+`metadata.exchange` is the exchange it was published to, `''` for the default exchange, which is
+AMQP's name for it, and `metadata.routing_key` the routing key it was published with.
+`metadata.delivery_tag` is the `U64` tag its consumer channel gave it, counting from 1 on each
+channel, so a reconnected instance starts again at 1. `metadata.redelivered` is true when the broker
+delivered the message before, such as after a requeue or a lost connection. `metadata.content_type`,
+`content_encoding`, `message_id`, `correlation_id`, `reply_to`, `type`, `app_id`, `user_id`,
+`priority`, `expiration` and `timestamp` are its basic properties, each null when the publisher did
+not set it. `priority` is the `U8` octet the publisher wrote, whatever priorities the queue
+supports, and `expiration` keeps the text the publisher wrote. `metadata.timestamp` reads the AMQP
+timestamp, a count of whole seconds since the Unix epoch, as that exact `DATETIME` instant, so
+`TIMESTAMP AT metadata.timestamp` admits a message at the instant its producer wrote. A count no
+`DATETIME` holds, past 2262-04-11, such as milliseconds written where AMQP specifies seconds, refuses
+its message wherever the ingestor's route programs or its `TIMESTAMP AT` read `metadata.timestamp`,
+with code `validation` and operation `admit`, and refuses nothing in an ingestor that reads none.
 
 
 Choose `MODE NO ACK`, `MODE ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY …`, or
@@ -1687,7 +1728,8 @@ Delivery constraints:
 - `ACK` modes require `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. CREATE and ALTER refuse any other
   pairing, naming the session and quality of service the statement writes and underlining the
   mode, such as `MQTT TOPIC ingestors name MODE ACK SEQUENTIAL only with SESSION PERSISTENT and
-  QOS 1 or 2; the statement writes SESSION CLEAN and QOS 1`
+  QOS 1 or 2; the statement writes SESSION CLEAN and QOS 1`. Completion after `MODE` offers only the
+  modes the written session and quality of service keep, so any other pairing offers `NO ACK` alone
 - `ACK PARALLEL MAX <n>` is the in-flight ACK window and `BATCH TIMEOUT` is the maximum partial-batch wait;
   a quiesce change or a stop that meets a partial batch takes in the publishes it gathered at once
   rather than after its batch timeout
@@ -2662,33 +2704,44 @@ The client's Nervix-owned `CONFIG` is strict, with lowercase, case-sensitive key
 
 | Key | Contract |
 | --- | --- |
-| `endpoint` | Required `ws://` or `wss://` URL with a host and without a fragment. Its path and query are sent in the upgrade request. |
+| `endpoint` | Required `ws://` or `wss://` URL with a host, without a fragment and without user information. Its path and query are sent in the upgrade request. |
 | `connect_timeout_ms` | Positive whole milliseconds for DNS, TCP, TLS and upgrade together; omitted means 30000. |
 | `ping_interval_ms` | Positive whole milliseconds between client pings after signaling completes; omitted means only answering peer pings. |
 | `idle_timeout_ms` | Positive whole milliseconds without an inbound frame before reconnecting. When omitted, three configured ping intervals apply, or 30000 without configured pings. |
 | `handshake_buffer_capacity` | Accepted signaling messages retained before readiness: 1–65535, default 16. A full queue backpressures the connection within the signaling `TIMEOUT`. |
 | `max_message_size` | Positive whole bytes per incoming message, including fragmented messages: at most 4294967295, default 67108864 (64 MiB). |
 | `max_frame_size` | Positive whole bytes per incoming frame: at most 4294967295, default 16777216 (16 MiB). |
-| `tls_ca_file` | Optional PEM CA file; only with a `wss://` endpoint. Its certificates are trusted beside the bundled WebPKI roots and the platform's native roots, never instead of them. |
+| `tls_ca_file` | Optional PEM CA file holding at least one certificate; only with a `wss://` endpoint. Its certificates are trusted beside the bundled WebPKI roots and the platform's native roots, never instead of them. |
 | `tls_cert_file`, `tls_key_file` | Optional client identity files, supplied together; only with a `wss://` endpoint. |
 
 The client's declared key schema refuses unknown, repeated or mistyped keys and TLS file keys with
 `ws://`, and supplies the three declared defaults that `DESCRIBE CLIENT` shows. The WebSocket
-configuration then refuses an endpoint with a fragment, a count above its maximum and three ping
-intervals beyond the schedulable bound. Durations obey the shared schedulable physical-duration
-bound. Resource mounts and configuration templates keep their shared client contract; rendered
-values are checked before commitment and again when opening the source. A ping write has a
-one-second physical budget and a failure triggers recovery.
+configuration then refuses an endpoint with a fragment or user information, a count above its
+maximum and three ping intervals beyond the schedulable bound. Durations obey the shared
+schedulable physical-duration bound. Resource mounts and configuration templates keep their shared
+client contract; rendered values are checked before commitment and again when opening the source.
+A ping write has a one-second physical budget and a failure triggers recovery.
 
 No WebSockets key is declared confidential, but `DESCRIBE CLIENT` and `SHOW CREATE CLIENT` show an
-`endpoint` that carries user information or a query as `********`, because either can hold a
-credential. User information in the `endpoint` is not sent with the upgrade; a peer that needs
-credentials receives them as a `HEADERS` field, such as `authorization`, or in the query. `CREATE WEBSOCKETS CLIENT` requires each TLS file key, once its resource mount template
-is rendered, to name a readable regular file. The source parses the files when it opens: a CA
-certificate it cannot parse, or a client certificate chain and private key it cannot read or pair,
-fails the ingestor's start, which `DESCRIBE INGESTOR` shows as its transient status. A
-`tls_ca_file` that holds no PEM certificate adds no trust root, so the bundled and native roots
-alone verify the server. The server certificate is always verified against the endpoint's host.
+`endpoint` that carries a query as `********`, because a query can hold a credential. The upgrade
+never sends user information, so `CREATE WEBSOCKETS CLIENT` refuses an `endpoint` that carries it
+with `'endpoint' must not carry user information`, without printing the value. A peer that needs
+credentials receives them as a `HEADERS` field, such as `authorization`, or in the query.
+
+`CREATE WEBSOCKETS CLIENT` requires each TLS file key, once its resource mount template is
+rendered, to name a readable regular file. It also refuses a `tls_ca_file` that holds no PEM
+certificate, with `client config key 'tls_ca_file' holds no certificate`: such a file adds no trust
+root, so a private CA the client was meant to trust would surface only as a verification failure on
+every connection. `REBIND RESOURCE` applies the same checks to the version it moves a client to.
+The source parses the files when it opens: a CA certificate it cannot parse, or a client
+certificate chain and private key it cannot read or pair, fails the ingestor's start, which
+`DESCRIBE INGESTOR` shows as its transient status. The server certificate is always verified
+against the endpoint's host.
+
+These checks read the file on the node that validates the statement. A mounted file is the pinned
+version every node reads. A path outside a mount names each node's own file, and the source does
+not repeat the certificate check when it opens: a file that holds no certificate there adds no
+trust root, and the bundled and native roots alone verify the server.
 
 After signaling succeeds, the idle timer starts. An explicit idle timeout overrides the
 ping-derived value. Every received frame, including a ping or pong, refreshes activity. Sending a
@@ -2891,3 +2944,9 @@ The following entities declare `INSTANCES`; presence and defaults follow the voc
 | RABBITMQ QUEUE | optional; default 1 |
 | SQS QUEUE | optional; default 1 |
 <!-- connector-matrix:instancing:end -->
+
+The instances of a `KAFKA TOPIC` ingestor under `OFFSET BY CONSUMER GROUP` are members of one group
+and share its `START AT`: whichever instance takes a partition the group holds no usable offset for
+starts it there, and a partition that moves to another instance resumes from the group's committed
+offset. Under `OFFSET BY DOMAIN` the domain's start point places every partition, whichever instance
+the schedule assigns it to.

@@ -262,13 +262,14 @@ platform string; connector preparation uses it only when the codec's event omits
 A polled HTTP request's header holds a literal or names a client secret as two states of one enum,
 so a value cannot be both or neither, and the Model that names a secret holds its key and never its
 value.
-The registry's `NERVIX HDR VALUE` archive signature identifies the current Model layout, including
-an owned Pulsar subscription's required start position, the required branch partition count,
-Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's
-`SEND` request shape, the session and quality of service an MQTT TOPIC ingestor writes beside
-its delivery mode, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a
-`PATTERN`, and that header state. Consensus's `raft_header_value_` keyspaces and current state
-metadata encoding identify its stored shapes. An unrecognized signature, namespace or
+The registry's `NERVIX GROUP POS` archive signature identifies the current Model layout, including
+an owned Pulsar subscription's required start position, a Kafka consumer group's required start
+position, the required branch partition count, Sentry platform, an ingestor's
+`TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the session and
+quality of service an MQTT TOPIC ingestor writes beside its delivery mode, a `REDIS PUBSUB`
+ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`, and that header state.
+Consensus's `raft_group_start_` keyspaces and current state metadata encoding identify its stored
+shapes. An unrecognized signature, namespace or
 encoding fails with the owning storage error and requires the stored data to be recreated.
 
 ## Absence And Distinct States
@@ -711,6 +712,14 @@ BSON's signed range. It does not publish that record with a replacement BSON nul
 conflict key. An actual null remains null, and other valid records in the batch can proceed under
 the connector's record outcome contract. See [Connector Crates And The Connector Contract](./connector-contract.md)
 for the host's publish and acknowledgement boundaries.
+
+Ingest metadata keeps the same three states apart. A message hands each declared field a value of
+the field's exact type, an absence where its transport carries none, or an unrepresentable value
+where its connector keeps a message carrying one the type cannot hold, such as an AMQP timestamp
+after the last `DATETIME` instant. An unrepresentable value never reads as null and never becomes
+a nearby instant: a program or `TIMESTAMP AT` that reads the field refuses the message with a
+`validation` message error naming the field, and a field nothing reads costs nothing. The retained
+copy a quiesce buffer replays keeps the unrepresentable state with its description.
 
 The MongoDB sink also distinguishes each failed write's document answers: delivered, rejected with
 the server's definitive refusal code, or unresolved. An insert's implicit applied-document account

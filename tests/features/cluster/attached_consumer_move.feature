@@ -23,12 +23,11 @@ Feature: Attached acknowledgements across consumer moves
       CREATE RELAY moved_sink_records SCHEMA moved_sink_event
         BRANCHED BY moved_sink_branch CAPACITY 1;
       CREATE KAFKA CLIENT moved_sink_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR moved_sink_source
         FROM moved_sink_kafka TOPIC 'moved_sink_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'moved_sink_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'moved_sink_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND DECODE USING moved_sink_codec
         TO moved_sink_records INHERIT ALL
@@ -121,12 +120,11 @@ Feature: Attached acknowledgements across consumer moves
         FROM WIRE JSON SCHEMA owner_move_wire TO SCHEMA owner_move_event;
       CREATE RELAY owner_move_records SCHEMA owner_move_event UNBRANCHED CAPACITY 1;
       CREATE KAFKA CLIENT owner_move_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR owner_move_source
         FROM owner_move_kafka TOPIC 'owner_move_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'owner_move_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'owner_move_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND DECODE USING owner_move_codec
         TO owner_move_records INHERIT ALL UNBRANCHED

@@ -372,14 +372,14 @@ current connection, retry and deadline limits.
   an ingestor's `NO ACK` or an emitter's `NO ACK`.
 - Every Kafka client sets `bootstrap.servers`; `CREATE KAFKA CLIENT` refuses a client without it.
   Treat `TOPIC` as a literal, case-preserving Kafka topic name in both directions, and give every
-  `KAFKA TOPIC` ingestor `OFFSET BY DOMAIN` or `OFFSET BY CONSUMER GROUP '<group>'` and
-  `ON QUIESCE SUSPEND`.
+  `KAFKA TOPIC` ingestor `OFFSET BY DOMAIN` or
+  `OFFSET BY CONSUMER GROUP '<group>' START AT EARLIEST|LATEST` and `ON QUIESCE SUSPEND`.
 - For Kafka record metadata, nullable keys, tombstones and `TIMESTAMP AT metadata.timestamp`,
   follow `Ingestors` → `Kafka`; convert a binary key explicitly before using it as text.
-- Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
-  group may need records that already exist; Nervix passes the setting through and does not supply
-  a hidden default. Under `OFFSET BY DOMAIN` in an unpaced domain the same policy places a
-  partition that has no domain offset yet, such as one added to the topic.
+- Choose `START AT` for what a new consumer group should do with the records a topic retains:
+  `EARLIEST` reads them and `LATEST` skips them. A partition the group holds an offset for ignores
+  it. `CREATE KAFKA CLIENT` refuses `auto.offset.reset`, and `OFFSET BY DOMAIN` takes no `START AT`:
+  in an unpaced domain a plain `START` reads what a partition retains and `START AT NOW` skips it.
 - A Kafka client never sets `allow.auto.create.topics`; `CREATE KAFKA CLIENT` refuses it. Provision each
   topic a Kafka ingestor reads: an ingestor never creates its topic and reports it as missing until
   it exists.

@@ -24,12 +24,11 @@ Feature: Kafka consumer-group rewinds across a rebalance
       CREATE CODEC rewind_codec FROM WIRE JSON SCHEMA rewind_wire TO SCHEMA rewind_event;
       CREATE RELAY rewind_records SCHEMA rewind_event UNBRANCHED;
       CREATE KAFKA CLIENT rewind_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR rewind_source
         FROM rewind_kafka TOPIC 'rewind_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'rewind_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'rewind_group_{{test_id}}' START AT EARLIEST
           MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 30s ACK TIMEOUT 5s
           RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND DECODE USING rewind_codec
@@ -106,13 +105,12 @@ Feature: Kafka consumer-group rewinds across a rebalance
       CREATE RELAY floor_records SCHEMA floor_event UNBRANCHED;
       CREATE KAFKA CLIENT floor_kafka CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}',
-        'auto.offset.reset' = 'latest',
         'session.timeout.ms' = '6000',
         'heartbeat.interval.ms' = '500'
       };
       CREATE KAFKA TOPIC INGESTOR floor_source
         FROM floor_kafka TOPIC 'floor_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'floor_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'floor_group_{{test_id}}' START AT LATEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND DECODE USING floor_codec
         TO floor_records INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG

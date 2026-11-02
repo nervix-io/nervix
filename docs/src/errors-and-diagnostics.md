@@ -447,8 +447,12 @@ MQTT QoS refusals identify the supplied number, its source span, and the levels 
 or emitter accepts. An MQTT ingestor `ACK` mode outside a persistent session at QoS 1 or 2 is
 refused with the mode underlined and the session and QoS the statement writes named beside the
 required pairing. A refused `ON QUIESCE SUSPEND` identifies `SUSPEND` and its required
-`SESSION PERSISTENT` pairing at `QOS 1` or `QOS 2`. Completion offers the quiesce modes the
-written session can use; a clean session or QoS 0 offers `BUFFER` and `DROP`.
+`SESSION PERSISTENT` pairing at `QOS 1` or `QOS 2`. Completion offers the delivery and quiesce
+modes the written session and QoS keep, so a statement that follows completion reaches neither
+refusal: a clean session or QoS 0 offers `NO ACK` after `MODE`, and `BUFFER` and `DROP` after
+`ON QUIESCE`. A grammar branch those choices close names nothing a statement could write, so a
+diagnostic lists only what the open branches expect, and says `something else` only where none
+names an item.
 
 The language layer reports rejected source the same way. Lexing and parsing each create the report
 at the stage that failed, and its context names that stage and holds the rejected text with every
@@ -1053,15 +1057,11 @@ ends that resume attempt with `KafkaTopicIngestorError::UnresolvedDomainStart` b
 `IngestorError::Resume`. Its typed fields retain the accepted and observed generations. The host
 retries on its existing cadence; the connector polls only after it has canonical resume positions.
 
-A domain-offset Kafka ingestor that must start a partition without a domain offset while its
-client's `auto.offset.reset` is `error` fails its resume with
-`KafkaTopicIngestorError::ResetRefused`, which names the topic and partition, beneath
-`IngestorError::Resume`; the host shows it as the ingestor's transient status and resumes again on
-its cadence. A timestamp lookup whose answer carries a partition error keeps that `KafkaError`
+A timestamp lookup whose answer carries a partition error keeps that `KafkaError`
 beneath `KafkaTopicIngestorError::ResolveTimestampOffsets`. A consumer-group rebalance runs in the consumer's context, which has no caller to return a failure
 to: a rejected partition's floor that cannot be set on the assignment, and an assignment or
 revocation librdkafka refuses, are logged at `warn` with the driver's error, and the partition then
-starts where the group's committed offset or the client's reset policy places it.
+starts where the group's committed offset or the ingestor's `START AT` places it.
 
 A Kafka consumer takes the commands charge of the job that will destroy it before it is created,
 and a refused charge keeps `AdmissionError` beneath `KafkaTopicIngestorError::RetirementAdmission`. It
@@ -1315,9 +1315,14 @@ is created. The refusal names the connector, the client and the domain, with the
 or timeout rule, that rule's error is beneath the key, such as `PROMETHEUS client 'prom_main' in
 domain 'shop' cannot use its CONFIG: 'addr' is not an API root: the URL has a query string`.
 A `WEBSOCKETS CLIENT` uses the same validation boundary with
-`WebsocketsClientConfigError`: unknown/repeated keys, invalid endpoint, positive-duration or
-portable positive limit values, an unschedulable ping-derived idle bound,
-TLS keys on `ws`, and unpaired identity files are typed refusals naming their key, client and domain.
+`WebsocketsClientConfigError`: unknown/repeated keys, invalid endpoint, an endpoint with a fragment
+or user information, positive-duration or portable positive limit values, an unschedulable
+ping-derived idle bound, TLS keys on `ws`, and unpaired identity files are typed refusals naming
+their key, client and domain without printing a value. The connector's offline check reports a
+`tls_ca_file` without a certificate as `OfflineClientConfigError::NoCertificate`, whose public
+message names only the key, and a file it cannot read as `InvalidKey` above the contract's
+`ClientConfigError`. A certificate section it cannot parse stays
+`TlsClientConfigError::ParseCaCertificate` beneath `IngestorError::Open` when the source opens.
 `WebsocketsUpgradeHeadersError` names the connection ingestor and offending field without printing
 its value; shared HTTP name, value and limit causes remain beneath it. Planning retains that typed
 cause if a ingestor cannot produce its validated header collection. Rendered client values are
@@ -1704,9 +1709,14 @@ failure. An error handler whose own construction fails does not recursively invo
 
 Paced ingest admission reports a rejected event timestamp as a message error with code
 `validation` and operation `admit`. A null declared timestamp has the same classification and
-names its field. The host keeps the rejected row's source metadata and ACK attached while each
-output route applies its message-error policy. Accepted rows from the same decoded group continue
-through their normal routes.
+names its field. So does a transport metadata value its connector hands over as unrepresentable,
+with a description of it, such as an AMQP timestamp after the last `DATETIME` instant, wherever
+the ingestor's programs or its `TIMESTAMP AT` read that field: the host refuses the message after
+`FILTER WHERE` and before event-time selection, and the message names `metadata.<field>` and that
+description, never a payload value.
+The host keeps the rejected row's source metadata and ACK attached while each output route applies
+its message-error policy. Accepted rows from the same decoded group continue through their normal
+routes.
 
 Before a domain execution or replacement becomes active, the registry selects each DLQ route and
 resolves its source, partial-output and destination schemas, branch declarations and flush

@@ -315,12 +315,11 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR kafka_events
         FROM kafka_main TOPIC 'http_leases_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'http_leases_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'http_leases_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING outbound_events_codec
         TO outgoing
