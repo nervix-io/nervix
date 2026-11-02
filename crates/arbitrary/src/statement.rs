@@ -1151,14 +1151,24 @@ impl Arbitrary<'_> {
             IngestorEntityKind::Http(HttpIngestorEntity::Endpoint) => {
                 self.transport_operations(Self::http_endpoint_source)
             }
-            IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic) => {
-                self.transport_operations(Self::kafka_topic_source)
-            }
+            IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic) => self
+                .operations(|arbitrary| {
+                    if arbitrary.entropy.flag() {
+                        nervix_models::KafkaTopicIngestorOperation::SetStartAt {
+                            position: arbitrary.ingest_start_position(),
+                        }
+                    } else {
+                        nervix_models::KafkaTopicIngestorOperation::Transport(
+                            arbitrary.transport_operation(Self::kafka_topic_source),
+                        )
+                    }
+                })
+                .into(),
             IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic) => self
                 .operations(|arbitrary| {
                     if arbitrary.entropy.flag() {
                         nervix_models::PulsarTopicIngestorOperation::SetStartAt {
-                            position: arbitrary.pulsar_start_position(),
+                            position: arbitrary.ingest_start_position(),
                         }
                     } else {
                         nervix_models::PulsarTopicIngestorOperation::Transport(

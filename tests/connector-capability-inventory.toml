@@ -323,10 +323,18 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "OFFSET BY CONSUMER GROUP"
+capability = "OFFSET BY CONSUMER GROUP START AT EARLIEST"
 entity = "KAFKA TOPIC INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/kafka_ingestion.feature", scenario = "Kafka NO ACK executes ingestor programs once for a collected ingest group" },
+  { feature = "tests/features/runtime/kafka_start_position.feature", scenario = "A new consumer group declared START AT EARLIEST replays the retained backlog on <cluster_size> nodes" },
+]
+
+[[capability]]
+capability = "OFFSET BY CONSUMER GROUP START AT LATEST"
+entity = "KAFKA TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/kafka_start_position.feature", scenario = "A new consumer group declared START AT LATEST skips the retained backlog and receives the next record in <mode_name> on <cluster_size> nodes" },
 ]
 
 [[capability]]
@@ -1021,6 +1029,114 @@ entity = "RABBITMQ QUEUE INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ ingestor whose broker never answers its TLS handshake is reported within connect_timeout_ms" },
   { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A RabbitMQ ingestor whose broker never answers its AMQP handshake is reported within connect_timeout_ms" },
+]
+
+[[capability]]
+capability = "metadata.app_id"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.content_encoding"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.content_type"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.correlation_id"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.delivery_tag"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.exchange"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.expiration"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.message_id"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.priority"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.redelivered"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ delivery the ingestor rejected reads metadata.redelivered as true when the broker delivers it again" },
+]
+
+[[capability]]
+capability = "metadata.reply_to"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.routing_key"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.timestamp"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "TIMESTAMP AT metadata.timestamp windows RabbitMQ messages at the instant their producer wrote" },
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ timestamp no DATETIME holds refuses its message only where metadata.timestamp is read" },
+]
+
+[[capability]]
+capability = "metadata.type"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.user_id"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
 ]
 
 [[capability]]

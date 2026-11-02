@@ -24,12 +24,11 @@ Feature: Remote record acknowledgements lost between nodes
       CREATE BRANCH lost_ack_branch SCHEMA lost_ack_key TTL 5m;
       CREATE RELAY lost_ack_records SCHEMA lost_ack_event BRANCHED BY lost_ack_branch;
       CREATE KAFKA CLIENT lost_ack_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR lost_ack_source
         FROM lost_ack_kafka TOPIC 'lost_ack_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'lost_ack_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'lost_ack_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND DECODE USING lost_ack_codec
         TO lost_ack_records INHERIT ALL

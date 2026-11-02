@@ -1,12 +1,12 @@
 //! The clauses ingestor source bodies share: the delivery modes, the consumer count, the batch
-//! timeout of a parallel acknowledgement window, and every `ON QUIESCE` body.
+//! timeout of a parallel acknowledgement window, the start position, and every `ON QUIESCE` body.
 //!
 //! Layer: language.
 //!
 //! - **Owns.** The one spelling of each delivery mode an ingestor writes — `NO ACK`,
 //!   `ACK SEQUENTIAL …` and `ACK PARALLEL MAX n …` — and the grammar of `INSTANCES`,
-//!   `BATCH TIMEOUT` and the quiesce bodies, which each connector's grammar composes into the
-//!   subset its entity accepts.
+//!   `BATCH TIMEOUT`, `START AT` and the quiesce bodies, which each connector's grammar composes
+//!   into the subset its entity accepts.
 //! - **Depends on.** Shared Plexus grammar primitives and the delivery and quiesce vocabulary.
 //! - **Must not know.** Which connector accepts which clause; the connector modules choose.
 
@@ -19,7 +19,7 @@ use std::num::NonZeroU64;
 
 use chumsky::prelude::*;
 use meticulous::ResultExt as _;
-use nervix_models::{IngestQuiesceMode, IngestQuiesceOverflow, RetryPolicy};
+use nervix_models::{IngestQuiesceMode, IngestQuiesceOverflow, IngestStartPosition, RetryPolicy};
 
 use crate::{
     lexer::{Identifier, Token},
@@ -96,6 +96,15 @@ pub(super) fn optional_instances<'src>()
         .ignore_then(instance_count())
         .or_not()
         .map(|instances| instances.unwrap_or(NonZeroU64::MIN))
+}
+
+/// `START AT EARLIEST|LATEST`: where a source starts when its broker holds no position it can use.
+pub(super) fn start_position<'src>()
+-> impl Parser<'src, &'src [Token], IngestStartPosition, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase2(Identifier::Start, Identifier::At).ignore_then(choice((
+        kw(Identifier::Earliest).to(IngestStartPosition::Earliest),
+        kw(Identifier::Latest).to(IngestStartPosition::Latest),
+    )))
 }
 
 pub(super) fn batch_timeout_parser<'src>()
