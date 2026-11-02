@@ -2619,11 +2619,15 @@ impl Cluster {
         ensure_kafka_topic_partitions(&self.dependencies, topic, partitions).await
     }
 
-    /// Historical CreateTime records must survive the broker's retention scans.
+    /// Historical CreateTime records must survive the broker's retention scans, and the broker
+    /// keeps every CreateTime as its producer wrote it, however far after the broker's clock, so a
+    /// record whose timestamp no `DATETIME` holds reaches the topic whatever the broker's default.
     pub(crate) async fn create_kafka_metadata_topic(&self, topic: &str) -> io::Result<()> {
         let admin = kafka_admin_client(&self.dependencies)?;
+        let latest_create_time = i64::MAX.to_string();
         let definition = NewTopic::new(topic, 1, TopicReplication::Fixed(1))
             .set("message.timestamp.type", "CreateTime")
+            .set("message.timestamp.after.max.ms", &latest_create_time)
             .set("retention.ms", "-1")
             .set("retention.bytes", "-1");
         let options = AdminOptions::new().request_timeout(Some(Duration::from_secs(5)));

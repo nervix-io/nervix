@@ -289,6 +289,12 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   wherever a route or `TIMESTAMP AT` reads the field; check the producer's unit before choosing
   `TIMESTAMP AT metadata.timestamp`. `metadata.exchange` is `''` for the default exchange. Read the
   [RabbitMQ ingestor contract](../../../docs/src/ingestors.md#rabbitmq) for every field.
+- For KAFKA TOPIC, `metadata.timestamp` reads the record timestamp as milliseconds. A producer that
+  writes microseconds there sends an instant no `DATETIME` holds, so each such record is refused
+  wherever a route or `TIMESTAMP AT` reads the field and is ingested everywhere else; under an
+  acknowledged mode, send that route's `ON MESSAGE ERROR` to a relay, because `LOG` negatively
+  acknowledges the record and the source reads it again before any later record. Read the
+  [Kafka ingestor contract](../../../docs/src/ingestors.md#kafka).
 - Treat domain execution time as one snapshot per accepted unit of work. Every expression in that
   unit uses the same instant, including filters, construction, keys, correlation and window
   programs, inferencer mappings, emitter `VALUES` and SQS FIFO groups, and subscription filters.
