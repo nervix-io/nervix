@@ -29,8 +29,8 @@ and the same signature and namespace fence that shape.
 Pulsar subscription generators draw both required owned creation positions, `EARLIEST` and
 `LATEST`, and provisioned subscriptions without a position. Statement generators mix typed
 `SET START AT` with shared ingestor operations. The Model, registry and consensus properties
-preserve those complete values. The `NERVIX REDIS SUB` registry signature and
-`raft_redis_subscription_` consensus namespace identify this current Model layout before decoding.
+preserve those complete values. The `NERVIX HDR VALUE` registry signature and
+`raft_header_value_` consensus namespace identify this current Model layout before decoding.
 
 MQTT TOPIC ingestor generators draw either session at QoS 0, 1 or 2 beside `NO ACK`, and the
 persistent session at QoS 1 or 2 beside an acknowledged mode, so every pairing the declaration
