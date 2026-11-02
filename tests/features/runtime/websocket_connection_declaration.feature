@@ -188,6 +188,55 @@ Feature: WebSockets connection declarations
         'handshake_buffer_capacity' = '65536'
       };
       """
+    When these Plexus statements fail with "WEBSOCKETS client 'socket' in domain '{{domain}}' cannot use its CONFIG: 'endpoint' must not carry user information"
+      """
+      CREATE WEBSOCKETS CLIENT socket CONFIG {
+        'endpoint' = 'wss://operator:private-endpoint-password@websocket.nervix.test/events'
+      };
+      """
+    Then the last command error does not contain
+      """
+      private-endpoint-password
+      """
+
+    # A CONFIG that names a mounted file reaches these checks through its rendered values.
+    Given the leader node is configured with these Plexus statements
+      """
+      CREATE RESOURCE socket_trust;
+      """
+    And node "node-1" has resource directory "socket_trust_files" containing
+      """
+      {"empty.pem":"","prose.pem":"no certificate is written here\n"}
+      """
+    When these Plexus commands are executed through the client on the leader node
+      """
+      UPLOAD RESOURCE socket_trust VERSION "{{socket_trust_files}}";
+      """
+    When these Plexus statements fail with "invalid client 'socket' in domain '{{domain}}': 'endpoint' must not carry user information"
+      """
+      CREATE WEBSOCKETS CLIENT socket MOUNT socket_trust VERSION 1 CONFIG {
+        'endpoint' = 'wss://operator:private-endpoint-password@websocket.nervix.test/events',
+        'tls_ca_file' = '{{ socket_trust }}/prose.pem'
+      };
+      """
+    Then the last command error does not contain
+      """
+      private-endpoint-password
+      """
+    When these Plexus statements fail with "invalid client 'socket' in domain '{{domain}}': client config key 'tls_ca_file' holds no certificate"
+      """
+      CREATE WEBSOCKETS CLIENT socket MOUNT socket_trust VERSION 1 CONFIG {
+        'endpoint' = 'wss://websocket.nervix.test/events',
+        'tls_ca_file' = '{{ socket_trust }}/empty.pem'
+      };
+      """
+    When these Plexus statements fail with "invalid client 'socket' in domain '{{domain}}': client config key 'tls_ca_file' holds no certificate"
+      """
+      CREATE WEBSOCKETS CLIENT socket MOUNT socket_trust VERSION 1 CONFIG {
+        'endpoint' = 'wss://websocket.nervix.test/events',
+        'tls_ca_file' = '{{ socket_trust }}/prose.pem'
+      };
+      """
 
     Given the leader node is configured with these Plexus statements
       """
@@ -247,6 +296,52 @@ Feature: WebSockets connection declarations
       CREATE WEBSOCKETS CONNECTION INGESTOR socket_events FROM socket HEADERS { 'sec-websocket-protocol' = 'chat, chat' }
         MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
         TO received INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: Rebinding a WebSockets client refuses a CA file that holds no certificate
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE socket_trust;
+      """
+    # Validation looks for a certificate section. The source parses one when it opens.
+    And node "node-1" has resource directory "socket_trust_certificate" containing
+      """
+      {"ca.pem":"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"}
+      """
+    And node "node-1" has resource directory "socket_trust_prose" containing
+      """
+      {"ca.pem":"no certificate is written here\n"}
+      """
+    When these Plexus commands are executed through the client on the leader node
+      """
+      UPLOAD RESOURCE socket_trust VERSION "{{socket_trust_certificate}}";
+      UPLOAD RESOURCE socket_trust VERSION "{{socket_trust_prose}}";
+      """
+    And these Plexus commands are executed
+      """
+      CREATE WEBSOCKETS CLIENT socket MOUNT socket_trust VERSION 1 CONFIG {
+        'endpoint' = 'wss://websocket.nervix.test/events',
+        'tls_ca_file' = '{{ socket_trust }}/ca.pem'
+      };
+      """
+    When these Plexus statements fail with "invalid client 'socket' in domain '{{domain}}': client config key 'tls_ca_file' holds no certificate"
+      """
+      REBIND RESOURCE socket_trust TO VERSION 2;
+      """
+    And these Plexus commands are executed
+      """
+      SHOW CREATE CLIENT socket;
+      """
+    Then the last command output contains
+      """
+      MOUNT socket_trust VERSION 1
       """
 
     Examples:

@@ -1609,3 +1609,110 @@ async fn a_node_without_room_to_unfold_a_payload_refuses_it_without_judging_it()
         .expect("the same payload unfolds once the class has room");
     assert_eq!(collector.pending.undispatched_payloads(), 1);
 }
+
+/// A message whose value for a read metadata field its declared type cannot hold is refused before
+/// routing: its ACK resolves through the routes' message-error policy, which ends it unacknowledged
+/// with the error's text where the ingestor has no route, and the other messages of its group stay,
+/// in order and with their own ACKs. A group none of whose messages was refused comes back whole.
+#[nervix_primitives::test]
+async fn a_message_whose_read_metadata_value_its_type_cannot_hold_is_refused_before_routing() {
+    use nervix_connector::{IngestRowHeaders, RetainedIngestMetadata, RetainedIngestMetadataValue};
+    use nervix_models::{IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType};
+
+    const FIELDS: &[IngestorMetadataField] = &[IngestorMetadataField::new(
+        "timestamp",
+        IngestorMetadataType::Datetime,
+    )];
+    let runtime = Runtime::default();
+    let test_domain = domain("default");
+    install_unpaced_test_domain(&runtime, &test_domain);
+    let projection =
+        IngestMetadataProjection::reading(IngestorMetadataDeclaration::new(FIELDS), ["timestamp"])
+            .expect("the projection reads a declared field");
+    let refused =
+        RetainedIngestMetadata::from_values(vec![RetainedIngestMetadataValue::Unrepresentable {
+            ty: IngestorMetadataType::Datetime,
+            value: "the AMQP timestamp 946684800000 seconds after the Unix epoch".to_string(),
+        }]);
+    let admitted =
+        RetainedIngestMetadata::from_values(vec![RetainedIngestMetadataValue::Datetime(
+            Timestamp::from_unix_nanos(1),
+        )]);
+    let metadata_rows = [
+        IngestMetadataRow {
+            fields: &refused,
+            headers: IngestRowHeaders::NONE,
+            position: None,
+        },
+        IngestMetadataRow {
+            fields: &admitted,
+            headers: IngestRowHeaders::NONE,
+            position: None,
+        },
+    ];
+    let tracker = Arc::new(AckRootTracker::default());
+    let (refused_acks, refused_completion) = AckSet::tracked_root(tracker.clone());
+    let (admitted_acks, _admitted_completion) = AckSet::tracked_root(tracker.clone());
+    let mut rows = two_ingest_rows();
+    rows.ingest_metadata = ingest_metadata_for_test(projection.clone(), &metadata_rows);
+    rows.acks = vec![refused_acks, admitted_acks];
+    let context = IngestGroupContext {
+        handles: IngestTaskHandles::detached(&test_domain),
+        domain: test_domain.clone(),
+        ingestor: named("rabbit_orders"),
+        timestamp_source: None,
+        output_routes: Arc::new(BoundIngestorRoutes {
+            routes: Vec::new(),
+            metadata: projection.clone(),
+        }),
+        filter_where: None,
+    };
+    let routing = DomainRoutingSnapshot::default();
+    let mut collector = IngestRouteCollector::new(projection, 2, grouped_event_ingestor_metrics());
+
+    let remaining = runtime
+        .refuse_unrepresentable_metadata(
+            &routing,
+            &context,
+            rows,
+            &mut collector,
+            Timestamp::from_unix_nanos(5),
+        )
+        .await
+        .expect("a refused message leaves a consistent group");
+
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(
+        remaining.batch.value(0, "value").expect("readable"),
+        Some(RuntimeValue::I64(2))
+    );
+    assert!(remaining.ingest_metadata.refusal(0).is_none());
+    assert!(!collector.input_refused, "no route logs the refusal");
+    assert_eq!(
+        timeout(Duration::from_secs(1), refused_completion.wait())
+            .await
+            .expect("the refused message's ACK resolves"),
+        AckOutcome::NoAck(
+            "metadata.timestamp holds the AMQP timestamp 946684800000 seconds after the Unix \
+             epoch, which no DATETIME holds"
+                .to_string()
+        )
+    );
+    assert_eq!(
+        tracker.outstanding(),
+        1,
+        "the admitted message keeps its ACK for routing"
+    );
+
+    let untouched = runtime
+        .refuse_unrepresentable_metadata(
+            &routing,
+            &context,
+            two_ingest_rows(),
+            &mut collector,
+            Timestamp::from_unix_nanos(5),
+        )
+        .await
+        .expect("a group without refusals comes back whole");
+    assert_eq!(untouched.len(), 2);
+}
