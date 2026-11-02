@@ -176,6 +176,10 @@ fn is_record_sqlstate(code: &str) -> bool {
 }
 
 impl PostgresWriteError {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "SQLx's external database-error trait provides the SQLSTATE")
+    )]
     fn report_cancellation(
         error: &sqlx::Error,
         deadline: Option<PostgresStatementDeadline>,
@@ -199,6 +203,10 @@ impl PostgresWriteError {
         Report::new(Self::Metadata(error))
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "SQLx's external database-error trait provides the SQLSTATE")
+    )]
     fn report_execute(
         error: sqlx::Error,
         deadline: Option<PostgresStatementDeadline>,
