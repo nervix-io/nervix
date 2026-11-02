@@ -379,6 +379,12 @@ pub(crate) enum RegistryError {
         domain: DomainName,
         ingestor: ModelName,
     },
+    /// The method refusal is the frame beneath, rendered once in the chain.
+    #[error("ingestor '{ingestor}' in domain '{domain}' cannot use its METHOD")]
+    InvalidHttpRequestMethod {
+        domain: DomainName,
+        ingestor: ModelName,
+    },
     #[error("branch '{branch}' in domain '{domain}' uses BYTES in field '{field}'")]
     BranchFieldContainsBytes {
         domain: DomainName,

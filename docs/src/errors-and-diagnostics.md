@@ -1340,6 +1340,10 @@ A polling header whose known name and literal or resolved client-secret value ex
 policy produces `ClusterParameterLimit` at admission or parameter transition. Complete rendered
 headers are checked against the host-captured caps at connector open; an over-limit value keeps
 `InvalidHeader` and its typed HTTP limit cause without exposing the secret.
+A polling ingestor's `METHOD` that HTTP cannot send is refused at `CREATE` and `ALTER` in the same
+shape: `HttpRequestFieldError` is the frame beneath the registry's `InvalidHttpRequestMethod`
+context, which names only the ingestor and its domain, as in `ingestor 'polled' in domain 'shop'
+cannot use its METHOD: method is not a supported HTTP token`.
 An Iceberg emitter's location refusal names its domain, emitter and `LOCATION`, with the
 vocabulary's typed location failure beneath that context. A malformed URL retains its URL-parser
 cause; a storage-scheme mismatch names the found scheme and the schemes its declared client
