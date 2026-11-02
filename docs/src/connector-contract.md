@@ -349,7 +349,8 @@ each integration connects through it.
 
 Composition passes the resolver's handle into the HTTP polling and Prometheus source plans and into
 the HTTP request, Sentry, OTEL HTTP, and Iceberg emitter plans. The shared `HttpClientConfig` installs
-it on the Reqwest 0.13 clients of HTTP polling, Prometheus, Sentry and OTEL HTTP. The HTTP request
+it on the Reqwest 0.13 clients of HTTP polling, Prometheus, Sentry and OTEL HTTP. Their shared TLS
+trust and identity follow [HTTP client transport](#http-client-transport), as HTTP request emission does. The HTTP request
 emitter resolves each request's target host, or its client's declared proxy's host, itself, as its
 [request transport](#emitter-boundary) describes. Iceberg REST uses a separate Reqwest 0.12 client with that same resolver. Iceberg object
 storage uses OpenDAL 0.57 with a Reqwest 0.13 client that the connector builds with the node
@@ -404,6 +405,11 @@ one contract:
   names through the node resolver, never reads `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
   `NO_PROXY` or their lowercase forms, follows no redirect by itself, bounds each request by the
   client's `timeout_ms` where the client sets it, and presents the client's TLS trust and identity.
+  It obtains its preconfigured rustls client from `RustlsClientConfigProvider`, the same owner the
+  HTTP request emitter uses: bundled Mozilla roots plus native roots, with every certificate in
+  `tls_ca_file` added and the optional paired client certificate and key. An empty native store
+  does not prevent client construction. The HTTP builder advertises HTTP/2 and HTTP/1.1 through
+  ALPN; passing a preconfigured TLS client must not drop protocol negotiation.
   Reqwest's `gzip`, `deflate` and `brotli` features, which the OTEL connector selects and Cargo
   unifies across the server's build, make such a client ask for those encodings with
   `accept-encoding: gzip,deflate,br` unless its request writes that field, and decompress a
