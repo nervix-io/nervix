@@ -116,7 +116,10 @@ delivered. `TIMESTAMP NOW` records that snapshot. `TIMESTAMP AT <field>` reads a
 field and `TIMESTAMP AT metadata.<field>` a metadata field the source's entity declares; the field
 must be `DATETIME`, and `CREATE` and `ALTER` refuse an undeclared metadata field or one of another
 type, naming the fields the entity declares. A message that carries no value for the field is
-rejected as a null payload timestamp is. These and connector-owned event timestamps preserve the
+rejected as a null payload timestamp is, and one whose connector hands over a value no `DATETIME`
+holds is refused before selection (see the metadata rules under
+[Value Construction and Filters](#value-construction-and-filters)). These and connector-owned event
+timestamps preserve the
 external instant exactly; `TIME RATE` never scales them. The internal low
 and high watermarks initially equal the selected event time, so source event time remains distinct
 from delivery and observation time throughout the graph. The 5 ms source-idle close and the
@@ -499,7 +502,9 @@ General notes:
 - each source entity declares the typed transport metadata its messages expose as
   `metadata.<field>`, listed under Metadata in its reference below: `KAFKA TOPIC` declares
   `metadata.topic`, `metadata.partition`, `metadata.offset`, `metadata.key`, `metadata.timestamp`,
-  `metadata.timestamp_type`, and `metadata.tombstone`, `SYSLOG LISTENER` declares
+  `metadata.timestamp_type`, and `metadata.tombstone`, `RABBITMQ QUEUE` declares the delivery's
+  envelope and its AMQP basic properties, `SQS QUEUE` declares the message identity and its system
+  attributes, `SYSLOG LISTENER` declares
   `metadata.peer_addr`, `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`,
   `HTTP ENDPOINT` declares `metadata.method`, `metadata.path`, `metadata.query`,
   `metadata.remote_addr`, and `metadata.host`, `PROMETHEUS QUERY` declares `metadata.query` and
@@ -513,6 +518,13 @@ General notes:
 - an ingestor builds a metadata column only for the fields its route expressions or its
   `TIMESTAMP AT metadata.<field>` read; an ingestor that reads none visits no metadata values and
   builds no metadata columns
+- a message whose connector hands over a value its field's declared type cannot hold, such as a
+  `RABBITMQ QUEUE` AMQP timestamp after 2262-04-11, is refused once `FILTER WHERE` keeps it, wherever
+  a route or `TIMESTAMP AT` reads that field: every route's `ON MESSAGE ERROR` policy receives a
+  message error with code `validation` and operation `admit` that names `metadata.<field>` and
+  describes the value. The field never reads as null for it, and a field no program reads refuses
+  nothing. A `KAFKA TOPIC` record timestamp or an `SQS QUEUE` system attribute out of range fails
+  the read instead, as its reference states
 - supported sources expose transport headers through `read_header(name)` and `read_headers(name)`;
   header names may be any `STRING` expression, and these functions may be used in both top-level
   `FILTER WHERE` and per-route expressions
@@ -1440,7 +1452,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
-| Metadata | Not offered: The current queue declaration exposes transport headers but no typed AMQP delivery metadata namespace. |
+| Metadata | metadata.exchange: STRING OPTIONAL<br>metadata.routing_key: STRING OPTIONAL<br>metadata.delivery_tag: U64 OPTIONAL<br>metadata.redelivered: BOOL OPTIONAL<br>metadata.content_type: STRING OPTIONAL<br>metadata.content_encoding: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.correlation_id: STRING OPTIONAL<br>metadata.reply_to: STRING OPTIONAL<br>metadata.type: STRING OPTIONAL<br>metadata.app_id: STRING OPTIONAL<br>metadata.user_id: STRING OPTIONAL<br>metadata.priority: U8 OPTIONAL<br>metadata.expiration: STRING OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
@@ -1456,6 +1468,22 @@ See the [RABBITMQ QUEUE capability and mirror reference](connector-capabilities.
 Its string literal must contain 1 to 255 UTF-8 bytes, the AMQP short-string limit; a multibyte
 character contributes every byte to that limit. `SHOW CREATE INGESTOR` retains the exact queue
 name and the configured acknowledgement, retry and instance policies.
+
+Each delivery exposes its envelope and its AMQP basic properties as metadata.
+`metadata.exchange` is the exchange it was published to, `''` for the default exchange, which is
+AMQP's name for it, and `metadata.routing_key` the routing key it was published with.
+`metadata.delivery_tag` is the `U64` tag its consumer channel gave it, counting from 1 on each
+channel, so a reconnected instance starts again at 1. `metadata.redelivered` is true when the broker
+delivered the message before, such as after a requeue or a lost connection. `metadata.content_type`,
+`content_encoding`, `message_id`, `correlation_id`, `reply_to`, `type`, `app_id`, `user_id`,
+`priority`, `expiration` and `timestamp` are its basic properties, each null when the publisher did
+not set it. `priority` is the `U8` octet the publisher wrote, whatever priorities the queue
+supports, and `expiration` keeps the text the publisher wrote. `metadata.timestamp` reads the AMQP
+timestamp, a count of whole seconds since the Unix epoch, as that exact `DATETIME` instant, so
+`TIMESTAMP AT metadata.timestamp` admits a message at the instant its producer wrote. A count no
+`DATETIME` holds, past 2262-04-11, such as milliseconds written where AMQP specifies seconds, refuses
+its message wherever the ingestor's route programs or its `TIMESTAMP AT` read `metadata.timestamp`,
+with code `validation` and operation `admit`, and refuses nothing in an ingestor that reads none.
 
 
 Choose `MODE NO ACK`, `MODE ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY …`, or
@@ -2685,33 +2713,44 @@ The client's Nervix-owned `CONFIG` is strict, with lowercase, case-sensitive key
 
 | Key | Contract |
 | --- | --- |
-| `endpoint` | Required `ws://` or `wss://` URL with a host and without a fragment. Its path and query are sent in the upgrade request. |
+| `endpoint` | Required `ws://` or `wss://` URL with a host, without a fragment and without user information. Its path and query are sent in the upgrade request. |
 | `connect_timeout_ms` | Positive whole milliseconds for DNS, TCP, TLS and upgrade together; omitted means 30000. |
 | `ping_interval_ms` | Positive whole milliseconds between client pings after signaling completes; omitted means only answering peer pings. |
 | `idle_timeout_ms` | Positive whole milliseconds without an inbound frame before reconnecting. When omitted, three configured ping intervals apply, or 30000 without configured pings. |
 | `handshake_buffer_capacity` | Accepted signaling messages retained before readiness: 1–65535, default 16. A full queue backpressures the connection within the signaling `TIMEOUT`. |
 | `max_message_size` | Positive whole bytes per incoming message, including fragmented messages: at most 4294967295, default 67108864 (64 MiB). |
 | `max_frame_size` | Positive whole bytes per incoming frame: at most 4294967295, default 16777216 (16 MiB). |
-| `tls_ca_file` | Optional PEM CA file; only with a `wss://` endpoint. Its certificates are trusted beside the bundled WebPKI roots and the platform's native roots, never instead of them. |
+| `tls_ca_file` | Optional PEM CA file holding at least one certificate; only with a `wss://` endpoint. Its certificates are trusted beside the bundled WebPKI roots and the platform's native roots, never instead of them. |
 | `tls_cert_file`, `tls_key_file` | Optional client identity files, supplied together; only with a `wss://` endpoint. |
 
 The client's declared key schema refuses unknown, repeated or mistyped keys and TLS file keys with
 `ws://`, and supplies the three declared defaults that `DESCRIBE CLIENT` shows. The WebSocket
-configuration then refuses an endpoint with a fragment, a count above its maximum and three ping
-intervals beyond the schedulable bound. Durations obey the shared schedulable physical-duration
-bound. Resource mounts and configuration templates keep their shared client contract; rendered
-values are checked before commitment and again when opening the source. A ping write has a
-one-second physical budget and a failure triggers recovery.
+configuration then refuses an endpoint with a fragment or user information, a count above its
+maximum and three ping intervals beyond the schedulable bound. Durations obey the shared
+schedulable physical-duration bound. Resource mounts and configuration templates keep their shared
+client contract; rendered values are checked before commitment and again when opening the source.
+A ping write has a one-second physical budget and a failure triggers recovery.
 
 No WebSockets key is declared confidential, but `DESCRIBE CLIENT` and `SHOW CREATE CLIENT` show an
-`endpoint` that carries user information or a query as `********`, because either can hold a
-credential. User information in the `endpoint` is not sent with the upgrade; a peer that needs
-credentials receives them as a `HEADERS` field, such as `authorization`, or in the query. `CREATE WEBSOCKETS CLIENT` requires each TLS file key, once its resource mount template
-is rendered, to name a readable regular file. The source parses the files when it opens: a CA
-certificate it cannot parse, or a client certificate chain and private key it cannot read or pair,
-fails the ingestor's start, which `DESCRIBE INGESTOR` shows as its transient status. A
-`tls_ca_file` that holds no PEM certificate adds no trust root, so the bundled and native roots
-alone verify the server. The server certificate is always verified against the endpoint's host.
+`endpoint` that carries a query as `********`, because a query can hold a credential. The upgrade
+never sends user information, so `CREATE WEBSOCKETS CLIENT` refuses an `endpoint` that carries it
+with `'endpoint' must not carry user information`, without printing the value. A peer that needs
+credentials receives them as a `HEADERS` field, such as `authorization`, or in the query.
+
+`CREATE WEBSOCKETS CLIENT` requires each TLS file key, once its resource mount template is
+rendered, to name a readable regular file. It also refuses a `tls_ca_file` that holds no PEM
+certificate, with `client config key 'tls_ca_file' holds no certificate`: such a file adds no trust
+root, so a private CA the client was meant to trust would surface only as a verification failure on
+every connection. `REBIND RESOURCE` applies the same checks to the version it moves a client to.
+The source parses the files when it opens: a CA certificate it cannot parse, or a client
+certificate chain and private key it cannot read or pair, fails the ingestor's start, which
+`DESCRIBE INGESTOR` shows as its transient status. The server certificate is always verified
+against the endpoint's host.
+
+These checks read the file on the node that validates the statement. A mounted file is the pinned
+version every node reads. A path outside a mount names each node's own file, and the source does
+not repeat the certificate check when it opens: a file that holds no certificate there adds no
+trust root, and the bundled and native roots alone verify the server.
 
 After signaling succeeds, the idle timer starts. An explicit idle timeout overrides the
 ping-derived value. Every received frame, including a ping or pong, refreshes activity. Sending a
