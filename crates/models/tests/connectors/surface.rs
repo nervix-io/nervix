@@ -236,9 +236,11 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
     };
     let otel = &[("ATTRIBUTES", false), ("RESOURCE", false), ("SCOPE", false)];
     let conflict = &[("ON CONFLICT", false)];
-    // Both RabbitMQ entities publish through the same channel, so either can ask the broker to
-    // return a message no queue takes.
-    let mandatory = &[EnvelopeClauseKind::Mandatory];
+    let rabbitmq = &[
+        EnvelopeClauseKind::Persistent,
+        EnvelopeClauseKind::Mandatory,
+        EnvelopeClauseKind::Timestamp,
+    ];
     match kind {
         EmitterEntityKind::Client(ClientEmitterEntity::Consumer) => EmitterSurface {
             reference: EmitterReferenceKind::Schema,
@@ -253,18 +255,22 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
             envelope: &[EnvelopeClauseKind::Timestamp],
             ..located(ConnectorKind::Kafka, "TOPIC", "kafka_topic", &[])
         },
-        EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic) => {
-            located(ConnectorKind::Pulsar, "TOPIC", "pulsar_topic", &[])
-        }
+        EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic) => EmitterSurface {
+            envelope: &[
+                EnvelopeClauseKind::Timestamp,
+                EnvelopeClauseKind::DeliverAfter,
+            ],
+            ..located(ConnectorKind::Pulsar, "TOPIC", "pulsar_topic", &[])
+        },
         EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => {
             located(ConnectorKind::Mqtt, "TOPIC", "mqtt_topic", &[])
         }
         EmitterEntityKind::RabbitMq(RabbitMqEmitterEntity::Queue) => EmitterSurface {
-            envelope: mandatory,
+            envelope: rabbitmq,
             ..located(ConnectorKind::RabbitMq, "QUEUE", "rabbitmq_queue", &[])
         },
         EmitterEntityKind::RabbitMq(RabbitMqEmitterEntity::Exchange) => EmitterSurface {
-            envelope: mandatory,
+            envelope: rabbitmq,
             ..located(
                 ConnectorKind::RabbitMq,
                 "EXCHANGE",
@@ -346,6 +352,8 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
 
 #[test]
 fn every_emitter_pair_declares_its_reference_locator_options_and_envelope_clauses() {
+    use nervix_models::PropertyType::{String, U8};
+
     for kind in EmitterEntityKind::all() {
         let expected = emitter_surface(kind);
         let declared = kind.capabilities();
@@ -353,8 +361,30 @@ fn every_emitter_pair_declares_its_reference_locator_options_and_envelope_clause
         assert_eq!(locator_shape(declared.locator), expected.locator, "{kind}");
         assert_eq!(option_shapes(declared.options), expected.options, "{kind}");
         assert_eq!(declared.envelope, expected.envelope, "{kind}");
-        // No entity declares an envelope property yet.
-        assert!(declared.properties.is_empty(), "{kind}");
+        let properties: &[(&str, nervix_models::PropertyType)] = match kind {
+            EmitterEntityKind::RabbitMq(_) => &[
+                ("content_type", String),
+                ("content_encoding", String),
+                ("message_id", String),
+                ("correlation_id", String),
+                ("reply_to", String),
+                ("expiration", String),
+                ("priority", U8),
+                ("type", String),
+                ("app_id", String),
+                ("user_id", String),
+            ],
+            _ => &[],
+        };
+        assert_eq!(
+            declared
+                .properties
+                .iter()
+                .map(|property| (property.name, property.ty))
+                .collect::<Vec<_>>(),
+            properties,
+            "{kind}"
+        );
     }
 }
 

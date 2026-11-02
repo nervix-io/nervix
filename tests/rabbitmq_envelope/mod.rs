@@ -49,7 +49,7 @@ async fn given_private_broker(world: &mut ScenarioWorld) {
 async fn when_private_broker_restarts(world: &mut ScenarioWorld) {
     world
         .rabbitmq_envelope_broker
-        .as_ref()
+        .as_mut()
         .assured("the scenario started its broker")
         .restart()
         .await

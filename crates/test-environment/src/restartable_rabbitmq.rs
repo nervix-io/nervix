@@ -1,7 +1,7 @@
 //! A scenario-owned RabbitMQ broker that can restart without disturbing other scenarios.
 //!
 //! Outside the layer order: a test harness.
-//! - **Owns.** One ephemeral broker, its stable address, restart and explicit teardown.
+//! - **Owns.** One ephemeral broker, its current address, restart and explicit teardown.
 //! - **Depends on.** The test environment's container provisioning and cleanup.
 //! - **Must not know.** Nervix graphs, plans or acknowledgement state.
 
@@ -28,7 +28,7 @@ impl RestartableRabbitMq {
         self.environment.endpoints().get(RABBITMQ_ADDR)
     }
 
-    pub async fn restart(&self) -> io::Result<()> {
+    pub async fn restart(&mut self) -> io::Result<()> {
         let [RunningContainer::Generic(container)] = self.environment.containers.as_slice() else {
             unreachable!("this private environment starts exactly one RabbitMQ container");
         };
@@ -39,7 +39,14 @@ impl RestartableRabbitMq {
         container
             .start()
             .await
-            .map_err(testcontainers_error("isolated RabbitMQ restart"))
+            .map_err(testcontainers_error("isolated RabbitMQ restart"))?;
+        // Docker can assign another published port when the same container starts again.
+        let port = mapped_port(container, 5672, "restarted RabbitMQ").await?;
+        self.environment.endpoints.insert(
+            RABBITMQ_ADDR,
+            format!("amqp://guest:guest@127.0.0.1:{port}/%2f"),
+        );
+        Ok(())
     }
 
     pub async fn shutdown(&mut self) -> Result<(), TeardownFailures> {

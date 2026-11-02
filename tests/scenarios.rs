@@ -130,8 +130,8 @@ use crate::common::{
     cluster::{
         AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, BrokerRecordTime, Cluster,
         CommandHold, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, HttpsPublishLoopOutcome,
-        InterconnectCredentialFault, JoinAttempt, RejoinAttempt, TEST_AUTH_PASSWORD,
-        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, TypedBrokerHeader,
+        InterconnectCredentialFault, JoinAttempt, PulsarMessageTimes, RejoinAttempt,
+        TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestClusterConfig, TestSession, TypedBrokerHeader,
         WebsocketExchangeAction, assert_kafka_consumer_group_next_offset_through,
         bind_rabbitmq_queue, client_connect_options, client_domain, command_connect_options,
         delete_rabbitmq_queue, ensure_rabbitmq_exchange, ensure_rabbitmq_queue, ensure_sqs_queue,
@@ -157,6 +157,7 @@ use crate::common::{
     iceberg_catalog_gate::IcebergCatalogGate,
     kafka_group_member::ExternalKafkaGroupMember,
     kafka_mock_broker::KafkaMockBroker,
+    mqtt_broker_clients::{MqttBrokerClient, mqtt_broker_client},
     mqtt_publish_filter::MqttPublishFilter,
     nats_endpoint::NatsEndpoint,
     node_bound_address::{NodeBoundAddress, NodeBoundListener, bind_as_its_node},
@@ -227,6 +228,7 @@ mod paced_simulation;
 mod postgres_fixtures;
 mod process_cluster;
 mod pulsar_delivery;
+mod pulsar_emission;
 mod pulsar_readiness;
 mod pulsar_subscriptions;
 mod rabbitmq_envelope;
@@ -535,6 +537,8 @@ struct ScenarioWorld {
     last_broker_time: Option<BrokerRecordTime>,
     /// The typed headers of the last observed broker message: SQS attributes with their data types.
     last_broker_typed_headers: Vec<TypedBrokerHeader>,
+    /// The times of the last message a step received, where a Pulsar broker delivered it.
+    last_pulsar_times: Option<PulsarMessageTimes>,
     clickhouse_table: Option<String>,
     clickhouse_tls: bool,
     postgres_table: Option<String>,
@@ -703,6 +707,7 @@ impl fmt::Debug for ScenarioWorld {
                 &self.last_broker_payload.as_ref().map(|value| value.len()),
             )
             .field("last_broker_header_count", &self.last_broker_headers.len())
+            .field("last_pulsar_times", &self.last_pulsar_times)
             .field("last_broker_time", &self.last_broker_time)
             .field(
                 "last_auth_attempts_elapsed",
@@ -8010,6 +8015,7 @@ async fn given_cluster_is_started(world: &mut ScenarioWorld, node_count: usize) 
     world.last_broker_headers.clear();
     world.last_broker_time = None;
     world.last_broker_typed_headers.clear();
+    world.last_pulsar_times = None;
     world.burst_raft_retention_peak = None;
     append_cucumber_log_line(&format!(
         "cluster start requested: nodes={node_count} domain={} test_id={}",
@@ -26745,6 +26751,79 @@ async fn when_sized_mqtt_qos1_messages_are_published(
         .expect("failed to publish the sized MQTT QoS 1 messages");
 }
 
+/// Waits until the test broker records the client whose identity is `client_id` as connected, and
+/// returns that record.
+async fn connected_mqtt_broker_client(
+    world: &ScenarioWorld,
+    duration: &str,
+    client_id: &str,
+) -> MqttBrokerClient {
+    let duration = parse_duration_text(duration).expect("step duration must be a valid duration");
+    let client_id = expand_placeholders(world, client_id);
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let record = mqtt_broker_client(world.dependencies.endpoints(), &client_id)
+            .await
+            .expect("the MQTT broker's management API must answer");
+        if let Some(record) = record.as_ref()
+            && record.connected
+        {
+            return record.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the MQTT broker to report client '{client_id}' connected; its \
+             last record: {record:?}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(expr = "within {string} the MQTT broker reports client {string} connected")]
+async fn then_mqtt_broker_reports_client_connected(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_id: String,
+) {
+    connected_mqtt_broker_client(world, &duration, &client_id).await;
+}
+
+#[then(expr = "within {string} the MQTT broker reports client {string} connected as user {string}")]
+async fn then_mqtt_broker_reports_client_connected_as_user(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_id: String,
+    username: String,
+) {
+    let username = expand_placeholders(world, &username);
+    let record = connected_mqtt_broker_client(world, &duration, &client_id).await;
+    assert_eq!(
+        record.username.as_deref(),
+        Some(username.as_str()),
+        "the MQTT broker reports client '{}' connected under another username",
+        record.client_id
+    );
+}
+
+#[then(
+    expr = "within {string} the MQTT broker reports client {string} connected with a keep-alive \
+            of {int} seconds"
+)]
+async fn then_mqtt_broker_reports_client_connected_with_keep_alive(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_id: String,
+    keep_alive_seconds: u64,
+) {
+    let record = connected_mqtt_broker_client(world, &duration, &client_id).await;
+    assert_eq!(
+        record.keep_alive_seconds, keep_alive_seconds,
+        "the MQTT broker holds client '{}' to another keep-alive",
+        record.client_id
+    );
+}
+
 #[when(expr = "RabbitMQ message is published to queue {string}")]
 async fn when_rabbitmq_message_is_published(
     world: &mut ScenarioWorld,
@@ -31024,6 +31103,7 @@ async fn then_observed_broker_receives_payload(world: &mut ScenarioWorld, #[step
     world.last_broker_headers = message.headers;
     world.last_broker_time = message.time;
     world.last_broker_typed_headers = message.typed_headers;
+    world.last_pulsar_times = message.pulsar_times;
 
     let actual = world
         .last_broker_payload
@@ -33939,6 +34019,7 @@ async fn receive_exactly_these_broker_messages<Expected: BrokerMessageExpectatio
         }
         world.last_broker_payload = Some(message.payload.clone());
         world.last_broker_headers = message.headers;
+        world.last_pulsar_times = message.pulsar_times;
         world.last_broker_time = message.time;
         observed.push(delivered.describe());
     }
