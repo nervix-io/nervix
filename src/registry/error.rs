@@ -359,6 +359,11 @@ pub(crate) enum RegistryError {
         domain: DomainName,
         ingestor: ModelName,
     },
+    #[error("ingestor '{ingestor}' in domain '{domain}' cannot use its HEADERS")]
+    InvalidHttpRequestHeaders {
+        domain: DomainName,
+        ingestor: ModelName,
+    },
     #[error("branch '{branch}' in domain '{domain}' uses BYTES in field '{field}'")]
     BranchFieldContainsBytes {
         domain: DomainName,

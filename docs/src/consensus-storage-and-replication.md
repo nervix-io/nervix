@@ -462,8 +462,9 @@ the complete keyspace namespace before reading any records. This namespace ident
 Model shape, including an owned Pulsar subscription's required start position, the serialized Sentry
 platform field, an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND`
 request shape, the session and quality of service an MQTT TOPIC ingestor writes beside its delivery
-mode, the quality of service an MQTT TOPIC emitter writes beside its publishing mode, and a
-`REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription. Its state metadata requires the current
+mode, the quality of service an MQTT TOPIC emitter writes beside its publishing mode, a
+`REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription, and whether a polled HTTP request's
+header holds a literal or names a client secret. Its state metadata requires the current
 `RestoredLifecycle` encoding, including the durable restore installation gate and the unit-keyed
 committed schedule. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
 are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery

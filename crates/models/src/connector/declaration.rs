@@ -99,8 +99,9 @@ pub enum OptionValue {
     Expression,
     /// `{ '<name>' = <expression>, … }`: named expressions.
     Mapping,
-    /// `{ '<name>' = '<value>', … }`: named string literals.
-    LiteralMapping,
+    /// `{ '<name>' = '<value>' | CLIENT SECRET '<key>', … }`: named string literals, or the secret
+    /// keys of the client that read them.
+    RequestHeaders,
     /// A configured client of one connector.
     Client(ConnectorKind),
     /// A clause of several parts, as the option's example writes them.
