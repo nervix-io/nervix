@@ -462,6 +462,9 @@ current connection, retry and deadline limits.
   `DELAY <whole seconds from 1s to 900s>` for a standard queue or `DEDUPLICATION ID <string_expression>`
   for a `.fifo` queue. Its `write_header` values may be `STRING`, an integer type or `BYTES`, sent
   as `String`, `Number` and `Binary` attributes; read `Emitters` → `SQS`.
+  For source identity, redelivery routing and event time, read the metadata table in `Ingestors` →
+  `SQS`; use its exact field types and `TIMESTAMP AT metadata.sent_at` where appropriate. User
+  message attributes remain transport headers.
 - `NATS SUBJECT` ingestors use `NO ACK` with a required `QUEUE GROUP` and `INSTANCES`, and
   `BUFFER` or `DROP` quiesce. Write NATS wildcards only in an ingestor's `SUBJECT`, as whole
   tokens with `>` last; a `NATS SUBJECT` emitter uses `MODE NO ACK` and one literal subject.
@@ -525,6 +528,13 @@ current connection, retry and deadline limits.
   between `QUERY` and `EVERY` and `16MiB` when left out. A larger response fails the poll as the
   ingestor's transient error rather than delivering part of it; raise the bound for a query that
   legitimately returns more. Samples enter the graph in batches of at most 1024.
+- A `PROMETHEUS QUERY` ingestor delivers one object per sample in the API's own shape,
+  `{"metric":{...},"value":...,"timestamp":"..."}`, with `NaN`, `+Inf` and `-Inf` as strings. Labels
+  sit under `metric`, which `WIRE JSON` cannot read, so write a JAQ codec such as
+  `'{job: .metric.job, value, timestamp}'`, or a `MODE LOOSE` wire schema when no label is needed.
+  Use `metadata.query`, `metadata.evaluated_at` and `TIMESTAMP AT metadata.evaluated_at` for the
+  query and its evaluation instant. A `matrix`, `scalar` or `string` result or a native histogram
+  fails the poll; ask for an instant vector.
 - Treat Kafka `NO ACK` emitter success as local librdkafka producer-queue admission. Even in
   `ATTACHED` mode, Nervix does not wait for a broker delivery receipt before completing its ACK
   share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces the

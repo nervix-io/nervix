@@ -844,7 +844,7 @@ is declared as it behaves, and a buffer that nothing bounds yet is declared unbo
 shows each gap until its connector closes it. A `PROMETHEUS QUERY` or `HTTP REQUEST` response is
 bounded by its statement's `MAX BODY SIZE` (16 MiB where omitted). A response that exceeds the
 bound fails the poll, which the ingestor reports as its transient error, and the next poll reads
-again. The HTTP polling request's method and literal headers are carried by the typed ingestor plan;
+again. The HTTP polling request's method and headers are carried by the typed ingestor plan;
 its client supplies the required total `timeout_ms` and TLS settings. The polling client follows
 redirects and uses a proxy only as [HTTP client transport](#http-client-transport) describes. An
 HTTP response carries its status and scheduled poll instant into the same metadata group as its
@@ -1018,6 +1018,15 @@ projection, masking secrets and address credentials/query options as `********`.
 serialization retains values for strongly persisted configuration and backup archives; archives
 remain secret-bearing under [Backup And Restore](backup-and-restore.md). Existing entity `DESCRIBE`
 output references clients by name and does not print their CONFIG.
+
+A client schema may also declare a family of secret keys its operator names, as the `HTTP` client
+does with `secret.<name>`. Nervix owns these keys and no driver reads them, so the family is not a
+delegated namespace: `ownership_label` stays `Nervix`, and the client stays strict about every
+other key. Inspection masks them as it masks a key with no public declaration. An `HTTP REQUEST`
+ingestor reads one with a `CLIENT SECRET '<key>'` header value. The statement holds only that name,
+the registry refuses at `CREATE` and `ALTER` a name its client does not hold or does not keep
+secret and a value no header can carry, without quoting the value, and the connector takes the
+value from its rendered configuration at open and marks the field sensitive.
 
 `DESCRIBE CLIENT <name>` reads the stored client in the selected domain and reports its connector
 and effective CONFIG. The schema represents an optional key with a declared default separately
@@ -1387,21 +1396,32 @@ vocabulary, in order and each with its exact type: `HTTP REQUEST` declares the r
 the poll's scheduled instant, `HTTP ENDPOINT` the request's method, path, query, peer address and
 routed host, `WEBSOCKETS CONNECTION` the frame kind, `WEBSOCKETS ENDPOINT` the frame kind, the
 connection's peer address and its path, `KAFKA TOPIC` the topic, partition, offset, binary key,
-timestamp, timestamp kind and tombstone flag, `SYSLOG LISTENER` the peer address, `REDIS PUBSUB`
-the delivering channel and the pattern it matched, and NATS the delivered subject and reply with
-the additional stream delivery fields above. The endpoint
+timestamp, timestamp kind and tombstone flag, `SQS QUEUE` the message identity, send and
+first-receive times, receive count, group and deduplication identifiers, sequence number and
+sender identifier, `SYSLOG LISTENER` the peer address, `REDIS PUBSUB` the delivering channel and
+the pattern it matched, and NATS the delivered subject and reply with the additional stream
+delivery fields above. The endpoint
 entities are served by the host itself rather than a connector crate, so the server's endpoint
 intake hands their values over the same way a connector's message does. Registry
 validation reads that declaration for the fields an ingestor's route programs and its
 `TIMESTAMP AT metadata.<field>` may name, the host builds its metadata columns from it, and a
 connector's message hands the host the value of every declared field in declared order, one typed
 call per field into the host's value sink, so the three cannot disagree. A value is a `STRING`,
-`BYTES`, `BOOL`, `U16`, `U64`, `I32`, `I64` or `DATETIME`, or absent where the message carries none; a
+`BYTES`, `BOOL`, `U16`, `U32`, `U64`, `I32`, `I64` or `DATETIME`, or absent where the message carries none; a
 `STRING` such as a socket address may be written into the column in place instead of being
 allocated per message. A message that hands over another number of values than its entity declares,
 or a value of another type than its field's, is a connector defect the host refuses as a typed
 metadata error. A connector adds a field by declaring it and handing its value over: neither the
 contract nor the host names any connector's fields.
+
+The SQS connector requests system attributes with `MessageSystemAttributeNames`, independently
+of user message attributes used as headers. It validates the receive count as `U32` and both
+millisecond timestamps as `Timestamp` once when constructing a received message. Its metadata
+visitor lends strings from the SDK message and hands over those typed scalar values in declared
+order. Missing attributes are absent; invalid numbers or timestamps that cannot fit the internal
+range retain their typed cause beneath `SqsQueueIngestorError::SystemAttribute` and the host's
+read context. They never become absent values. The generic retained row and Arrow builders carry
+`U32` through quiesce and projection without widening it; the FIFO sequence number stays text.
 
 The host projects metadata lazily. When an ingestor binds its programs, the host records which
 declared fields its route programs and its `TIMESTAMP AT metadata.<field>` read, and every ingest
@@ -1425,7 +1445,9 @@ pending. The source declares this single-report bound beside its driver buffers.
 Beside its fields and headers, a message names the position its transport gives it, where the
 transport has one: a Kafka record's topic, partition and offset, or a syslog frame's peer. It is the
 transport's own coordinate, never a header value its sender wrote, and a decode rejection names it.
-A paced source returns each polled message owned, its declared values already copied.
+A paced source returns each polled message owned, its declared values already copied. A clone of a
+retained copy shares its values, so the samples of one Prometheus poll, which all carry the same
+query and evaluation instant, hold them once however many samples the poll returned.
 
 Transport headers are visited from the borrowed message in the order the entity's
 [header model](#header-models) declares. The host copies them only when the quiesce control decides
@@ -2436,9 +2458,11 @@ envelope grouping and the exact container bytes, `codec-bounded-encodings` and
 `bounded-write-limits` the exact sizes under `MAX SIZE`, `emitter-row-preparations` and
 `emitter-retained-payloads` the membership and byte-for-byte retry, text and typed headers
 included, `sqs-batch-requests`, `mqtt-publish-packets`, `postgres-insert-measures` and
-`mysql-insert-measures` the connector-specific measures. The MySQL property compares the complete
-statement and bound parameters with the driver's binary serializer, including qualified table
-names, quoted column keys, nulls and nonempty slices of a rotated membership sequence.
+`mysql-insert-measures` the connector-specific measures. `prometheus-sample-encoding` checks the
+bytes of the object a query source delivers for a sample against the vocabulary's declaration. The
+MySQL property compares the complete statement and bound parameters with the driver's binary
+serializer, including qualified table names, quoted column keys, nulls and nonempty slices of a
+rotated membership sequence.
 `mongodb-write-answers` checks the rows a failed MongoDB write delivers, rejects and leaves unresolved.
 `mongodb-bson-mapping` checks the complete native document encoding and stored-size measure:
 integer widths, floating-point bits (including non-finite values), native dates at millisecond

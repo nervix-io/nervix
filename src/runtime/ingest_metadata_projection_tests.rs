@@ -21,7 +21,7 @@ use std::{
 use arrow_array::{
     Array,
     cast::AsArray as _,
-    types::{Int32Type, Int64Type, TimestampNanosecondType, UInt16Type, UInt64Type},
+    types::{Int32Type, Int64Type, TimestampNanosecondType, UInt16Type, UInt32Type, UInt64Type},
 };
 use nervix_arbitrary::Entropy;
 use nervix_connector::{
@@ -45,6 +45,7 @@ const DECLARED_FIELDS: &[IngestorMetadataField] = &[
     IngestorMetadataField::new("key", IngestorMetadataType::Bytes),
     IngestorMetadataField::new("redelivered", IngestorMetadataType::Bool),
     IngestorMetadataField::new("status", IngestorMetadataType::U16),
+    IngestorMetadataField::new("receive_count", IngestorMetadataType::U32),
     IngestorMetadataField::new("partition", IngestorMetadataType::I32),
     IngestorMetadataField::new("offset", IngestorMetadataType::I64),
     IngestorMetadataField::new("stream_sequence", IngestorMetadataType::U64),
@@ -53,6 +54,7 @@ const DECLARED_FIELDS: &[IngestorMetadataField] = &[
     IngestorMetadataField::new("token", IngestorMetadataType::Bytes),
     IngestorMetadataField::new("retained", IngestorMetadataType::Bool),
     IngestorMetadataField::new("code", IngestorMetadataType::U16),
+    IngestorMetadataField::new("attempt", IngestorMetadataType::U32),
     IngestorMetadataField::new("sequence", IngestorMetadataType::I32),
     IngestorMetadataField::new("lag", IngestorMetadataType::I64),
     IngestorMetadataField::new("delivered", IngestorMetadataType::U64),
@@ -159,6 +161,7 @@ impl IngestMessageMetadata for GeneratedMessage {
                 Value::Bytes(bytes) => values.bytes(bytes),
                 Value::Bool(value) => values.bool(*value),
                 Value::U16(value) => values.u16(*value),
+                Value::U32(value) => values.u32(*value),
                 Value::U64(value) => values.u64(*value),
                 Value::I32(value) => values.i32(*value),
                 Value::I64(value) => values.i64(*value),
@@ -248,6 +251,11 @@ impl Cases<'_> {
         u16::try_from(value).verified("the value was drawn from the u16 range")
     }
 
+    fn u32(&mut self) -> u32 {
+        let value = self.entropy.boundary_biased(0..=u64::from(u32::MAX));
+        u32::try_from(value).verified("the value was drawn from the u32 range")
+    }
+
     /// Any `i32`, landing on zero, the extremes and their neighbours as often as elsewhere.
     fn i32(&mut self) -> i32 {
         match self.entropy.byte() % 6 {
@@ -273,6 +281,7 @@ impl Cases<'_> {
             IngestorMetadataType::Bytes => Value::Bytes(self.bytes()),
             IngestorMetadataType::Bool => Value::Bool(self.entropy.flag()),
             IngestorMetadataType::U16 => Value::U16(self.u16()),
+            IngestorMetadataType::U32 => Value::U32(self.u32()),
             IngestorMetadataType::U64 => Value::U64(self.entropy.any_u64()),
             IngestorMetadataType::I32 => Value::I32(self.i32()),
             IngestorMetadataType::I64 => Value::I64(self.entropy.any_i64()),
@@ -541,6 +550,10 @@ fn column_value(column: &dyn Array, ty: IngestorMetadataType, row: usize) -> Val
         IngestorMetadataType::U16 => {
             let column = column.as_primitive_opt::<UInt16Type>().verified(TYPED);
             Value::U16(column.value(row))
+        }
+        IngestorMetadataType::U32 => {
+            let column = column.as_primitive_opt::<UInt32Type>().verified(TYPED);
+            Value::U32(column.value(row))
         }
         IngestorMetadataType::U64 => {
             let column = column.as_primitive_opt::<UInt64Type>().verified(TYPED);

@@ -46,7 +46,7 @@ Feature: Visual connector choices follow the entity declarations
       | 1            |
       | 3            |
 
-  @connector_presentation_console
+  @connector_presentation_console @slots_2
   Scenario Outline: Each transport editor offers exactly its declared delivery modes
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
