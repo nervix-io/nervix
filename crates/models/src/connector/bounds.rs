@@ -152,6 +152,13 @@ pub enum WaitBound {
     /// A statement clause, as a statement writes it: `ACK TIMEOUT`, a signaling protocol's
     /// `TIMEOUT`.
     Clause(&'static str),
+    /// A protocol interval another client key sets, such as MQTT's `keep_alive_ms`, and how the
+    /// wait follows from it, including what applies where the client leaves the key out. Unlike a
+    /// [`DeadlineKey`], the key keeps its protocol's own meaning.
+    ClientKey {
+        key: &'static str,
+        rule: &'static str,
+    },
     /// A fixed physical bound that Nervix sets.
     Fixed(Duration),
     /// The driver's own default, which no Nervix key sets, as the matrix states it.
@@ -166,7 +173,11 @@ impl WaitBound {
     pub fn key(&self) -> Option<DeadlineKey> {
         match self {
             Self::Key { key, .. } => Some(*key),
-            Self::Clause(_) | Self::Fixed(_) | Self::Driver(_) | Self::Unbounded => None,
+            Self::Clause(_)
+            | Self::ClientKey { .. }
+            | Self::Fixed(_)
+            | Self::Driver(_)
+            | Self::Unbounded => None,
         }
     }
 }

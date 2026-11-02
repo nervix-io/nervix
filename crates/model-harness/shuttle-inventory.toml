@@ -107,6 +107,8 @@ name = "nervix-connector-sqs"
 checks = [
   "queue::ingestor::reader::shuttle_tests::shuttle_a_batch_deadline_racing_cancellation_preserves_every_delivery",
   "queue::ingestor::reader::shuttle_tests::shuttle_a_cancelled_read_hands_over_every_delivery_once_and_in_order",
+  "publisher::confirmation_window::shuttle_tests::shuttle_a_return_followed_by_a_multiple_ack_rejects_only_its_message",
+  "publisher::confirmation_window::shuttle_tests::shuttle_a_deadline_never_delivers_a_partially_attributed_mandatory_window",
 ]
 name = "nervix-connector-rabbitmq"
 
