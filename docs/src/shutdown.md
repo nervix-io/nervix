@@ -586,7 +586,9 @@ owns the general contract; this section states what shutdown adds.
 
 The move identifies one scheduled node and unit. The destination's prepared and activated
 checkpoints and the source's capture freeze use that same unit, so moving one unit does not
-discard a sibling unit's state. Current schedules have only `Single` units.
+discard a sibling unit's state. A relay of a partitioned branch has one `Partition` unit per
+partition, and a drain moves each partition the node owns on its own; every other node has one
+`Single` unit.
 
 The complete target schedule is computed before anything is held. The coordinator then fences
 dispatch at the affected subgraph boundary on every live node that runs part of it, stops intake for

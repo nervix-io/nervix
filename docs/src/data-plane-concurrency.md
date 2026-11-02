@@ -503,10 +503,11 @@ evaluation. Executor admission continues to own worker and memory bounds for ext
 The admission benchmark also constructs the current emitter context, resolving its routing,
 metrics mark, status publication and confirmation counter before the timed encoding runs.
 
-Each handoff entity has one immutable coordination-owner set and notification owner. Tasks retain
-that entity slot across repeated freezes. A watch registers before reading the publication;
-engagement and release replace it before notifying. Concurrent owners derive their replacement
-with the primitive publication boundary's reference update. Domain removal drops registry interest.
+Each unit of a handoff entity has one immutable coordination-owner set and notification owner.
+Tasks retain that unit's slot across repeated freezes. A watch registers before reading the
+publication; engagement and release replace it before notifying. Concurrent owners derive their
+replacement with the primitive publication boundary's reference update. Domain removal drops
+registry interest.
 
 Domain-clock publication contains lifecycle pause, generation and start-point observations alongside
 its installation. Ingestion reads admission and time from that one publication; Kafka offset polls
