@@ -447,8 +447,12 @@ MQTT QoS refusals identify the supplied number, its source span, and the levels 
 or emitter accepts. An MQTT ingestor `ACK` mode outside a persistent session at QoS 1 or 2 is
 refused with the mode underlined and the session and QoS the statement writes named beside the
 required pairing. A refused `ON QUIESCE SUSPEND` identifies `SUSPEND` and its required
-`SESSION PERSISTENT` pairing at `QOS 1` or `QOS 2`. Completion offers the quiesce modes the
-written session can use; a clean session or QoS 0 offers `BUFFER` and `DROP`.
+`SESSION PERSISTENT` pairing at `QOS 1` or `QOS 2`. Completion offers the delivery and quiesce
+modes the written session and QoS keep, so a statement that follows completion reaches neither
+refusal: a clean session or QoS 0 offers `NO ACK` after `MODE`, and `BUFFER` and `DROP` after
+`ON QUIESCE`. A grammar branch those choices close names nothing a statement could write, so a
+diagnostic lists only what the open branches expect, and says `something else` only where none
+names an item.
 
 The language layer reports rejected source the same way. Lexing and parsing each create the report
 at the stage that failed, and its context names that stage and holds the rejected text with every
@@ -1053,15 +1057,11 @@ ends that resume attempt with `KafkaTopicIngestorError::UnresolvedDomainStart` b
 `IngestorError::Resume`. Its typed fields retain the accepted and observed generations. The host
 retries on its existing cadence; the connector polls only after it has canonical resume positions.
 
-A domain-offset Kafka ingestor that must start a partition without a domain offset while its
-client's `auto.offset.reset` is `error` fails its resume with
-`KafkaTopicIngestorError::ResetRefused`, which names the topic and partition, beneath
-`IngestorError::Resume`; the host shows it as the ingestor's transient status and resumes again on
-its cadence. A timestamp lookup whose answer carries a partition error keeps that `KafkaError`
+A timestamp lookup whose answer carries a partition error keeps that `KafkaError`
 beneath `KafkaTopicIngestorError::ResolveTimestampOffsets`. A consumer-group rebalance runs in the consumer's context, which has no caller to return a failure
 to: a rejected partition's floor that cannot be set on the assignment, and an assignment or
 revocation librdkafka refuses, are logged at `warn` with the driver's error, and the partition then
-starts where the group's committed offset or the client's reset policy places it.
+starts where the group's committed offset or the ingestor's `START AT` places it.
 
 A Kafka consumer takes the commands charge of the job that will destroy it before it is created,
 and a refused charge keeps `AdmissionError` beneath `KafkaTopicIngestorError::RetirementAdmission`. It

@@ -256,8 +256,8 @@ fn create_if_not_exists_completion_suggests_compound_keyword_without_leakage() {
 
 #[test]
 fn ingestor_mode_context_suggestions_do_not_leak_schema_keywords() {
-    let input =
-        "CREATE KAFKA TOPIC INGESTOR i FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' MODE ";
+    let input = "CREATE KAFKA TOPIC INGESTOR i FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' \
+                 START AT LATEST MODE ";
     let suggestions = suggest_statement(input, input.len());
     assert!(suggestions.contains(&"ACK".to_string()));
     assert!(suggestions.contains(&"NO ACK".to_string()));
@@ -1512,7 +1512,7 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
                 FROM
                     kafka_main
                     TOPIC 'notifications'
-                    OFFSET BY CONSUMER GROUP 'nervix_consumer'
+                    OFFSET BY CONSUMER GROUP 'nervix_consumer' START AT LATEST
                     MODE ACK PARALLEL MAX 10 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
                 ON QUIESCE SUSPEND DECODE USING notification_kafka_message
                 TO notifications

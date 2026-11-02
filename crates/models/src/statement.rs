@@ -2269,6 +2269,11 @@ pub enum AlterIngestorError {
     ProvisionedPulsarStartPosition {
         subscription: crate::PulsarSubscriptionName,
     },
+    #[error(
+        "cannot set START AT on a {} ingestor whose domain owns its offsets",
+        crate::ConnectorKind::Kafka
+    )]
+    DomainKafkaStartPosition,
     #[error("ALTER targets ingestor `{requested}`, but the stored ingestor is `{stored}`")]
     IngestorNameMismatch {
         stored: IngestorName,

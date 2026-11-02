@@ -40,8 +40,7 @@ Feature: Domain-paced emitter cadence
         ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
       CREATE KAFKA TOPIC EMITTER kafka_cadence FROM notifications TO kafka_main TOPIC 'emitter_cadence_out_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 1s ENCODE USING notification_codec
         INHERIT ALL
@@ -120,8 +119,7 @@ Feature: Domain-paced emitter cadence
         ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
       CREATE KAFKA TOPIC EMITTER kafka_hold FROM notifications TO kafka_main TOPIC 'emitter_hold_out_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
@@ -190,8 +188,7 @@ Feature: Domain-paced emitter cadence
         ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
       CREATE KAFKA TOPIC EMITTER kafka_immediate FROM notifications TO kafka_main TOPIC 'emitter_immediate_out_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
@@ -318,11 +315,10 @@ Feature: Domain-paced emitter cadence
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'ack_keepalive_in_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
+        FROM kafka_main TOPIC 'ack_keepalive_in_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
