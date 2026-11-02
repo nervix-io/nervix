@@ -36,7 +36,7 @@ struct ResolvedMqttIngestor {
 
 /// Immutable per-instance client material rendered once for a logical ingestor on this node.
 struct RenderedMqttClient {
-    entries: Arc<[Vec<nervix_models::ClientConfigEntry>]>,
+    connector: MqttTopicIngestorPlan,
     mounts: Arc<[Option<Arc<ClientResourceMounts>>]>,
 }
 
@@ -124,6 +124,13 @@ impl MqttTopicIngestorStartPlan {
         runtime: &Runtime,
         ingestor: &IngestorSpec,
     ) -> error_stack::Result<ResolvedMqttIngestor, IngestorConnectorStartError> {
+        let dispatcher = runtime.inner.remote_dispatcher.load();
+        let read_ahead_dropped = runtime.inner.metrics.ingestor_read_ahead_dropped_payloads(
+            &ingestor.domain,
+            &ingestor.name,
+            ingestor.unit,
+            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+        );
         let cached = match runtime.inner.executions.get(&ingestor.domain) {
             Some(execution) => match execution.mqtt_ingestor_clients.get(&ingestor.name) {
                 Some(prepared) if prepared.declaration == *self => Some(prepared.rendered.clone()),
@@ -149,8 +156,24 @@ impl MqttTopicIngestorStartPlan {
                     entries.push(resolved.entries);
                     mounts.push(resolved.mounts);
                 }
+                let Some(dns) = runtime.dns() else {
+                    return Err(Report::new(IngestorConnectorStartError::NodeDnsUnavailable));
+                };
+                let default_client_id =
+                    format!("{}~{}", ingestor.domain.as_str(), ingestor.name.as_str());
+                let connector = MqttTopicIngestorPlan::new(MqttTopicIngestorSettings {
+                    instances: entries.into(),
+                    share_group: default_client_id.clone(),
+                    default_client_id,
+                    topic: self.topic.as_str().to_string(),
+                    session: self.session,
+                    qos: self.qos,
+                    acknowledgement_window: self.mode.acknowledgement_window(),
+                    dns: dns.clone(),
+                    read_ahead_dropped: read_ahead_dropped.clone(),
+                });
                 let rendered = Arc::new(RenderedMqttClient {
-                    entries: entries.into(),
+                    connector,
                     mounts: mounts.into(),
                 });
                 if let Some(mut execution) = runtime.inner.executions.get_mut(&ingestor.domain) {
@@ -165,32 +188,10 @@ impl MqttTopicIngestorStartPlan {
                 rendered
             }
         };
-        let Some(dns) = runtime.dns() else {
-            return Err(Report::new(IngestorConnectorStartError::NodeDnsUnavailable));
-        };
-        let default_client_id = format!("{}~{}", ingestor.domain.as_str(), ingestor.name.as_str());
-        let dispatcher = runtime.inner.remote_dispatcher.load();
-        let read_ahead_dropped = runtime.inner.metrics.ingestor_read_ahead_dropped_payloads(
-            &ingestor.domain,
-            &ingestor.name,
-            ingestor.unit,
-            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
-        );
-        let connector = MqttTopicIngestorPlan::new(MqttTopicIngestorSettings {
-            instances: rendered.entries.clone(),
-            client_id_conflict: MqttTopicIngestorPlan::client_id_conflict(
-                &self.client.config,
-                self.instances,
-            ),
-            share_group: default_client_id.clone(),
-            default_client_id,
-            topic: self.topic.as_str().to_string(),
-            session: self.session,
-            qos: self.qos,
-            acknowledgement_window: self.mode.acknowledgement_window(),
-            dns: dns.clone(),
-            read_ahead_dropped,
-        });
+        let connector = rendered
+            .connector
+            .clone()
+            .with_read_ahead_dropped(read_ahead_dropped);
         Ok(ResolvedMqttIngestor {
             connector,
             client_mounts: rendered.mounts.clone(),

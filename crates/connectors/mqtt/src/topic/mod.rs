@@ -2,7 +2,8 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The MQTT client a configuration declares, its event loop and reconnect backoff,
+//! - **Owns.** The MQTT client a configuration declares and the one set of connection options
+//!   both sides build from it, its event loop and reconnect backoff,
 //!   the connection it opens to the broker through the node resolver, the session, quality of
 //!   service and shared subscription an ingestor reads through, the Maximum Packet Size an ingestor
 //!   advertises, manual acknowledgement and local replay of publishes, the quality of service each
@@ -26,6 +27,7 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
+mod client_options;
 mod connection;
 mod ingestor;
 #[cfg(test)]
@@ -51,9 +53,10 @@ use std::{
 
 use arch_into::ArchInto as _;
 use async_trait::async_trait;
+use client_options::MqttClientOptions;
+pub use client_options::MqttClientOptionsError;
 pub use connection::MqttConnectionError;
-use connection::MqttDialer;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use futures_util::FutureExt as _;
 pub use ingestor::{
     MqttClientIdError, MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorMessage,
@@ -65,8 +68,7 @@ use nervix_connector::{
     AckConfirmation, BrokerAnswer, BrokerVerdict, ConfirmationWindow, EmitterFinish,
     EmitterFinishError, EmitterFinishResult, EmitterHost, EmitterLifecycle, EmitterOpenError,
     EmitterRecord, EmitterRecordId, EmitterStartResult, EmitterWriteError, ParsedRetryPolicy,
-    PerRecordOutcome, RecordEmitter, RejectedEmitterMember, client_config_value, client_tls_paths,
-    next_retry_delay, optional_client_config_value, read_tls_file,
+    PerRecordOutcome, RecordEmitter, RejectedEmitterMember, next_retry_delay,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, MqttTopicName};
@@ -81,14 +83,12 @@ use nervix_primitives::{
 };
 use nervix_recovery::Discarded as _;
 use rumqttc::{
-    AsyncClient, ClientError as MqttClientError, ConnAck, Event, Incoming, MqttOptions,
+    AsyncClient, ClientError as MqttClientError, ConnAck, Event, Incoming,
     PubAckReason as MqttPubAckReason, PubRecReason as MqttPubRecReason, PublishNotice,
-    PublishNoticeError, PublishOptions, SessionMode, TlsConfiguration, Transport as MqttTransport,
-    ValidatedTopic,
+    PublishNoticeError, PublishOptions, SessionMode, ValidatedTopic,
 };
 use thiserror::Error;
 use tracing::warn;
-use url::{Host, Url};
 
 const MQTT: &str = "mqtt";
 
@@ -401,12 +401,6 @@ impl MqttReconnectBackoff {
     }
 }
 
-struct MqttTopicEmitterAddr {
-    host: String,
-    port: u16,
-    tls: bool,
-}
-
 impl MqttTopicEmitter {
     pub fn new(config: MqttTopicEmitterConfig, host: EmitterHost) -> EmitterStartResult<Self> {
         let mode = config.mode;
@@ -478,96 +472,36 @@ impl MqttTopicEmitter {
         })
     }
 
+    /// The client and event loop of the connection `config` declares: the options it shares with
+    /// every ingestor, completed with the session the emitter's quality of service needs and room
+    /// for the publishes its confirmation window lets wait.
     fn client_from_config(
         config: &[ClientConfigEntry],
         default_client_id: &str,
         mode: MqttPublishingMode,
         dns: DnsResolver,
     ) -> EmitterStartResult<(AsyncClient, rumqttc::EventLoop)> {
-        let addr = Self::config_value(config, "addr")?;
-        let client_id = match optional_client_config_value(config, "client_id") {
-            Some(client_id) => client_id.to_owned(),
-            None => default_client_id.to_string(),
-        };
-
-        let mqtt_addr = Self::parse_addr(&addr)?;
-        let mut options = MqttOptions::new(client_id, (mqtt_addr.host, mqtt_addr.port));
-        options.set_session_mode(match mode {
+        let invalid = || EmitterOpenError::InvalidConfiguration { connector: MQTT };
+        let mut client = MqttClientOptions::from_config(config, default_client_id)
+            .change_context_lazy(invalid)?;
+        let session = match mode {
             MqttPublishingMode::Qos0 => SessionMode::Clean,
             MqttPublishingMode::Qos1 { .. } | MqttPublishingMode::Qos2 { .. } => {
                 SessionMode::Persistent
             }
-        });
-        if mqtt_addr.tls {
-            let tls = client_tls_paths(config);
-            let ca = if let Some(ca_file) = tls.ca_file.as_ref() {
-                Self::read_tls_file(ca_file, "TLS CA certificate")?
-            } else {
-                return Err(Self::config_error(
-                    "MQTT TLS requires client config key 'tls_ca_file'",
-                ));
-            };
-            let client_auth = match (&tls.cert_file, &tls.key_file) {
-                (Some(cert_file), Some(key_file)) => Some((
-                    Self::read_tls_file(cert_file, "TLS certificate")?,
-                    Self::read_tls_file(key_file, "TLS private key")?,
-                )),
-                (None, None) => None,
-                _ => {
-                    return Err(Self::config_error(
-                        "MQTT TLS client authentication requires both 'tls_cert_file' and \
-                         'tls_key_file'",
-                    ));
-                }
-            };
-            options.set_transport(MqttTransport::Tls(TlsConfiguration::Simple {
-                ca,
-                alpn: None,
-                client_auth,
-            }));
-        }
+        };
+        client.options_mut().set_session_mode(session);
         let request_capacity = match mode {
             MqttPublishingMode::Qos0 => NonZeroUsize::MIN,
             MqttPublishingMode::Qos1(confirmation) | MqttPublishingMode::Qos2(confirmation) => {
                 confirmation.max_in_flight
             }
         };
-        MqttDialer::install(&mut options, dns);
+        let options = client.dialing_through(dns);
         AsyncClient::builder(options)
             .capacity(request_capacity.get())
             .try_build()
-            .map_err(|error| Self::config_error(format!("invalid MQTT client config: {error}")))
-    }
-
-    fn parse_addr(addr: &str) -> EmitterStartResult<MqttTopicEmitterAddr> {
-        let url = Url::parse(addr).map_err(|source| {
-            Self::config_error(format!("invalid MQTT addr '{addr}': {source}"))
-        })?;
-        let tls = if url.scheme() == "mqtt" {
-            false
-        } else if url.scheme() == "mqtts" {
-            true
-        } else {
-            return Err(Self::config_error(format!(
-                "unsupported MQTT addr scheme '{}', expected mqtt:// or mqtts://",
-                url.scheme()
-            )));
-        };
-        let host = match url.host() {
-            Some(Host::Domain(domain)) => domain.to_string(),
-            Some(Host::Ipv4(address)) => address.to_string(),
-            Some(Host::Ipv6(address)) => address.to_string(),
-            None => String::new(),
-        };
-        if host.is_empty() {
-            return Err(Self::config_error(format!(
-                "missing host in MQTT addr '{addr}'"
-            )));
-        }
-        let port = url
-            .port()
-            .ok_or_else(|| Self::config_error(format!("missing port in MQTT addr '{addr}'")))?;
-        Ok(MqttTopicEmitterAddr { host, port, tls })
+            .map_err(|error| Report::new(error).change_context(invalid()))
     }
 
     /// Accepts a payload of `payload_bytes` whose PUBLISH packet the protocol can express and the
@@ -731,36 +665,6 @@ impl MqttTopicEmitter {
             }
         }
         window.finish().await
-    }
-
-    fn config_value(config: &[ClientConfigEntry], key: &str) -> EmitterStartResult<String> {
-        {
-            let mapping_input = client_config_value(config, key, "MQTT");
-            match mapping_input {
-                Ok(mapped_value) => Ok(mapped_value),
-                Err(error) => Err({
-                    let message = error.current_context().to_string();
-                    error
-                        .change_context(EmitterOpenError::InvalidConfiguration { connector: MQTT })
-                        .attach_printable(message)
-                }),
-            }
-        }
-    }
-
-    fn read_tls_file(path: &std::path::PathBuf, label: &str) -> EmitterStartResult<Vec<u8>> {
-        {
-            let mapping_input = read_tls_file(path, label);
-            match mapping_input {
-                Ok(mapped_value) => Ok(mapped_value),
-                Err(error) => Err({
-                    let message = error.current_context().to_string();
-                    error
-                        .change_context(EmitterOpenError::InvalidConfiguration { connector: MQTT })
-                        .attach_printable(message)
-                }),
-            }
-        }
     }
 
     fn config_error(error: impl std::fmt::Display) -> Report<EmitterOpenError> {

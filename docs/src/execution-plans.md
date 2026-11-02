@@ -336,7 +336,10 @@ tasks stop. `IngestorStartPlan` decides whether the source changed, independentl
 changes. Runtime installation snapshots locally owned retiring inputs before withdrawing the
 installed revision, and the composition root dispatches retirement. Passive revisions retain the
 same plans, so removing an ingestor after `STOP` can still release its MQTT sessions. The MQTT
-connector compares validated session identities and subscriptions, cleans up obsolete identities
+host prepares its rendered client configurations, connector plan and resource mounts once
+per logical declaration on a node. Unit starts clone that immutable plan with their own read-ahead
+metric handle, preserving the global instance indices and avoiding repeated identity scans.
+Its connector compares validated session identities and subscriptions, cleans up obsolete identities
 best-effort, and prepares changed sessions at the replacement endpoint before its source starts.
 No Model, source driver, or registry guard is retained across this transition. Ordinary shutdown
 and ownership transfer with an unchanged input preserve external sessions. For Pulsar, a changed

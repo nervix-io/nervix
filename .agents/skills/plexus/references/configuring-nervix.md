@@ -446,15 +446,19 @@ current connection, retry and deadline limits.
   `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. Do not mix mode bodies between entities or infer a
   default.
 - MQTT source client identities default to the domain and ingestor, with an instance suffix for
-  multiple instances. Account for the broker state that input replacement and `DROP INGESTOR`
+  multiple instances. A `client_id` is a template whose `{{instance}}` renders each source
+  instance's index, and every instance must render its own identity; an emitter connects as
+  instance 0. Account for the broker state that input replacement and `DROP INGESTOR`
   retire; ordinary stop retains a persistent session. Read `Ingestors` → `MQTT` for identities,
   session lifetime, the separate raw-frame and admitted-publish bounds, oversized-payload counts
   and cleanup failures, and `Emitters` → `MQTT` for emitter identities.
 - An `MQTT CLIENT`'s `addr` is `mqtt://` or `mqtts://`, a host and a port, with no credentials,
-  path or query; its `tls_*` files belong only with `mqtts`. Write MQTT wildcards only in an
-  ingestor's `TOPIC`, as whole levels with `#` last and never a leading `$share` level, which
-  Nervix forms itself; an emitter's `TOPIC` is one literal topic. Check both against the MQTT
-  sections of `Ingestors` and `Emitters`.
+  path or query: write `username` and `password` (redacted on inspection), `keep_alive_ms` in
+  whole seconds and the source admission bound `max_packet_size` as their own keys, checked against
+  the client key table in `Ingestors` → `MQTT`; its `tls_*` files belong only with `mqtts`. Write
+  MQTT wildcards only in an ingestor's `TOPIC`, as whole levels with `#` last and never a leading
+  `$share` level, which Nervix forms itself; an emitter's `TOPIC` is one literal topic. Check both
+  against the MQTT sections of `Ingestors` and `Emitters`.
 - Redis Pub/Sub separates message read-ahead from the byte-bound quiesce buffer. Check the client
   required capacity and idle-probe keys against `Ingestors` → `Redis Pub/Sub`; retain the source's explicit
   `BUFFER` or `DROP` policy in generated Plexus.
@@ -478,6 +482,12 @@ current connection, retry and deadline limits.
   `BUFFER` or `DROP` quiesce. Write NATS wildcards only in an ingestor's `SUBJECT`, as whole
   tokens with `>` last; an emitter's `SUBJECT` is one literal subject. Check both against the NATS
   sections of `Ingestors` and `Emitters`.
+- A `PULSAR TOPIC` emitter's `TIMESTAMP <expression>` is each message's event time: an exact,
+  non-null, non-sensitive `DATETIME`, written as the millisecond that contains it, and a time before
+  `1970-01-01T00:00:00.001Z` rejects its record through `ON MESSAGE ERROR`. Its `DELIVER AFTER
+  <duration>` delays each message from its batch's execution time, not from the send, for shared
+  subscriptions only, and the broker may deliver up to its tick, one second by default, early. Read
+  `Emitters` → `Pulsar`.
 - Every `PULSAR TOPIC` ingestor states who owns its subscription after the subscription's name:
   `OWNED BY INGESTOR START AT EARLIEST` when Nervix may create it and should remove it when the ingestor or its
   domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and
@@ -516,8 +526,11 @@ current connection, retry and deadline limits.
   due instant, and use a fresh execution snapshot for returned data and generated routes.
 - Every `PROMETHEUS CLIENT` sets `addr` to the API root, an `http` or `https` URL without a
   query string or fragment, and a positive `timeout_ms`. It sets no key beyond `tls_ca_file` and
-  the paired `tls_cert_file` and `tls_key_file`; `CREATE PROMETHEUS CLIENT` refuses any other. Read
-  `Ingestors` → `Prometheus` for the keys.
+  the paired `tls_cert_file` and `tls_key_file`; `CREATE PROMETHEUS CLIENT` refuses any other. It
+  follows no redirect and uses no proxy, whatever the environment names, so `addr` names the root
+  that answers. It declares no bearer token: authenticate with a client certificate or with Basic
+  credentials in the user information of `addr`. Read `Ingestors` → `Prometheus` for the keys and
+  the transport.
 - A `PROMETHEUS QUERY` ingestor reads at most `MAX BODY SIZE` bytes of each response, written
   between `QUERY` and `EVERY` and `16MiB` when left out. A larger response fails the poll as the
   ingestor's transient error rather than delivering part of it; raise the bound for a query that
@@ -528,7 +541,8 @@ current connection, retry and deadline limits.
   `'{job: .metric.job, value, timestamp}'`, or a `MODE LOOSE` wire schema when no label is needed.
   Use `metadata.query`, `metadata.evaluated_at` and `TIMESTAMP AT metadata.evaluated_at` for the
   query and its evaluation instant. A `matrix`, `scalar` or `string` result or a native histogram
-  fails the poll; ask for an instant vector.
+  fails the poll; ask for an instant vector. A failed poll is not sent again, so its instant stays
+  a gap in the series.
 - Treat Kafka `NO ACK` emitter success as local librdkafka producer-queue admission. Even in
   `ATTACHED` mode, Nervix does not wait for a broker delivery receipt before completing its ACK
   share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces the

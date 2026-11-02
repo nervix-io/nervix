@@ -5,8 +5,10 @@
 //! - **Owns.** The MQTT client Model, the topic source and emitter Models with their session,
 //!   quality-of-service and delivery modes, the topic filter a source subscribes to with the rules
 //!   MQTT holds it to, and what each entity declares.
-//!   Client declarations also own public configuration keys, types and confidentiality.
-//! - **Depends on.** The shared source and emitter declarations and the names a body references.
+//!   Client declarations also own public configuration keys, types and confidentiality, and the
+//!   typed values of a configuration that satisfies them.
+//! - **Depends on.** The shared source and emitter declarations, the shared client configuration
+//!   schema and the names a body references.
 //! - **Must not know.** The MQTT driver, or how a topic filter is
 //!   subscribed or published to.
 
@@ -31,35 +33,72 @@ use super::{
     external_name::{ExternalNameError, external_names, require_length},
 };
 use crate::{
-    AcknowledgementConfirmation, ChoiceRequirement, ClientName, ConnectorKind, DeclaredDelivery,
-    DeclaredQuiesce, EmitterBatchLegality, EmitterBodyForm, EmitterClientReference,
-    EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities, EmitterReference,
-    EmitterReferenceKind, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
-    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorReference,
+    AcknowledgementConfirmation, ChoiceRequirement, ClientConfigKey, ClientConfigSchema,
+    ClientConfigValue, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
+    EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
+    EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
+    IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration, IngestorEntityBody,
+    IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorReference,
     IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
     OptionForm, OptionPresence, PositionClass, RetryPolicy,
 };
 
+mod config;
+#[cfg(test)]
+mod config_tests;
+
+pub use config::{
+    MqttBroker, MqttClientConfig, MqttClientConfigError, MqttPassword, MqttTlsFiles,
+    MqttTlsIdentity, MqttTransport,
+};
+
 configured_client!(Mqtt: unpooled, config CLIENT_CONFIG, CreateClientMqtt => MqttConfigEntry);
+
+/// The broker every connection dials. A connection reads only its scheme, host and port.
+const ADDR: ClientConfigKey =
+    ClientConfigKey::required("addr", ClientConfigValue::HostPortUrl(&["mqtt", "mqtts"]));
+/// The identity template every connection renders: its `{{instance}}` placeholder renders the
+/// index of the ingestor instance that connects, and an emitter connects as instance 0.
+const CLIENT_ID: ClientConfigKey =
+    ClientConfigKey::optional("client_id", ClientConfigValue::String);
+/// The keep-alive every `CONNECT` asks for, in whole seconds written as milliseconds: 60 seconds
+/// where omitted.
+const KEEP_ALIVE: ClientConfigKey =
+    ClientConfigKey::defaulted("keep_alive_ms", ClientConfigValue::Milliseconds, "60000");
+/// The largest complete publish an ingestor admits, its topic, properties and framing included:
+/// 10,240 bytes where omitted. Emitters receive no publish.
+const MAX_PACKET_SIZE: ClientConfigKey = ClientConfigKey::defaulted(
+    "max_packet_size",
+    ClientConfigValue::PositiveInteger,
+    "10240",
+)
+.read_by_ingestors();
+/// The password every `CONNECT` carries, which public inspection redacts.
+const PASSWORD: ClientConfigKey =
+    ClientConfigKey::optional("password", ClientConfigValue::String).secret();
+/// The username every `CONNECT` carries.
+const USERNAME: ClientConfigKey = ClientConfigKey::optional("username", ClientConfigValue::String);
 
 /// The current keys this connector reads, shared by validation, completion and inspection.
 ///
 /// A connection reads only the scheme, host and port of `addr`, and reads the TLS files only for
-/// `mqtts`, where its trust has no other root than `tls_ca_file`.
-const CLIENT_CONFIG: crate::ClientConfigSchema = {
-    use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
-    ClientConfigSchema::new(
-        &[
-            K::required("addr", V::HostPortUrl(&["mqtt", "mqtts"])),
-            K::optional("client_id", V::String),
-            K::TLS_CA.exactly_for_scheme("addr", "mqtts"),
-            K::TLS_CERT.only_for_scheme("addr", "mqtts"),
-            K::TLS_KEY.only_for_scheme("addr", "mqtts"),
-        ],
-        &[],
-        &[],
-    )
-};
+/// `mqtts`, where its trust has no other root than `tls_ca_file`. Credentials, the keep-alive and
+/// the admission bound are keys of their own.
+const CLIENT_CONFIG: ClientConfigSchema = ClientConfigSchema::new(
+    &[
+        ADDR,
+        CLIENT_ID,
+        KEEP_ALIVE,
+        MAX_PACKET_SIZE,
+        PASSWORD,
+        ClientConfigKey::TLS_CA.exactly_for_scheme(ADDR.name, "mqtts"),
+        ClientConfigKey::TLS_CERT.only_for_scheme(ADDR.name, "mqtts"),
+        ClientConfigKey::TLS_KEY.only_for_scheme(ADDR.name, "mqtts"),
+        USERNAME,
+    ],
+    &[],
+    &[],
+);
 
 /// The longest topic filter MQTT carries, in bytes.
 const MQTT_TOPIC_FILTER_MAX: usize = 65_535;
@@ -138,10 +177,6 @@ pub struct MqttTopicIngestor {
     pub quiesce: IngestQuiesceMode,
 }
 
-/// The largest publish an MQTT TOPIC ingestor admits, including its MQTT packet headers.
-/// Larger publishes are acknowledged and counted as oversized before decoding their payloads.
-pub const MQTT_SOURCE_MAXIMUM_PACKET_BYTES: u64 = 10 * 1024;
-
 /// Extra acknowledged publishes advertised to the broker and the separate QoS 0 read-ahead quota.
 /// Automatic acknowledgement uses this quota alone, with backpressure instead of overflow drops.
 pub const MQTT_SOURCE_READ_AHEAD_HEADROOM: u64 = 64;
@@ -161,11 +196,24 @@ pub const MQTT_MAXIMUM_PACKET_BYTES: u64 = (1 << 28) + 4;
 const MQTT_FOUR_BYTE_INTEGER_MAX: u64 = 0xFFFF_FFFF;
 
 const _: () = assert!(
-    MQTT_SOURCE_MAXIMUM_PACKET_BYTES > 0
-        && MQTT_SOURCE_MAXIMUM_PACKET_BYTES <= MQTT_MAXIMUM_PACKET_BYTES
-        && MQTT_MAXIMUM_PACKET_BYTES <= MQTT_FOUR_BYTE_INTEGER_MAX,
-    "MQTT forbids a Maximum Packet Size of zero, and carries it as a Four Byte Integer"
+    MQTT_MAXIMUM_PACKET_BYTES <= MQTT_FOUR_BYTE_INTEGER_MAX,
+    "MQTT carries the Maximum Packet Size as a Four Byte Integer, so every admission bound up to \
+     its largest packet fits thirty-two bits"
 );
+
+/// One interval of the keep-alive a connection keeps to, which bounds a wait for a write.
+const KEEP_ALIVE_INTERVAL: WaitBound = WaitBound::ClientKey {
+    key: KEEP_ALIVE.name,
+    rule: "one interval of it, or of the broker's Server Keep Alive; 60 s when omitted",
+};
+
+/// How long a connection that hears nothing from its broker lasts: it pings after one interval
+/// without traffic and ends when the following interval passes without an answer.
+const SILENT_CONNECTION: WaitBound = WaitBound::ClientKey {
+    key: KEEP_ALIVE.name,
+    rule: "two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 \
+           s when omitted",
+};
 
 /// What the connector of a MQTT TOPIC ingestor holds and how long it waits.
 const MQTT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
@@ -181,7 +229,7 @@ const MQTT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
         DeclaredBuffer {
             holds: "each admitted publish including its packet headers, copied out of raw framing",
             bound: BufferBound::Bounded {
-                capacity: BufferCapacity::Bytes(MQTT_SOURCE_MAXIMUM_PACKET_BYTES),
+                capacity: BufferCapacity::Setting("max_packet_size, 10240 bytes when omitted"),
                 overflow: BufferOverflow::DropAndCount,
             },
         },
@@ -255,11 +303,11 @@ const MQTT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
         DeclaredWait {
             wait: "ordinary and oversized-discard acknowledgements written to the connection",
-            bound: WaitBound::Driver("one keep-alive interval of 60 s, or the broker's"),
+            bound: KEEP_ALIVE_INTERVAL,
         },
         DeclaredWait {
             wait: "a silent connection",
-            bound: WaitBound::Driver("keep-alive of 60 s, or the broker's"),
+            bound: SILENT_CONNECTION,
         },
     ],
     driver_limits: &[
@@ -293,6 +341,10 @@ const MQTT_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
         DeclaredWait {
             wait: "writes to the connection",
             bound: WaitBound::Unbounded,
+        },
+        DeclaredWait {
+            wait: "a silent connection",
+            bound: SILENT_CONNECTION,
         },
     ],
     driver_limits: &["Packets above the broker's maximum packet size are rejected."],
