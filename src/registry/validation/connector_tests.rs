@@ -316,6 +316,50 @@ fn emitter_publishing_contract_rejects_model_level_bypasses() {
     assert!(format!("{error:#}").contains("requires a queue name ending in .fifo"));
 }
 
+#[test]
+fn a_publishing_mode_needs_the_option_choices_its_entity_declares_beside_it() {
+    let domain = DomainName::parse("default").expect("valid domain");
+    let Model::Emitter(mut emitter) = emitter("emit", "events", "event_codec", "broker_out") else {
+        unreachable!("emitter helper must build an emitter model")
+    };
+    let topic = nervix_models::MqttTopicName::try_from("devices/orders").expect("valid topic");
+    *emitter.connector = EmitterEntity::Mqtt(nervix_models::MqttEmitter::Topic(
+        nervix_models::MqttTopicEmitter {
+            mode: nervix_models::MqttTopicPublishingMode::NoAck {
+                retry_policy: RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
+            client: named("mqtt_main"),
+            topic,
+            qos: nervix_models::MqttQos::Qos1,
+        },
+    ));
+
+    let error = validate_emitter_publishing_contract(
+        &domain,
+        &ModelName::from(&emitter.name),
+        &ModelIndex::new(),
+        &emitter,
+    )
+    .expect_err("NO ACK beside QoS 1 must be refused");
+
+    let RegistryError::InvalidConnectorDeclaration { node, issue, .. } = error.current_context()
+    else {
+        panic!("expected the connector declaration refusal, got {error:?}");
+    };
+    assert_eq!(node.kind, nervix_models::ModelKind::Emitter);
+    let ConnectorDeclarationIssue::Publishing(unmet) = issue else {
+        panic!("expected the publishing requirement, got {issue:?}");
+    };
+    assert_eq!(unmet.mode, nervix_models::EmitterPublishingModeKind::NoAck);
+    assert_eq!(
+        issue.to_string(),
+        "MQTT TOPIC emitters name MODE NO ACK only with QOS 0; the statement writes QOS 1"
+    );
+}
+
 fn batch_policy(max_messages: u32, max_size: &str) -> nervix_models::EmitterBatchPolicy {
     nervix_models::EmitterBatchPolicy {
         max_messages: nervix_models::BatchMessageLimit::try_from(max_messages)

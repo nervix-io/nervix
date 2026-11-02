@@ -46,7 +46,7 @@ fn pubsub_declarations_match_the_unacknowledged_transport() {
         Some(&DeclaredQuiesce::BUFFER)
     );
     assert_eq!(
-        emit.publishing_modes,
+        emit.publishing_kinds(),
         &[crate::EmitterPublishingModeKind::NoAck]
     );
     assert_eq!(emit.body, EmitterBodyForm::Codec);

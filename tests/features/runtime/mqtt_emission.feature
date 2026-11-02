@@ -170,7 +170,7 @@ Feature: MQTT emission
   # The broker delivers a QOS 2 publish and answers PUBREC once it took the publish, and PUBCOMP only
   # for the client's PUBREL. The endpoint drops every PUBREL, so the record is delivered and its
   # exchange never completes: the emitter keeps the offset until a retry's exchange reaches PUBCOMP.
-  @mqtt_emitter_pubcomp_boundary
+  @mqtt_emitter_pubcomp_boundary @deloxide_stress
   Scenario Outline: An attached MQTT QOS 2 emitter holds the input offset until PUBCOMP
     Given Kafka is running
     And MQTT is running

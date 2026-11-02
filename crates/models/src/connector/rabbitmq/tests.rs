@@ -229,7 +229,7 @@ fn queue_emission_declares_codec_batches_and_broker_confirmation_modes() {
     );
     assert!(!declaration.requires_batch_transformation);
     assert_eq!(
-        declaration.publishing_modes,
+        declaration.publishing_kinds(),
         &[
             EmitterPublishingModeKind::NoAck,
             EmitterPublishingModeKind::BrokerAck,

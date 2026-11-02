@@ -64,7 +64,7 @@ fn topic_declarations_match_the_replayable_log_and_its_producer() {
         assert_eq!(ingest.declared_quiesce(undeclared), None);
     }
     assert_eq!(
-        emit.publishing_modes,
+        emit.publishing_kinds(),
         &[
             EmitterPublishingModeKind::NoAck,
             EmitterPublishingModeKind::BrokerAck

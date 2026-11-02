@@ -39,8 +39,8 @@ use super::{
     RabbitMqQueueIngestorAlteration, RedisIngestor, RedisIngestorAlteration, RedisIngestorEntity,
     RuntimeCapability, SqsIngestor, SqsIngestorEntity, SqsQueueIngestorAlteration, SyslogIngestor,
     SyslogIngestorEntity, SyslogListenerIngestorAlteration, WebsocketsIngestor,
-    WebsocketsIngestorAlteration, WebsocketsIngestorEntity, ZeroMqIngestor, ZeroMqIngestorEntity,
-    ZeroMqPullIngestorAlteration,
+    WebsocketsIngestorAlteration, WebsocketsIngestorEntity, WrittenChoice, ZeroMqIngestor,
+    ZeroMqIngestorEntity, ZeroMqPullIngestorAlteration,
     entity_union::{entity_union, ingestor_alteration_union},
 };
 use crate::{
@@ -537,18 +537,11 @@ impl IngestorEntityCapabilities {
         if ChoiceRequirement::all_met(declared.requires, chosen) {
             return None;
         }
-        let mut written = Vec::with_capacity(declared.requires.len());
-        for requirement in declared.requires {
-            written.push(WrittenChoice {
-                option: requirement.option,
-                choice: chosen(requirement.option),
-            });
-        }
         Some(UnmetDeliveryRequirement {
             entity,
             delivery,
             requires: declared.requires,
-            written,
+            written: WrittenChoice::of(declared.requires, chosen),
         })
     }
 }
@@ -579,34 +572,6 @@ pub struct UnmetDeliveryRequirement {
     /// The choice the statement makes for each option a requirement names, in the order the
     /// requirements name them.
     pub written: Vec<WrittenChoice>,
-}
-
-/// The choice a statement makes for one declared option.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WrittenChoice {
-    /// The keywords of the option.
-    pub option: &'static str,
-    /// The name of the choice the statement makes, where its body answers for the option.
-    pub choice: Option<&'static str>,
-}
-
-impl WrittenChoice {
-    /// Every choice of `written`, as a statement writes them together, such as
-    /// `SESSION CLEAN and QOS 0`.
-    fn conjunction(written: &[Self]) -> String {
-        let phrases: Vec<String> = written.iter().map(ToString::to_string).collect();
-        phrases.join(" and ")
-    }
-}
-
-/// A choice is written as its option's keywords, then the choice's own name.
-impl Display for WrittenChoice {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self.choice {
-            Some(choice) => write!(f, "{} {choice}", self.option),
-            None => write!(f, "no {}", self.option),
-        }
-    }
 }
 
 /// The declaration one source entity's Model makes for every statement of that entity.

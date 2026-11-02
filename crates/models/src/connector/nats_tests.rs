@@ -94,7 +94,7 @@ fn subject_emission_declares_core_and_jetstream_publication() {
         EmitterReferenceKind::Client(ConnectorKind::Nats)
     );
     assert_eq!(
-        emit.publishing_modes,
+        emit.publishing_kinds(),
         &[
             EmitterPublishingModeKind::NoAck,
             EmitterPublishingModeKind::NatsJetStream,
