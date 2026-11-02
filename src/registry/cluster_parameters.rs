@@ -114,9 +114,11 @@ fn validate_ingestor_header_parameters(
     {
         let mut headers = std::collections::BTreeMap::<String, u64>::new();
         for header in &source.headers {
-            let value_bytes = header
-                .known_value_from(clients.get(&source.client).copied())
-                .map_or(0, str::len);
+            let client = clients.get(&source.client).copied();
+            let value_bytes = match header.known_value_from(client) {
+                Some(value) => value.len(),
+                None => 0,
+            };
             let bytes = header
                 .name
                 .len()
