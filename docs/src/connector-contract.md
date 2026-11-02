@@ -861,9 +861,12 @@ nor makes the host reconnect. UDP admission separately drops and counts a datagr
 intake queue holds at most 64 frames and applies backpressure; that queue does not limit the
 connection count or total connection-local retention.
 
-A wait ends at a client deadline key, a statement clause such as `ACK TIMEOUT`, a fixed bound Nervix
-sets, or the driver's own default. A wait that only the host's stop ends is declared unbounded. The
-deadline keys mean the same thing for every connector:
+A wait ends at a client deadline key, a statement clause such as `ACK TIMEOUT`, a protocol interval
+another client key sets, such as MQTT's `keep_alive_ms`, a fixed bound Nervix sets, or the driver's
+own default. A protocol interval is not a deadline key: it keeps its protocol's meaning, and the
+entity declares how its wait follows from the key and what applies where the client leaves the key
+out. A wait that only the host's stop ends is declared unbounded. The deadline keys mean the same
+thing for every connector:
 
 | Key | What it bounds |
 | --- | --- |
@@ -906,8 +909,8 @@ A change that adds or alters a connector's buffers or network waits checks that:
 
 - every buffer between the transport and the host is declared with its capacity and overflow, and
   only a buffer already declared unbounded stays so;
-- every network wait is bounded by a declared key, clause, fixed bound or driver default, and only
-  a wait already declared unbounded stays so;
+- every network wait is bounded by a declared deadline key, protocol interval key, clause, fixed
+  bound or driver default, and only a wait already declared unbounded stays so;
 - every deadline key it reads keeps the meaning above and is read through `ConfiguredDeadline`;
 - no driver call parks an asynchronous worker;
 - every deadline key its declaration names has its stalled-peer scenario in the inventory.
@@ -929,7 +932,7 @@ remain in their owning work records until that delivery.
 | Side | What the entity declares |
 | --- | --- |
 | Ingestor | Header reads, the typed metadata fields in their order, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits, and any alternative locators a body may write instead of it, each with its own keywords and name; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
-| Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which `KAFKA TOPIC` declares `TIMESTAMP`, `SQS QUEUE` declares `DELAY` and `DEDUPLICATION ID`, the two RabbitMQ emitter entities declare `MANDATORY`, and no entity declares any other clause or key yet. |
+| Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which `KAFKA TOPIC` declares `TIMESTAMP`, `PULSAR TOPIC` declares `TIMESTAMP` and `DELIVER AFTER`, `SQS QUEUE` declares `DELAY` and `DEDUPLICATION ID`, the two RabbitMQ emitter entities declare `MANDATORY`, and no entity declares any other clause or key yet. |
 | Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Every client declares its CONFIG key names, required or optional presence, value type, confidentiality, file role and Nervix or driver ownership, and which of its entities read each key: every ingestor and emitter that references the client, or only its ingestors or only its emitters. Only a client both sides reference declares a key for one side; a SYSLOG client does, and its connector takes the side a deadline key bounds a wait on from that declaration. The declaration explicitly names delegated property namespaces and reserved keys, and the other names its driver reads for one property: each pair of names with the one the client accepts, and a prefix the driver strips from a key before reading it, with the driver's own properties that begin with it. Validation, composed-grammar completion, public inspection and the generated key reference read this one schema. |
 
 Plexus client definitions start with `CREATE [IF NOT EXISTS] <CONNECTOR> CLIENT <name>`. The
@@ -1141,8 +1144,9 @@ written; at most 1,024 bytes without whitespace, control characters or an empty 
 ingestor names a subscription of 1 to 255 bytes with its declared owner, declares `NO ACK`,
 `ACK SEQUENTIAL` and `ACK PARALLEL` in Pulsar's own delivery-mode type, and quiesces only by
 `SUSPEND`, since the durable subscription keeps its backlog. The emitter declares `NO ACK` and
-`ACK` publishing and optional batching under the `maxMessageSize` the broker announces. Message
-properties are headers in both directions, `ordered_repeats` on ingestion and `last_wins` on
+`ACK` publishing, optional batching under the `maxMessageSize` the broker announces, the `TIMESTAMP`
+and `DELIVER AFTER` envelope clauses it writes as each message's `event_time` and `deliver_at_time`,
+and no other envelope clause or properties. Message properties are headers in both directions, `ordered_repeats` on ingestion and `last_wins` on
 emission. A Pulsar client declares only the keys both directions read. `namespace` holds exactly a
 tenant and a namespace, with the default `public/default` written once in the declaration, and topic
 qualification reads that effective value, so a namespace that cannot qualify a topic is refused at
@@ -1714,17 +1718,18 @@ the broker would have to exceed the advertised Receive Maximum for acknowledged 
 When the connection ended first, it fails with the
 lost connection beneath `MqttTopicIngestorError::Acknowledge`. A connection whose broker stopped reading
 it holds the writes, and the client's flush has no deadline of its own, so the acknowledgement
-waits at most one keep-alive interval, 60 seconds unless the broker's `CONNACK` announced its own,
-and then fails with `MqttTopicIngestorError::AcknowledgementDeadline`; a broker that announces a
-keep-alive of zero leaves it unbounded, as it leaves a silent connection. Every such failure drops
+waits at most one keep-alive interval, the client's `keep_alive_ms` unless the broker's `CONNACK`
+announced its own, and then fails with `MqttTopicIngestorError::AcknowledgementDeadline`; a broker
+that announces a keep-alive of zero leaves it unbounded, as it leaves a silent connection. Every such failure drops
 the connection and the acknowledgements it never wrote: the host shows the failure as the ingestor's transient status and
 rejects the positions, a rejection fails once its publishes' connection is gone, and the broker
 delivers again every publish the lost connection did not acknowledge once the source resumes; see
 [Confirmed acknowledgements](#confirmed-acknowledgements).
 
 Every `CONNECT` advertises MQTT's full framing limit, 268,435,460 bytes: the maximum Remaining
-Length plus its fixed header. This transport bound is separate from the 10 KiB admission bound
-for each complete publish, including its topic and properties. Local admission drops an oversized
+Length plus its fixed header. This transport bound is separate from the admission bound for each
+complete publish, including its topic and properties: the client's `max_packet_size`, 10,240 bytes
+when omitted, which the source's plan carries to the task. Local admission drops an oversized
 publish's bytes before read-ahead and retains only its prepared acknowledgement, if required.
 At QoS 1 or 2 under manual acknowledgement the ingestor queues its `PUBACK` or `PUBREC` through the
 same request owner as ordinary acknowledgements and waits for its write before returning
@@ -1754,14 +1759,17 @@ with how many it dropped. The host counts them in `nervix_ingestor_oversized_pay
 `DESCRIBE INGESTOR` renders, and reads again at once; the drop is neither a read failure nor a
 decode rejection, because the payload never reached the codec. A `SYSLOG LISTENER` does this for a
 UDP datagram larger than `max_message_size`; an `MQTT TOPIC` does it for a complete publish above
-its 10 KiB admission bound, after acknowledging it when required. A stream source that cannot
+its client's `max_packet_size`, after acknowledging it when required. A stream source that cannot
 identify the next frame closes that connection instead and counts nothing.
 
 ### MQTT session retirement
 
 MQTT source identities default to `<domain>~<ingestor>` for one instance and
 `<domain>~<ingestor>~<instance>` for multiple instances. The emitter default is
-`<domain>~<emitter>`. An explicit multi-instance source identity contains `{{instance}}`.
+`<domain>~<emitter>`. An explicit identity is the client's `client_id` template, which the
+composition root renders once for each instance, an emitter as instance 0. The connector compares
+the rendered identities, so instances whose identities render alike carry the identity conflict,
+however the template spells its `{{instance}}` placeholder.
 
 Stopping an execution retains its persistent broker state. Retiring a declared input is a
 separate host operation after its exact source tasks stop. The host compares the previous and
@@ -2038,7 +2046,14 @@ that declares nothing always receives the empty envelope. `KAFKA TOPIC` declares
 it writes as each record's Kafka `CreateTime`, in the millisecond that contains it; it rejects a
 record whose millisecond is not after the Unix epoch before its producer takes it, because
 librdkafka reads a zero timestamp as the time it takes the record, and a record without a timestamp
-gets that time from librdkafka. `SQS QUEUE` declares `DELAY`, which it sends as each message's
+gets that time from librdkafka. `PULSAR TOPIC` declares `TIMESTAMP` and `DELIVER AFTER`. It writes a
+record's timestamp as its message's `event_time`, in the millisecond that contains it, and the
+record's `occurred_at` plus its `deliver_after` as its `deliver_at_time`. `occurred_at` is the
+execution time of the batch the record's first source row came from, which the host retains with
+the record, so a retry writes the times of the first attempt and the connector reads no clock. It
+rejects a record before its producer takes it where the timestamp's millisecond is not after the
+Unix epoch, because Pulsar reads a zero event time as none, or where the delivery time leaves the
+range of a timestamp. `SQS QUEUE` declares `DELAY`, which it sends as each message's
 `DelaySeconds`, and `DEDUPLICATION ID`, which it sends as each message's `MessageDeduplicationId`;
 the registry refuses `DELAY` for a FIFO queue, outside whole seconds from `1s` to `900s`, and
 `DEDUPLICATION ID` for a standard queue. Only an entity whose body is a codec, whose records a
@@ -2801,11 +2816,19 @@ sequenceDiagram
   short string as a rejection of its record. Each checks its queue or exchange with a passive
   declaration when it opens, and a missing exchange is `EmitterOpenError::MissingExternalEntity`.
   A record whose envelope carries `MANDATORY` is published mandatory, and a message the broker
-  returns unrouted rejects its record in either mode: under `ACK` the return arrives with the
-  message's publisher confirm, and under `NO ACK` the emitter drains the channel's returns once the
-  round trip that ends the write is answered, attributing each to the first written message, in
-  order, with the same exchange, routing key, headers and body. A return never outlives the write
-  that published its message.
+  returns unrouted rejects its record in either mode. Under `ACK`, the driver can attach a return
+  to another message's confirm, so `publisher::confirmation_window` retains at most `MAX` messages,
+  collects their answers, and attributes all returns before refilling the window. It indexes borrowed
+  routing keys and bodies, then compares the actual AMQP properties through the message owner;
+  payloads are not cloned for attribution. Each return rejects the first matching mandatory message
+  in publication order, including when identical messages cannot be distinguished. A positive
+  mandatory answer in an interrupted window stays unresolved if another answer can still carry its
+  return; known rejections and safe nonmandatory answers are retained before retry. Every message
+  keeps its own handover deadline. Under `NO ACK` the emitter drains returns once the round trip
+  that ends the write is answered and attributes them by the same transport contents in written
+  order. A return is never attributed to a later window or write, and an unmatched return fails
+  the write. Size-refusal recovery cannot continue on a replacement channel while a positive
+  mandatory answer still has an undecidable return outcome; the host retries that unresolved prefix.
   The broker answers no `NO ACK` message itself, so the emitter ends a `NO ACK`
   write with one round trip on its channel, which the broker answers only after it has taken every
   message written before it, and the answer delivers the write; a write costs that one round trip,

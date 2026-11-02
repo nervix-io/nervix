@@ -812,14 +812,19 @@ body size and the limit as typed fields and becomes a record rejection of that m
 lost connection, and a close whose reason never arrives fail the attempt as an infrastructure
 failure, which the emitter retries on its backoff.
 
-A message the broker returns unrouted under `MANDATORY`, with its publisher confirm under `ACK` or
+A message the broker returns unrouted under `MANDATORY`, carried by a publisher confirm under `ACK` or
 before the round trip that ends a `NO ACK` write, is a record rejection with code `external` and
 operation `publish` whose message names the broker's reply code and text, such as `rabbitmq
 returned the message unrouted with reply code 312: NO_ROUTE`. A routing key longer than an AMQP
 short string carries is a `RabbitMqRecordError` keeping the driver's `ShortStringError` as its
 source and the key's length as a typed field, and becomes the same kind of rejection before the
 message is written. A return the emitter cannot attribute to a message of its write fails the
-attempt instead, because no record can be named as unrouted. An exchange emitter whose passive check
+attempt instead, because no record can be named as unrouted. Under `ACK`, returns are attributed
+across the bounded confirmation window rather than to the confirm carrying them. An unmatched
+return keeps its reply code and text in `RabbitMqConfirmationError`; a nack or disabled confirms
+uses that same typed owning context. No payload is included. An incomplete mandatory attribution
+is an infrastructure failure, including during size-refusal recovery, so an unresolved positive
+answer cannot disappear when the publisher replaces its channel. An exchange emitter whose passive check
 finds no exchange fails to open with `EmitterOpenError::MissingExternalEntity`, naming the exchange
 and keeping the broker's `NOT_FOUND` answer, a `lapin::Error`, as its typed cause; `DESCRIBE EMITTER`
 shows it as `RabbitMQ exchange '<name>' does not exist`. Any other failure of that check is an
@@ -926,6 +931,17 @@ transient error. A Syslog client that sets a deadline key its direction and prot
 is refused as `SyslogConfigError::InapplicableDeadlineKey`, naming the key and the clients it
 applies to.
 
+An MQTT client configuration the vocabulary cannot carry is refused as an
+`MqttClientConfigError`, which names the key without its value: an empty or NUL-bearing identity, a
+string longer than MQTT's 65,535 bytes, a keep-alive that is not whole seconds within MQTT's range,
+or a `max_packet_size` above MQTT's largest packet; a schema refusal stays beneath its `Schema`
+variant. `CREATE MQTT CLIENT` reports it after rendering the configuration for instance 0. A source
+or emitter whose rendered configuration the vocabulary refuses at connection keeps it beneath the
+connector's `MqttClientOptionsError::Configuration`, and a TLS file it cannot read keeps the
+connector contract's `ClientConfigError` beneath `MqttClientOptionsError::TlsFile`, naming the
+file. A source keeps either beneath `MqttTopicIngestorError::ClientConfig`, and an emitter beneath
+`EmitterOpenError::InvalidConfiguration`.
+
 An MQTT client's event loop reports a failed or lost broker connection as an
 `MqttConnectionError`, owned by the connector's connection module. The socket connector hands the
 driver the resolver's `DnsLookupError` as the failure of a lookup, and the driver keeps it as the
@@ -959,9 +975,9 @@ emitter's transient error. A missed `ACK TIMEOUT` is the confirmation window's
 MQTT input retirement reports `RuntimeError::RetireIngestorEntity`, naming its domain and
 ingestor, above the connector's `MqttTopicIngestorError::RetireInstance` and instance index. The report
 keeps typed client and connection causes, an unsubscribe refusal's reason codes, or the cleanup
-deadline's budget. Invalid endpoint URLs retain their parse cause, and client construction keeps
-its driver cause. Cleanup failures at the preceding endpoint are rendered once into runtime error
-events and do not fail a drop or prevent moving to another reachable endpoint. Failure to prepare
+deadline's budget. An invalid client configuration keeps the vocabulary's refusal, and client
+construction keeps its driver cause. Cleanup failures at the preceding endpoint are rendered once
+into runtime error events and do not fail a drop or prevent moving to another reachable endpoint. Failure to prepare
 the replacement's changed sessions remains an installation failure. Neither path rejects a record
 or confirms payload delivery.
 
@@ -1119,10 +1135,13 @@ classification; diagnostics do not quote the row payload.
 
 A Pulsar message refused for good is a `PulsarRecordError`, owned by the Pulsar emitter: a message
 larger than the maximum message size the broker announced, which carries the measured size of its
-metadata and payload and the limit as typed fields, or a message the broker answered with
-`NotAllowedError`, which carries the broker's reason. Either becomes a record rejection with code
-`external` and operation `publish`. Every other failure of the client, its connection or the broker
-stays an infrastructure failure of the attempt, which the emitter retries.
+metadata and payload and the limit as typed fields, a message the broker answered with
+`NotAllowedError`, which carries the broker's reason, or a record whose envelope sets a time its
+message cannot carry, which carries the `PulsarMessageTimeError` naming that time: a `TIMESTAMP`
+before the Unix epoch's first millisecond, or a `DELIVER AFTER` past the last timestamp, with the
+batch's execution time and the delay. Each becomes a record rejection with code `external` and
+operation `publish`. Every other failure of the client, its connection or the broker stays an
+infrastructure failure of the attempt, which the emitter retries.
 
 The Pulsar emitter preserves the driver's `pulsar::Error` beneath `EmitterWriteError::Publish` for
 enqueue failures and failed receipts, with its description in a printable attachment. Its shared
