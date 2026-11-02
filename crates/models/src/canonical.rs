@@ -4910,7 +4910,10 @@ mod tests {
                     decoded(KafkaTopicIngestor {
                         client: named("kafka_main"),
                         topic: named("Orders.Topic"),
-                        offset_mode: KafkaOffsetMode::ConsumerGroup(named("Orders Group")),
+                        offset_mode: KafkaOffsetMode::ConsumerGroup {
+                            group: named("Orders Group"),
+                            start_at: crate::IngestStartPosition::Earliest,
+                        },
                         instances: nonzero!(3u64),
                         mode: KafkaIngestMode::AckParallel {
                             max: nonzero!(8u64),
@@ -4922,9 +4925,9 @@ mod tests {
                     }),
                 ),
                 "CREATE KAFKA TOPIC INGESTOR kafka_ingestor\n  FROM kafka_main TOPIC \
-                 'Orders.Topic' OFFSET BY CONSUMER GROUP 'Orders Group' INSTANCES 3 MODE ACK \
-                 PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX \
-                 30s ON QUIESCE SUSPEND",
+                 'Orders.Topic' OFFSET BY CONSUMER GROUP 'Orders Group' START AT EARLIEST \
+                 INSTANCES 3 MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY \
+                 POLICY BACKOFF 1s MAX 30s ON QUIESCE SUSPEND",
             ),
             (
                 orders_ingestor(

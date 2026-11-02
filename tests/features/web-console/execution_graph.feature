@@ -17,7 +17,7 @@ Feature: Web console execution graph
       CREATE KAFKA CLIENT kafka_in CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA CLIENT kafka_out CONFIG { 'bootstrap.servers' = '127.0.0.1:9093' };
       CREATE KAFKA TOPIC INGESTOR orders_in
-        FROM kafka_in TOPIC 'orders_topic' OFFSET BY CONSUMER GROUP 'orders_group' INSTANCES 1 MODE NO ACK
+        FROM kafka_in TOPIC 'orders_topic' OFFSET BY CONSUMER GROUP 'orders_group' START AT LATEST INSTANCES 1 MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING order_codec
         TO orders
         INHERIT ALL
@@ -65,7 +65,7 @@ Feature: Web console execution graph
       CREATE KAFKA CLIENT kafka_in CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA CLIENT kafka_out CONFIG { 'bootstrap.servers' = '127.0.0.1:9093' };
       CREATE KAFKA TOPIC INGESTOR orders_in
-        FROM kafka_in TOPIC 'orders_topic' OFFSET BY CONSUMER GROUP 'orders_group' INSTANCES 1 MODE NO ACK
+        FROM kafka_in TOPIC 'orders_topic' OFFSET BY CONSUMER GROUP 'orders_group' START AT LATEST INSTANCES 1 MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING order_codec
         TO orders
         INHERIT ALL
@@ -249,7 +249,7 @@ Feature: Web console execution graph
       CREATE RELAY orders SCHEMA order_record UNBRANCHED;
       CREATE KAFKA CLIENT kafka_in CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA TOPIC INGESTOR orders_in
-        FROM kafka_in TOPIC 'orders_topic' OFFSET BY CONSUMER GROUP 'orders_group' INSTANCES 1 MODE NO ACK
+        FROM kafka_in TOPIC 'orders_topic' OFFSET BY CONSUMER GROUP 'orders_group' START AT LATEST INSTANCES 1 MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING order_codec
         TO orders
         INHERIT ALL

@@ -1,7 +1,8 @@
 //! WebsocketsConnectionIngestor connector entities.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** The public connection connector implementation surface.
+//! - **Owns.** The public connection connector implementation surface and its network-free client
+//!   configuration check.
 //! - **Depends on.** The connector contract, vocabulary values and its own driver stack.
 //! - **Must not know.** Graph routing, registry state, placement or other connector engines.
 
@@ -19,3 +20,6 @@
 
 pub mod connection;
 pub use connection::*;
+
+mod offline_config;
+pub use offline_config::validate_client_configuration;

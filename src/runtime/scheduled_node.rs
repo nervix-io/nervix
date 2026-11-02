@@ -288,7 +288,10 @@ mod tests {
                 kafka_ingestor("domain_offsets", KafkaOffsetMode::Domain),
                 kafka_ingestor(
                     "group_offsets",
-                    KafkaOffsetMode::ConsumerGroup(named::<KafkaConsumerGroupName>("group")),
+                    KafkaOffsetMode::ConsumerGroup {
+                        group: named::<KafkaConsumerGroupName>("group"),
+                        start_at: nervix_models::IngestStartPosition::Earliest,
+                    },
                 ),
             ],
         );

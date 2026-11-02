@@ -3,7 +3,8 @@
 //! Layer: vocabulary.
 //! - **Owns.** The client's declared key schema, and the typed values of a configuration that
 //!   satisfies it, with the WebSocket rules the schema cannot state: an endpoint without a
-//!   fragment, counts within their representations and a schedulable derived idle deadline.
+//!   fragment or user information, counts within their representations and a schedulable derived
+//!   idle deadline.
 //! - **Depends on.** The shared client configuration schema and deadline contract, the URL parser
 //!   and standard duration values.
 //! - **Must not know.** DNS, sockets, TLS file loading, signaling or runtime scheduling.
@@ -86,6 +87,8 @@ pub enum WebsocketsClientConfigError {
     Schema,
     #[error("'endpoint' must not have a fragment")]
     EndpointFragment,
+    #[error("'endpoint' must not carry user information")]
+    EndpointUserInformation,
     #[error("'{key}' must be at most {maximum}")]
     AboveMaximum { key: &'static str, maximum: u32 },
     #[error("three 'ping_interval_ms' intervals exceed the schedulable idle deadline")]
@@ -141,6 +144,11 @@ impl WebsocketsClientConfig {
         let endpoint = Url::parse(endpoint).verified("the schema parsed the endpoint as a URL");
         if endpoint.fragment().is_some() {
             return Err(Report::new(WebsocketsClientConfigError::EndpointFragment));
+        }
+        if !endpoint.username().is_empty() || endpoint.password().is_some() {
+            return Err(Report::new(
+                WebsocketsClientConfigError::EndpointUserInformation,
+            ));
         }
         let connect_timeout = match Self::duration(&values, ClientConfigKey::CONNECT_TIMEOUT) {
             Some(timeout) => timeout,

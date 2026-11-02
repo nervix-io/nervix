@@ -50,8 +50,7 @@ Feature: Durable consensus storage
       CREATE CODEC slow_commit_codec FROM WIRE JSON SCHEMA slow_commit_wire TO SCHEMA slow_commit_event;
       CREATE RELAY slow_commit_events SCHEMA slow_commit_event UNBRANCHED;
       CREATE KAFKA CLIENT slow_commit_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR slow_commit_source
         FROM slow_commit_kafka TOPIC 'slow_commits_{{test_id}}'

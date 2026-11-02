@@ -34,8 +34,7 @@ Feature: Multi-source DAG routing
         CREATE RELAY shared_dispatch SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE RABBITMQ CLIENT rabbit_main
         CONFIG {
@@ -47,7 +46,7 @@ Feature: Multi-source DAG routing
           'addr' = '{{redis_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'dag_kafka_{{test_id}}' OFFSET BY CONSUMER GROUP 'dag_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM kafka_main TOPIC 'dag_kafka_{{test_id}}' OFFSET BY CONSUMER GROUP 'dag_cucumber_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO kafka_ingress
         INHERIT ALL

@@ -53,7 +53,7 @@ Feature: Positive count settings
     And these Plexus commands fail with "instances must be greater than 0"
       """
       CREATE KAFKA TOPIC INGESTOR no_instances
-        FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'counts' INSTANCES 0
+        FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'counts' START AT LATEST INSTANCES 0
           MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
@@ -62,7 +62,7 @@ Feature: Positive count settings
     And these Plexus commands fail with "parallel max in-flight must be greater than zero"
       """
       CREATE KAFKA TOPIC INGESTOR empty_ack_window
-        FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'counts'
+        FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'counts' START AT LATEST
           MODE ACK PARALLEL MAX 0 BATCH TIMEOUT 1s ACK TIMEOUT 1s
           RETRY POLICY BACKOFF 10ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec

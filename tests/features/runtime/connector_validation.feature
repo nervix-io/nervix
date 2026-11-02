@@ -80,7 +80,7 @@ Feature: Nervix refuses connector declarations that cannot execute
     When these Plexus statements fail with "<clause>"
       """
       CREATE KAFKA TOPIC INGESTOR incoming
-        FROM broker TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers'
+        FROM broker TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST
         MODE ACK PARALLEL MAX 2 BATCH TIMEOUT <batch_timeout> ACK TIMEOUT <ack_timeout>
         RETRY POLICY BACKOFF <backoff> MAX <ceiling>
         ON QUIESCE SUSPEND DECODE USING event_codec
@@ -160,7 +160,7 @@ Feature: Nervix refuses connector declarations that cannot execute
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA TOPIC INGESTOR incoming
-        FROM broker TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers'
+        FROM broker TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY BACKOFF 10ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -169,7 +169,7 @@ Feature: Nervix refuses connector declarations that cannot execute
     When these Plexus statements fail with "BATCH TIMEOUT"
       """
       ALTER KAFKA TOPIC INGESTOR incoming
-        SET FROM broker TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers'
+        SET FROM broker TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST
         MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 1000000000000000000s
         ACK TIMEOUT 1s RETRY POLICY BACKOFF 10ms MAX 1s ON QUIESCE SUSPEND;
       """

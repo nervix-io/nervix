@@ -19,12 +19,11 @@ Feature: Forced ownership recovery while a former owner holds relay deliveries
       CREATE CODEC forced_codec FROM WIRE JSON SCHEMA forced_wire TO SCHEMA forced_event;
       CREATE RELAY forced_records SCHEMA forced_event UNBRANCHED;
       CREATE KAFKA CLIENT forced_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR forced_source
         FROM forced_kafka TOPIC 'forced_delivery_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'forced_delivery_group_{{test_id}}' INSTANCES 1
+          OFFSET BY CONSUMER GROUP 'forced_delivery_group_{{test_id}}' START AT EARLIEST INSTANCES 1
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND DECODE USING forced_codec
         TO forced_records INHERIT ALL UNBRANCHED

@@ -2,8 +2,9 @@
 //!
 //! Layer: language.
 //!
-//! - **Owns.** The body of a `KAFKA TOPIC` ingestor: its client, topic, offset ownership,
-//!   instances, delivery mode and quiesce mode, and the delivery modes a Kafka consumer offers.
+//! - **Owns.** The body of a `KAFKA TOPIC` ingestor: its client, topic, offset ownership, a
+//!   consumer group's start position, instances, delivery mode and quiesce mode, the delivery modes
+//!   a Kafka consumer offers, and its alteration.
 //! - **Depends on.** The shared ingestor clauses and the Kafka vocabulary.
 //! - **Must not know.** The Kafka driver, consumer groups at run time or offset storage.
 
@@ -14,28 +15,32 @@
 
 use chumsky::prelude::*;
 use nervix_models::{
-    KafkaConsumerGroupName, KafkaIngestMode, KafkaOffsetMode, KafkaTopicIngestor, KafkaTopicName,
+    KafkaConsumerGroupName, KafkaIngestMode, KafkaOffsetMode, KafkaTopicIngestor,
+    KafkaTopicIngestorOperation, KafkaTopicName,
 };
 
 use super::delivery::{
     ParallelAck, SequentialAck, ack_parallel, ack_sequential, no_ack, optional_instances,
-    suspend_only_quiesce_clause,
+    start_position, suspend_only_quiesce_clause,
 };
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{ParseError, client_ref, external_name, kw, kw_phrase2},
 };
 
-/// `FROM <client> TOPIC '<topic>' OFFSET BY DOMAIN|CONSUMER GROUP '<group>' [INSTANCES <n>] MODE …
-/// ON QUIESCE SUSPEND`.
+/// `FROM <client> TOPIC '<topic>'
+/// OFFSET BY DOMAIN|CONSUMER GROUP '<group>' START AT EARLIEST|LATEST
+/// [INSTANCES <n>] MODE … ON QUIESCE SUSPEND`.
 pub(super) fn topic_body<'src>()
 -> impl Parser<'src, &'src [Token], KafkaTopicIngestor, extra::Err<ParseError<'src>>> + Clone {
+    let consumer_group = kw_phrase2(Identifier::Consumer, Identifier::Group)
+        .ignore_then(external_name::<KafkaConsumerGroupName>())
+        .then(start_position())
+        .map(|(group, start_at)| KafkaOffsetMode::ConsumerGroup { group, start_at });
     let offset_mode = kw(Identifier::Offset)
         .ignore_then(kw(Identifier::By))
         .ignore_then(choice((
-            kw_phrase2(Identifier::Consumer, Identifier::Group)
-                .ignore_then(external_name::<KafkaConsumerGroupName>())
-                .map(KafkaOffsetMode::ConsumerGroup),
+            consumer_group,
             kw(Identifier::Domain).to(KafkaOffsetMode::Domain),
         )));
     client_ref()
@@ -89,11 +94,25 @@ fn mode<'src>()
     ))
 }
 
+pub(super) fn alteration<'src>()
+-> impl Parser<'src, &'src [Token], nervix_models::AlterIngestor, extra::Err<ParseError<'src>>> + Clone
+{
+    let operation = choice((
+        kw(Identifier::Set)
+            .ignore_then(start_position())
+            .map(|position| KafkaTopicIngestorOperation::SetStartAt { position }),
+        super::transport_operation(topic_body()).map(KafkaTopicIngestorOperation::Transport),
+    ));
+    super::alteration::<KafkaTopicIngestor, _, _>(operation)
+}
+
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
     use nervix_models::{
-        IngestorEntity, IngestorInput, KafkaIngestMode, KafkaIngestor, KafkaOffsetMode,
-        KafkaTopicIngestor, Model,
+        AlterIngestor, AlterIngestorError, CreateIngestor, IngestStartPosition, IngestorEntity,
+        IngestorInput, KafkaIngestMode, KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, Model,
+        Statement,
     };
     use rstest::rstest;
 
@@ -156,13 +175,164 @@ mod tests {
 
         let grouped = created_source(&statement(
             "orders",
-            "OFFSET BY CONSUMER GROUP 'Readers EU'",
+            "OFFSET BY CONSUMER GROUP 'Readers EU' START AT LATEST",
             SEQUENTIAL,
         ));
-        let KafkaOffsetMode::ConsumerGroup(group) = grouped.offset_mode else {
+        let KafkaOffsetMode::ConsumerGroup { group, .. } = grouped.offset_mode else {
             panic!("OFFSET BY CONSUMER GROUP names the group that owns the offsets");
         };
         assert_eq!(group.as_str(), "Readers EU");
+    }
+
+    /// The start position of the consumer group `source` declares.
+    fn start_position_of(source: &KafkaTopicIngestor) -> IngestStartPosition {
+        let KafkaOffsetMode::ConsumerGroup { start_at, .. } = &source.offset_mode else {
+            panic!("the statement names a consumer group");
+        };
+        *start_at
+    }
+
+    #[rstest]
+    #[case("EARLIEST", IngestStartPosition::Earliest)]
+    #[case("LATEST", IngestStartPosition::Latest)]
+    #[case("earliest", IngestStartPosition::Earliest)]
+    #[case("latest", IngestStartPosition::Latest)]
+    fn a_consumer_group_declares_where_it_starts(
+        #[case] written: &str,
+        #[case] position: IngestStartPosition,
+    ) {
+        let offsets = format!("OFFSET BY CONSUMER GROUP 'readers' START AT {written}");
+        let source = created_source(&statement("orders", &offsets, SEQUENTIAL));
+
+        assert_eq!(start_position_of(&source), position);
+    }
+
+    #[rstest]
+    #[case::group_without_a_position("OFFSET BY CONSUMER GROUP 'readers'")]
+    #[case::position_without_a_value("OFFSET BY CONSUMER GROUP 'readers' START AT")]
+    #[case::position_outside_its_choices("OFFSET BY CONSUMER GROUP 'readers' START AT NOW")]
+    #[case::position_before_the_group("OFFSET BY CONSUMER GROUP START AT EARLIEST 'readers'")]
+    #[case::domain_with_a_position("OFFSET BY DOMAIN START AT EARLIEST")]
+    #[case::repeated_position(
+        "OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST START AT LATEST"
+    )]
+    fn the_composed_grammar_ties_a_start_position_to_a_consumer_group(#[case] offsets: &str) {
+        let statement = statement("orders", offsets, SEQUENTIAL);
+
+        assert!(refused(&statement), "this offset clause reads: {statement}");
+    }
+
+    /// The ingestor `offsets` declares, ready for an alteration to change.
+    fn created_ingestor(offsets: &str) -> CreateIngestor {
+        let text = statement("orders", offsets, SEQUENTIAL);
+        let Statement::Create(create) =
+            crate::statement::parse_statement(&text).verified("the current statement parses")
+        else {
+            panic!("the statement creates a Model");
+        };
+        let Model::Ingestor(ingestor) = *create.body else {
+            panic!("the statement creates an ingestor");
+        };
+        ingestor
+    }
+
+    /// The Kafka topic source `ingestor` reads.
+    fn source_of(ingestor: &CreateIngestor) -> &KafkaTopicIngestor {
+        let IngestorInput::Transport(input) = &ingestor.input else {
+            panic!("Kafka is a transport");
+        };
+        let IngestorEntity::Kafka(KafkaIngestor::Topic(source)) = &input.source else {
+            panic!("the source is a Kafka topic");
+        };
+        source
+    }
+
+    fn alteration(text: &str) -> AlterIngestor {
+        let statement = crate::statement::parse_statement(text).verified("current ALTER parses");
+        let Statement::AlterIngestor(alteration) = statement else {
+            panic!("the statement alters an ingestor");
+        };
+        alteration
+    }
+
+    #[rstest]
+    #[case(IngestStartPosition::Earliest)]
+    #[case(IngestStartPosition::Latest)]
+    fn alteration_changes_only_the_start_position(#[case] position: IngestStartPosition) {
+        let mut ingestor = created_ingestor("OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST");
+        let expected = {
+            let mut source = source_of(&ingestor).clone();
+            let KafkaOffsetMode::ConsumerGroup { start_at, .. } = &mut source.offset_mode else {
+                panic!("the statement names a consumer group");
+            };
+            *start_at = position;
+            source
+        };
+
+        let alter = alteration(&format!(
+            "ALTER KAFKA TOPIC INGESTOR intake SET START AT {position}"
+        ));
+        ingestor
+            .apply_alter(&alter)
+            .verified("a consumer group's position changes");
+
+        assert_eq!(source_of(&ingestor), &expected);
+    }
+
+    #[test]
+    fn mixed_alteration_operations_keep_their_order() {
+        let mut ingestor = created_ingestor("OFFSET BY CONSUMER GROUP 'readers' START AT LATEST");
+        let alter = alteration(
+            "ALTER KAFKA TOPIC INGESTOR intake SET START AT LATEST, SET DECODE USING other_codec, \
+             SET START AT EARLIEST",
+        );
+
+        ingestor
+            .apply_alter(&alter)
+            .verified("the operations of a consumer-group ingestor apply");
+
+        assert_eq!(
+            start_position_of(source_of(&ingestor)),
+            IngestStartPosition::Earliest
+        );
+        assert_eq!(
+            ingestor.input.codec().map(|codec| codec.as_str()),
+            Some("other_codec")
+        );
+    }
+
+    #[test]
+    fn a_domain_offset_ingestor_refuses_a_start_position_and_stays_as_it_was() {
+        let mut ingestor = created_ingestor(DOMAIN_OFFSETS);
+        let stored = ingestor.clone();
+
+        let refusal = ingestor
+            .apply_alter(&alteration(
+                "ALTER KAFKA TOPIC INGESTOR intake SET START AT EARLIEST",
+            ))
+            .expect_err("the domain's start point owns a domain-offset ingestor's position");
+
+        assert_eq!(
+            refusal.current_context(),
+            &AlterIngestorError::DomainKafkaStartPosition
+        );
+        assert_eq!(ingestor, stored);
+    }
+
+    #[test]
+    fn the_alteration_refuses_a_position_outside_its_choices() {
+        for clause in ["SET START AT NOW", "SET START AT", "SET START EARLIEST"] {
+            let statement = format!("ALTER KAFKA TOPIC INGESTOR intake {clause}");
+            assert!(refused(&statement), "this alteration reads: {statement}");
+        }
+    }
+
+    #[test]
+    fn completion_offers_the_alteration_start_position_once_its_set_is_read() {
+        assert_offers_exactly(
+            "ALTER KAFKA TOPIC INGESTOR intake SET START AT ",
+            &["EARLIEST", "LATEST"],
+        );
     }
 
     #[test]
@@ -198,6 +368,22 @@ mod tests {
         assert_offers_exactly(
             &format!("{HEAD} 'orders' OFFSET BY CONSUMER GROUP "),
             &["kafka_consumer_group"],
+        );
+        assert_offers_exactly(
+            &format!("{HEAD} 'orders' OFFSET BY CONSUMER GROUP 'readers' "),
+            &["START AT"],
+        );
+        assert_offers_exactly(
+            &format!("{HEAD} 'orders' OFFSET BY CONSUMER GROUP 'readers' START AT "),
+            &["EARLIEST", "LATEST"],
+        );
+    }
+
+    #[test]
+    fn completion_keeps_the_start_position_off_a_domain_offset_ingestor() {
+        assert_offers_exactly(
+            &format!("{HEAD} 'orders' OFFSET BY DOMAIN "),
+            &["INSTANCES", "MODE"],
         );
     }
 
@@ -235,7 +421,7 @@ mod tests {
     fn the_composed_grammar_applies_the_consumer_group_rule() {
         let too_long = "g".repeat(256);
         for group in ["", too_long.as_str()] {
-            let offsets = format!("OFFSET BY CONSUMER GROUP '{group}'");
+            let offsets = format!("OFFSET BY CONSUMER GROUP '{group}' START AT LATEST");
             let statement = statement("orders", &offsets, SEQUENTIAL);
             assert!(
                 refused(&statement),

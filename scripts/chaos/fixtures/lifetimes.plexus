@@ -47,7 +47,7 @@ CREATE BRANCH chaos_life_rotation SCHEMA chaos_branch_key TTL 10m MAX INSTANCES 
 CREATE RELAY chaos_life_profiles SCHEMA chaos_life_profile BRANCHED BY chaos_life_branch CAPACITY 1 WITH MATERIALIZED STATE LAST BY TIMESTAMP;
 
 CREATE KAFKA TOPIC INGESTOR chaos_life_profile_ingestor
-  FROM chaos_kafka TOPIC 'chaos_life_profile_input' OFFSET BY CONSUMER GROUP 'chaos_life_profiles' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  FROM chaos_kafka TOPIC 'chaos_life_profile_input' OFFSET BY CONSUMER GROUP 'chaos_life_profiles' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
   DECODE USING chaos_life_profile_json
   TIMESTAMP AT updated_at
   TO chaos_life_profiles
@@ -60,7 +60,7 @@ CREATE KAFKA TOPIC INGESTOR chaos_life_profile_ingestor
 CREATE RELAY chaos_life_records SCHEMA chaos_life_record BRANCHED BY chaos_life_branch CAPACITY 1;
 
 CREATE KAFKA TOPIC INGESTOR chaos_life_ingestor
-  FROM chaos_kafka TOPIC 'chaos_life_input' OFFSET BY CONSUMER GROUP 'chaos_life' MODE ACK PARALLEL MAX 32 BATCH TIMEOUT 100ms ACK TIMEOUT 120s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  FROM chaos_kafka TOPIC 'chaos_life_input' OFFSET BY CONSUMER GROUP 'chaos_life' START AT EARLIEST MODE ACK PARALLEL MAX 32 BATCH TIMEOUT 100ms ACK TIMEOUT 120s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
   DECODE USING chaos_life_json
   TO chaos_life_records
     INHERIT ALL
@@ -230,7 +230,7 @@ CREATE ATTACHED KAFKA TOPIC EMITTER chaos_life_rotating_emitter
 CREATE RELAY chaos_life_buffered SCHEMA chaos_life_record UNBRANCHED CAPACITY 1;
 
 CREATE KAFKA TOPIC INGESTOR chaos_life_flush_ingestor
-  FROM chaos_kafka TOPIC 'chaos_life_flush_input' OFFSET BY CONSUMER GROUP 'chaos_life_flush' MODE ACK PARALLEL MAX 64 BATCH TIMEOUT 100ms ACK TIMEOUT 600s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  FROM chaos_kafka TOPIC 'chaos_life_flush_input' OFFSET BY CONSUMER GROUP 'chaos_life_flush' START AT EARLIEST MODE ACK PARALLEL MAX 64 BATCH TIMEOUT 100ms ACK TIMEOUT 600s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
   DECODE USING chaos_life_json
   TO chaos_life_buffered
     INHERIT ALL
@@ -252,7 +252,7 @@ CREATE ATTACHED KAFKA TOPIC EMITTER chaos_life_buffered_emitter
 CREATE RELAY chaos_life_expiring_profiles SCHEMA chaos_life_profile BRANCHED BY chaos_life_expiring CAPACITY 1 WITH MATERIALIZED STATE LAST BY TIMESTAMP;
 
 CREATE KAFKA TOPIC INGESTOR chaos_life_expiring_profile_ingestor
-  FROM chaos_kafka TOPIC 'chaos_life_expiring_profile_input' OFFSET BY CONSUMER GROUP 'chaos_life_expiring_profiles' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  FROM chaos_kafka TOPIC 'chaos_life_expiring_profile_input' OFFSET BY CONSUMER GROUP 'chaos_life_expiring_profiles' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
   DECODE USING chaos_life_profile_json
   TIMESTAMP AT updated_at
   TO chaos_life_expiring_profiles
@@ -265,7 +265,7 @@ CREATE KAFKA TOPIC INGESTOR chaos_life_expiring_profile_ingestor
 CREATE RELAY chaos_life_expiring_records SCHEMA chaos_life_record BRANCHED BY chaos_life_expiring CAPACITY 1;
 
 CREATE KAFKA TOPIC INGESTOR chaos_life_expiring_ingestor
-  FROM chaos_kafka TOPIC 'chaos_life_expiring_input' OFFSET BY CONSUMER GROUP 'chaos_life_expiring' MODE ACK SEQUENTIAL ACK TIMEOUT 60s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  FROM chaos_kafka TOPIC 'chaos_life_expiring_input' OFFSET BY CONSUMER GROUP 'chaos_life_expiring' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 60s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
   DECODE USING chaos_life_json
   TO chaos_life_expiring_records
     INHERIT ALL
@@ -300,7 +300,7 @@ CREATE ATTACHED KAFKA TOPIC EMITTER chaos_life_expiring_emitter
 CREATE RELAY chaos_life_late SCHEMA chaos_life_record UNBRANCHED CAPACITY 1;
 
 CREATE KAFKA TOPIC INGESTOR chaos_life_late_ingestor
-  FROM chaos_kafka TOPIC 'chaos_life_late_input' OFFSET BY CONSUMER GROUP 'chaos_life_late' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  FROM chaos_kafka TOPIC 'chaos_life_late_input' OFFSET BY CONSUMER GROUP 'chaos_life_late' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
   DECODE USING chaos_life_json
   TO chaos_life_late
     INHERIT ALL
@@ -328,7 +328,7 @@ CREATE POSTGRES CLIENT chaos_life_pg
 CREATE RELAY chaos_life_pooled SCHEMA chaos_life_record UNBRANCHED CAPACITY 1;
 
 CREATE KAFKA TOPIC INGESTOR chaos_life_pool_ingestor
-  FROM chaos_kafka TOPIC 'chaos_life_pool_input' OFFSET BY CONSUMER GROUP 'chaos_life_pool' MODE ACK PARALLEL MAX 16 BATCH TIMEOUT 100ms ACK TIMEOUT 900s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  FROM chaos_kafka TOPIC 'chaos_life_pool_input' OFFSET BY CONSUMER GROUP 'chaos_life_pool' START AT EARLIEST MODE ACK PARALLEL MAX 16 BATCH TIMEOUT 100ms ACK TIMEOUT 900s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
   DECODE USING chaos_life_json
   TO chaos_life_pooled
     INHERIT ALL
