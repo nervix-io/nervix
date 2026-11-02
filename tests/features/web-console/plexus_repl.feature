@@ -14,21 +14,21 @@ Feature: Web console Plexus REPL
     Then selector ".suggestions" contains "<function>"
 
     Examples:
-      | cluster_size | prefix                                                                                                                                                           | function    |
-      | 1            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec FILTER WHERE read_                                   | read_header |
-      | 1            | CREATE KAFKA TOPIC EMITTER e FROM incoming WHERE co                                                                                                              | coalesce    |
-      | 1            | CREATE HTTP REQUEST EMITTER e FROM incoming TO client METHOD co                                                                                                  | coalesce    |
-      | 1            | CREATE HTTP REQUEST EMITTER e FROM incoming TO client METHOD 'POST' PATH co                                                                                      | coalesce    |
-      | 1            | ALTER HTTP ENDPOINT INGESTOR i ADD ROUTE TO outgoing SET value = read_                                                                                           | read_header |
-      | 3            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec FILTER WHERE read_                                   | read_header |
-      | 3            | CREATE KAFKA TOPIC EMITTER e FROM incoming WHERE co                                                                                                              | coalesce    |
-      | 3            | CREATE HTTP REQUEST EMITTER e FROM incoming TO client METHOD co                                                                                                  | coalesce    |
-      | 3            | CREATE HTTP REQUEST EMITTER e FROM incoming TO client METHOD 'POST' PATH co                                                                                      | coalesce    |
-      | 3            | ALTER HTTP ENDPOINT INGESTOR i ADD ROUTE TO outgoing SET value = read_                                                                                           | read_header |
-      | 1            | CREATE KAFKA TOPIC INGESTOR i FROM broker TOPIC 'events' OFFSET BY CONSUMER GROUP 'g' MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec FILTER WHERE metadata.to | topic       |
-      | 1            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec FILTER WHERE coalesce(read_                          | read_header |
-      | 3            | CREATE KAFKA TOPIC INGESTOR i FROM broker TOPIC 'events' OFFSET BY CONSUMER GROUP 'g' MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec FILTER WHERE metadata.to | topic       |
-      | 3            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec FILTER WHERE coalesce(read_                          | read_header |
+      | cluster_size | prefix                                                                                                                                                                             | function    |
+      | 1            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec FILTER WHERE read_                                                     | read_header |
+      | 1            | CREATE KAFKA TOPIC EMITTER e FROM incoming WHERE co                                                                                                                                | coalesce    |
+      | 1            | CREATE HTTP REQUEST EMITTER e FROM incoming TO client METHOD co                                                                                                                    | coalesce    |
+      | 1            | CREATE HTTP REQUEST EMITTER e FROM incoming TO client METHOD 'POST' PATH co                                                                                                        | coalesce    |
+      | 1            | ALTER HTTP ENDPOINT INGESTOR i ADD ROUTE TO outgoing SET value = read_                                                                                                             | read_header |
+      | 3            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec FILTER WHERE read_                                                     | read_header |
+      | 3            | CREATE KAFKA TOPIC EMITTER e FROM incoming WHERE co                                                                                                                                | coalesce    |
+      | 3            | CREATE HTTP REQUEST EMITTER e FROM incoming TO client METHOD co                                                                                                                    | coalesce    |
+      | 3            | CREATE HTTP REQUEST EMITTER e FROM incoming TO client METHOD 'POST' PATH co                                                                                                        | coalesce    |
+      | 3            | ALTER HTTP ENDPOINT INGESTOR i ADD ROUTE TO outgoing SET value = read_                                                                                                             | read_header |
+      | 1            | CREATE KAFKA TOPIC INGESTOR i FROM broker TOPIC 'events' OFFSET BY CONSUMER GROUP 'g' START AT EARLIEST MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec FILTER WHERE metadata.to | topic       |
+      | 1            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec FILTER WHERE coalesce(read_                                            | read_header |
+      | 3            | CREATE KAFKA TOPIC INGESTOR i FROM broker TOPIC 'events' OFFSET BY CONSUMER GROUP 'g' START AT EARLIEST MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec FILTER WHERE metadata.to | topic       |
+      | 3            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec FILTER WHERE coalesce(read_                                            | read_header |
 
   Scenario: Web console sends simple Plexus commands and renders responses
     Given a 3 node nervix cluster is started
