@@ -504,6 +504,11 @@ fn client(kind: ConnectorKind) -> Option<Value> {
         .iter()
         .map(|alias| json!({ "alias": alias.alias, "accepted": alias.accepted }))
         .collect();
+    let statement_keys: Vec<_> = config
+        .statement_keys()
+        .iter()
+        .map(|statement_key| json!({ "key": statement_key.key, "clause": statement_key.clause }))
+        .collect();
     let stripped_prefix = match config.stripped_prefix() {
         Some(stripped) => json!({ "prefix": stripped.prefix, "properties": stripped.properties }),
         None => Value::Null,
@@ -517,7 +522,8 @@ fn client(kind: ConnectorKind) -> Option<Value> {
     };
     Some(
         json!({ "kind": kind.keyword(), "pool": pool, "config_owner": config_owner, "options": options,
-            "keys": keys, "namespaces": namespaces, "reserved": config.reserved(), "aliases": aliases,
+            "keys": keys, "namespaces": namespaces, "reserved": config.reserved(),
+            "statement_keys": statement_keys, "aliases": aliases,
             "stripped_prefix": stripped_prefix,
             "secret_keys": config.secret_key_prefix().map(|prefix| format!("{prefix}*")),
             "constraints": constraints }),

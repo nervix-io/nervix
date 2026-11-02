@@ -30,6 +30,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Resources, uploads, mounts, and TLS files | `Resources` |
 | Syslog wire schema, codec fields, UDP/TCP/TLS framing, per-connection versus total buffer bounds, clients, sources, and emitters | `Common` → `Syslog`, and `Connector Capabilities` |
 | Source transports, delivery modes, headers, and ingestor routes | `Ingestors` |
+| HTTP polling requests and client secrets, responses, failed polls, the response bound, and the `HTTP CLIENT` keys, redirects and proxy both directions share | `Ingestors` → `HTTP REQUEST`, then `Emitters` → `HTTP client transport` |
 | Client, ingestor and emitter heads, their connector/entity choice, and kind-preserving ALTER | `Plexus Overview` → `Statement catalog`, then `Connector Capabilities` and the entity's manual section |
 | Kafka domain offsets across explicit starts, reconnects, instance changes and restored backups | `Ingestors` → `Kafka`, and `Backup And Restore` |
 | Plexus entity modes, ordered options, typed metadata, generated client CONFIG key/type/confidentiality tables and directional differences | `Connector Capabilities`, then the entity's `Ingestors` or `Emitters` section |
@@ -213,7 +214,8 @@ current connection, retry and deadline limits.
   use only `MODE NO ACK` on a `SYSLOG LISTENER` ingestor and `NO ACK` on a syslog emitter,
   configure TLS identity for the client direction that consumes it, and set a key only one side
   reads, such as `framing` or `idle_timeout_ms`, only on a client that side uses; the SYSLOG
-  client reference in `Connector Capabilities` names those keys.
+  client reference in `Connector Capabilities` names those keys. Read `Common` → `Syslog` →
+  `Ingestor` for transport metadata and when a TLS connection exposes a verified client subject.
 - Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
   owner-buffer bound, not a per-branch or per-consumer bound; nonowner producer and remote consumer
   nodes each have one additional fixed dispatch slot.
@@ -370,14 +372,14 @@ current connection, retry and deadline limits.
   an ingestor's `NO ACK` or an emitter's `NO ACK`.
 - Every Kafka client sets `bootstrap.servers`; `CREATE KAFKA CLIENT` refuses a client without it.
   Treat `TOPIC` as a literal, case-preserving Kafka topic name in both directions, and give every
-  `KAFKA TOPIC` ingestor `OFFSET BY DOMAIN` or `OFFSET BY CONSUMER GROUP '<group>'` and
-  `ON QUIESCE SUSPEND`.
+  `KAFKA TOPIC` ingestor `OFFSET BY DOMAIN` or
+  `OFFSET BY CONSUMER GROUP '<group>' START AT EARLIEST|LATEST` and `ON QUIESCE SUSPEND`.
 - For Kafka record metadata, nullable keys, tombstones and `TIMESTAMP AT metadata.timestamp`,
   follow `Ingestors` → `Kafka`; convert a binary key explicitly before using it as text.
-- Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
-  group may need records that already exist; Nervix passes the setting through and does not supply
-  a hidden default. Under `OFFSET BY DOMAIN` in an unpaced domain the same policy places a
-  partition that has no domain offset yet, such as one added to the topic.
+- Choose `START AT` for what a new consumer group should do with the records a topic retains:
+  `EARLIEST` reads them and `LATEST` skips them. A partition the group holds an offset for ignores
+  it. `CREATE KAFKA CLIENT` refuses `auto.offset.reset`, and `OFFSET BY DOMAIN` takes no `START AT`:
+  in an unpaced domain a plain `START` reads what a partition retains and `START AT NOW` skips it.
 - A Kafka client never sets `allow.auto.create.topics`; `CREATE KAFKA CLIENT` refuses it. Provision each
   topic a Kafka ingestor reads: an ingestor never creates its topic and reports it as missing until
   it exists.
@@ -521,6 +523,16 @@ current connection, retry and deadline limits.
   generators run once immediately; Prometheus first runs after one interval. Keep later work on
   the original schedule, coalesce missed periods without a catch-up burst, query Prometheus at the
   due instant, and use a fresh execution snapshot for returned data and generated routes.
+- An `HTTP REQUEST` ingestor sends its `METHOD` and `HEADERS` to its client's `endpoint` exactly as
+  written, path and query included, so declare one `HTTP CLIENT` for each polled resource; a client
+  an `HTTP REQUEST` emitter also uses must name an origin. Keep credentials in `secret.<name>` keys
+  read through `CLIENT SECRET`, never in a `HEADERS` literal. A status outside `2xx`, a redirect the
+  client does not follow, or a body above `MAX BODY SIZE` (`16MiB` when left out) fails the poll as
+  the ingestor's transient error, and the failed instant is not polled again; `204` delivers
+  nothing. A `gzip`, `deflate` or `br` response arrives decompressed and without its
+  `content-encoding` and `content-length` headers. Read `Ingestors` → `HTTP REQUEST` for the
+  request, responses, failures and the shared client keys, and `Emitters` → `HTTP client transport`
+  for redirects and proxies.
 - Every `PROMETHEUS CLIENT` sets `addr` to the API root, an `http` or `https` URL without a
   query string or fragment, and a positive `timeout_ms`. It sets no key beyond `tls_ca_file` and
   the paired `tls_cert_file` and `tls_key_file`; `CREATE PROMETHEUS CLIENT` refuses any other. It

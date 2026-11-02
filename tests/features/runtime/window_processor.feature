@@ -1310,11 +1310,10 @@ Feature: Window processor runtime behavior
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_kafka_metrics;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_kafka_metrics;
         CREATE KAFKA CLIENT kafka_main CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
         CREATE KAFKA TOPIC INGESTOR kafka_metrics
-        FROM kafka_main TOPIC 'metrics_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 30s ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        FROM kafka_main TOPIC 'metrics_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' START AT EARLIEST MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 30s ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING metric_codec
         TO metrics
         INHERIT ALL
@@ -1402,11 +1401,10 @@ Feature: Window processor runtime behavior
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_kafka_metrics;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_kafka_metrics;
         CREATE KAFKA CLIENT kafka_main CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
         CREATE KAFKA TOPIC INGESTOR kafka_metrics
-        FROM kafka_main TOPIC 'metrics_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        FROM kafka_main TOPIC 'metrics_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' START AT EARLIEST MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING metric_codec
         TO metrics
         INHERIT ALL

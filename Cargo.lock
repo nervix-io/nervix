@@ -6989,7 +6989,6 @@ dependencies = [
  "nervix-recovery",
  "rdkafka",
  "shuttle",
- "strum 0.26.3",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -7333,6 +7332,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "url",
+ "x509-parser",
 ]
 
 [[package]]
@@ -7354,6 +7354,8 @@ dependencies = [
  "nervix-test-environment",
  "prost 0.13.5",
  "prost-reflect",
+ "rcgen",
+ "rustls-pki-types",
  "serde_json",
  "shuttle",
  "tempfile",
