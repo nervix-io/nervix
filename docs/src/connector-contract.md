@@ -2763,11 +2763,19 @@ sequenceDiagram
   short string as a rejection of its record. Each checks its queue or exchange with a passive
   declaration when it opens, and a missing exchange is `EmitterOpenError::MissingExternalEntity`.
   A record whose envelope carries `MANDATORY` is published mandatory, and a message the broker
-  returns unrouted rejects its record in either mode: under `ACK` the return arrives with the
-  message's publisher confirm, and under `NO ACK` the emitter drains the channel's returns once the
-  round trip that ends the write is answered, attributing each to the first written message, in
-  order, with the same exchange, routing key, headers and body. A return never outlives the write
-  that published its message.
+  returns unrouted rejects its record in either mode. Under `ACK`, the driver can attach a return
+  to another message's confirm, so `publisher::confirmation_window` retains at most `MAX` messages,
+  collects their answers, and attributes all returns before refilling the window. It indexes borrowed
+  routing keys and bodies, then compares the actual AMQP properties through the message owner;
+  payloads are not cloned for attribution. Each return rejects the first matching mandatory message
+  in publication order, including when identical messages cannot be distinguished. A positive
+  mandatory answer in an interrupted window stays unresolved if another answer can still carry its
+  return; known rejections and safe nonmandatory answers are retained before retry. Every message
+  keeps its own handover deadline. Under `NO ACK` the emitter drains returns once the round trip
+  that ends the write is answered and attributes them by the same transport contents in written
+  order. A return is never attributed to a later window or write, and an unmatched return fails
+  the write. Size-refusal recovery cannot continue on a replacement channel while a positive
+  mandatory answer still has an undecidable return outcome; the host retries that unresolved prefix.
   The broker answers no `NO ACK` message itself, so the emitter ends a `NO ACK`
   write with one round trip on its channel, which the broker answers only after it has taken every
   message written before it, and the answer delivers the write; a write costs that one round trip,
