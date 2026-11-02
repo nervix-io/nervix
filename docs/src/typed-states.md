@@ -326,7 +326,10 @@ default, with an instance suffix when needed.
 **Pulsar received messages.** The driver message crosses one conversion boundary into checked
 publish and optional event `Timestamp` values and an `I64` sequence. The admitted message retains
 those typed values rather than raw time or sequence alternatives. Optional event time, partition
-key and ordering key preserve absence independently of present zero or empty values. The broker
+key and ordering key preserve absence independently of present zero or empty values. The driver's
+batch decoder resolves optional member sequence ids and event times by presence: a present member
+value wins, including zero; an absent member uses the envelope field. Only absence at both levels
+leaves event time absent, and publish time is never its substitute. The broker
 protocol explicitly defaults an omitted redelivery count to zero; that external default is applied
 once into a lossless `I64`. Failed conversion is a typed read failure, held separately from any
 valid gathered prefix. The full broker position remains the settlement identity.

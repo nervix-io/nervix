@@ -2215,7 +2215,10 @@ observation; the public outcome and dependent mutation assert recovery under the
 execution reference.
 
 The registered `@pulsar_message_metadata` workloads cover source metadata in all three delivery
-modes, branch-local event-time windows and broker redelivery. The source's checked metadata and
+modes, branch-local event-time windows, broker redelivery and independent broker-stored batches.
+The batch oracle checks member sequence and event-time precedence, envelope inheritance and exact
+member positions. Its bounded protocol publisher and the driver's synchronous batch expansion add
+no tracked lock. The source's checked metadata and
 single pending read failure are instance-owned. Cancellation returns any gathered prefix without
 consuming the pending failure. Borrowed visitors add no synchronization or concurrent map. Deloxide
 observes the existing host state; foreign Pulsar driver channels, borrowed visitors and asynchronous

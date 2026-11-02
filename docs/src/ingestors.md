@@ -1311,6 +1311,10 @@ this display. The key is the stored text, including base64 text when the produce
 `ordering_key` preserves its bytes. Missing keys read as null, while present empty keys stay empty.
 Properties remain available through `read_header` and `read_headers` with their order and repeats.
 
+For batched messages, a member's sequence id and event time take precedence when present,
+including zero. An omitted member field uses the corresponding batch value. Event time is null
+when both the member and batch omit it.
+
 `TIMESTAMP AT metadata.publish_time` or `TIMESTAMP AT metadata.event_time` uses that message time
 for admission and windows. An absent event time is null; a present zero is the Unix epoch. Nervix
 does not substitute publish time for an absent event time. Times outside the signed Unix-nanosecond

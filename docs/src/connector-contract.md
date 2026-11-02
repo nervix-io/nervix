@@ -1804,6 +1804,9 @@ ordered properties, complete acknowledgement position and validated metadata. Th
 the nine fields declared by `PulsarTopicIngestor` in declaration order; it renders the message id
 only when read and lends binary ordering keys without a retained metadata row. Publish and optional
 event milliseconds become checked `Timestamp` values; sequence ids are checked into `I64`.
+The driver expands a stored batch before this conversion: a present member sequence id or event
+time overrides its envelope field, including zero; an omitted member field uses that envelope
+value. Event time remains absent when neither carries it, without substituting publish time.
 Missing event time and keys remain absent, including the distinction from present epoch or empty
 values. The external `CommandMessage` contract defaults an omitted redelivery count to zero; the
 connector exposes that count losslessly as `I64`.

@@ -20,6 +20,8 @@ use pulsar::{ConsumerOptions, Pulsar, TokioExecutor, consumer::InitialPosition};
 
 use super::{ScenarioWorld, docstring, expand_placeholders};
 
+mod batch;
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MetadataRecord {

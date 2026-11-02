@@ -157,6 +157,26 @@ invocation = "stress-scenarios"
 scenario = "A Pulsar redelivery keeps its message identity and reports the broker's count"
 selections = ["deloxide-stress"]
 
+[[workload]]
+coverage = "A real broker-stored batch passes through tracked ingestion, relay and acknowledgement state on one and three nodes. The bounded protocol fixture, driver channels and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata_batch.feature"
+id = "scenario.pulsar-batch-member-metadata"
+invariant = "Present member sequence ids and event times override their envelope fields, including zero; omitted member fields inherit the envelope. Each member preserves all metadata and its exact batch position."
+invocation = "scenarios"
+scenario = "Pulsar batch members retain their own sequence ids and complete metadata"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: A real broker-stored batch passes through tracked ingestion, relay and acknowledgement state on one and three nodes. The bounded protocol fixture, driver channels and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata_batch.feature"
+id = "stress.pulsar-batch-member-metadata"
+invariant = "Present member sequence ids and event times override their envelope fields, including zero; omitted member fields inherit the envelope. Each member preserves all metadata and its exact batch position."
+invocation = "stress-scenarios"
+scenario = "Pulsar batch members retain their own sequence ids and complete metadata"
+selections = ["deloxide-stress"]
+
 [lane]
 # All diagnostic test and driver executables build before any workload starts, under their own
 # real-time budget. The measured cold stressed scenario build took 1988s on a loaded host; 80

@@ -854,6 +854,7 @@ scenarios = [
 capability = "metadata.topic"
 entity = "PULSAR TOPIC INGESTOR"
 scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_batch.feature", scenario = "Pulsar batch members retain their own sequence ids and complete metadata" },
   { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
 ]
 
@@ -861,6 +862,7 @@ scenarios = [
 capability = "metadata.message_id"
 entity = "PULSAR TOPIC INGESTOR"
 scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_batch.feature", scenario = "Pulsar batch members retain their own sequence ids and complete metadata" },
   { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
   { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar redelivery keeps its message identity and reports the broker's count" },
 ]
@@ -869,6 +871,7 @@ scenarios = [
 capability = "metadata.publish_time"
 entity = "PULSAR TOPIC INGESTOR"
 scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_batch.feature", scenario = "Pulsar batch members retain their own sequence ids and complete metadata" },
   { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
 ]
 
@@ -876,6 +879,7 @@ scenarios = [
 capability = "metadata.event_time"
 entity = "PULSAR TOPIC INGESTOR"
 scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_batch.feature", scenario = "Pulsar batch members retain their own sequence ids and complete metadata" },
   { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
   { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "Pulsar event time flushes historical windows separately for two branches" },
 ]
@@ -884,6 +888,7 @@ scenarios = [
 capability = "metadata.key"
 entity = "PULSAR TOPIC INGESTOR"
 scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_batch.feature", scenario = "Pulsar batch members retain their own sequence ids and complete metadata" },
   { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
 ]
 
@@ -891,6 +896,7 @@ scenarios = [
 capability = "metadata.ordering_key"
 entity = "PULSAR TOPIC INGESTOR"
 scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_batch.feature", scenario = "Pulsar batch members retain their own sequence ids and complete metadata" },
   { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
 ]
 
@@ -898,6 +904,7 @@ scenarios = [
 capability = "metadata.producer_name"
 entity = "PULSAR TOPIC INGESTOR"
 scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_batch.feature", scenario = "Pulsar batch members retain their own sequence ids and complete metadata" },
   { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
 ]
 
@@ -905,6 +912,7 @@ scenarios = [
 capability = "metadata.sequence_id"
 entity = "PULSAR TOPIC INGESTOR"
 scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_batch.feature", scenario = "Pulsar batch members retain their own sequence ids and complete metadata" },
   { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
 ]
 
@@ -912,6 +920,7 @@ scenarios = [
 capability = "metadata.redelivery_count"
 entity = "PULSAR TOPIC INGESTOR"
 scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_batch.feature", scenario = "Pulsar batch members retain their own sequence ids and complete metadata" },
   { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
   { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar redelivery keeps its message identity and reports the broker's count" },
 ]
