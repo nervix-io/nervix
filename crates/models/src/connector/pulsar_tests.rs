@@ -144,7 +144,7 @@ fn the_subscription_is_required_with_its_owner_and_instances_are_optional() {
     };
     assert_eq!(types.len(), PulsarSubscriptionType::iter().count());
     for (choice, kind) in types.iter().zip(PulsarSubscriptionType::iter()) {
-        assert_eq!(choice.name, kind.as_ref());
+        assert_eq!(choice.name, kind.keyword());
         assert_eq!(choice.value, None);
         assert_eq!(choice.example, format!("TYPE {kind}"));
     }

@@ -97,7 +97,7 @@ Feature: Pulsar subscription types
       """
     Then within "60s" DESCRIBE EMITTER "forwarded" on the leader node contains
       """
-      transient error: emitter fault injector failed publish
+      transient error: fault injector failed emitter 'forwarded'
       """
     And Pulsar subscription "rejected_{{test_id}}" of topic "rejected_{{test_id}}" holds 1 unacknowledged message
     When emitter "forwarded" leaves fault mode
@@ -118,7 +118,7 @@ Feature: Pulsar subscription types
       | 1            | EXCLUSIVE  | Exclusive  |
       | 3            | EXCLUSIVE  | Exclusive  |
 
-  @pulsar_subscription_type @pulsar_subscription_conflict
+  @pulsar_subscription_type
   Scenario Outline: A subscription another consumer holds is the ingestor's transient status until it leaves
     Given Pulsar is running
     And a <cluster_size> node nervix cluster is started
@@ -147,16 +147,48 @@ Feature: Pulsar subscription types
       transient error: -
       """
 
+    # An owned subscription joins at open, so a refused join is the one start that reaches the host's
+    # resume path where it would otherwise fail the ingestor's start.
+    @pulsar_subscription_conflict @deloxide_stress
     Examples:
       | cluster_size | held_as   | ownership                           | type      | reason                                  |
       | 1            | Exclusive | OWNED BY INGESTOR START AT EARLIEST | EXCLUSIVE | Exclusive consumer is already connected |
       | 3            | Exclusive | OWNED BY INGESTOR START AT EARLIEST | EXCLUSIVE | Exclusive consumer is already connected |
+
+    Examples:
+      | cluster_size | held_as   | ownership                           | type      | reason                                  |
       | 1            | Exclusive | PROVISIONED                         | EXCLUSIVE | Exclusive consumer is already connected |
       | 3            | Exclusive | PROVISIONED                         | EXCLUSIVE | Exclusive consumer is already connected |
       | 1            | Shared    | OWNED BY INGESTOR START AT EARLIEST | EXCLUSIVE | Subscription is of different type       |
       | 3            | Shared    | OWNED BY INGESTOR START AT EARLIEST | EXCLUSIVE | Subscription is of different type       |
       | 1            | Exclusive | OWNED BY INGESTOR START AT EARLIEST | SHARED    | Subscription is of different type       |
       | 3            | Exclusive | OWNED BY INGESTOR START AT EARLIEST | SHARED    | Subscription is of different type       |
+
+  # Removal joins the subscription as its declared type, so the broker has to admit that join once
+  # the ingestor's own consumer has left, EXCLUSIVE included.
+  @pulsar_subscription_type @pulsar_subscription_removal
+  Scenario Outline: Dropping a running <type> ingestor removes the subscription it owns
+    Given Pulsar is running
+    And a <cluster_size> node nervix cluster is started
+    And a Pulsar domain graph reads through "{{pulsar_addr}}"
+    And Pulsar ingestor "events" reads subscription "dropped_{{test_id}}" of topic "dropped_{{test_id}}" declared "OWNED BY INGESTOR START AT EARLIEST TYPE <type>"
+    Then within "60s" Pulsar subscription "dropped_{{test_id}}" of topic "dropped_{{test_id}}" has type "<reported>"
+    When these Plexus statements are executed
+      """
+      DROP INGESTOR events;
+      """
+    Then within "60s" Pulsar topic "dropped_{{test_id}}" has no durable subscription "dropped_{{test_id}}"
+
+    Examples:
+      | cluster_size | type       | reported   |
+      | 1            | SHARED     | Shared     |
+      | 3            | SHARED     | Shared     |
+      | 1            | KEY_SHARED | Key_Shared |
+      | 3            | KEY_SHARED | Key_Shared |
+      | 1            | FAILOVER   | Failover   |
+      | 3            | FAILOVER   | Failover   |
+      | 1            | EXCLUSIVE  | Exclusive  |
+      | 3            | EXCLUSIVE  | Exclusive  |
 
   # A standby of a lower priority level gives way to the ingestor's consumer, so which consumer the
   # broker makes active does not depend on how it hashes their names.

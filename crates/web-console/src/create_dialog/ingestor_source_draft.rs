@@ -172,7 +172,7 @@ impl IngestorEntityDraft {
             "SUBSCRIPTION" => self
                 .subscription_ownership
                 .map(|ownership| ownership.keywords()),
-            "TYPE" => self.subscription_type.map(|kind| kind.as_ref()),
+            "TYPE" => self.subscription_type.map(PulsarSubscriptionType::keyword),
             "OFFSET BY" => self.offset.map(|offset| match offset {
                 OffsetChoice::Domain => "DOMAIN",
                 OffsetChoice::ConsumerGroup => "CONSUMER GROUP",
@@ -195,7 +195,7 @@ impl IngestorEntityDraft {
             }
             "TYPE" => {
                 self.subscription_type =
-                    PulsarSubscriptionType::iter().find(|value| value.as_ref() == choice)
+                    PulsarSubscriptionType::iter().find(|value| value.keyword() == choice)
             }
             "OFFSET BY" => {
                 self.offset = match choice {
@@ -777,6 +777,7 @@ mod tests {
         RequestedResourceVersion, Statement, WebsocketsIngestorEntity,
     };
     use nervix_plexus::statement::parse_statement;
+    use strum::IntoEnumIterator as _;
 
     use super::{IngestorEntityDraft, IngestorEntityDraftError, OffsetChoice};
     use crate::create_dialog::{
@@ -1190,8 +1191,8 @@ mod tests {
             &super::IngestorEntityDraftError::SubscriptionType
         );
         for kind in nervix_models::PulsarSubscriptionType::iter() {
-            draft.choose_option("TYPE", kind.as_ref());
-            assert_eq!(draft.chosen_option("TYPE"), Some(kind.as_ref()));
+            draft.choose_option("TYPE", kind.keyword());
+            assert_eq!(draft.chosen_option("TYPE"), Some(kind.keyword()));
             let IngestorEntity::Pulsar(PulsarIngestor::Topic(source)) =
                 draft.build().assured("a complete Pulsar draft builds")
             else {

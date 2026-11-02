@@ -183,7 +183,7 @@ pub struct PulsarSubscription {
     RkyvDeserialize,
     strum::EnumIter,
     strum::Display,
-    strum::AsRefStr,
+    strum::IntoStaticStr,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum PulsarSubscriptionType {
@@ -198,6 +198,11 @@ pub enum PulsarSubscriptionType {
 }
 
 impl PulsarSubscriptionType {
+    /// The word a statement writes for this type after `TYPE`.
+    pub fn keyword(self) -> &'static str {
+        self.into()
+    }
+
     /// Whether the broker delivers through one consumer at a time.
     pub const fn reads_through_one_consumer(self) -> bool {
         matches!(self, Self::Failover | Self::Exclusive)
