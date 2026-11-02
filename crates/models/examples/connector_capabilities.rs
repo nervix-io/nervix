@@ -48,11 +48,29 @@ fn main() -> std::io::Result<()> {
 
 fn locator(declaration: Option<LocatorDeclaration>) -> Option<String> {
     let declaration = declaration?;
+    Some(locator_with_label(declaration))
+}
+
+/// Every locator a body may write, the declared one first and each alternative after it, or none.
+fn locators(declarations: &[LocatorDeclaration]) -> Option<String> {
+    if declarations.is_empty() {
+        return None;
+    }
+    let described: Vec<String> = declarations
+        .iter()
+        .copied()
+        .map(locator_with_label)
+        .collect();
+    Some(described.join(" | "))
+}
+
+/// The locator written in full, with the label completion offers for its name.
+fn locator_with_label(declaration: LocatorDeclaration) -> String {
     let label = match declaration.name {
         LocatorName::External(name) => name.label,
         LocatorName::Unquoted { label } => label,
     };
-    Some(format!("{} ({label})", declaration.example()))
+    format!("{} ({label})", declaration.example())
 }
 
 fn option_value(value: OptionValue) -> String {
@@ -63,7 +81,7 @@ fn option_value(value: OptionValue) -> String {
         OptionValue::Name(name) => format!("string literal checked by {}", name.label),
         OptionValue::Expression => "expression".to_owned(),
         OptionValue::Mapping => "named expressions".to_owned(),
-        OptionValue::LiteralMapping => "named string literals".to_owned(),
+        OptionValue::RequestHeaders => "named string literals or client secrets".to_owned(),
         OptionValue::Client(connector) => format!("{connector} client"),
         OptionValue::Clause => "composed clause".to_owned(),
         OptionValue::Size => "byte size".to_owned(),
@@ -164,7 +182,7 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
     );
     json!({
         "entity": kind.phrase(), "connector": kind.connector().keyword(),
-        "reference": reference, "locator": locator(declared_locator), "options": options,
+        "reference": reference, "locator": locators(&kind.locators()), "options": options,
         "modes": modes, "quiesce": quiesce, "metadata": metadata,
         "headers": header_model(headers), "every_node": executes_on_every_cluster_node,
         "position": position_class.as_ref(),
@@ -263,6 +281,7 @@ fn wait_bound(bound: WaitBound) -> String {
             format!("`{}`; {omitted}", key.key())
         }
         WaitBound::Clause(clause) => format!("`{clause}`"),
+        WaitBound::ClientKey { key, rule } => format!("client key `{key}`; {rule}"),
         WaitBound::Fixed(bound) => format!("fixed {}", humantime::format_duration(bound)),
         WaitBound::Driver(default) => format!("driver default, {default}"),
         WaitBound::Unbounded => "unbounded".to_owned(),
@@ -486,7 +505,9 @@ fn client(kind: ConnectorKind) -> Option<Value> {
     Some(
         json!({ "kind": kind.keyword(), "pool": pool, "config_owner": config_owner, "options": options,
             "keys": keys, "namespaces": namespaces, "reserved": config.reserved(), "aliases": aliases,
-            "stripped_prefix": stripped_prefix, "constraints": constraints }),
+            "stripped_prefix": stripped_prefix,
+            "secret_keys": config.secret_key_prefix().map(|prefix| format!("{prefix}*")),
+            "constraints": constraints }),
     )
 }
 

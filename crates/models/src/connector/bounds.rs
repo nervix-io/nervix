@@ -152,6 +152,13 @@ pub enum WaitBound {
     /// A statement clause, as a statement writes it: `ACK TIMEOUT`, a signaling protocol's
     /// `TIMEOUT`.
     Clause(&'static str),
+    /// A protocol interval another client key sets, such as MQTT's `keep_alive_ms`, and how the
+    /// wait follows from it, including what applies where the client leaves the key out. Unlike a
+    /// [`DeadlineKey`], the key keeps its protocol's own meaning.
+    ClientKey {
+        key: &'static str,
+        rule: &'static str,
+    },
     /// A fixed physical bound that Nervix sets.
     Fixed(Duration),
     /// The driver's own default, which no Nervix key sets, as the matrix states it.
@@ -166,7 +173,11 @@ impl WaitBound {
     pub fn key(&self) -> Option<DeadlineKey> {
         match self {
             Self::Key { key, .. } => Some(*key),
-            Self::Clause(_) | Self::Fixed(_) | Self::Driver(_) | Self::Unbounded => None,
+            Self::Clause(_)
+            | Self::ClientKey { .. }
+            | Self::Fixed(_)
+            | Self::Driver(_)
+            | Self::Unbounded => None,
         }
     }
 }
@@ -187,6 +198,11 @@ pub enum DeadlineKey {
     /// activity and whether cancellation or handoff backpressure retains the activity deadline.
     #[strum(serialize = "idle_timeout_ms")]
     IdleTimeout,
+    /// `pool_acquire_timeout_ms`: one checkout from a connection pool: the wait for the pool, then
+    /// opening or testing the connection it hands over, with name resolution, TLS and
+    /// authentication. How long an accepted operation then runs is outside it.
+    #[strum(serialize = "pool_acquire_timeout_ms")]
+    PoolAcquireTimeout,
 }
 
 impl DeadlineKey {
@@ -252,6 +268,13 @@ mod tests {
                 },
             },
             DeclaredWait {
+                wait: "a pool checkout",
+                bound: WaitBound::Key {
+                    key: DeadlineKey::PoolAcquireTimeout,
+                    omitted: OmittedDeadline::Required,
+                },
+            },
+            DeclaredWait {
                 wait: "an acknowledgement",
                 bound: WaitBound::Clause("ACK TIMEOUT"),
             },
@@ -266,7 +289,8 @@ mod tests {
             vec![
                 DeadlineKey::Timeout,
                 DeadlineKey::ConnectTimeout,
-                DeadlineKey::IdleTimeout
+                DeadlineKey::IdleTimeout,
+                DeadlineKey::PoolAcquireTimeout
             ]
         );
     }
@@ -302,6 +326,10 @@ mod tests {
         assert_eq!(DeadlineKey::Timeout.key(), "timeout_ms");
         assert_eq!(DeadlineKey::ConnectTimeout.key(), "connect_timeout_ms");
         assert_eq!(DeadlineKey::IdleTimeout.key(), "idle_timeout_ms");
+        assert_eq!(
+            DeadlineKey::PoolAcquireTimeout.key(),
+            "pool_acquire_timeout_ms"
+        );
         let checks: Vec<String> = RuntimeCapability::of_bounds(KEYED)
             .iter()
             .map(ToString::to_string)
@@ -311,7 +339,8 @@ mod tests {
             vec![
                 "STALLED PEER timeout_ms".to_string(),
                 "STALLED PEER connect_timeout_ms".to_string(),
-                "STALLED PEER idle_timeout_ms".to_string()
+                "STALLED PEER idle_timeout_ms".to_string(),
+                "STALLED PEER pool_acquire_timeout_ms".to_string()
             ]
         );
     }

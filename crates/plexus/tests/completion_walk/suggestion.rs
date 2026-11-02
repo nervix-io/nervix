@@ -87,6 +87,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("rabbitmq_exchange", "'nx.exchange'"),
     ("rabbitmq_queue", "'nx.queue'"),
     ("redis_channel", "'nx.channel'"),
+    ("redis_channel_pattern", "'nx.*'"),
     ("relay_capacity", "1024"),
     ("sqs_queue", "'nx-queue'"),
     ("string", "'nx_value'"),
@@ -96,6 +97,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     // Server-issued identities are quoted literals rather than Plexus names.
     ("transaction_id", "'nx_transaction'"),
     ("request_header_name", "'x-nx-header'"),
+    ("client_secret_key", "'secret.nx_key'"),
     ("upgrade_header_name", "'x-nx-header'"),
     ("word", "nx_word"),
 ];
@@ -114,6 +116,7 @@ const FREE_FORM_FILLERS: &[(&str, &str)] = &[
     ("routing_key_expression", "input.nx_field"),
     ("set_assignments", "nx_out = 1"),
     ("string_expression", "'nx_value'"),
+    ("timestamp_expression", "input.nx_field"),
     ("value_expression", "1"),
     ("where_expression", "1 = 1"),
 ];

@@ -15,10 +15,22 @@ the optional FIFO group. The Model/archive, registry, consensus and canonical Pl
 preserve the request shape, and the archive signature and consensus keyspace namespace fence the
 current SQS emitter shape before decoding.
 
+`REDIS PUBSUB` ingestor generators draw both subscriptions, a `CHANNEL` and a `PATTERN`, each from
+any text within its byte bound and the pattern from glob characters too. The Model/archive,
+registry, consensus and canonical Plexus properties preserve which subscription an ingestor holds
+and its exact text, and the archive signature and consensus keyspace namespace fence that shape
+before decoding.
+
 Ingestor generators draw every timestamp source, `TIMESTAMP AT metadata.<field>` included, in
 `CREATE` and in `ALTER ... SET TIMESTAMP`. The Model/archive, registry, consensus and canonical
 Plexus properties preserve the metadata source distinctly from a payload field of the same name,
 and the same signature and namespace fence that shape.
+
+Pulsar subscription generators draw both required owned creation positions, `EARLIEST` and
+`LATEST`, and provisioned subscriptions without a position. Statement generators mix typed
+`SET START AT` with shared ingestor operations. The Model, registry and consensus properties
+preserve those complete values. The `NERVIX HDR VALUE` registry signature and
+`raft_header_value_` consensus namespace identify this current Model layout before decoding.
 
 MQTT TOPIC ingestor generators draw either session at QoS 0, 1 or 2 beside `NO ACK`, and the
 persistent session at QoS 1 or 2 beside an acknowledged mode, so every pairing the declaration
@@ -147,10 +159,13 @@ delegated configuration values through JSON/archive equality and public inspecti
 
 ## Client Configuration And Inspection
 
-`client-config-schema` includes omitted ClickHouse connection defaults and Redis command-pool
-lifetimes, and explicit typed TCP and pool intervals and lifetimes. JSON and archive equality
-preserve the authored entries; the effective-default projection preserves those entries and is
-idempotent, and public inspection remains idempotent.
+`client-config-schema` includes omitted ClickHouse connection defaults, Redis command-pool
+lifetimes, Postgres pool keys and MQTT keep-alive and publish admission bounds, explicit typed TCP
+and pool intervals, lifetimes, checkout deadlines and borrow tests, and MQTT credentials whose
+password public inspection redacts. `mqtt-client-config` separately converts every valid MQTT
+client configuration into its typed broker, transport, identity, credentials, keep-alive and
+admission bound. JSON and archive equality preserve the authored entries; the effective-default
+projection preserves those entries and is idempotent, and public inspection remains idempotent.
 Scheme-restricted driver addresses include RabbitMQ's `amqps` TLS-file configurations; the
 property retains their complete ordered trust and identity entries through both encodings.
 Driver URLs with Nervix-owned query options include Postgres addresses, which set `sslmode` once
