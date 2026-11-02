@@ -78,15 +78,10 @@ Feature: Physical infrastructure deadlines under domain pacing
         timestamp STRING,
         due STRING
       );
-      CREATE WIRE JSON SCHEMA physical_prometheus_wire MODE STRICT (
-        source string,
-        value number,
-        timestamp string,
-        due string
-      );
       CREATE CODEC physical_prometheus_codec
-        FROM WIRE JSON SCHEMA physical_prometheus_wire
-        TO SCHEMA physical_prometheus_sample;
+        FROM JSON
+        TO SCHEMA physical_prometheus_sample
+        WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, due: .metric.due, value, timestamp}';
       CREATE RELAY physical_prometheus_samples
         SCHEMA physical_prometheus_sample UNBRANCHED;
       CREATE PROMETHEUS CLIENT physical_prometheus_source

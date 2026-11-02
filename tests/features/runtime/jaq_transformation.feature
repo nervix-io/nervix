@@ -616,7 +616,7 @@ Feature: JAQ transformation
         CREATE CODEC sample_codec
         FROM JSON
         TO SCHEMA sample
-        WITH JAQ TRANSFORMATIONS ON INGESTION '{source, value: (.value * 2), timestamp}';
+        WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, value: (.value * 2), timestamp}';
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
         CREATE IF NOT EXISTS BRANCH by_prom_samples SCHEMA source_branch TTL 5m;
         CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;

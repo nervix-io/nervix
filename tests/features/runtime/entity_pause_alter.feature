@@ -292,7 +292,7 @@ Feature: Entity-pause model alterations
       | 1            |
       | 3            |
 
-  @entity_gate_waits_for_parked_required_wait
+  @entity_gate_waits_for_parked_required_wait @slots_2
   Scenario Outline: An entity gate waits for the message its junction parked on required materialized state
     Given entity gate deadline is configured as "5s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"

@@ -19,7 +19,6 @@ ingest_locator = "The configured client or endpoint owns the address and path; t
 mirror = "Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position."
 
 [entity."KAFKA TOPIC"]
-envelope = "This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity."
 mirror = "Consumption tracks replayable log offsets and consumer groups; publication uses a producer queue or delivery report. Both directions use the same quoted, case-preserving Kafka topic names."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
@@ -62,7 +61,6 @@ properties = "This entity declares no typed PROPERTIES block; any encoded record
 [entity."PROMETHEUS QUERY"]
 ingest_headers = "The Prometheus query API is polled for samples; no Prometheus remote-write emitter is declared."
 ingest_locator = "QUERY is a PromQL expression option rather than an external entity name."
-metadata = "The current query result is decoded as payload; no separate typed query or evaluation-time metadata namespace is declared."
 mirror = "The Prometheus query API is polled for samples; no Prometheus remote-write emitter is declared."
 
 [entity."ZEROMQ PULL"]

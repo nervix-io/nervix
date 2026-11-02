@@ -929,7 +929,7 @@ remain in their owning work records until that delivery.
 | Side | What the entity declares |
 | --- | --- |
 | Ingestor | Header reads, the typed metadata fields in their order, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits, and any alternative locators a body may write instead of it, each with its own keywords and name; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
-| Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which only SQS QUEUE and the two RabbitMQ emitter entities declare any yet: SQS QUEUE the `DELAY` and `DEDUPLICATION ID` clauses, and each RabbitMQ entity the `MANDATORY` clause. |
+| Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which `KAFKA TOPIC` declares `TIMESTAMP`, `SQS QUEUE` declares `DELAY` and `DEDUPLICATION ID`, the two RabbitMQ emitter entities declare `MANDATORY`, and no entity declares any other clause or key yet. |
 | Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Every client declares its CONFIG key names, required or optional presence, value type, confidentiality, file role and Nervix or driver ownership, and which of its entities read each key: every ingestor and emitter that references the client, or only its ingestors or only its emitters. Only a client both sides reference declares a key for one side; a SYSLOG client does, and its connector takes the side a deadline key bounds a wait on from that declaration. The declaration explicitly names delegated property namespaces and reserved keys, and the other names its driver reads for one property: each pair of names with the one the client accepts, and a prefix the driver strips from a key before reading it, with the driver's own properties that begin with it. Validation, composed-grammar completion, public inspection and the generated key reference read this one schema. |
 
 Plexus client definitions start with `CREATE [IF NOT EXISTS] <CONNECTOR> CLIENT <name>`. The
@@ -1116,9 +1116,10 @@ the topic keeps its records after they are read and a suspended source resumes f
 and a required `OFFSET BY` choice between the domain's replicated offsets and a named consumer
 group. Its emitter declares `NO ACK` and `ACK` with either window, optional batching with no
 protocol-fixed batch limit, since the producer's configurable `message.max.bytes` bounds each record
-it writes, and no envelope or properties. Headers are `ordered_repeats` exact names in both
-directions; the ingestor's metadata is the record's topic, partition, offset, binary key, timestamp,
-timestamp kind and tombstone flag. A Kafka client
+it writes, the `TIMESTAMP` envelope clause it writes as each record's `CreateTime`, and no other
+envelope clause or properties. Headers are `ordered_repeats` exact names in both directions; the
+ingestor's metadata is the record's topic, partition, offset, binary key, timestamp, timestamp kind
+and tombstone flag. A Kafka client
 requires `bootstrap.servers`, without which no consumer or producer reaches a broker. Every other
 property is librdkafka's, checked offline before commit, except the keys Nervix sets itself on the
 consumers and producers it runs, which the client refuses. librdkafka reads some properties under
@@ -1391,7 +1392,9 @@ pending. The source declares this single-report bound beside its driver buffers.
 Beside its fields and headers, a message names the position its transport gives it, where the
 transport has one: a Kafka record's topic, partition and offset, or a syslog frame's peer. It is the
 transport's own coordinate, never a header value its sender wrote, and a decode rejection names it.
-A paced source returns each polled message owned, its declared values already copied.
+A paced source returns each polled message owned, its declared values already copied. A clone of a
+retained copy shares its values, so the samples of one Prometheus poll, which all carry the same
+query and evaluation instant, hold them once however many samples the poll returned.
 
 Transport headers are visited from the borrowed message in the order the entity's
 [header model](#header-models) declares. The host copies them only when the quiesce control decides
@@ -2019,12 +2022,16 @@ timestamp, the two durations, the reply target, the message and deduplication id
 routing key, and the properties in written order, each a `RecordProperty` under the name its entity declares with a
 `PropertyValue` of exactly the declared `PropertyType`. A property is never a float, so equal
 envelopes always compare equal. A connector receives only what its entity declares, and an entity
-that declares nothing always receives the empty envelope. `SQS QUEUE` declares `DELAY`, which it
-sends as each message's `DelaySeconds`, and `DEDUPLICATION ID`, which it sends as each message's
-`MessageDeduplicationId`; the registry refuses `DELAY` for a FIFO queue, outside whole seconds from
-`1s` to `900s`, and `DEDUPLICATION ID` for a standard queue. Only an entity whose body is a codec,
-whose records a record emitter publishes, declares envelope clauses or properties, so no envelope
-is evaluated for a row, row request, HTTP request or native client emitter.
+that declares nothing always receives the empty envelope. `KAFKA TOPIC` declares `TIMESTAMP`, which
+it writes as each record's Kafka `CreateTime`, in the millisecond that contains it; it rejects a
+record whose millisecond is not after the Unix epoch before its producer takes it, because
+librdkafka reads a zero timestamp as the time it takes the record, and a record without a timestamp
+gets that time from librdkafka. `SQS QUEUE` declares `DELAY`, which it sends as each message's
+`DelaySeconds`, and `DEDUPLICATION ID`, which it sends as each message's `MessageDeduplicationId`;
+the registry refuses `DELAY` for a FIFO queue, outside whole seconds from `1s` to `900s`, and
+`DEDUPLICATION ID` for a standard queue. Only an entity whose body is a codec, whose records a
+record emitter publishes, declares envelope clauses or properties, so no envelope is evaluated for a
+row, row request, HTTP request or native client emitter.
 
 Each connector classifies definite delivery and rejection per record, and may report one
 infrastructure failure for the attempt. A record emitter answers for a record under the identity the
@@ -2396,9 +2403,11 @@ envelope grouping and the exact container bytes, `codec-bounded-encodings` and
 `bounded-write-limits` the exact sizes under `MAX SIZE`, `emitter-row-preparations` and
 `emitter-retained-payloads` the membership and byte-for-byte retry, text and typed headers
 included, `sqs-batch-requests`, `mqtt-publish-packets`, `postgres-insert-measures` and
-`mysql-insert-measures` the connector-specific measures. The MySQL property compares the complete
-statement and bound parameters with the driver's binary serializer, including qualified table
-names, quoted column keys, nulls and nonempty slices of a rotated membership sequence.
+`mysql-insert-measures` the connector-specific measures. `prometheus-sample-encoding` checks the
+bytes of the object a query source delivers for a sample against the vocabulary's declaration. The
+MySQL property compares the complete statement and bound parameters with the driver's binary
+serializer, including qualified table names, quoted column keys, nulls and nonempty slices of a
+rotated membership sequence.
 `mongodb-write-answers` checks the rows a failed MongoDB write delivers, rejects and leaves unresolved.
 `mongodb-bson-mapping` checks the complete native document encoding and stored-size measure:
 integer widths, floating-point bits (including non-finite values), native dates at millisecond
