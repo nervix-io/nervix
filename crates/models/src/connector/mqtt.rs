@@ -619,6 +619,17 @@ impl EmitterDeclaration for MqttTopicEmitter {
     };
 }
 
+impl MqttTopicEmitter {
+    /// The choice a statement that publishes at `qos` makes for the declared option opened by
+    /// `option`: the one option a requirement of this entity names.
+    pub fn publication_choice(qos: MqttQos, option: &str) -> Option<&'static str> {
+        match option {
+            QOS_OPTION => Some(qos.spelling()),
+            _ => None,
+        }
+    }
+}
+
 impl EmitterEntityBody for MqttTopicEmitter {
     fn reference(&self) -> EmitterReference<'_> {
         EmitterReference::Client(EmitterClientReference {
@@ -633,10 +644,7 @@ impl EmitterEntityBody for MqttTopicEmitter {
 
     /// The quality of service this emitter publishes at, which its publishing mode requires.
     fn chosen(&self, option: &str) -> Option<&'static str> {
-        match option {
-            QOS_OPTION => Some(self.qos.spelling()),
-            _ => None,
-        }
+        Self::publication_choice(self.qos, option)
     }
 }
 

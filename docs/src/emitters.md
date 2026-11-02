@@ -1685,9 +1685,10 @@ so `TOPIC 'devices/+'` is refused when the emitter is created. The client's `add
 by its scheme, host and port alone, as [MQTT ingestion](ingestors.md#mqtt) describes.
 
 CREATE refuses an unsupported QoS number with its value and accepted levels, such as
-`MQTT QOS must be 0, 1 or 2, found 3`, underlining the supplied number. It refuses a mode beside a
-quality of service it does not pair with, underlining `MODE` and naming what the statement writes,
-such as `MQTT TOPIC emitters name MODE NO ACK only with QOS 0; the statement writes QOS 1`.
+`MQTT QOS must be 0, 1 or 2, found 3`, underlining the supplied number. Completion after `MODE`
+offers only the modes the written quality of service pairs with, and a statement that writes
+another is refused with the mode underlined and what it writes named, such as
+`MQTT TOPIC emitters name MODE NO ACK only with QOS 0; the statement writes QOS 1`.
 
 `ALTER` holds every result to the same pairing. `SET MODE` changes the mode within a quality of
 service, so `SET MODE ACK PARALLEL MAX 8 ...` is accepted at `QOS 1` and `SET MODE NO ACK ...` is

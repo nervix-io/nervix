@@ -525,14 +525,23 @@ fn an_envelope_clause_or_property_the_entity_does_not_declare_is_refused() {
 }
 
 #[test]
-fn completion_offers_exactly_the_declared_publishing_modes() {
+fn completion_offers_exactly_the_declared_publishing_modes_the_written_choices_admit() {
     for kind in EmitterEntityKind::all() {
         let declared = kind.capabilities();
-        let mut spellings = Vec::new();
         for mode in declared.publishing_modes {
-            spellings.push(mode.kind.example());
+            let mut spellings = Vec::new();
+            for other in declared.publishing_modes {
+                if other.requires == mode.requires {
+                    spellings.push(other.kind.example());
+                }
+            }
+            let generated = Generated {
+                mode: mode.kind.example(),
+                requires: mode.requires,
+                ..Generated::of(kind)
+            };
+            assert_offers_exactly(&generated.through_mode(), &spellings);
         }
-        assert_offers_exactly(&Generated::of(kind).through_mode(), &spellings);
     }
 }
 

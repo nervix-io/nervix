@@ -17,22 +17,88 @@ pub(super) fn mode<'src>()
     broker_mode!(MqttTopicPublishingMode)
 }
 
-/// The publishing mode a statement writes and the span of its `MODE` clause, which a refused
-/// pairing underlines.
-struct WrittenMode {
-    mode: MqttTopicPublishingMode,
-    span: SimpleSpan,
+type MqttModeExtra<'src> = extra::Full<ParseError<'src>, (), MqttQos>;
+
+fn with_qos_context<'src, O, P>(
+    parser: P,
+) -> impl Parser<'src, &'src [Token], O, MqttModeExtra<'src>> + Clone
+where
+    P: Parser<'src, &'src [Token], O, extra::Err<ParseError<'src>>> + Clone,
+{
+    map_ctx::<_, _, _, MqttModeExtra<'src>, extra::Err<ParseError<'src>>, _>(|_| (), parser)
 }
 
-/// `MODE …` after its quality of service.
-fn written_mode<'src>()
--> impl Parser<'src, &'src [Token], WrittenMode, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Mode)
-        .ignore_then(mode())
-        .map_with(|mode, extra| WrittenMode {
-            mode,
-            span: extra.span(),
-        })
+/// The requirement a statement that publishes at `qos` leaves unmet by naming a mode of `kind`.
+fn unmet_pairing(
+    kind: EmitterPublishingModeKind,
+    qos: MqttQos,
+) -> Option<UnmetPublishingRequirement> {
+    MqttTopicEmitter::CAPABILITIES.unmet_publishing(MqttTopicEmitter::KIND, kind, &|option| {
+        MqttTopicEmitter::publication_choice(qos, option)
+    })
+}
+
+/// The kind of the publishing mode `token` opens, for a word that opens one.
+fn opened_mode(token: Option<&Token>) -> Option<EmitterPublishingModeKind> {
+    let Some(Token::Word(Word::KnownWord { iden, .. })) = token else {
+        return None;
+    };
+    match iden {
+        Identifier::No => Some(EmitterPublishingModeKind::NoAck),
+        Identifier::Ack => Some(EmitterPublishingModeKind::BrokerAck),
+        _ => None,
+    }
+}
+
+/// `parser`, which reads a mode of `kind` only beside a quality of service that pairs with it.
+fn paired_with_qos<'src, P>(
+    kind: EmitterPublishingModeKind,
+    parser: P,
+) -> impl Parser<'src, &'src [Token], MqttTopicPublishingMode, MqttModeExtra<'src>> + Clone
+where
+    P: Parser<'src, &'src [Token], MqttTopicPublishingMode, extra::Err<ParseError<'src>>>
+        + Clone
+        + 'src,
+{
+    with_qos_context(parser)
+        .contextual()
+        .configure(move |_, qos: &MqttQos| unmet_pairing(kind, *qos).is_none())
+}
+
+/// `MODE …` after the quality of service the context holds. A supplied mode that does not pair with
+/// it is read through the shared parser and refused, naming what the statement writes. With none,
+/// the contextual gates keep completion to the modes this quality of service can use, so a statement
+/// that follows completion never reaches that refusal.
+fn paired_mode<'src>()
+-> impl Parser<'src, &'src [Token], MqttTopicPublishingMode, MqttModeExtra<'src>> + Clone {
+    let paired = choice((
+        paired_with_qos(
+            EmitterPublishingModeKind::NoAck,
+            unconfirmed_mode!(MqttTopicPublishingMode),
+        ),
+        paired_with_qos(
+            EmitterPublishingModeKind::BrokerAck,
+            consumer_mode!(MqttTopicPublishingMode),
+        ),
+    ));
+    let refused = with_qos_context(mode()).try_map_with(|mode: MqttTopicPublishingMode, extra| {
+        let qos: MqttQos = *extra.ctx();
+        match unmet_pairing(mode.publishing().kind(), qos) {
+            Some(unmet) => Err(Rich::custom(extra.span(), unmet.to_string())),
+            None => Ok(mode),
+        }
+    });
+    with_qos_context(kw(Identifier::Mode)).ignore_then(custom::<_, _, _, MqttModeExtra<'src>>(
+        move |input| {
+            let qos = *input.ctx();
+            if let Some(kind) = opened_mode(input.peek_ref())
+                && unmet_pairing(kind, qos).is_some()
+            {
+                return input.parse(refused.clone());
+            }
+            input.parse(paired.clone())
+        },
+    ))
 }
 
 /// `<client> TOPIC '<topic>' QOS 0|1|2 MODE …`: every statement writes the quality of service it
@@ -43,20 +109,12 @@ fn topic_destination<'src>()
     client_ref()
         .then_ignore(kw(Identifier::Topic))
         .then(external_name::<MqttTopicName>())
-        .then(mqtt_qos_clause())
-        .then(written_mode())
-        .try_map(|(((client, topic), qos), written), _| {
-            let WrittenMode { mode, span } = written;
-            let destination = MqttTopicEmitter {
-                client,
-                topic,
-                qos,
-                mode,
-            };
-            match destination.unmet_publishing() {
-                Some(unmet) => Err(Rich::custom(span, unmet.to_string())),
-                None => Ok(destination),
-            }
+        .then(mqtt_qos_clause().then_with_ctx(paired_mode()))
+        .map(|((client, topic), (qos, mode))| MqttTopicEmitter {
+            client,
+            topic,
+            qos,
+            mode,
         })
 }
 
@@ -167,10 +225,21 @@ mod tests {
         assert_offers_exactly(&format!("{head}'devices/orders' "), &["QOS"]);
         assert_offers_exactly(&format!("{head}'devices/orders' QOS "), &["mqtt_qos"]);
         assert_offers_exactly(&format!("{head}'devices/orders' QOS 1 "), &["MODE"]);
-        assert_offers_exactly(
-            &format!("{head}'devices/orders' QOS 1 MODE "),
-            &["ACK", "NO ACK"],
+    }
+
+    #[rstest]
+    #[case::unanswered("0", "NO ACK")]
+    #[case::at_least_once("1", "ACK")]
+    #[case::exactly_once("2", "ACK")]
+    fn completion_offers_the_mode_the_written_quality_of_service_pairs_with(
+        #[case] qos: &str,
+        #[case] mode: &str,
+    ) {
+        let prefix = format!(
+            "CREATE MQTT TOPIC EMITTER publishing FROM events TO mqtt_main TOPIC 'devices/orders' \
+             QOS {qos} MODE "
         );
+        assert_offers_exactly(&prefix, &[mode]);
     }
 
     #[rstest]
@@ -203,7 +272,7 @@ mod tests {
         "ACK",
         "QOS 1 or 2"
     )]
-    fn an_unpaired_mode_names_the_written_quality_of_service_and_underlines_its_mode(
+    fn an_unpaired_mode_names_the_written_quality_of_service_and_underlines_the_mode(
         #[case] qos: &str,
         #[case] mode: &str,
         #[case] phrase: &str,
@@ -216,7 +285,7 @@ mod tests {
         );
         let refusals = refusal(&source);
         assert!(
-            refusals.contains(&(expected, format!("MODE {mode}"))),
+            refusals.contains(&(expected, mode.to_owned())),
             "{refusals:?}"
         );
     }
