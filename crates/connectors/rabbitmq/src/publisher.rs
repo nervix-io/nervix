@@ -34,14 +34,17 @@
 //! emitter to its exchange under the routing key the host evaluated for each record. A record whose
 //! envelope carries `MANDATORY` is published mandatory, so the broker returns its message when no
 //! binding routes it, instead of dropping it, and the emitter rejects the record. Under `ACK` the
-//! return arrives ahead of the message's publisher confirm, which carries it. Under `NO ACK` it
-//! arrives ahead of the broker's answer to the round trip that ends the write, so once that answer
+//! return arrives ahead of the message's publisher confirm, but the driver can attach it to any
+//! confirm. The confirmation owner attributes all returns across the bounded window before
+//! reporting mandatory delivery or refilling it. Under `NO ACK` a return arrives ahead of the
+//! broker's answer to the round trip that ends the write, so once that answer
 //! arrives every return of the write is on the channel, and the emitter takes them all before the
 //! write ends: a return never outlives the write that published its message. A return names the
 //! message's exchange, routing key, properties and body, not which record it was, and the broker
 //! returns messages in the order it took them, so the emitter attributes each return to the first
-//! message of the write, in written order, that carries the same four; of messages identical in all
-//! four, the earlier one is rejected. A return the emitter cannot attribute fails the write instead.
+//! message in the window or write, in written order, that carries the same four; of
+//! messages identical in all four, the earlier one is rejected. A return the emitter cannot
+//! attribute fails the write instead.
 
 #![cfg_attr(
     nervix_lint,
@@ -55,10 +58,12 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
+mod confirmation_window;
+
 use std::{cmp::Ordering, collections::VecDeque, time::Duration};
 
+use confirmation_window::RabbitMqConfirmationWindow;
 use error_stack::Report;
-use futures_util::FutureExt;
 use lapin::{
     Confirmation, ErrorKind, ExchangeKind, PublisherConfirm,
     message::BasicReturnMessage,
@@ -78,7 +83,7 @@ use nervix_connector::{
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, RabbitMqExchangeName, RabbitMqQueueName};
-use nervix_primitives::time::{Instant, sleep, timeout};
+use nervix_primitives::time::{Instant, timeout};
 use thiserror::Error;
 
 use crate::{
@@ -227,27 +232,11 @@ enum Unaddressed {
     Missing(Report<EmitterWriteError>),
 }
 
-/// One message written on a channel in confirm mode whose publisher confirm the emitter has not read.
-struct PendingRabbitMqConfirmation {
-    message: RabbitMqMessage,
-    deadline: Instant,
-    confirmation: PublisherConfirm,
-}
-
 /// A message a confirmed write had on its channel when the channel was lost, with the broker's
 /// answer for it when the broker answered first.
 struct AnsweredMessage {
     message: RabbitMqMessage,
     answer: Option<Confirmation>,
-}
-
-/// What the broker's publisher confirm settles for the message it answers.
-enum ConfirmedAnswer {
-    Delivered,
-    /// The broker returned the message unrouted ahead of its confirm.
-    Rejected(RejectedEmitterMember<EmitterRecordId>),
-    /// The answer fails the write: a nack, or a confirm from a channel that is not in confirm mode.
-    Failed(Report<EmitterWriteError>),
 }
 
 /// Why a `NO ACK` write stopped before the broker answered its round trip.
@@ -267,7 +256,10 @@ enum ConfirmedStop {
     Failed(Report<EmitterWriteError>),
     /// The channel is gone, as the failure the emitter saw shows. The messages written on it stay in
     /// the confirmation window.
-    ChannelLost(lapin::Error),
+    ChannelLost {
+        observed: lapin::Error,
+        answered: Vec<AnsweredMessage>,
+    },
 }
 
 impl RabbitMqPublisher {
@@ -649,9 +641,9 @@ impl RabbitMqPublisher {
         Ok(())
     }
 
-    /// `MODE ACK`: the channel is in confirm mode, at most `max_in_flight` publisher confirms are
-    /// outstanding at once, and every one is awaited before the batch finishes. A channel lost on
-    /// the way is settled by [`Self::settle_confirmed_loss`].
+    /// `MODE ACK`: publish at most MAX messages together, then attribute every return across
+    /// that window before refilling it. The driver can attach a return to another message's
+    /// confirm, so an individual positive answer cannot settle a mandatory record on its own.
     async fn publish_confirmed(
         &mut self,
         mut unsent: VecDeque<RabbitMqMessage>,
@@ -660,25 +652,28 @@ impl RabbitMqPublisher {
     ) {
         loop {
             nervix_primitives::task::consume_budget().await;
-            let mut pending = VecDeque::new();
-            let written = self
-                .write_confirmed(&mut unsent, &mut pending, confirmation, outcome)
-                .await;
-            let observed = match written {
+            let (observed, answered) = match self
+                .write_confirmed(&mut unsent, confirmation, outcome)
+                .await
+            {
                 Ok(()) => return,
                 Err(ConfirmedStop::Failed(error)) => {
                     outcome.fail(error);
                     return;
                 }
-                Err(ConfirmedStop::ChannelLost(observed)) => observed,
+                Err(ConfirmedStop::ChannelLost { observed, answered }) => (observed, answered),
             };
             let closure = self
                 .closures
                 .next(&self.connection, &self.channel, observed)
                 .await;
-            let answered = Self::answered_before_loss(pending);
-            if let Err(error) = Self::settle_confirmed_loss(closure, answered, &mut unsent, outcome)
-            {
+            if let Err(error) = Self::settle_confirmed_loss(
+                self.destination.exchange(),
+                closure,
+                answered,
+                &mut unsent,
+                outcome,
+            ) {
                 outcome.fail(error);
                 return;
             }
@@ -689,265 +684,94 @@ impl RabbitMqPublisher {
         }
     }
 
-    /// Writes `unsent` on the channel in order within the confirmation window, reading each
-    /// publisher confirm the window requires and every one still outstanding at the end. A
-    /// publish that fails leaves its message at the front of `unsent`, and a lost channel leaves
-    /// the messages written on it in `pending`. The window carries the confirmation settings, so
-    /// the drain below never has to ask a mode that has no confirmations what its timeout is.
     async fn write_confirmed(
         &mut self,
         unsent: &mut VecDeque<RabbitMqMessage>,
-        pending: &mut VecDeque<PendingRabbitMqConfirmation>,
-        AckConfirmation {
-            max_in_flight,
-            timeout,
-        }: AckConfirmation,
+        settings: AckConfirmation,
         outcome: &mut PerRecordOutcome<EmitterRecordId>,
     ) -> Result<(), ConfirmedStop> {
+        let mut window = RabbitMqConfirmationWindow::new(settings);
         while let Some(message) = unsent.pop_front() {
             nervix_primitives::task::consume_budget().await;
             let confirmation = match self.publish_message(&message).await {
                 Ok(confirmation) => confirmation,
                 Err(observed) => {
                     unsent.push_front(message);
-                    return Err(ConfirmedStop::ChannelLost(observed));
+                    return Err(window.channel_lost(observed));
                 }
             };
-            let Some(deadline) = Instant::now().checked_add(timeout) else {
+            let Some(deadline) = Instant::now().checked_add(settings.timeout) else {
                 return Err(ConfirmedStop::Failed(Self::publish_error(
                     "rabbitmq ACK TIMEOUT exceeds the monotonic clock range",
                 )));
             };
-            pending.push_back(PendingRabbitMqConfirmation {
-                message,
-                deadline,
-                confirmation,
-            });
-            if pending.len() >= max_in_flight.get() {
-                Self::confirm_oldest(pending, timeout, outcome).await?;
+            window.push(message, deadline, confirmation);
+            if window.is_full() {
+                window.settle(self.destination.exchange(), outcome).await?;
+                window = RabbitMqConfirmationWindow::new(settings);
             }
         }
-        while !pending.is_empty() {
-            nervix_primitives::task::consume_budget().await;
-            Self::confirm_oldest(pending, timeout, outcome).await?;
+        if !window.is_empty() {
+            window.settle(self.destination.exchange(), outcome).await?;
         }
         Ok(())
     }
 
-    async fn confirm_oldest(
-        pending: &mut VecDeque<PendingRabbitMqConfirmation>,
-        timeout: Duration,
-        outcome: &mut PerRecordOutcome<EmitterRecordId>,
-    ) -> Result<(), ConfirmedStop> {
-        let Some(oldest) = pending.front_mut() else {
-            return Err(ConfirmedStop::Failed(Self::publish_error(
-                "rabbitmq acknowledgment window unexpectedly became empty",
-            )));
-        };
-        let remaining = oldest
-            .deadline
-            .checked_duration_since(Instant::now())
-            .unwrap_or(Duration::ZERO);
-        if remaining.is_zero() {
-            Self::harvest_ready_after_oldest_failure(pending, outcome);
-            return Err(ConfirmedStop::Failed(Self::confirm_timeout_error(timeout)));
-        }
-        let result = nervix_primitives::select! {
-            biased;
-            result = &mut oldest.confirmation => Some(result),
-            _ = sleep(remaining) => None,
-        };
-        let Some(result) = result else {
-            Self::harvest_ready_after_oldest_failure(pending, outcome);
-            return Err(ConfirmedStop::Failed(Self::confirm_timeout_error(timeout)));
-        };
-        let confirmation = match result {
-            Ok(confirmation) => confirmation,
-            Err(observed) => return Err(ConfirmedStop::ChannelLost(observed)),
-        };
-        let answer = Self::confirmed_answer(&oldest.message.record, confirmation);
-        match answer {
-            ConfirmedAnswer::Delivered => {
-                let delivered = pending.pop_front().verified(
-                    "the oldest confirmation was read from the front of this window, which \
-                     nothing else removes from",
-                );
-                outcome.deliver(delivered.message.record.id);
-                Ok(())
-            }
-            ConfirmedAnswer::Rejected(rejected) => {
-                pending.pop_front();
-                outcome.reject(rejected);
-                Ok(())
-            }
-            ConfirmedAnswer::Failed(error) => {
-                Self::harvest_ready_after_oldest_failure(pending, outcome);
-                Err(ConfirmedStop::Failed(error))
-            }
-        }
-    }
-
-    /// Collects the records behind the oldest one whose confirmation already resolved.
-    ///
-    /// The caller reached here because the oldest record failed or timed out, and it is about to
-    /// return that failure for the whole publish. Records behind it that already succeeded or were
-    /// individually rejected are recorded so the retry does not send them again. Anything else is
-    /// deliberately left in neither list: its failure is the same infrastructure failure the
-    /// caller is returning, and classifying it per record would report one outage many times.
-    fn harvest_ready_after_oldest_failure(
-        pending: &mut VecDeque<PendingRabbitMqConfirmation>,
-        outcome: &mut PerRecordOutcome<EmitterRecordId>,
-    ) {
-        let mut index = 1;
-        while index < pending.len() {
-            let ready = pending
-                .get_mut(index)
-                .and_then(|confirmation| (&mut confirmation.confirmation).now_or_never());
-            let Some(result) = ready else {
-                index += 1;
-                continue;
-            };
-            let settled = pending.remove(index).verified(
-                "the index came from scanning this same pending window, which nothing else \
-                 removes from",
-            );
-            let Ok(confirmation) = result else {
-                continue;
-            };
-            match Self::confirmed_answer(&settled.message.record, confirmation) {
-                ConfirmedAnswer::Delivered => outcome.deliver(settled.message.record.id),
-                ConfirmedAnswer::Rejected(rejected) => outcome.reject(rejected),
-                ConfirmedAnswer::Failed(_) => {}
-            }
-        }
-    }
-
-    /// The messages a confirmed write had on the channel it lost, in the order they were written,
-    /// each with the answer the broker gave for it first.
-    ///
-    /// Lapin resolves every confirm still outstanding when the broker closes a channel, one the
-    /// broker never answered with the loss, so once the loss is known each confirm holds the
-    /// broker's answer or that failure. The oldest message's confirm is spent when it is what
-    /// reported the loss, and Lapin answers a second read of a spent confirm with
-    /// `FutureCompleted`, which counts as no answer too.
-    fn answered_before_loss(
-        pending: VecDeque<PendingRabbitMqConfirmation>,
-    ) -> Vec<AnsweredMessage> {
-        let mut answered = Vec::with_capacity(pending.len());
-        for PendingRabbitMqConfirmation {
-            message,
-            confirmation,
-            ..
-        } in pending
-        {
-            let answer = match confirmation.now_or_never() {
-                Some(Ok(confirmation)) => Some(confirmation),
-                Some(Err(_)) | None => None,
-            };
-            answered.push(AnsweredMessage { message, answer });
-        }
-        answered
-    }
-
-    /// Settles the messages a confirmed write had on a channel it lost.
-    ///
-    /// Each answer the broker gave before the loss settles its message as it would have on an open
-    /// channel. When the broker refused a message for its size, the first message it left
-    /// unanswered whose body exceeds the limit is that message, and it is rejected. The broker
-    /// discarded every message after it, and when it answered every message before it, those
-    /// return to the front of `unsent` to be written on a new channel. An unanswered message before
-    /// the refused one may have reached its queue all the same, as it can on a quorum queue, and a
-    /// failing answer fails the write, so either leaves the write to the host's retry, as does any
-    /// other loss.
+    /// Settle all attributable answers before deciding whether a broker size refusal permits
+    /// the channel's discarded suffix to be written again. A mandatory answer without complete
+    /// attribution remains unresolved; a known return is a definitive rejection.
     fn settle_confirmed_loss(
+        exchange: &str,
         closure: ChannelClosure,
         answered: Vec<AnsweredMessage>,
         unsent: &mut VecDeque<RabbitMqMessage>,
         outcome: &mut PerRecordOutcome<EmitterRecordId>,
     ) -> EmitterWriteResult<()> {
+        let settlement = Self::settle_answered(exchange, &answered, outcome);
         let (limit, reason) = match closure {
             ChannelClosure::MessageTooLarge { limit, reason } => (limit, reason),
             ChannelClosure::Unattributed(reason) => {
-                Self::settle_answered(answered, outcome);
+                settlement?;
                 return Err(Self::publish_error(reason));
             }
         };
-        // The scan walks this write's messages on the lost channel, in the order they were written.
-        let Some(refused) = answered.iter().position(|answered| {
-            answered.answer.is_none() && answered.message.record.payload.len() > limit
-        }) else {
-            Self::settle_answered(answered, outcome);
+        // This is the current bounded window in publication order, not a shared lookup.
+        let Some(refused) = answered
+            .iter()
+            .position(|entry| entry.answer.is_none() && entry.message.record.payload.len() > limit)
+        else {
+            settlement?;
             return Err(Self::publish_error(reason));
         };
-        let mut failure = None;
+        let mut failure = match settlement {
+            Ok(attribution) => attribution.require_decided().err(),
+            Err(error) => Some(error),
+        };
         let mut discarded = Vec::new();
         for (index, AnsweredMessage { message, answer }) in answered.into_iter().enumerate() {
-            let Some(confirmation) = answer else {
-                match index.cmp(&refused) {
-                    Ordering::Less => {
-                        failure.get_or_insert_with(|| {
-                            Self::publish_error(
-                                "rabbitmq closed the channel before confirming a message written \
-                                 ahead of the one it refused",
-                            )
-                        });
-                    }
-                    Ordering::Equal => {
-                        outcome.reject(Self::refused_for_size(&message.record, limit));
-                    }
-                    Ordering::Greater => discarded.push(message),
-                }
+            if answer.is_some() {
                 continue;
-            };
-            match Self::confirmed_answer(&message.record, confirmation) {
-                ConfirmedAnswer::Delivered => outcome.deliver(message.record.id),
-                ConfirmedAnswer::Rejected(rejected) => outcome.reject(rejected),
-                ConfirmedAnswer::Failed(error) => {
-                    failure.get_or_insert(error);
+            }
+            match index.cmp(&refused) {
+                Ordering::Less => {
+                    failure.get_or_insert_with(|| {
+                        Self::publish_error(
+                            "rabbitmq closed the channel before confirming a message written \
+                             ahead of the one it refused",
+                        )
+                    });
                 }
+                Ordering::Equal => outcome.reject(Self::refused_for_size(&message.record, limit)),
+                Ordering::Greater => discarded.push(message),
             }
         }
         if let Some(error) = failure {
-            return Err(error.attach_printable(reason.to_string()));
+            return Err(error.attach_printable(reason));
         }
         for message in discarded.into_iter().rev() {
             unsent.push_front(message);
         }
         Ok(())
-    }
-
-    /// Settles every message the broker answered before a loss that leaves the rest unresolved.
-    fn settle_answered(
-        answered: Vec<AnsweredMessage>,
-        outcome: &mut PerRecordOutcome<EmitterRecordId>,
-    ) {
-        for AnsweredMessage { message, answer } in answered {
-            let Some(confirmation) = answer else {
-                continue;
-            };
-            match Self::confirmed_answer(&message.record, confirmation) {
-                ConfirmedAnswer::Delivered => outcome.deliver(message.record.id),
-                ConfirmedAnswer::Rejected(rejected) => outcome.reject(rejected),
-                ConfirmedAnswer::Failed(_) => {}
-            }
-        }
-    }
-
-    /// What the broker's publisher confirm for `record` settles. A confirm that carries a returned
-    /// message rejects the record whatever it acknowledges: the broker routed the message nowhere.
-    fn confirmed_answer(record: &EmitterRecord, confirmation: Confirmation) -> ConfirmedAnswer {
-        match confirmation {
-            Confirmation::Ack(None) => ConfirmedAnswer::Delivered,
-            Confirmation::Ack(Some(returned)) | Confirmation::Nack(Some(returned)) => {
-                ConfirmedAnswer::Rejected(record.rejected(Self::returned_message_reason(&returned)))
-            }
-            Confirmation::Nack(None) => ConfirmedAnswer::Failed(Self::publish_error(
-                "rabbitmq publisher confirm returned nack",
-            )),
-            Confirmation::NotRequested => ConfirmedAnswer::Failed(Self::publish_error(
-                "rabbitmq publisher confirms were not enabled",
-            )),
-        }
     }
 
     /// `record` rejected because the broker refused its body as larger than `limit`, its
@@ -1114,10 +938,11 @@ mod tests {
         }
     }
 
-    /// A message written under `routing_key`, whose body is `body`.
-    fn keyed(index: usize, routing_key: &str, body: &[u8]) -> RabbitMqMessage {
+    /// A mandatory message written under `routing_key`, whose body is `body`.
+    pub(super) fn keyed(index: usize, routing_key: &str, body: &[u8]) -> RabbitMqMessage {
         let mut record = record(index, 0);
         record.payload = body.to_vec();
+        record.envelope.mandatory = true;
         let properties =
             RabbitMqMessage::properties(&record).assured("the fixture envelope is valid");
         RabbitMqMessage {
@@ -1128,7 +953,7 @@ mod tests {
     }
 
     /// `message` as the broker returns it unrouted from `exchange`.
-    fn returned(exchange: &str, message: &RabbitMqMessage) -> BasicReturnMessage {
+    pub(super) fn returned(exchange: &str, message: &RabbitMqMessage) -> BasicReturnMessage {
         let mut delivery = Delivery::mock(
             0,
             exchange.into(),
@@ -1173,7 +998,9 @@ mod tests {
     }
 
     /// What `outcome` delivered and rejected, by record index, with each rejection's message.
-    fn settled(outcome: PerRecordOutcome<EmitterRecordId>) -> (Vec<usize>, Vec<(usize, String)>) {
+    pub(super) fn settled(
+        outcome: PerRecordOutcome<EmitterRecordId>,
+    ) -> (Vec<usize>, Vec<(usize, String)>) {
         let parts = outcome.into_parts();
         assert!(parts.infrastructure_error.is_none());
         let delivered = parts.delivered.iter().map(|id| id.index()).collect();
@@ -1185,8 +1012,99 @@ mod tests {
         (delivered, rejected)
     }
 
-    fn no_route() -> String {
+    pub(super) fn no_route() -> String {
         "rabbitmq returned the message unrouted with reply code 312: NO_ROUTE".to_string()
+    }
+
+    #[test]
+    fn a_multiple_confirmation_rejects_only_the_message_the_broker_returned() {
+        let routed = keyed(0, "order.created", b"first");
+        let unrouted = keyed(1, "order.unrouted", b"second");
+        // Lapin can attach the return to either confirm covered by a multiple acknowledgement.
+        let returned = returned("events", &unrouted);
+        let answered = vec![
+            AnsweredMessage {
+                message: routed,
+                answer: Some(Confirmation::Ack(Some(returned))),
+            },
+            AnsweredMessage {
+                message: unrouted,
+                answer: Some(Confirmation::Ack(None)),
+            },
+        ];
+        let mut outcome = PerRecordOutcome::empty();
+
+        RabbitMqPublisher::settle_answered("events", &answered, &mut outcome)
+            .assured("every return names a message in this window");
+
+        assert_eq!(settled(outcome), (vec![0], vec![(1, no_route())]));
+    }
+
+    #[test]
+    fn a_return_carried_by_a_later_confirm_still_rejects_the_first_message() {
+        let unrouted = keyed(0, "order.unrouted", b"first");
+        let routed = keyed(1, "order.created", b"second");
+        let returned = returned("events", &unrouted);
+        let answered = vec![
+            AnsweredMessage {
+                message: unrouted,
+                answer: Some(Confirmation::Ack(None)),
+            },
+            AnsweredMessage {
+                message: routed,
+                answer: Some(Confirmation::Ack(Some(returned))),
+            },
+        ];
+        let mut outcome = PerRecordOutcome::empty();
+        RabbitMqPublisher::settle_answered("events", &answered, &mut outcome)
+            .assured("every return names a message in this window");
+        assert_eq!(settled(outcome), (vec![1], vec![(0, no_route())]));
+    }
+
+    #[test]
+    fn indistinguishable_confirmed_messages_take_returns_in_written_order() {
+        let first = keyed(0, "order.created", b"same");
+        let second = keyed(1, "order.created", b"same");
+        let returned = returned("events", &second);
+        let answered = vec![
+            AnsweredMessage {
+                message: first,
+                answer: Some(Confirmation::Ack(None)),
+            },
+            AnsweredMessage {
+                message: second,
+                answer: Some(Confirmation::Ack(Some(returned))),
+            },
+        ];
+        let mut outcome = PerRecordOutcome::empty();
+        RabbitMqPublisher::settle_answered("events", &answered, &mut outcome)
+            .assured("every return names a message in this window");
+        assert_eq!(settled(outcome), (vec![1], vec![(0, no_route())]));
+    }
+
+    #[test]
+    fn return_attribution_compares_properties_when_the_key_and_body_are_identical() {
+        let mut first = keyed(0, "order.created", b"same");
+        first.record.headers = vec![("event".to_string(), "first".to_string())];
+        first.properties = RabbitMqMessage::properties(&first.record).assured("valid headers");
+        let mut second = keyed(1, "order.created", b"same");
+        second.record.headers = vec![("event".to_string(), "second".to_string())];
+        second.properties = RabbitMqMessage::properties(&second.record).assured("valid headers");
+        let returned = returned("events", &second);
+        let answered = vec![
+            AnsweredMessage {
+                message: first,
+                answer: Some(Confirmation::Ack(Some(returned))),
+            },
+            AnsweredMessage {
+                message: second,
+                answer: Some(Confirmation::Ack(None)),
+            },
+        ];
+        let mut outcome = PerRecordOutcome::empty();
+        RabbitMqPublisher::settle_answered("events", &answered, &mut outcome)
+            .assured("every return names a message in this window");
+        assert_eq!(settled(outcome), (vec![0], vec![(1, no_route())]));
     }
 
     fn too_large(body_bytes: usize) -> String {
@@ -1250,16 +1168,17 @@ mod tests {
 
     #[test]
     fn a_confirmed_refusal_keeps_earlier_answers_and_writes_the_discarded_messages_again() {
+        let mut rejected = message(1, 10);
+        rejected.record.envelope.mandatory = true;
+        let mut returned = returned("", &rejected);
+        returned.reply_code = 311;
+        returned.reply_text = "CONTENT_TOO_LARGE".into();
         let answered = vec![
             answered(0, 10, Some(Confirmation::Ack(None))),
-            answered(
-                1,
-                10,
-                Some(Confirmation::Ack(Some(returned_message(
-                    311,
-                    "CONTENT_TOO_LARGE",
-                )))),
-            ),
+            AnsweredMessage {
+                message: rejected,
+                answer: Some(Confirmation::Ack(Some(returned))),
+            },
             answered(2, 2000, None),
             answered(3, 10, None),
         ];
@@ -1267,6 +1186,7 @@ mod tests {
         let mut outcome = PerRecordOutcome::empty();
 
         RabbitMqPublisher::settle_confirmed_loss(
+            "",
             size_refusal(),
             answered,
             &mut unsent,
@@ -1309,6 +1229,7 @@ mod tests {
             let mut outcome = PerRecordOutcome::empty();
 
             let settled_loss = RabbitMqPublisher::settle_confirmed_loss(
+                "",
                 size_refusal(),
                 answered,
                 &mut unsent,
@@ -1319,6 +1240,35 @@ mod tests {
             assert_eq!(ids(&unsent), vec![3]);
             assert_eq!(settled(outcome), (Vec::new(), vec![(1, too_large(2000))]));
         }
+    }
+
+    #[test]
+    fn size_recovery_keeps_a_partially_attributed_mandatory_prefix_for_retry() {
+        let mut first = message(0, 10);
+        first.record.envelope.mandatory = true;
+        let answered = vec![
+            AnsweredMessage {
+                message: first,
+                answer: Some(Confirmation::Ack(None)),
+            },
+            answered(1, 2000, None),
+            answered(2, 10, None),
+        ];
+        let mut unsent = VecDeque::from([message(3, 10)]);
+        let mut outcome = PerRecordOutcome::empty();
+        let result = RabbitMqPublisher::settle_confirmed_loss(
+            "",
+            size_refusal(),
+            answered,
+            &mut unsent,
+            &mut outcome,
+        );
+        assert!(
+            result.is_err(),
+            "the mandatory prefix still has an unknown return outcome"
+        );
+        assert_eq!(ids(&unsent), vec![3]);
+        assert_eq!(settled(outcome), (Vec::new(), vec![(1, too_large(2000))]));
     }
 
     #[test]
@@ -1336,6 +1286,7 @@ mod tests {
             let mut outcome = PerRecordOutcome::empty();
 
             let settled_loss = RabbitMqPublisher::settle_confirmed_loss(
+                "",
                 closure,
                 answered,
                 &mut unsent,
@@ -1345,38 +1296,6 @@ mod tests {
             assert!(settled_loss.is_err());
             assert_eq!(ids(&unsent), vec![2]);
             assert_eq!(settled(outcome), (vec![0], Vec::new()));
-        }
-    }
-
-    /// A confirm that carries a returned message rejects its record whatever the reply code: the
-    /// broker routed the message nowhere, under `MANDATORY` because no binding matched it.
-    #[test]
-    fn publisher_confirms_deliver_reject_or_fail_their_message() {
-        let message = record(0, 10);
-        let delivered = RabbitMqPublisher::confirmed_answer(&message, Confirmation::Ack(None));
-        assert!(matches!(delivered, ConfirmedAnswer::Delivered));
-        for rejection in [
-            Confirmation::Ack(Some(returned_message(312, "NO_ROUTE"))),
-            Confirmation::Nack(Some(returned_message(312, "NO_ROUTE"))),
-            Confirmation::Ack(Some(returned_message(311, "CONTENT_TOO_LARGE"))),
-        ] {
-            let ConfirmedAnswer::Rejected(rejected) =
-                RabbitMqPublisher::confirmed_answer(&message, rejection)
-            else {
-                panic!("a returned message rejects its record");
-            };
-            assert!(
-                rejected
-                    .error
-                    .message
-                    .starts_with("rabbitmq returned the message unrouted with reply code 31"),
-                "{}",
-                rejected.error.message
-            );
-        }
-        for failure in [Confirmation::Nack(None), Confirmation::NotRequested] {
-            let answer = RabbitMqPublisher::confirmed_answer(&message, failure);
-            assert!(matches!(answer, ConfirmedAnswer::Failed(_)));
         }
     }
 
@@ -1422,6 +1341,7 @@ mod tests {
         let first = keyed(0, "order.created", b"same");
         let mut second = keyed(1, "order.created", b"same");
         second.record.envelope = RecordEnvelope {
+            mandatory: true,
             persistent: true,
             timestamp: Some(Timestamp::from_unix_nanos(0)),
             properties: vec![nervix_connector::RecordProperty {
@@ -1436,10 +1356,18 @@ mod tests {
         assert!(!first.is_returned_by("events", &returned));
         assert!(second.is_returned_by("events", &returned));
         let mut outcome = PerRecordOutcome::empty();
-        RabbitMqPublisher::settle_taken(
+        RabbitMqPublisher::settle_answered(
             "events",
-            vec![first, second],
-            vec![returned],
+            &[
+                AnsweredMessage {
+                    message: first,
+                    answer: Some(Confirmation::Ack(Some(returned))),
+                },
+                AnsweredMessage {
+                    message: second,
+                    answer: Some(Confirmation::Ack(None)),
+                },
+            ],
             &mut outcome,
         )
         .assured("only the second message carries the returned properties");
@@ -1748,13 +1676,5 @@ mod tests {
                  milliseconds"
             )
         );
-    }
-
-    fn returned_message(reply_code: u16, reply_text: &str) -> BasicReturnMessage {
-        BasicReturnMessage {
-            delivery: Delivery::mock(0, "".into(), "notifications".into(), false, Vec::new()),
-            reply_code,
-            reply_text: reply_text.into(),
-        }
     }
 }

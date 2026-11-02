@@ -107,6 +107,15 @@ and an absent failure means none has been observed. These are task-owned executi
 never persisted state or substitutes for a missing publishing mode. The
 [connector contract](./connector-contract.md#finishing-an-emitter) owns their completion semantics.
 
+RabbitMQ's volatile confirmation owner distinguishes a completely answered window, a deadline,
+and a lost channel with the answers collected before it. A positive driver acknowledgement and a
+returned message's owning record are separate facts. Return attribution produces a typed decided
+or incomplete state for positive mandatory answers; size-refusal recovery requires the decided
+state before replacing the channel and continuing. Unanswered records and mandatory answers whose
+return is still unknown remain unresolved for retry, while definite returns remain rejected.
+Nothing in this window is persisted. The [connector contract](./connector-contract.md) owns the
+confirmation and retry boundaries.
+
 The Kafka emitter installs its effective native queue byte capacity as `NonZeroU64` after librdkafka
 validates the client configuration. Its confirmation window's on-demand settlement returns
 `Some(EmitterRecordId)` for an answered record and `None` for an empty window. A refused enqueue
