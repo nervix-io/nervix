@@ -20,6 +20,16 @@ use super::nats_observer::NatsObserver;
 
 pub(crate) const BROKER_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// When a broker says a record it delivered was made, for a broker whose records carry a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum BrokerRecordTime {
+    /// The time the record's producer wrote on it, in Unix milliseconds: a Kafka `CreateTime`.
+    Created { unix_millis: i64 },
+    /// The time the broker appended the record to its log, in Unix milliseconds: a Kafka
+    /// `LogAppendTime`.
+    Appended { unix_millis: i64 },
+}
+
 #[derive(Debug)]
 pub(crate) struct BrokerMessage {
     /// The payload as text, with any byte that is not valid UTF-8 replaced.
@@ -34,6 +44,8 @@ pub(crate) struct BrokerMessage {
     pub(crate) key: Option<String>,
     /// The ordering group the broker delivered the payload in: an SQS FIFO message group.
     pub(crate) group: Option<String>,
+    /// When the broker says the record was made: a Kafka record's create or log-append time.
+    pub(crate) time: Option<BrokerRecordTime>,
     /// The headers a broker delivered with a type of their own, sorted by name: SQS message
     /// attributes with their data types. Empty for a broker whose headers carry no type.
     pub(crate) typed_headers: Vec<TypedBrokerHeader>,
@@ -57,6 +69,7 @@ impl BrokerMessage {
             headers,
             key: None,
             group: None,
+            time: None,
             typed_headers: Vec::new(),
         }
     }
@@ -68,6 +81,11 @@ impl BrokerMessage {
 
     pub(crate) fn with_key(mut self, key: Option<String>) -> Self {
         self.key = key;
+        self
+    }
+
+    pub(crate) fn with_time(mut self, time: Option<BrokerRecordTime>) -> Self {
+        self.time = time;
         self
     }
 

@@ -19,7 +19,7 @@ use nervix_connector::{
     AckConfirmation, BrokerPublishingMode, EmitterBoundedExecution, EmitterEventReporter,
     EmitterFinish, EmitterFinishError, EmitterGeneralErrorHandler, EmitterHost, EmitterLifecycle,
     EmitterRecord, EmitterRecordAcknowledgements, EmitterRecordId, EmitterStagingDirectory,
-    EmitterTransientErrorStatus, RecordEmitter,
+    EmitterTransientErrorStatus, RecordEmitter, RecordEnvelope,
 };
 use nervix_models::{ClientConfigEntry, KafkaTopicName, Timestamp};
 use nervix_primitives::{
@@ -31,13 +31,18 @@ use nervix_primitives::{
     time::{Instant, sleep, timeout},
 };
 use rdkafka::{
+    config::ClientConfig,
+    consumer::{BaseConsumer, Consumer as _},
     error::{KafkaError, RDKafkaErrorCode},
+    message::{Message as _, Timestamp as KafkaTimestamp},
     mocking::MockCluster,
     producer::DefaultProducerContext,
     types::{RDKafkaApiKey, RDKafkaRespErr},
 };
 
-use super::{KafkaAnswer, KafkaQueueWaitError, KafkaTopicEmitter, KafkaTopicEmitterConfig};
+use super::{
+    KafkaAnswer, KafkaCreateTime, KafkaQueueWaitError, KafkaTopicEmitter, KafkaTopicEmitterConfig,
+};
 
 pub(super) const TOPIC: &str = "orders";
 
@@ -258,9 +263,66 @@ fn ids(indexes: impl IntoIterator<Item = usize>) -> BTreeSet<EmitterRecordId> {
 /// publish would await for it.
 pub(super) fn awaited_hand_over(sink: &KafkaTopicEmitter, record: EmitterRecord) -> KafkaAnswer {
     let (answer, report) = oneshot::channel();
-    sink.hand_over(&record, Some(answer))
+    let create_time =
+        KafkaCreateTime::of(&record).expect("a test record's timestamp is a Kafka record time");
+    sink.hand_over(&record, create_time, Some(answer))
         .expect("the producer takes the record");
     KafkaAnswer { report }
+}
+
+/// A record like [`record`]'s, whose envelope's `TIMESTAMP` is the RFC 3339 instant `written`.
+fn timed_record(index: usize, written: &str) -> EmitterRecord {
+    let timestamp = written
+        .parse::<Timestamp>()
+        .expect("every case writes an RFC 3339 instant");
+    record(index, PARTITION_ZERO_KEYS[0], small_payload(index)).with_envelope(RecordEnvelope {
+        timestamp: Some(timestamp),
+        ..RecordEnvelope::default()
+    })
+}
+
+/// One record a consumer read back from the test topic: its payload and the time its Kafka record
+/// carries.
+#[derive(Debug, PartialEq, Eq)]
+struct ReadBack {
+    payload: Vec<u8>,
+    time: KafkaTimestamp,
+}
+
+/// The first `count` records of the test topic, read back in partition order by a consumer of
+/// `cluster` within thirty seconds.
+fn read_back(
+    cluster: &MockCluster<'static, DefaultProducerContext>,
+    count: usize,
+) -> Vec<ReadBack> {
+    let consumer: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", cluster.bootstrap_servers())
+        .set("group.id", "record-times")
+        .set("auto.offset.reset", "earliest")
+        .set("enable.auto.commit", "false")
+        .create()
+        .assured("librdkafka accepts the reader's configuration");
+    consumer
+        .subscribe(&[TOPIC])
+        .assured("a reader subscribes to the test topic");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut records = Vec::with_capacity(count);
+    while records.len() < count {
+        assert!(
+            Instant::now() < deadline,
+            "read back {} of {count} records within thirty seconds",
+            records.len()
+        );
+        let Some(message) = consumer.poll(Duration::from_millis(100)) else {
+            continue;
+        };
+        let message = message.assured("the mock broker serves the records the test produced");
+        records.push(ReadBack {
+            payload: message.payload().unwrap_or_default().to_vec(),
+            time: message.timestamp(),
+        });
+    }
+    records
 }
 
 #[nervix_primitives::test]
@@ -1091,4 +1153,192 @@ async fn a_flush_that_gives_up_after_every_report_was_served_sent_every_record()
         .await
         .expect("the polling thread was held inside the probe's report before the flush gave up");
     drop(hold.release);
+}
+
+#[nervix_primitives::test]
+async fn a_record_carries_its_envelope_timestamp_as_the_time_its_kafka_record_was_created() {
+    let cluster = cluster(1, 1);
+    let mut sink = sink(&cluster, &[], confirmed(1, Duration::from_secs(60)));
+
+    let parts = sink
+        .publish(vec![
+            timed_record(0, "2001-02-03T04:05:06.789Z"),
+            timed_record(1, "2001-02-03T04:05:06.789999999Z"),
+            timed_record(2, "1970-01-01T00:00:00.001Z"),
+        ])
+        .await
+        .into_parts();
+
+    assert!(
+        parts.infrastructure_error.is_none(),
+        "a broker that answers every record fails nothing: {:?}",
+        parts.infrastructure_error
+    );
+    assert!(parts.rejected.is_empty());
+    assert_eq!(
+        parts.delivered.into_iter().collect::<BTreeSet<_>>(),
+        ids(0..3)
+    );
+    assert_eq!(
+        read_back(&cluster, 3),
+        vec![
+            ReadBack {
+                payload: small_payload(0),
+                time: KafkaTimestamp::CreateTime(981_173_106_789),
+            },
+            ReadBack {
+                payload: small_payload(1),
+                time: KafkaTimestamp::CreateTime(981_173_106_789),
+            },
+            ReadBack {
+                payload: small_payload(2),
+                time: KafkaTimestamp::CreateTime(1),
+            },
+        ]
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_record_without_a_timestamp_carries_the_create_time_its_producer_gives_it() {
+    let cluster = cluster(1, 1);
+    let mut sink = sink(&cluster, &[], confirmed(1, Duration::from_secs(60)));
+
+    // The timed record goes first, so a record that took its create time from the record before it
+    // would read back with the timed record's 2001 time.
+    let parts = sink
+        .publish(vec![
+            timed_record(0, "2001-02-03T04:05:06.789Z"),
+            record(1, PARTITION_ZERO_KEYS[0], small_payload(1)),
+        ])
+        .await
+        .into_parts();
+
+    assert_eq!(
+        parts.delivered.into_iter().collect::<BTreeSet<_>>(),
+        ids(0..2)
+    );
+    let read = read_back(&cluster, 2);
+    let [timed, untimed] = read.as_slice() else {
+        panic!("the consumer reads back exactly the two records: {read:?}");
+    };
+    assert_eq!(
+        timed,
+        &ReadBack {
+            payload: small_payload(0),
+            time: KafkaTimestamp::CreateTime(981_173_106_789),
+        }
+    );
+    assert_eq!(untimed.payload, small_payload(1));
+    let KafkaTimestamp::CreateTime(created) = untimed.time else {
+        panic!("the producer gives a record without a timestamp its own create time: {untimed:?}");
+    };
+    assert!(
+        created > 981_173_106_789,
+        "the producer's clock gives the untimed record a time after its timed neighbour's, not \
+         {created}"
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_confirmed_publish_rejects_a_record_whose_timestamp_precedes_the_first_record_time() {
+    let cluster = cluster(1, 1);
+    let mut sink = sink(&cluster, &[], confirmed(4, Duration::from_secs(60)));
+
+    let parts = sink
+        .publish(vec![
+            timed_record(0, "2001-02-03T04:05:06.789Z"),
+            timed_record(1, "1970-01-01T00:00:00.000999999Z"),
+            timed_record(2, "1969-12-31T23:59:59.999Z"),
+            timed_record(3, "1970-01-01T00:00:00.001Z"),
+        ])
+        .await
+        .into_parts();
+
+    assert!(
+        parts.infrastructure_error.is_none(),
+        "a record without a Kafka record time fails nothing else: {:?}",
+        parts.infrastructure_error
+    );
+    assert_eq!(
+        parts.delivered.into_iter().collect::<BTreeSet<_>>(),
+        ids([0, 3])
+    );
+    let rejected = parts
+        .rejected
+        .iter()
+        .map(|rejected| (rejected.id, rejected.error.message.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rejected,
+        vec![
+            (
+                EmitterRecordId::new(1),
+                "kafka record timestamp 1970-01-01T00:00:00.000999999Z precedes \
+                 1970-01-01T00:00:00.001Z, the earliest time a kafka record carries"
+                    .to_string()
+            ),
+            (
+                EmitterRecordId::new(2),
+                "kafka record timestamp 1969-12-31T23:59:59.999Z precedes \
+                 1970-01-01T00:00:00.001Z, the earliest time a kafka record carries"
+                    .to_string()
+            ),
+        ]
+    );
+    assert_eq!(
+        read_back(&cluster, 2),
+        vec![
+            ReadBack {
+                payload: small_payload(0),
+                time: KafkaTimestamp::CreateTime(981_173_106_789),
+            },
+            ReadBack {
+                payload: small_payload(3),
+                time: KafkaTimestamp::CreateTime(1),
+            },
+        ]
+    );
+    assert_eq!(sink.retained_records(), 0);
+}
+
+#[nervix_primitives::test]
+async fn an_unconfirmed_publish_rejects_a_record_whose_timestamp_precedes_the_first_record_time() {
+    let cluster = cluster(1, 1);
+    let mut sink = sink(&cluster, &[], BrokerPublishingMode::NoAck);
+
+    let parts = sink
+        .publish(vec![
+            timed_record(0, "1970-01-01T00:00:00Z"),
+            timed_record(1, "2001-02-03T04:05:06.789Z"),
+        ])
+        .await
+        .into_parts();
+
+    assert!(
+        parts.infrastructure_error.is_none(),
+        "a record without a Kafka record time fails nothing else: {:?}",
+        parts.infrastructure_error
+    );
+    assert_eq!(parts.delivered, vec![EmitterRecordId::new(1)]);
+    let rejected = parts
+        .rejected
+        .iter()
+        .map(|rejected| (rejected.id, rejected.error.message.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rejected,
+        vec![(
+            EmitterRecordId::new(0),
+            "kafka record timestamp 1970-01-01T00:00:00Z precedes 1970-01-01T00:00:00.001Z, the \
+             earliest time a kafka record carries"
+                .to_string()
+        )]
+    );
+    assert_eq!(
+        read_back(&cluster, 1),
+        vec![ReadBack {
+            payload: small_payload(1),
+            time: KafkaTimestamp::CreateTime(981_173_106_789),
+        }]
+    );
 }
