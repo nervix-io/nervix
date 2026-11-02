@@ -1579,7 +1579,7 @@ Feature: Iceberg emission
       | 1            |
       | 3            |
 
-  @iceberg_commit_whole_class
+  @iceberg_commit_whole_class @slots_2
   Scenario Outline: An Iceberg staged file larger than the bulk memory class commits only once the whole class is free
     Given Iceberg dependencies are running
     And a <cluster_size> node nervix cluster is started

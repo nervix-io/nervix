@@ -582,7 +582,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/connectors/__fuzz__/surface__bolero_generated_entities_state_only_what_their_entity_declares/corpus"
-domain_version = 21
+domain_version = 22
 features = []
 id = "models-connector-declarations"
 invariant = "A generated ingestor and emitter of every entity state only what their entity declares: a declared delivery or publishing mode whose required option choices they make, a quiesce mode their entity honors, a body of the declared form, batching the declared legality admits, a type contract exactly for direct-value bodies and a client of a declared connector."
@@ -3281,6 +3281,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/kafka/src/topic/__fuzz__/topic__create_time_tests__bolero_create_times_are_the_millisecond_containing_their_timestamp/corpus"
+domain_version = 1
+features = []
+id = "kafka-record-create-times"
+invariant = "A Unix-nanosecond timestamp whose millisecond is after the Unix epoch becomes the Kafka create time of exactly that millisecond, which reads back as the timestamp floored to it; every millisecond after the epoch round-trips unchanged; and every earlier timestamp is refused, naming that timestamp."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-connector-kafka"
+random_iterations = 256
+source = "crates/connectors/kafka/src/topic/create_time_tests.rs"
+test = "topic::create_time_tests::bolero_create_times_are_the_millisecond_containing_their_timestamp"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/connectors/kafka/src/topic/__fuzz__/topic__ingestor__metadata_tests__bolero_kafka_record_metadata_preserves_every_field/corpus"
 domain_version = 1
 features = []
@@ -3537,7 +3552,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_entity_presentations_keep_declared_rows_and_complete_configuration/corpus"
-domain_version = 16
+domain_version = 17
 features = []
 id = "connector-entity-presentation"
 invariant = "Every generated source and sink entity uses its declared phrase and ordered inspection rows, while the canonical Plexus built from that shared presentation reparses to its complete Model including all options, modes, payload mappings, flush and error policies."

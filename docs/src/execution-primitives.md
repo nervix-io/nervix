@@ -528,9 +528,10 @@ architecture diagnostics. `just test` includes ordinary tests, public scenarios 
 doctests. Primitive conformance and the complete model selections also have dedicated recipes;
 the [development guide](./developing-nervix.md) owns the full command catalog. A change affecting
 Shuttle, Loom or Turmoil carries the corresponding PR label so its dedicated CI jobs run. A change
-covered by the Deloxide applicability rule carries `deloxide`; membership, failover, recovery or
-delivery behavior exercised by external Chaos carries `chaos`. Labels enable evidence and do not
-replace the local checks or source-owned applicability review.
+covered by the Deloxide applicability rule runs its lanes locally, and membership, failover,
+recovery or delivery behavior exercised by external Chaos runs its suite locally: the `deloxide`
+and `chaos` labels stay off by default, as [CI labels](./developing-nervix.md#ci-labels) says.
+Labels enable evidence and do not replace the local checks or source-owned applicability review.
 
 Registered Bolero properties use the same production path and complete assertion in ordinary
 randomized/corpus execution and sanitizer fuzzing. Randomized/corpus CI requires a pull request

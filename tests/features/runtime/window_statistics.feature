@@ -136,6 +136,7 @@ Feature: Window statistics
       | 1            |
       | 3            |
 
+  @slots_2
   Scenario Outline: Sliding windows compute exact statistics per branch and retract stepped rows
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
