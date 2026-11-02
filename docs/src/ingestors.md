@@ -631,7 +631,10 @@ Transport-specific schemes and keys:
 - `NATS`: use `tls://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `PULSAR`: use `pulsar+ssl://...` in `addr`. Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
 - `RABBITMQ`: use `amqps://...` in `addr`. Nervix honors `tls_ca_file` and presents `tls_cert_file` with `tls_key_file` as its client certificate; see [RabbitMQ](#rabbitmq).
-- `REDIS`: use `rediss://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
+- `REDIS`: use `rediss://...` in `addr`. Nervix trusts the host's trust store, or only
+  `tls_ca_file` when it is set, and presents `tls_cert_file` with `tls_key_file` as its client
+  certificate. A plaintext `redis://` address reads none of the three files; see
+  [Redis Pub/Sub](#redis-pubsub).
 - `SQS`: use an `https://...` `endpoint`. Nervix honors `tls_ca_file`, which is primarily useful for SQS-compatible local/test endpoints, and `CREATE SQS CLIENT` refuses a file that holds no certificate it could trust. An SQS connection presents no client certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and `tls_key_file`.
 - `SYSLOG`: select `'protocol' = 'tls'`. An ingestor requires `tls_cert_file` and
   `tls_key_file`; optional `tls_ca_file` enables required client-certificate verification.
@@ -923,10 +926,10 @@ see [Metrics And Observability](metrics-and-observability.md#client-ingestors).
 ## External Names
 
 An ingestor names the external entity it reads with a string literal: a topic, consumer group,
-subscription, queue, channel, subject, queue group, or MQTT topic filter. Nervix keeps the name
-exactly as written, letter case included, and sends it to the external system as written. Each
-entity validates its names when `CREATE` or `ALTER` applies, by the external system's own rule
-where it has one:
+subscription, queue, channel, channel pattern, subject, queue group, or MQTT topic filter. Nervix
+keeps the name exactly as written, letter case included, and sends it to the external system as
+written. Each entity validates its names when `CREATE` or `ALTER` applies, by the external
+system's own rule where it has one:
 
 | Entity | Name | Rule |
 | --- | --- | --- |
@@ -936,7 +939,8 @@ where it has one:
 | `PULSAR TOPIC` | `SUBSCRIPTION` | 1 to 255 bytes without control characters |
 | `RABBITMQ QUEUE` | `QUEUE` | 1 to 255 bytes: the AMQP 0-9-1 limit |
 | `SQS QUEUE` | `QUEUE` | 1 to 80 ASCII letters, digits, `-`, and `_`, and a FIFO queue's name ends in `.fifo`: SQS's own rule |
-| `REDIS PUBSUB` | `CHANNEL` | 1 to 1,024 bytes of any text; a `*` is the character itself, and pattern subscriptions are not offered |
+| `REDIS PUBSUB` | `CHANNEL` | 1 to 1,024 bytes of any text; a `*` is the character itself |
+| `REDIS PUBSUB` | `PATTERN` | 1 to 1,024 bytes of any text, which Redis matches against channel names as a glob; see [Redis Pub/Sub](#redis-pubsub) |
 | `NATS SUBJECT` | `SUBJECT` | At most 1,024 bytes of `.`-separated tokens, none empty, without whitespace or control characters; `*` stands for one token and `>` for the rest, each only as a whole token, and `>` only last |
 | `NATS SUBJECT` | `QUEUE GROUP` | 1 to 255 bytes without whitespace or control characters |
 | `MQTT TOPIC` | `TOPIC` | A topic filter of 1 to 65,535 bytes without NUL; `+` stands for one level and `#` for the rest, each only as a whole level, and `#` only last. Levels are joined by `/` and may be empty. The first level is not `$share`, since Nervix forms the shared subscription itself |
@@ -959,7 +963,7 @@ under the same head. `DECODE USING <codec>`, the timestamp, the filter, the rout
 | `KAFKA TOPIC` | A topic, through a `KAFKA CLIENT` | [Kafka](#kafka) |
 | `PULSAR TOPIC` | A topic, through a `PULSAR CLIENT` | [Pulsar](#pulsar) |
 | `RABBITMQ QUEUE` | A queue, through a `RABBITMQ CLIENT` | [RabbitMQ](#rabbitmq) |
-| `REDIS PUBSUB` | A channel, through a `REDIS CLIENT` | [Redis Pub/Sub](#redis-pubsub) |
+| `REDIS PUBSUB` | A channel, or every channel a pattern matches, through a `REDIS CLIENT` | [Redis Pub/Sub](#redis-pubsub) |
 | `MQTT TOPIC` | A topic filter, through an `MQTT CLIENT` | [MQTT](#mqtt) |
 | `NATS SUBJECT` | A subject, through a `NATS CLIENT` | [NATS](#nats) |
 | `ZEROMQ PULL` | The PULL socket of a `ZEROMQ CLIENT` | [ZeroMQ](#zeromq) |
@@ -1508,7 +1512,7 @@ naming the key and its required constraint without repeating the address or file
 <!-- connector-matrix:ingest-redis-pubsub:start -->
 ```plexus,ignore
 CREATE REDIS PUBSUB INGESTOR <name>
-  FROM <client> CHANNEL 'orders'
+  FROM <client> (CHANNEL 'orders' | PATTERN 'orders.*')
   MODE <mode>
   ON QUIESCE <quiesce>
   DECODE USING <codec>
@@ -1532,7 +1536,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Acknowledgement confirmation | none |
 | Buffers | messages read ahead of intake: set by subscription_buffer_messages; when full, holds back what fills it |
 | Network waits | subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE or PSUBSCRIBE: `connect_timeout_ms`; 30s when omitted<br>idle subscription activity, including its PING probe: `idle_timeout_ms`; required |
-| Driver limits | None declared. |
+| Driver limits | Redis closes a subscription whose unsent messages pass the server's client-output-buffer-limit for Pub/Sub clients, by default 32 MiB at once or 8 MiB held for 60 seconds; the messages it held are lost. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |
 
 See the [REDIS PUBSUB capability and mirror reference](connector-capabilities.md#redis-pubsub-ingest).
@@ -1569,30 +1573,58 @@ with the new body.
 Redis Pub/Sub carries no transport headers, so `read_header` and `read_headers` are refused when
 the ingestor is created.
 
-Redis Pub/Sub has no retained backlog, so it cannot suspend honestly. Both `ON QUIESCE BUFFER`
-and `ON QUIESCE DROP` keep reading and keep the subscriber healthy. `BUFFER` retains payloads up
-to its byte bound, then applies its declared `DROP OLDEST` or `DROP NEWEST` overflow policy;
-`DROP` discards every payload during the hold. Discards count in
-`nervix_ingestor_quiesce_dropped_total`. A `REDIS CLIENT` declares connection-pool bounds even
-when only ingestors reference it; see [Database Client Connection Pools](database-client-pools.md).
-Each subscription owns a separate connection, which the client's command-pool lifetimes,
-`pool_idle_timeout_ms` and `pool_max_lifetime_ms`, never close. It resolves the `addr` hostname through the node's
+Redis Pub/Sub has no retained backlog, so it cannot suspend honestly. A model alteration's entity
+hold and a domain pause apply `ON QUIESCE` and keep the subscription open: `BUFFER` and `DROP`
+both keep reading and keep the subscriber healthy. `BUFFER` retains payloads up to its byte bound,
+then applies its declared `DROP OLDEST` or `DROP NEWEST` overflow policy; `DROP` discards every
+payload during the hold. Discards count in `nervix_ingestor_quiesce_dropped_total`. Memory
+pressure also keeps reading and sheds what arrives, as [Quiesce Modes](#quiesce-modes) describes.
+
+An ownership handoff and a graceful shutdown do not consult `ON QUIESCE`. They stop intake by
+suspending the source, and suspending a Redis source closes its subscription. A message published
+from then until an instance subscribes again reaches no Nervix subscriber and is lost: after a
+handoff, until the destination subscribes once the new schedule revision activates, and after a
+failed fence or drain, until the former owner subscribes again. A payload intake had already taken
+continues through its routes, while messages still waiting in the subscription's read-ahead are
+discarded with it.
+
+A `REDIS CLIENT` declares connection-pool bounds even when only ingestors reference it; see
+[Database Client Connection Pools](database-client-pools.md). Each subscription owns a separate
+connection, which the client's command-pool lifetimes, `pool_idle_timeout_ms` and
+`pool_max_lifetime_ms`, never close. It resolves the `addr` hostname through the node's
 asynchronous DNS resolver on initial subscribe and every resume after a disconnect; it does not
-consume a pooled command connection. For `rediss://`, TLS verifies the original hostname and
-uses the configured CA and optional client identity. DNS and connection failures follow the
-source's existing retry cadence; Redis Pub/Sub does not replay messages missed while disconnected.
+consume a pooled command connection. DNS and connection failures follow the source's existing
+retry cadence; Redis Pub/Sub does not replay messages missed while disconnected.
+
+For `rediss://`, TLS verifies the original hostname. It trusts the host's trust store, or only
+the certificates in `tls_ca_file` when the client sets it, and presents `tls_cert_file` with
+`tls_key_file` as its client certificate. A plaintext `redis://` address reads none of these
+files. The subscription and an emitter's command connections build TLS separately, and they
+differ in one case: when part of the host's trust store cannot be read, such as an unreadable file
+or a malformed certificate, the subscription logs a warning and trusts the certificates it could
+read, while every command connection fails to open. `CREATE REDIS CLIENT` accepts an address with
+the driver's `#insecure` fragment, but neither the subscription nor a command connection connects
+with it; each reports the failure as its transient error and retries on its policy.
 
 A Redis ingestor's client must set `subscription_buffer_messages` and `idle_timeout_ms` in its
 `CONFIG`; neither key has an implicit default. The message capacity bounds read-ahead separately
 from `BUFFER MAX SIZE`, which bounds retained payload bytes during quiesce. It is a positive whole
 number that fits the bounded channel.
 For example, choose `'subscription_buffer_messages' = '1024'` and `'idle_timeout_ms' = '30000'`
-for a 1,024-message handoff and a 30-second idle interval. A full message handoff stops TCP reads; quiesced
-intake still applies its declared `BUFFER` overflow policy or counts the messages `DROP` discards.
-Malformed capacity values are refused at CREATE CLIENT, including after template rendering. The
-source still requires both keys when its plan is built. This handoff applies TCP backpressure
-when full; it does not discard a message to make room. Redis Pub/Sub still offers no replay or
-delivery acknowledgement, so neither buffer recovers messages missed during a disconnect.
+for a 1,024-message handoff and a 30-second idle interval. A full message handoff stops TCP reads;
+quiesced intake still applies its declared `BUFFER` overflow policy or counts the messages `DROP`
+discards. Malformed capacity values are refused at CREATE CLIENT, including after template
+rendering. The source still requires both keys when its plan is built. This handoff applies TCP
+backpressure when full; it does not discard a message to make room. Redis Pub/Sub still offers no
+replay or delivery acknowledgement, so neither buffer recovers messages missed during a disconnect.
+
+Redis does not wait for a subscriber that stops reading. It keeps what it cannot send in the
+subscriber's output buffer and closes the subscription once that passes its
+`client-output-buffer-limit` for Pub/Sub clients, by default 32 MiB at once or 8 MiB held for 60
+seconds. The messages it held are lost. The source hands intake what it had already read, then
+reports the closed subscription as a transient read failure and subscribes again on its retry
+cadence. Where intake can fall that far behind its publishers, raise the server's limit or expect
+that loss.
 
 `idle_timeout_ms` is a positive whole number of schedulable milliseconds. The
 subscription sends a same-connection `PING` after half that interval without activity and requires
