@@ -134,7 +134,7 @@ Feature: Typed ingestor metadata
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'prometheus_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but PROMETHEUS QUERY ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'prometheus_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but PROMETHEUS QUERY ingestors declare only metadata.query and metadata.evaluated_at"
       """
       CREATE PROMETHEUS QUERY INGESTOR prometheus_source
         FROM prom_main QUERY 'up' EVERY 15s MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
