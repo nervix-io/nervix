@@ -220,6 +220,7 @@ mod iceberg_delivery;
 mod ingestion_time;
 mod kafka_metadata;
 mod mqtt_fixtures;
+mod mqtt_properties;
 mod mqtt_sessions;
 mod mysql_isolation;
 mod nats_delivery;

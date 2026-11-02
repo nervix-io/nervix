@@ -77,6 +77,106 @@ invocation = "stress-scenarios"
 scenario = "Kafka broker event time makes historical windows due independently in two branches"
 selections = ["deloxide-stress"]
 
+[[workload]]
+coverage = "MQTT publishes through the real broker and the source host's tracked ingestion and ACK state, with every metadata field read in NO ACK and ACK SEQUENTIAL on one and three nodes. Driver polling and borrowed metadata visits are untracked."
+examples = 6
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "scenario.mqtt-publish-metadata"
+invariant = "Every delivered publish reads its own topic, flags and MQTT 5 properties, and a property its publisher left unset reads as null."
+invocation = "scenarios"
+scenario = "An MQTT ingestor reads the delivered packet's topic, flags and MQTT 5 properties as metadata"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Real wildcard deliveries routed by metadata.topic beside tracked ingestion state on one and three nodes. Driver polling and borrowed metadata visits are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "scenario.mqtt-publish-topic-routing"
+invariant = "A route over metadata.topic receives exactly the publishes delivered on its topic, under one wildcard filter."
+invocation = "scenarios"
+scenario = "A wildcard MQTT ingestor routes each publish by the topic it was delivered on"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Real MQTT 5 user properties read as headers beside tracked ingestion state on one and three nodes. Driver polling and borrowed header visits are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "scenario.mqtt-publish-user-properties"
+invariant = "read_header and read_headers find a publish's user properties in their written order with their repeats, and a name matches only its exact spelling."
+invocation = "scenarios"
+scenario = "An MQTT ingestor reads user properties as headers in the order the publisher wrote them"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A reset connection forces broker redelivery through the source host's tracked ACK, suspend and resume state on one and three nodes. Driver reconnection and network waits are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "scenario.mqtt-publish-redelivery"
+invariant = "A publish the broker delivers again after a lost connection reads metadata.duplicate as true, and its first delivery reads false."
+invocation = "scenarios"
+scenario = "A publish the broker delivers again reads metadata.duplicate as true"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "An ALTER held at its entity gate retains a publish in the source host's tracked quiesce state on one and three nodes, and its release replays it. Driver polling and retained metadata values are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "scenario.mqtt-publish-quiesce-retention"
+invariant = "A publish a buffering quiesce retains reads its own metadata and user properties when the buffer replays it."
+invocation = "scenarios"
+scenario = "A publish a buffering quiesce retains keeps its metadata and user properties"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: real-broker MQTT ingestion and ACK state with every metadata field read. Driver polling and borrowed metadata visits remain untracked."
+examples = 6
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "stress.mqtt-publish-metadata"
+invariant = "Every delivered publish reads its own topic, flags and MQTT 5 properties, and a property its publisher left unset reads as null."
+invocation = "stress-scenarios"
+scenario = "An MQTT ingestor reads the delivered packet's topic, flags and MQTT 5 properties as metadata"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: wildcard deliveries routed by metadata.topic beside tracked ingestion state. Driver polling and borrowed metadata visits remain untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "stress.mqtt-publish-topic-routing"
+invariant = "A route over metadata.topic receives exactly the publishes delivered on its topic, under one wildcard filter."
+invocation = "stress-scenarios"
+scenario = "A wildcard MQTT ingestor routes each publish by the topic it was delivered on"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: real MQTT 5 user properties read as headers beside tracked ingestion state. Driver polling and borrowed header visits remain untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "stress.mqtt-publish-user-properties"
+invariant = "read_header and read_headers find a publish's user properties in their written order with their repeats, and a name matches only its exact spelling."
+invocation = "stress-scenarios"
+scenario = "An MQTT ingestor reads user properties as headers in the order the publisher wrote them"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a reset connection forces broker redelivery through tracked ACK, suspend and resume state. Driver reconnection and network waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "stress.mqtt-publish-redelivery"
+invariant = "A publish the broker delivers again after a lost connection reads metadata.duplicate as true, and its first delivery reads false."
+invocation = "stress-scenarios"
+scenario = "A publish the broker delivers again reads metadata.duplicate as true"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: an ALTER held at its entity gate retains and replays a publish through tracked quiesce state. Driver polling and retained metadata values remain untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "stress.mqtt-publish-quiesce-retention"
+invariant = "A publish a buffering quiesce retains reads its own metadata and user properties when the buffer replays it."
+invocation = "stress-scenarios"
+scenario = "A publish a buffering quiesce retains keeps its metadata and user properties"
+selections = ["deloxide-stress"]
+
 [lane]
 # All diagnostic test and driver executables build before any workload starts, under their own
 # real-time budget. The measured cold stressed scenario build took 1988s on a loaded host; 80
@@ -170,6 +270,7 @@ package = "nervix-scenarios"
 selections = ["deloxide", "deloxide-order"]
 tags = [
   "@kafka_record_metadata",
+  "@mqtt_metadata",
   "@rabbitmq_metadata",
   "@restore_client_inspection",
   "@runtime_installation_retry",

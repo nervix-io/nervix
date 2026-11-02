@@ -5,9 +5,9 @@
 //! - **Owns.** The MQTT client and event loop each ingestor instance subscribes through, its
 //!   session and quality-of-service settings, the Maximum Packet Size and the Receive Maximum every
 //!   connection advertises and local admission of publishes within the client's bound, the shared
-//!   subscription every instance joins, the client identity each instance connects with and the
-//!   conflict among identities its instances render alike, the batches a read gathers
-//!   from its connection's read-ahead and how a read ends when the host cancels it, manual
+//!   subscription every instance joins with Retain As Published, the client identity each instance
+//!   connects with and the conflict among identities its instances render alike, the batches a read
+//!   gathers from its connection's read-ahead and how a read ends when the host cancels it, manual
 //!   acknowledgement of publishes and its confirmation once written, the local replay of publishes
 //!   the host rejected, and retirement of obsolete broker sessions.
 //! - **Depends on.** The connector contract, the crate's connection options and its broker
@@ -27,6 +27,7 @@
     )
 )]
 
+mod delivered_publish;
 mod driver;
 
 use std::{
@@ -42,10 +43,9 @@ use driver::MqttConnection;
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    BrokerIngestorConnector, IngestMessageHeaders, IngestMetadataRow, IngestorBatch,
-    IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
-    IngestorReadCancellation, IngestorResult, IngestorResume, NoIngestHeaders,
-    optional_client_config_value,
+    BrokerIngestorConnector, IngestMessageHeaders, IngestMetadataRow, IngestRowHeaders,
+    IngestorBatch, IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
+    IngestorReadCancellation, IngestorResult, IngestorResume, optional_client_config_value,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{
@@ -56,7 +56,7 @@ use nervix_primitives::time::{Instant, timeout, timeout_at};
 use rumqttc::{
     AckMode, AsyncClient, BrokerSessionResumePolicy, ConnectionError, DisconnectProperties,
     DisconnectReasonCode, Event, EventLoop, Incoming, ManualAck, Outgoing, PubAck, PubRec, Publish,
-    QoS, SessionMode, SubscribeReasonCode, UnsubAckReason,
+    QoS, SessionMode, SubscribeFilter, SubscribeReasonCode, UnsubAckReason,
 };
 use thiserror::Error;
 
@@ -663,6 +663,17 @@ impl MqttTopicIngestorPlan {
         })
     }
 
+    /// The subscription a new session asks for: the instance's shared filter at its quality of
+    /// service, with Retain As Published.
+    ///
+    /// A broker clears RETAIN on what it forwards to a subscription without that option, so
+    /// `metadata.retain` could not read what the publisher wrote.
+    fn subscription(&self) -> SubscribeFilter {
+        let mut subscription = SubscribeFilter::new(self.subscribe_filter.as_str(), self.qos);
+        subscription.preserve_retain = true;
+        subscription
+    }
+
     /// Drives the event loop until the broker confirms the subscription.
     ///
     /// A broker that resumes a persistent session already holds the subscription and cannot
@@ -681,7 +692,7 @@ impl MqttTopicIngestorPlan {
                     }
                     connection
                         .client
-                        .subscribe(self.subscribe_filter.as_str(), self.qos)
+                        .subscribe_many([self.subscription()])
                         .await
                         .map_err(|error| {
                             Report::new(MqttTopicIngestorError::Subscribe)
@@ -745,17 +756,15 @@ fn acknowledgement(publish: &Publish) -> Option<ManualAck> {
     }
 }
 
-/// One received publish. MQTT carries no headers into the ingest namespace.
+/// One received publish, whose packet holds its payload, its metadata and its headers.
 pub struct MqttTopicIngestorMessage {
     position: MqttTopicIngestorPosition,
-    headers: NoIngestHeaders,
 }
 
 impl MqttTopicIngestorMessage {
     fn new(publish: Publish) -> Self {
         Self {
             position: MqttTopicIngestorPosition { publish },
-            headers: NoIngestHeaders,
         }
     }
 }
@@ -772,11 +781,15 @@ impl IngestorMessage for MqttTopicIngestorMessage {
     }
 
     fn headers(&self) -> &dyn IngestMessageHeaders {
-        &self.headers
+        self
     }
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::headers(&self.headers)
+        IngestMetadataRow {
+            fields: self,
+            headers: IngestRowHeaders::Borrowed(self),
+            position: None,
+        }
     }
 }
 

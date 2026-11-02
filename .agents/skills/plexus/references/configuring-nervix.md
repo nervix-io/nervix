@@ -446,6 +446,9 @@ current connection, retry and deadline limits.
   retire; ordinary stop retains a persistent session. Read `Ingestors` → `MQTT` for identities,
   session lifetime, the separate raw-frame and admitted-publish bounds, oversized-payload counts
   and cleanup failures, and `Emitters` → `MQTT` for emitter identities.
+- For MQTT publish metadata, user properties through `read_header`, and what `metadata.retain` and
+  `metadata.message_expiry` can read, follow `Ingestors` → `MQTT`; convert
+  `metadata.correlation_data` explicitly before using it as text.
 - An `MQTT CLIENT`'s `addr` is `mqtt://` or `mqtts://`, a host and a port, with no credentials,
   path or query: write `username` and `password` (redacted on inspection), `keep_alive_ms` in
   whole seconds and the source admission bound `max_packet_size` as their own keys, checked against

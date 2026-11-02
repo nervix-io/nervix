@@ -335,13 +335,32 @@ fn topic_emission_publishes_at_the_quality_of_service_its_mode_names() {
 }
 
 #[test]
-fn both_topic_directions_carry_no_transport_headers_or_typed_metadata() {
+fn a_topic_ingestor_reads_the_delivered_packet_and_a_topic_emitter_writes_no_header() {
     let ingest = IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic).capabilities();
     let emit = EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic).capabilities();
 
-    assert_eq!(ingest.headers, None);
-    assert!(!ingest.reads_headers());
-    assert!(ingest.metadata.fields().is_empty());
+    assert_eq!(
+        ingest.headers,
+        Some(HeaderModel::exact(HeaderLayout::OrderedRepeats))
+    );
+    assert!(ingest.reads_headers());
+    let mut declared = Vec::with_capacity(ingest.metadata.fields().len());
+    for field in ingest.metadata.fields() {
+        declared.push((field.name(), field.ty()));
+    }
+    assert_eq!(
+        declared,
+        [
+            ("topic", IngestorMetadataType::String),
+            ("retain", IngestorMetadataType::Bool),
+            ("qos", IngestorMetadataType::U8),
+            ("duplicate", IngestorMetadataType::Bool),
+            ("content_type", IngestorMetadataType::String),
+            ("response_topic", IngestorMetadataType::String),
+            ("correlation_data", IngestorMetadataType::Bytes),
+            ("message_expiry", IngestorMetadataType::U32),
+        ]
+    );
     assert_eq!(emit.headers, None);
 }
 
