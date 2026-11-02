@@ -512,11 +512,22 @@ current connection, retry and deadline limits.
   between `QUERY` and `EVERY` and `16MiB` when left out. A larger response fails the poll as the
   ingestor's transient error rather than delivering part of it; raise the bound for a query that
   legitimately returns more. Samples enter the graph in batches of at most 1024.
+- A `PROMETHEUS QUERY` ingestor delivers one object per sample in the API's own shape,
+  `{"metric":{...},"value":...,"timestamp":"..."}`, with `NaN`, `+Inf` and `-Inf` as strings. Labels
+  sit under `metric`, which `WIRE JSON` cannot read, so write a JAQ codec such as
+  `'{job: .metric.job, value, timestamp}'`, or a `MODE LOOSE` wire schema when no label is needed.
+  Use `metadata.query`, `metadata.evaluated_at` and `TIMESTAMP AT metadata.evaluated_at` for the
+  query and its evaluation instant. A `matrix`, `scalar` or `string` result or a native histogram
+  fails the poll; ask for an instant vector.
 - Treat Kafka `NO ACK` emitter success as local librdkafka producer-queue admission. Even in
   `ATTACHED` mode, Nervix does not wait for a broker delivery receipt before completing its ACK
   share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces the
   client's `delivery.timeout.ms` as the producer's delivery bound. The producer always reports every record, so `delivery.report.only.error` in a client's
   `CONFIG` has no effect.
+- A `KAFKA TOPIC` emitter's `TIMESTAMP <expression>` is each record's Kafka create time: an exact,
+  non-null, non-sensitive `DATETIME`, written as the millisecond that contains it. A time before
+  `1970-01-01T00:00:00.001Z` rejects its record through `ON MESSAGE ERROR`. Read `Emitters` →
+  `Kafka`.
 - Every Sentry emitter references a `SENTRY CLIENT` with a project DSN and a positive `timeout_ms`,
   encodes one event JSON object per record, or per batch through `ON EMITTING BATCH`, and has no
   `write_header` invocation.
