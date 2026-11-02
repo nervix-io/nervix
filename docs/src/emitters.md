@@ -1113,10 +1113,11 @@ the entity's closed property set, each at most once and in any order. A clause o
 does not declare is refused where it is written, with the entity and the clause or key named, and
 the registry refuses it again in a Model that reaches it another way. The
 [capability matrix](connector-capabilities.md) lists the clauses and properties each entity
-declares, and each entity's section below says what its transport does with them. Today only
-[SQS](#sqs) QUEUE, with the `DELAY` and `DEDUPLICATION ID` clauses, and the two
-[RabbitMQ](#rabbitmq) entities, with `MANDATORY`, declare a clause. No entity declares a
-`PROPERTIES` key, and every other emitter refuses every clause.
+declares, and each entity's section below says what its transport does with them. `KAFKA TOPIC`
+declares `TIMESTAMP`, which [Kafka](#kafka) writes as each record's create time, `SQS QUEUE`
+declares `DELAY` and `DEDUPLICATION ID`, which [SQS](#sqs) sends with each message, and the two
+[RabbitMQ](#rabbitmq) entities declare `MANDATORY`. No entity declares another clause or a property
+yet, and every emitter refuses each clause its entity does not declare.
 
 | Clause | Written with | Value every record carries |
 | --- | --- | --- |
@@ -1249,6 +1250,7 @@ CREATE KAFKA TOPIC EMITTER <name>
   TO <client> TOPIC 'orders'
     MODE <mode>
     ENCODE USING <codec>
+    [TIMESTAMP occurred_at]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
@@ -1269,7 +1271,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
 | Batch transformation required | no |
-| Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
+| Envelope | TIMESTAMP occurred_at |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | records the producer queues under ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, holds back what fills it<br>records the producer queues under NO ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |
 | Network waits | a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, delivery.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT`<br>destroying a producer, for its polling thread and the reports of the records its purge failed: driver default, 100 ms poll, then a 500 ms flush |
@@ -1281,9 +1283,27 @@ See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#
 
 `TOPIC` uses the same rule as [Kafka ingestion](ingestors.md#kafka): 1 to 249 ASCII letters,
 digits, `.`, `_` and `-`, other than `.` and `..`, produced to exactly as written. `write_header`
-writes the record's headers in the order the program writes them, and the emitter declares no
-envelope clause or `PROPERTIES` block. The `KAFKA CLIENT` it names requires `bootstrap.servers` and
-refuses the Nervix-owned keys the [Kafka ingestion section](ingestors.md#kafka) lists.
+writes the record's headers in the order the program writes them. The emitter declares the
+`TIMESTAMP` envelope clause, no other envelope clause and no `PROPERTIES` block. The `KAFKA CLIENT`
+it names requires `bootstrap.servers` and refuses the Nervix-owned keys the
+[Kafka ingestion section](ingestors.md#kafka) lists.
+
+`TIMESTAMP <expression>` sets the time each record carries as its Kafka `CreateTime`. The
+expression's `DATETIME` counts nanoseconds and a Kafka record time counts whole milliseconds, so
+Nervix writes the millisecond that contains the value: `2001-02-03T04:05:06.789999999Z` becomes
+`2001-02-03T04:05:06.789Z`. A record keeps that time on every attempt, so a retry after a refused
+or unanswered publish writes the time the first attempt wrote. librdkafka reads a zero timestamp as
+the time it takes the record, and a Kafka record carries no time before the Unix epoch, so a record
+whose millisecond is not after the epoch, any time before `1970-01-01T00:00:00.001Z`, is rejected
+through `ON MESSAGE ERROR` before the producer takes it, as an `external` error of the `publish`
+operation whose message names its timestamp, and the emitter's other records are still sent.
+Without `TIMESTAMP`, librdkafka gives each record the time the producer takes it. A topic whose
+`message.timestamp.type` is `LogAppendTime` replaces either time with the time the broker appends
+the record. A broker whose `log.message.timestamp.before.max.ms` or
+`log.message.timestamp.after.max.ms` refuses a record's time answers `INVALID_TIMESTAMP`; under
+`ACK` that answer rejects the record through `ON MESSAGE ERROR`. Under `NO ACK` the record counts
+as delivered once the producer takes it, so it is lost, like any other record its broker refuses
+after that.
 
 `ACK` waits for every record's delivery report through the shared confirmation window. If a publish
 attempt fails, the window first settles the answers already received and returns only unresolved

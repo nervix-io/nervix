@@ -349,6 +349,7 @@ fn every_registered_filler_lexes() {
         "timestamp",
         "deduplicate_on",
         "reorder_by",
+        "timestamp_expression",
         "value_expression",
     ] {
         let text = materializer

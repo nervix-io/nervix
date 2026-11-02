@@ -3,10 +3,11 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Kafka consumer and producer configuration, ingestor polling and offset handling,
-//!   consumer and producer retirement off the async workers, record and header publication, native
-//!   queue capacity and admission backpressure, delivery-report classification, the records the
-//!   producer holds until their delivery reports are served, the delivery bound a confirmed publish
-//!   gives the producer, and producer queue shutdown.
+//!   consumer and producer retirement off the async workers, record and header publication, the
+//!   create time each record carries from its envelope's `TIMESTAMP`, native queue capacity and
+//!   admission backpressure, delivery-report classification, the records the producer holds until
+//!   their delivery reports are served, the delivery bound a confirmed publish gives the producer,
+//!   and producer queue shutdown.
 //! - **Depends on.** The connector contract and its confirmation window, vocabulary values, the
 //!   bounded executor, `error-stack`, Tokio, and `rust-rdkafka`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -62,7 +63,7 @@ use nervix_connector::{
     EmitterWriteResult, PerRecordOutcome, RecordEmitter, RejectedEmitterMember,
 };
 use nervix_execution::Executor;
-use nervix_models::{ClientConfigEntry, ConnectorKind, KafkaTopicName};
+use nervix_models::{ClientConfigEntry, ConnectorKind, KafkaTopicName, Timestamp};
 use nervix_primitives::{
     sync::oneshot,
     time::{Instant, sleep, timeout_at},
@@ -222,6 +223,87 @@ impl TryFrom<Duration> for KafkaMessageTimeout {
     }
 }
 
+/// The earliest time a Kafka record carries, in Unix milliseconds: the Unix epoch's first
+/// millisecond. librdkafka reads a zero timestamp as the time it takes the record, and a Kafka
+/// record carries no time before the epoch.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "librdkafka reads a zero record timestamp as the time it takes the record, and a \
+                  Kafka record carries no time before the Unix epoch"
+    )
+)]
+const FIRST_RECORD_MILLIS: i64 = 1;
+
+/// The time a Kafka record carries as its `CreateTime`, in the whole Unix milliseconds Kafka
+/// counts, from the `TIMESTAMP` its record's envelope sets.
+///
+/// A timestamp counts nanoseconds, so a record carries the millisecond that contains it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KafkaCreateTime {
+    /// At least [`FIRST_RECORD_MILLIS`].
+    unix_millis: i64,
+}
+
+/// Why a record's `TIMESTAMP` cannot be the time its Kafka record carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "the conversion returns a pure range validation refusal"
+    )
+)]
+enum KafkaCreateTimeError {
+    /// The millisecond that contains the timestamp is not after the Unix epoch.
+    #[error(
+        "{KAFKA} record timestamp {} precedes {}, the earliest time a {KAFKA} record carries",
+        .timestamp.to_rfc3339(),
+        KafkaCreateTime::FIRST.timestamp().to_rfc3339()
+    )]
+    BeforeFirstMillisecond { timestamp: Timestamp },
+}
+
+impl KafkaCreateTime {
+    /// The earliest time a Kafka record carries.
+    const FIRST: Self = Self {
+        unix_millis: FIRST_RECORD_MILLIS,
+    };
+
+    /// The time the Kafka record of `record` carries: the one its envelope's `TIMESTAMP` sets, or
+    /// none, where librdkafka gives the record the time it takes it.
+    fn of(record: &EmitterRecord) -> Result<Option<Self>, KafkaCreateTimeError> {
+        let Some(timestamp) = record.envelope.timestamp else {
+            return Ok(None);
+        };
+        Self::try_from(timestamp).map(Some)
+    }
+
+    /// The instant at the start of this record time's millisecond.
+    fn timestamp(self) -> Timestamp {
+        let unix_nanos = self
+            .unix_millis
+            .checked_mul(i64::from(NANOS_PER_MILLI))
+            .assured("a record time is the millisecond of a signed Unix-nanosecond timestamp");
+        Timestamp::from_unix_nanos(unix_nanos)
+    }
+}
+
+impl TryFrom<Timestamp> for KafkaCreateTime {
+    type Error = KafkaCreateTimeError;
+
+    fn try_from(timestamp: Timestamp) -> Result<Self, Self::Error> {
+        let unix_millis = timestamp
+            .unix_nanos()
+            .div_euclid(i64::from(NANOS_PER_MILLI));
+        if unix_millis < FIRST_RECORD_MILLIS {
+            return Err(KafkaCreateTimeError::BeforeFirstMillisecond { timestamp });
+        }
+        Ok(Self { unix_millis })
+    }
+}
+
 /// The broker's answer for one record handed to the producer, read from the delivery report
 /// librdkafka gives for it.
 struct KafkaAnswer {
@@ -376,7 +458,14 @@ impl KafkaTopicEmitter {
                 outcome.reject(rejected);
                 continue;
             }
-            match self.hand_over(&record, None) {
+            let create_time = match KafkaCreateTime::of(&record) {
+                Ok(create_time) => create_time,
+                Err(refusal) => {
+                    outcome.reject(record.rejected(refusal.to_string()));
+                    continue;
+                }
+            };
+            match self.hand_over(&record, create_time, None) {
                 Ok(()) => outcome.deliver(record.id),
                 Err(error) if Self::is_record_rejection(&error) => {
                     outcome.reject(record.rejected(format!("kafka rejected record: {error}")));
@@ -409,8 +498,15 @@ impl KafkaTopicEmitter {
                 window.reject(rejected);
                 continue;
             }
+            let create_time = match KafkaCreateTime::of(&record) {
+                Ok(create_time) => create_time,
+                Err(refusal) => {
+                    window.reject(record.rejected(refusal.to_string()));
+                    continue;
+                }
+            };
             let answer = match self
-                .hand_over_confirmed(&record, &mut window, settings.timeout)
+                .hand_over_confirmed(&record, create_time, &mut window, settings.timeout)
                 .await
             {
                 Ok(answer) => answer,
@@ -437,6 +533,7 @@ impl KafkaTopicEmitter {
     async fn hand_over_confirmed(
         &self,
         record: &EmitterRecord,
+        create_time: Option<KafkaCreateTime>,
         window: &mut ConfirmationWindow<KafkaAnswer>,
         timeout: Duration,
     ) -> EmitterWriteResult<KafkaAnswer> {
@@ -444,7 +541,7 @@ impl KafkaTopicEmitter {
         loop {
             nervix_primitives::task::consume_budget().await;
             let (answer, report) = oneshot::channel();
-            match self.hand_over(record, Some(answer)) {
+            match self.hand_over(record, create_time, Some(answer)) {
                 Ok(()) => return Ok(KafkaAnswer { report }),
                 Err(error @ KafkaError::MessageProduction(RDKafkaErrorCode::QueueFull)) => {
                     if window.settle_next().await?.is_some() {
@@ -492,12 +589,14 @@ impl KafkaTopicEmitter {
     /// Hands `message` to the producer, which retains it until librdkafka serves its delivery
     /// report.
     ///
-    /// `answer` is where a confirmed publish awaits that report; a `NO ACK` publish awaits none. A
-    /// record the producer refuses is never retained: its delivery opaque comes back with the
-    /// refusal and is dropped here.
+    /// `create_time` is the time the record carries, where its envelope sets one; without it,
+    /// librdkafka gives the record the time it takes it. `answer` is where a confirmed publish
+    /// awaits that report; a `NO ACK` publish awaits none. A record the producer refuses is never
+    /// retained: its delivery opaque comes back with the refusal and is dropped here.
     fn hand_over(
         &self,
         message: &EmitterRecord,
+        create_time: Option<KafkaCreateTime>,
         answer: Option<oneshot::Sender<KafkaDeliveryReport>>,
     ) -> Result<(), KafkaError> {
         let handed_over = self.producer.context().retain(answer);
@@ -511,6 +610,9 @@ impl KafkaTopicEmitter {
         }
         if !message.headers.is_empty() {
             record = record.headers(Self::owned_headers(&message.headers));
+        }
+        if let Some(create_time) = create_time {
+            record = record.timestamp(create_time.unix_millis);
         }
         self.producer
             .send(record)
@@ -1001,6 +1103,14 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+#[path = "create_time_tests.rs"]
+mod create_time_tests;
 
 #[cfg(test)]
 #[cfg_attr(

@@ -2,9 +2,10 @@ Feature: Emitters write envelope clauses only where their entity declares them
 
   An emitter's envelope clauses follow its payload and set what its transport carries beside each
   payload. A clause or PROPERTIES key the emitter's entity does not declare is refused where it is
-  written. Only SQS QUEUE, with DELAY and DEDUPLICATION ID, and the RabbitMQ entities, with
-  MANDATORY, declare a clause, so a node refuses each clause form on every entity that does not
-  declare it.
+  written. KAFKA TOPIC declares TIMESTAMP, SQS QUEUE declares DELAY and DEDUPLICATION ID, the
+  RabbitMQ entities declare MANDATORY, and no entity declares another clause or a property, so a
+  node refuses each clause form on every entity that does not declare it, and a declared clause
+  refuses a value that is not exactly the type it carries.
 
   @emitter_envelope
   Scenario Outline: Every emitter entity refuses the envelope clauses it does not declare
@@ -165,6 +166,73 @@ Feature: Emitters write envelope clauses only where their entity declares them
     Then the last command error contains
       """
       found PROPERTIES
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @emitter_envelope
+  Scenario Outline: A declared TIMESTAMP refuses a value that is not an exact, non-null and non-sensitive DATETIME
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event (
+        seq I64,
+        event_at DATETIME,
+        maybe_at DATETIME OPTIONAL,
+        secret_at DATETIME SENSITIVE,
+        label STRING
+      );
+      CREATE SCHEMA published ( seq I64 );
+      CREATE WIRE JSON SCHEMA published_wire MODE STRICT ( seq integer );
+      CREATE CODEC published_codec FROM WIRE JSON SCHEMA published_wire TO SCHEMA published;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
+      """
+    When these Plexus commands fail with "envelope TIMESTAMP requires an exact, non-null, non-sensitive DATETIME value"
+      """
+      CREATE KAFKA TOPIC EMITTER labelled FROM events TO broker TOPIC 'orders'
+        MODE NO ACK RETRY POLICY BACKOFF 1s MAX 30s ENCODE USING published_codec
+        TIMESTAMP input.label
+        SET seq = input.seq
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    And these Plexus commands fail with "envelope TIMESTAMP requires an exact, non-null, non-sensitive DATETIME value"
+      """
+      CREATE KAFKA TOPIC EMITTER optional_time FROM events TO broker TOPIC 'orders'
+        MODE NO ACK RETRY POLICY BACKOFF 1s MAX 30s ENCODE USING published_codec
+        TIMESTAMP input.maybe_at
+        SET seq = input.seq
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    And these Plexus commands fail with "envelope TIMESTAMP requires an exact, non-null, non-sensitive DATETIME value"
+      """
+      CREATE KAFKA TOPIC EMITTER secret_time FROM events TO broker TOPIC 'orders'
+        MODE NO ACK RETRY POLICY BACKOFF 1s MAX 30s ENCODE USING published_codec
+        TIMESTAMP input.secret_at
+        SET seq = input.seq
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      CREATE KAFKA TOPIC EMITTER leaked_time FROM events TO broker TOPIC 'orders'
+        MODE NO ACK RETRY POLICY BACKOFF 1s MAX 30s ENCODE USING published_codec
+        TIMESTAMP leak_sensitive(input.secret_at)
+        SET seq = input.seq
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE KAFKA TOPIC EMITTER event_time FROM events TO broker TOPIC 'orders'
+        MODE NO ACK RETRY POLICY BACKOFF 1s MAX 30s ENCODE USING published_codec
+        TIMESTAMP input.event_at
+        SET seq = input.seq
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      SHOW CREATE EMITTER leaked_time;
+      """
+    Then the last command output contains
+      """
+      TIMESTAMP leak_sensitive(input.secret_at)
       """
 
     Examples:
