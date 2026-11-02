@@ -248,9 +248,10 @@ A NATS ingestor Model is one of two entities, `NATS SUBJECT` or `NATS STREAM`, s
 holds the archived union of both. The registry's `NERVIX MODEL NJS` archive signature identifies the
 current Model layout, including that union, an owned Pulsar subscription's required start position,
 the required branch partition count, Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>`
-source, an SQS QUEUE emitter's `SEND` request shape, and the session and quality of service an MQTT
-TOPIC ingestor writes beside its delivery mode. Consensus's `raft_jetstream_` keyspaces and current
-state metadata encoding identify its stored shapes. An unrecognized signature, namespace or encoding
+source, an SQS QUEUE emitter's `SEND` request shape, the session and quality of service an MQTT
+TOPIC ingestor writes beside its delivery mode, and a `REDIS PUBSUB` ingestor's subscription, which
+is either a `CHANNEL` or a `PATTERN`. Consensus's `raft_jetstream_` keyspaces and current state
+metadata encoding identify its stored shapes. An unrecognized signature, namespace or encoding
 fails with the owning storage error and requires the stored data to be recreated.
 
 ## Absence And Distinct States
