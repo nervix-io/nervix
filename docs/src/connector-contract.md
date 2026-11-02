@@ -956,14 +956,14 @@ capacities with `QueueAdmission::WaitForPlace`; lack of room has not judged the 
 The service task's existing shutdown cancellation ends the wait. A charge larger than the whole
 class or a closed executor still fails inspection, and no uncharged config copy is made while waiting.
 Rendered values also pass the WebSockets configuration owner, which holds a schema-valid
-WebSockets client to an endpoint without a fragment, counts within their ranges and a derivable
-idle deadline, and the Prometheus API-root owner;
+WebSockets client to an endpoint without a fragment or user information, counts within their ranges
+and a derivable idle deadline, and the Prometheus API-root owner;
 an optional Redis subscription capacity passes the same range parser its ingestor plan uses.
 Ingestor-only presence requirements stay with that plan.
 MQTT's representative first instance uses the same instance-template renderer as execution.
 Connector-owned offline parsers check librdkafka property names and values, sqlx and mysql_async
-options, Redis connection information, lapin AMQP URIs, NATS server addresses, ZeroMQ endpoints
-and Sentry project DSNs.
+options, Redis connection information, lapin AMQP URIs, NATS server addresses, ZeroMQ endpoints,
+Sentry project DSNs and the certificate a WebSocket client's `tls_ca_file` holds.
 They create no connection, consumer, producer, DNS lookup or remote side effect. Checks requiring
 the remote service still belong to client initialization. The registry names no connector crate
 and runtime receives entries and pinned mounts rather than a Model.
@@ -2790,16 +2790,22 @@ sequenceDiagram
   connection/ping/idle durations, positive handoff/message/frame limits with their declared
   defaults, and TLS file keys restricted to secure endpoints with paired client identity files.
   The vocabulary's typed WebSockets configuration converts schema-valid entries once and adds
-  only what the schema cannot state: an endpoint without a fragment, each count within its
-  range, and three ping intervals within the schedulable bound when they derive the idle
-  deadline. Registry creation and source construction after template rendering both validate
-  it. The omitted connection
+  only what the schema cannot state: an endpoint without a fragment or user information, which
+  the upgrade would never send, each count within its range, and three ping intervals within the
+  schedulable bound when they derive the idle deadline. Registry creation and source construction
+  after template rendering both validate it. The omitted connection
   timeout is thirty seconds; omitted ping cadence means only answering peer pings. `open` prepares local transport and TLS
   state without resolving a name or connecting. For a `wss` endpoint it takes the rustls
   configuration that the shared `RustlsClientConfigProvider` builds from the client's entries: the
   bundled WebPKI roots and the platform's native roots with the client's `tls_ca_file` added, and
   the identity of its `tls_cert_file` and `tls_key_file`. A file it cannot parse therefore fails
-  `open`, and with it the ingestor's start. `resume` resolves and connects, completes any
+  `open`, and with it the ingestor's start. A `tls_ca_file` with no certificate section fails
+  nothing there and adds no root, so the connector's offline check reads the file before a client
+  or a rebinding commits, with the provider's PEM parser, and refuses it as
+  `OfflineClientConfigError::NoCertificate`; a section it cannot parse stays the `open` refusal.
+  That check belongs to this connector rather than to the shared provider: the provider runs as a
+  connection opens, for every connector that adds to the default roots, and each of them takes the
+  same refusal with its own manual and scenarios. `resume` resolves and connects, completes any
   signaling handshake, and only then reports readiness. Accepted data from a successful
   handshake stays in one bounded `HandshakeFrames` handoff for polling before new socket frames.
   Its capacity is `handshake_buffer_capacity` (default 16 messages), with each message bounded by

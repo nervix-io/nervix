@@ -7355,6 +7355,8 @@ dependencies = [
  "nervix-test-environment",
  "prost 0.13.5",
  "prost-reflect",
+ "rcgen",
+ "rustls-pki-types",
  "serde_json",
  "shuttle",
  "tempfile",
