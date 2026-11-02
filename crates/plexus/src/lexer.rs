@@ -73,6 +73,7 @@ pub enum Word {
 #[strum(ascii_case_insensitive, serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum Identifier {
     Headers,
+    Secret,
     Platform,
     Create,
     Delete,
