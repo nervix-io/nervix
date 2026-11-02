@@ -56,7 +56,7 @@ Feature: Drain node
       """
     And the broken ownership handoff gate engagement request in domain "{{domain}}" was delivered
 
-  @planned-handoff-owner-loss
+  @planned-handoff-owner-loss @slots_3
   Scenario: Losing the former owner during a held drain leaves relocation to failover
     Given entity gate deadline is configured as "60s"
     And the production sticky scheduler is configured

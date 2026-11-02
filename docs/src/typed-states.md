@@ -74,6 +74,20 @@ the group's row bound and the vocabulary's frame labels. An estimate that exceed
 is a typed error before allocation; the ingest group adds the opening operation's context and
 retains the cause for its general-error policy.
 
+An SQS received message validates its system-attribute numbers at construction. The receive count
+is an optional `U32`, and send and first-receive times are optional `Timestamp` values converted
+exactly from Unix milliseconds. Absence means the service omitted the attribute. A parse or range
+failure is a typed read error, never an absent value or a default. Borrowed message identifiers
+and FIFO sequence numbers keep their textual representation. The shared metadata visitor,
+retained row and Arrow projection preserve the count as `U32` throughout its in-memory lifetime.
+
+A Kafka record keeps an unavailable timestamp distinct from its create-time and log-append-time
+variants. A present variant carries a validated signed-nanosecond timestamp converted exactly from
+the driver's milliseconds. Kafka's external unavailable encoding is resolved at this boundary;
+an out-of-range present timestamp is a typed conversion failure. Missing binary keys are `None`,
+empty keys remain present empty bytes, and the null-payload tombstone flag preserves the distinction
+from a present empty payload when both lend an empty slice to a codec.
+
 A paced poll message carries a typed metadata variant. HTTP polling supplies its response status
 and scheduled poll instant in that variant, while sources with no integration fields carry the
 headers-only variant. The host copies the variant into a matching quiesce buffer and Arrow builder;
@@ -92,6 +106,15 @@ confirmation settings. An empty receipt collection means there are no outstandin
 and an absent failure means none has been observed. These are task-owned execution values,
 never persisted state or substitutes for a missing publishing mode. The
 [connector contract](./connector-contract.md#finishing-an-emitter) owns their completion semantics.
+
+RabbitMQ's volatile confirmation owner distinguishes a completely answered window, a deadline,
+and a lost channel with the answers collected before it. A positive driver acknowledgement and a
+returned message's owning record are separate facts. Return attribution produces a typed decided
+or incomplete state for positive mandatory answers; size-refusal recovery requires the decided
+state before replacing the channel and continuing. Unanswered records and mandatory answers whose
+return is still unknown remain unresolved for retry, while definite returns remain rejected.
+Nothing in this window is persisted. The [connector contract](./connector-contract.md) owns the
+confirmation and retry boundaries.
 
 The Kafka emitter installs its effective native queue byte capacity as `NonZeroU64` after librdkafka
 validates the client configuration. Its confirmation window's on-demand settlement returns
@@ -236,12 +259,16 @@ The Sentry event Model keeps an omitted `PLATFORM` as `None`, separately from an
 written string, including an empty string or `other`. Its serialized field is required and holds
 either that string or an explicit null. Planning resolves the declared default into a required
 platform string; connector preparation uses it only when the codec's event omits the field.
-The registry's `NERVIX INGESTORS` archive signature identifies the current Model layout, including
+A polled HTTP request's header holds a literal or names a client secret as two states of one enum,
+so a value cannot be both or neither, and the Model that names a secret holds its key and never its
+value.
+The registry's `NERVIX HDR VALUE` archive signature identifies the current Model layout, including
 an owned Pulsar subscription's required start position, the required branch partition count,
 Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's
-`SEND` request shape, and the session and quality of service an MQTT TOPIC ingestor writes beside
-its delivery mode. Consensus's `raft_ingestor_choices_` keyspaces and current state metadata
-encoding identify its stored shapes. An unrecognized signature, namespace or
+`SEND` request shape, the session and quality of service an MQTT TOPIC ingestor writes beside
+its delivery mode, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a
+`PATTERN`, and that header state. Consensus's `raft_header_value_` keyspaces and current state
+metadata encoding identify its stored shapes. An unrecognized signature, namespace or
 encoding fails with the owning storage error and requires the stored data to be recreated.
 
 ## Absence And Distinct States
@@ -263,6 +290,15 @@ The following read starts its optional keep-alive deadline after the host acknow
 ordinary prefix; that original deadline then survives cancellation. The connection retains at
 most one discard and clears it only when it returns the size outcome after confirmation. See
 [MQTT source connections](./connector-contract.md#mqtt-source-connections).
+
+**MQTT client configuration.** The vocabulary converts one rendered MQTT client configuration into
+typed values once, at `CREATE MQTT CLIENT` and again when a connection is built. Its transport is
+plain TCP or TLS, and the TLS variant carries the trust file and the optional certificate and key
+pair, so a plain connection holds no TLS file and a TLS one cannot lack its trust root. An absent
+identity template, username or password is `None`, never an empty string, and an empty
+`client_id` is refused rather than read as absent. The keep-alive is a nonzero count of seconds and
+the admission bound a nonzero byte count, each taking the schema's one declared default where the
+client leaves it out. A password's debug rendering shows only the redaction marker.
 
 **Iceberg catalog identity.** The namespace is required configuration, represented by one shared
 validated name type from parsing through connector opening. Dot-separated levels are nonempty and

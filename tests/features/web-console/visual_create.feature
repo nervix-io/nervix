@@ -1,5 +1,5 @@
 Feature: Web console visual creation
-  @visual_create_happy
+  @visual_create_happy @slots_3
   Scenario Outline: Popup forms create domains, users, and resource catalogs through the REPL dispatcher
     Given a <cluster_size> node nervix cluster is started
     When the web console is opened on the leader node

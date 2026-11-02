@@ -2,12 +2,12 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The node's shared Postgres pool and its connection options, the one borrowed
-//!   connection each insert runs on together with the write's metadata lookup and the row-by-row
-//!   isolation of a refused insert, the declared type of each mapped column, the `unnest` insert
-//!   every write becomes under the emitter's `BATCH` limits and the size of one protocol message,
-//!   its text parameters and their exact encoded size, the `ON CONFLICT` clause of a conflict
-//!   action, and SQLSTATE classification.
+//! - **Owns.** The node's shared Postgres pool, the policy its client's keys declare for it and its
+//!   connection options, the one borrowed connection each insert runs on together with the write's
+//!   metadata lookup and the row-by-row isolation of a refused insert, the declared type of each
+//!   mapped column, the `unnest` insert every write becomes under the emitter's `BATCH` limits and
+//!   the size of one protocol message, its text parameters and their exact encoded size, the
+//!   `ON CONFLICT` clause of a conflict action, and SQLSTATE classification.
 //! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, `error-stack`, Tokio
 //!   and the `sqlx` driver.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -36,18 +36,18 @@ use arrow_array::{
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::DateTime;
-use error_stack::{Report, ResultExt as _};
+use error_stack::{Context, Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    EmitterFinish, EmitterFinishResult, EmitterHost, EmitterLifecycle, EmitterOpenError,
-    EmitterRecordPosition, EmitterStartResult, EmitterWriteError, EmitterWriteResult,
-    MappedEmitterMember, MappedEmitterRows, MeasuredRequest, PerRecordOutcome,
-    RejectedEmitterMember, RowEmitter, RowRequest, RowRequestLimits, client_tls_paths,
-    optional_client_config_value,
+    ClientConfigError, ConfiguredDeadline, EmitterFinish, EmitterFinishResult, EmitterHost,
+    EmitterLifecycle, EmitterOpenError, EmitterRecordPosition, EmitterStartResult,
+    EmitterWriteError, EmitterWriteResult, MappedEmitterMember, MappedEmitterRows, MeasuredRequest,
+    PerRecordOutcome, RejectedEmitterMember, RowEmitter, RowRequest, RowRequestLimits,
+    client_tls_paths, optional_bool_client_config_value, optional_client_config_value,
 };
 use nervix_models::{
-    ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, POSTGRES_MESSAGE_SIZE_MAXIMUM,
-    PostgresSslMode, PostgresTableName,
+    ClientConfigEntry, ClientDeadline, ClientPoolBounds, ConnectorKind, EmitterBatchPolicy,
+    POSTGRES_MESSAGE_SIZE_MAXIMUM, PostgresSslMode, PostgresTableName,
 };
 use nervix_primitives::time::Instant;
 use sqlx::{
@@ -81,18 +81,12 @@ const ARRAY_HEADER_BYTES: u64 = 20;
 /// The length word before every element of an array parameter, which alone encodes a NULL.
 const ELEMENT_LENGTH_BYTES: u64 = 4;
 
-/// How long a borrower waits for a connection, including pool wait, establishment,
-/// authentication and validation. Independent of how long an accepted query then runs.
-const ACQUIRE_DEADLINE: Duration = Duration::from_secs(30);
-
-/// How long a connection above the maintained minimum may sit idle before it is retired.
-const IDLE_LIFETIME: Duration = Duration::from_secs(10 * 60);
-
-/// How old any connection may become before it is retired and replaced within the same maximum.
-const MAX_LIFETIME: Duration = Duration::from_secs(30 * 60);
-
 /// The node's shared Postgres pool for one named client.
-pub struct PostgresPool(sqlx::postgres::PgPool);
+pub struct PostgresPool {
+    connections: sqlx::postgres::PgPool,
+    /// The deadline each checkout keeps, which one that runs out of it names.
+    checkout: ConfiguredDeadline,
+}
 
 /// One connection borrowed from the shared pool, returned to it when this is dropped.
 pub struct PostgresConnection(PoolConnection<Postgres>);
@@ -146,8 +140,9 @@ enum PostgresWriteError {
     Server { code: Option<String> },
     #[error("Postgres insert failed")]
     Execute(#[source] sqlx::Error),
-    #[error("{reason}")]
-    Pool { reason: String },
+    /// The pool handed no connection over; what it reported is beneath this context.
+    #[error("failed to borrow a Postgres connection")]
+    Pool,
 }
 
 /// A SQLSTATE the server reports for a row, or for a set of rows, it will never accept.
@@ -198,7 +193,8 @@ impl PostgresWriteError {
             Self::Metadata(error) => {
                 Some(format!("failed to load Postgres table metadata: {error}"))
             }
-            Self::Pool { reason } => Some(reason.clone()),
+            // The pool describes its own failure beneath this context.
+            Self::Pool => None,
             error => Some(error.to_string()),
         };
         let report = report.change_context(EmitterWriteError::Publish {
@@ -211,13 +207,85 @@ impl PostgresWriteError {
     }
 }
 
+/// How the pool treats its connections, as the client's effective configuration declares it: an
+/// omitted key takes the default the client schema declares for it.
+///
+/// SQLx closes a connection idle for `idle`, the ones it keeps for the declared minimum included,
+/// and one that has lived `maximum` when it is returned or while it is idle, then opens connections
+/// again to keep the minimum. It checks its idle connections as often as the shorter lifetime.
+#[derive(Debug, Clone, Copy)]
+struct PostgresPoolPolicy {
+    /// `pool_acquire_timeout_ms`: how long one checkout may take, the wait for the pool, opening a
+    /// connection and testing one included. Independent of how long an accepted query then runs.
+    checkout: ConfiguredDeadline,
+    /// `pool_idle_timeout_ms`: how long a connection may sit idle in the pool.
+    idle: Duration,
+    /// `pool_max_lifetime_ms`: how old a connection may become.
+    maximum: Duration,
+    /// `pool_test_before_acquire`: whether a checkout tests an idle connection before handing it
+    /// over.
+    test_before_acquire: bool,
+}
+
+impl PostgresPoolPolicy {
+    /// The policy `config` declares, each value held to its rule again before the pool opens.
+    fn read(config: &[ClientConfigEntry]) -> EmitterStartResult<Self> {
+        let invalid = || EmitterOpenError::InvalidConfiguration {
+            connector: POSTGRES,
+        };
+        let effective = ConnectorKind::Postgres
+            .client()
+            .assured("the Postgres connector declares a configured client")
+            .config
+            .effective_entries(config);
+        let checkout = ConfiguredDeadline::pool_acquire(&effective)
+            .change_context_lazy(invalid)?
+            .assured("the effective configuration supplies every defaulted key");
+        let test_before_acquire =
+            optional_bool_client_config_value(&effective, "pool_test_before_acquire")
+                .change_context_lazy(invalid)?
+                .assured("the effective configuration supplies every defaulted key");
+        let idle =
+            Self::lifetime(&effective, "pool_idle_timeout_ms").change_context_lazy(invalid)?;
+        let maximum =
+            Self::lifetime(&effective, "pool_max_lifetime_ms").change_context_lazy(invalid)?;
+        Ok(Self {
+            checkout,
+            idle,
+            maximum,
+            test_before_acquire,
+        })
+    }
+
+    /// The lifetime the declared key `name` sets in `effective`, held to the rule of its value.
+    fn lifetime(
+        effective: &[ClientConfigEntry],
+        name: &'static str,
+    ) -> Result<Duration, Report<ClientConfigError>> {
+        let value = optional_client_config_value(effective, name)
+            .assured("the effective configuration supplies every defaulted key");
+        let lifetime = ClientDeadline::parse(value)
+            .change_context(ClientConfigError::InvalidDeadline { key: name })?;
+        Ok(lifetime.duration())
+    }
+
+    /// The driver's pool options for a client sized by `bounds`.
+    fn pool_options(self, bounds: ClientPoolBounds) -> PgPoolOptions {
+        PgPoolOptions::new()
+            .min_connections(bounds.minimum())
+            .max_connections(bounds.maximum().get())
+            .acquire_timeout(self.checkout.bound())
+            .idle_timeout(Some(self.idle))
+            .max_lifetime(Some(self.maximum))
+            .test_before_acquire(self.test_before_acquire)
+    }
+}
+
 impl PostgresPool {
     /// Open the node's shared Postgres pool for one named client, sized by its declared bounds.
     ///
-    /// SQLx's own pool enforces the ceiling, validates a connection before handing it out, and
-    /// retires idle and aged connections within the same maximum. The acquisition deadline covers
-    /// pool wait, establishment, authentication and validation, and is independent of how long an
-    /// accepted query then runs.
+    /// SQLx's own pool enforces the ceiling and treats its connections as [`PostgresPoolPolicy`]
+    /// describes, retiring them within the same maximum.
     pub async fn open(
         config: &[ClientConfigEntry],
         bounds: ClientPoolBounds,
@@ -229,38 +297,58 @@ impl PostgresPool {
             .attach_printable("missing Postgres client config key 'addr'"));
         };
         let options = connect_options(addr, config)?;
-        {
-            let mapping_input = PgPoolOptions::new()
-                .min_connections(bounds.minimum())
-                .max_connections(bounds.maximum().get())
-                .acquire_timeout(ACQUIRE_DEADLINE)
-                .idle_timeout(Some(IDLE_LIFETIME))
-                .max_lifetime(Some(MAX_LIFETIME))
-                .test_before_acquire(true)
-                .connect_with(options)
-                .await
-                .map(Self);
-            match mapping_input {
-                Ok(mapped_value) => Ok(mapped_value),
-                Err(source) => Err(Report::new(EmitterOpenError::Initialize {
+        let policy = PostgresPoolPolicy::read(config)?;
+        let opened = policy.pool_options(bounds).connect_with(options).await;
+        match opened {
+            Ok(connections) => Ok(Self {
+                connections,
+                checkout: policy.checkout,
+            }),
+            Err(source) => Err(checkout_failure(
+                source,
+                policy.checkout,
+                EmitterOpenError::Initialize {
                     connector: POSTGRES,
-                })
-                .attach_printable(source.to_string())),
-            }
+                },
+            )),
         }
     }
 
     /// Borrow one connection, which returns to the pool when the borrow is dropped.
     pub async fn connection(&self) -> EmitterWriteResult<PostgresConnection> {
-        {
-            let mapping_input = self.0.acquire().await.map(PostgresConnection);
-            match mapping_input {
-                Ok(mapped_value) => Ok(mapped_value),
-                Err(source) => Err(Report::new(EmitterWriteError::NotInitialized {
+        let acquired = self.connections.acquire().await;
+        match acquired {
+            Ok(connection) => Ok(PostgresConnection(connection)),
+            Err(source) => Err(checkout_failure(
+                source,
+                self.checkout,
+                EmitterWriteError::NotInitialized {
                     connector: POSTGRES,
-                })
-                .attach_printable(source.to_string())),
-            }
+                },
+            )),
+        }
+    }
+}
+
+/// Why a checkout handed no connection over, beneath `context`: the deadline it ran out of, or the
+/// driver's typed cause. Its description is attached too, which is how an emitter reports a failure.
+fn checkout_failure<C: Context>(
+    source: sqlx::Error,
+    checkout: ConfiguredDeadline,
+    context: C,
+) -> Report<C> {
+    match source {
+        sqlx::Error::PoolTimedOut => {
+            let elapsed = checkout.elapsed("checking out a Postgres connection");
+            Report::new(elapsed)
+                .change_context(context)
+                .attach_printable(elapsed.to_string())
+        }
+        source => {
+            let description = source.to_string();
+            Report::new(source)
+                .change_context(context)
+                .attach_printable(description)
         }
     }
 }
@@ -375,13 +463,10 @@ impl PostgresTableEmitter {
         nervix::dispatch(reason = "the host's pool lease hands out the borrowed connection")
     )]
     async fn borrow(&self) -> error_stack::Result<PostgresConnection, PostgresWriteError> {
-        match self.connections.connection().await {
-            Ok(connection) => Ok(connection),
-            Err(error) => {
-                let reason = format!("{error:?}");
-                Err(error.change_context(PostgresWriteError::Pool { reason }))
-            }
-        }
+        self.connections
+            .connection()
+            .await
+            .change_context(PostgresWriteError::Pool)
     }
 
     /// The declared type of each mapped column, read on the connection the write's first insert
@@ -1104,12 +1189,146 @@ fn float_text(value: f64) -> Option<String> {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use std::num::NonZeroU32;
+
     use arrow_array::builder::{BinaryBuilder, ListBuilder};
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
-    use nervix_connector::MappedEmitterCarrier;
+    use error_stack::{AttachmentKind, FrameKind};
+    use nervix_connector::{DeadlineElapsed, MappedEmitterCarrier};
+    use nervix_models::DeadlineKey;
     use nervix_primitives::sync::StdArc;
 
     use super::*;
+
+    fn pool_bounds() -> ClientPoolBounds {
+        let maximum = NonZeroU32::new(8).assured("eight is not zero");
+        ClientPoolBounds::new(2, maximum).assured("two connections fit a maximum of eight")
+    }
+
+    fn client_config(pairs: &[(&str, &str)]) -> Vec<ClientConfigEntry> {
+        let mut entries = vec![ClientConfigEntry {
+            key: "addr".to_string(),
+            value: "postgres://127.0.0.1/nervix?sslmode=disable".to_string(),
+        }];
+        for (key, value) in pairs {
+            entries.push(ClientConfigEntry {
+                key: (*key).to_string(),
+                value: (*value).to_string(),
+            });
+        }
+        entries
+    }
+
+    /// The description the emitter host reports a failed write by.
+    fn first_description<C>(report: &Report<C>) -> Option<String> {
+        report.frames().find_map(|frame| match frame.kind() {
+            FrameKind::Attachment(AttachmentKind::Printable(attachment)) => {
+                Some(attachment.to_string())
+            }
+            FrameKind::Context(_) | FrameKind::Attachment(_) => None,
+        })
+    }
+
+    #[test]
+    fn a_client_that_leaves_the_pool_keys_out_takes_their_declared_defaults() {
+        let policy = PostgresPoolPolicy::read(&client_config(&[]))
+            .assured("every omitted key takes its declared default");
+        let options = policy.pool_options(pool_bounds());
+        assert_eq!(options.get_min_connections(), 2);
+        assert_eq!(options.get_max_connections(), 8);
+        assert_eq!(options.get_acquire_timeout(), Duration::from_secs(30));
+        assert_eq!(options.get_idle_timeout(), Some(Duration::from_secs(600)));
+        assert_eq!(options.get_max_lifetime(), Some(Duration::from_secs(1800)));
+        assert!(options.get_test_before_acquire());
+    }
+
+    #[test]
+    fn the_pool_takes_every_key_the_client_declares() {
+        let policy = PostgresPoolPolicy::read(&client_config(&[
+            ("pool_acquire_timeout_ms", "1500"),
+            ("pool_idle_timeout_ms", "45000"),
+            ("pool_max_lifetime_ms", "90000"),
+            ("pool_test_before_acquire", "false"),
+        ]))
+        .assured("each declared value keeps its rule");
+        assert_eq!(policy.checkout.key(), DeadlineKey::PoolAcquireTimeout);
+        let options = policy.pool_options(pool_bounds());
+        assert_eq!(options.get_acquire_timeout(), Duration::from_millis(1500));
+        assert_eq!(options.get_idle_timeout(), Some(Duration::from_secs(45)));
+        assert_eq!(options.get_max_lifetime(), Some(Duration::from_secs(90)));
+        assert!(!options.get_test_before_acquire());
+    }
+
+    #[test]
+    fn a_pool_key_that_breaks_its_rule_fails_the_open_and_is_named_beneath_it() {
+        for (key, value) in [
+            ("pool_acquire_timeout_ms", "0"),
+            ("pool_idle_timeout_ms", "1.5s"),
+            ("pool_max_lifetime_ms", "-1"),
+            ("pool_test_before_acquire", "yes"),
+        ] {
+            let refusal = PostgresPoolPolicy::read(&client_config(&[(key, value)]))
+                .expect_err("the committed value breaks its declared rule");
+            assert_eq!(
+                refusal.current_context(),
+                &EmitterOpenError::InvalidConfiguration {
+                    connector: POSTGRES
+                },
+                "{key}"
+            );
+            let cause = refusal
+                .downcast_ref::<ClientConfigError>()
+                .assured("the key's own refusal stays beneath the open");
+            assert!(cause.to_string().contains(key), "{cause}");
+        }
+    }
+
+    #[test]
+    fn a_checkout_that_runs_out_of_its_deadline_reports_the_key_and_its_bound() {
+        let checkout =
+            PostgresPoolPolicy::read(&client_config(&[("pool_acquire_timeout_ms", "1000")]))
+                .assured("one second is a valid deadline")
+                .checkout;
+        let failure = checkout_failure(
+            sqlx::Error::PoolTimedOut,
+            checkout,
+            EmitterWriteError::NotInitialized {
+                connector: POSTGRES,
+            },
+        );
+        let elapsed = failure
+            .downcast_ref::<DeadlineElapsed>()
+            .assured("the deadline stays beneath the failure's context");
+        assert_eq!(elapsed.key, DeadlineKey::PoolAcquireTimeout);
+        assert_eq!(elapsed.bound, Duration::from_secs(1));
+        assert_eq!(
+            first_description(&failure).as_deref(),
+            Some(
+                "checking out a Postgres connection did not finish within pool_acquire_timeout_ms \
+                 1s"
+            )
+        );
+    }
+
+    #[test]
+    fn any_other_checkout_failure_keeps_the_driver_cause() {
+        let checkout = PostgresPoolPolicy::read(&client_config(&[]))
+            .assured("every omitted key takes its declared default")
+            .checkout;
+        let failure = checkout_failure(
+            sqlx::Error::PoolClosed,
+            checkout,
+            EmitterOpenError::Initialize {
+                connector: POSTGRES,
+            },
+        );
+        assert!(failure.contains::<sqlx::Error>());
+        assert!(!failure.contains::<DeadlineElapsed>());
+        assert_eq!(
+            first_description(&failure),
+            Some(sqlx::Error::PoolClosed.to_string())
+        );
+    }
 
     #[test]
     fn invalid_conflict_target_keeps_its_typed_cause_at_the_host_boundary() {
@@ -1599,13 +1818,14 @@ mod tests {
         let Err(error) = connector.borrow().await else {
             panic!("the test pool has no connection");
         };
-        assert!(matches!(
-            error.current_context(),
-            PostgresWriteError::Pool { .. }
-        ));
+        assert!(matches!(error.current_context(), PostgresWriteError::Pool));
         let report = PostgresWriteError::into_report(error);
         assert!(report.contains::<PostgresWriteError>());
-        assert!(format!("{report:?}").contains("pool-acquire-detail"));
+        assert_eq!(
+            first_description(&report).as_deref(),
+            Some("pool-acquire-detail"),
+            "the host reports the pool's own description"
+        );
     }
 
     /// A write borrows its connection before its metadata lookup, so one it cannot borrow fails as

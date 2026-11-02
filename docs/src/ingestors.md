@@ -83,8 +83,8 @@ boundaries for error-record delivery. `ON GENERAL ERROR` remains node-level beca
 source or transport failures that are not tied to one message or output route.
 
 `MAX BATCH SIZE` counts logical Arrow value, offset, and validity bytes. It excludes unused Arrow
-buffer capacity and object overhead. In delivery modes, `MAX <n>` is only an in-flight window for
-`ACK PARALLEL`; `MODE NO ACK` never accepts it.
+buffer capacity and object overhead. In delivery modes, `MAX <n>` bounds the in-flight window of
+`ACK PARALLEL` or endpoint `ACK`; `MODE NO ACK` never accepts it.
 
 At runtime, the ingestor:
 
@@ -139,13 +139,21 @@ Every source body declares its delivery mode with `MODE`, polled and listener so
   <duration> MAX <duration>` lets at most `n` payloads await their acknowledgement; `BATCH TIMEOUT`
   is the longest wait for a partial batch. A `CLIENT PRODUCER` ingestor writes `ACK PARALLEL MAX
   <n> ACK TIMEOUT ...` without `BATCH TIMEOUT`.
+- `ACK MAX <n> ACK TIMEOUT <duration>` is the endpoint response mode. It holds at most `n`
+  outstanding payloads per ingestor on each node and requires `ON QUIESCE REJECT RETRY AFTER
+  <duration>`. The sender owns retry.
 
-`ACK TIMEOUT` bounds how long a payload may make no acknowledgement progress, not how long its
-processing takes. Work under way on its records reports them alive on the physical clock: a node
-that received a record from another node does for as long as it holds it, the node delivering a
+For `ACK SEQUENTIAL` and `ACK PARALLEL`, `ACK TIMEOUT` bounds how long a payload may make no
+acknowledgement progress, not how long its processing takes. Work under way on its records reports
+them alive on the physical clock: a node that received a record from another node does for as long
+as it holds it, the node delivering a
 record to another node does until that node has admitted it, and an emitter whose publish waits for
 a retry does for the records it holds. A payload whose records report nothing for its `ACK TIMEOUT`
 is delivered again, and its earlier delivery is not cancelled and may still complete.
+
+Endpoint `ACK TIMEOUT` instead bounds the complete response wait on the physical clock; progress
+does not restart it. Expiry reports `processing_failed` with cause `ack_timeout` without undoing
+admitted effects. See [endpoint ingestion](#http-endpoint-and-websockets-endpoint).
 
 Each entity accepts only the modes it can honor, and completion offers only those:
 
@@ -157,10 +165,11 @@ keeps the ingestor's accepted policy.
 
 | Entity | `MODE` forms |
 | --- | --- |
-| `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC` | `NO ACK`, `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` |
-| `RABBITMQ QUEUE`, `SQS QUEUE` | `ACK SEQUENTIAL ...` |
+| `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC`, `RABBITMQ QUEUE` | `NO ACK`, `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` |
+| `SQS QUEUE` | `ACK SEQUENTIAL ...` |
 | `CLIENT PRODUCER` | `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` without `BATCH TIMEOUT` |
-| `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, `WEBSOCKETS CONNECTION`, `REDIS PUBSUB`, `NATS SUBJECT`, `ZEROMQ PULL`, `SYSLOG LISTENER`, `PROMETHEUS QUERY` | `NO ACK` |
+| `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` | `NO ACK`, `ACK MAX <n> ACK TIMEOUT <duration>` |
+| `HTTP REQUEST`, `WEBSOCKETS CONNECTION`, `REDIS PUBSUB`, `NATS SUBJECT`, `ZEROMQ PULL`, `SYSLOG LISTENER`, `PROMETHEUS QUERY` | `NO ACK` |
 
 In an `ACK` mode an ingestor acknowledges a message on its transport only once every route and error
 delivery the message unfolded into has completed, and it reports that progress only once the
@@ -205,9 +214,10 @@ again under the other head instead.
 
 `SET FROM` accepts the complete body that follows `FROM` in a `CREATE` statement with the same
 head, and only that pair's body. Change a client or endpoint, a Kafka topic or offset mode,
-`INSTANCES`, the delivery mode, or source-specific subscription settings by supplying that complete
-body, including its required `ON QUIESCE` clause. `SET QUIESCE` changes only the quiesce mode and
-its variables. It parses every quiesce body, and the stored source refuses one it does not honor,
+`INSTANCES`, the delivery mode, an `HTTP REQUEST`'s `METHOD`, `HEADERS` or `MAX BODY SIZE`, a
+`PROMETHEUS QUERY`'s `QUERY`, `MAX BODY SIZE` or `EVERY`, or source-specific subscription settings
+by supplying that complete body, including its required `ON QUIESCE` clause. `SET QUIESCE` changes
+only the quiesce mode and its variables. It parses every quiesce body, and the stored source refuses one it does not honor,
 for example with `HTTP ENDPOINT ingestors do not support ON QUIESCE SUSPEND`; there is no
 `DROP QUIESCE` operation. `SET DECODE USING` exists under every head except `CLIENT PRODUCER`,
 which decodes nothing. `ADD ROUTE` appends a route, while `REPLACE ROUTE` preserves the matched
@@ -247,9 +257,10 @@ The shared mode vocabulary is:
   HTTP requests and new WebSocket upgrades receive 503; HTTP includes `Retry-After`, rounded up to
   whole seconds. Established WebSockets close with code 1013 (Try Again Later).
 - Endpoint buffering, for `HTTP ENDPOINT` and `WEBSOCKETS ENDPOINT`, is `BUFFER MAX SIZE <bytes>`
-  without `ON OVERFLOW`. Requests that fit receive 202 and are held. A full buffer, or a body that
-  cannot fit, is rejected with HTTP 503 or a WebSocket 1013 close; an acknowledged body is never
-  discarded by buffer policy.
+  without `ON OVERFLOW`, available only with `MODE NO ACK`. HTTP requests that fit receive 202 and
+  are held; WebSocket data frames that fit are held without a per-frame acknowledgement. A full
+  buffer, or a body that cannot fit, is rejected with HTTP 503 or a WebSocket 1013 close; an accepted
+  body is never discarded by buffer policy. `MODE ACK` requires `REJECT RETRY AFTER <duration>`.
 
 A read already in progress when an ingestor quiesces ends without losing what its source took from
 the transport: under `SUSPEND` those payloads still dispatch before the source suspends, and under
@@ -265,7 +276,7 @@ A source accepts only the modes it can honor, and completion of its body offers 
 | `NATS SUBJECT`, `REDIS PUBSUB`, `WEBSOCKETS CONNECTION` | `BUFFER ... ON OVERFLOW ...`, `DROP` |
 | `ZEROMQ PULL`, `SYSLOG LISTENER` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...`, `DROP` |
 | `HTTP REQUEST`, `PROMETHEUS QUERY` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...` |
-| `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` | `REJECT RETRY AFTER ...`, `BUFFER MAX SIZE ...` |
+| `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` | `REJECT RETRY AFTER ...`; `BUFFER MAX SIZE ...` only with `MODE NO ACK` |
 | `CLIENT PRODUCER` | `SUSPEND` |
 
 The mode is consulted for resumable model-alteration `ENTITY_PAUSE` holds, `DOMAIN_PAUSE` batches,
@@ -487,18 +498,21 @@ General notes:
 - public Models store structured expressions; the runtime never reparses Plexus
 - each source entity declares the typed transport metadata its messages expose as
   `metadata.<field>`, listed under Metadata in its reference below: `KAFKA TOPIC` declares
-  `metadata.topic`, `metadata.partition`, and `metadata.offset`, `SYSLOG LISTENER` declares
+  `metadata.topic`, `metadata.partition`, `metadata.offset`, `metadata.key`, `metadata.timestamp`,
+  `metadata.timestamp_type`, and `metadata.tombstone`, `SYSLOG LISTENER` declares
   `metadata.peer_addr`, `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`,
   `HTTP ENDPOINT` declares `metadata.method`, `metadata.path`, `metadata.query`,
-  `metadata.remote_addr`, and `metadata.host`, `WEBSOCKETS CONNECTION` declares
-  `metadata.frame_type`, and `WEBSOCKETS ENDPOINT` declares `metadata.frame_type`,
-  `metadata.remote_addr`, and `metadata.path`; every field is optional and none is sensitive
+  `metadata.remote_addr`, and `metadata.host`, `PROMETHEUS QUERY` declares `metadata.query` and
+  `metadata.evaluated_at`, `WEBSOCKETS CONNECTION` declares `metadata.frame_type`,
+  `WEBSOCKETS ENDPOINT` declares `metadata.frame_type`, `metadata.remote_addr`, and
+  `metadata.path`, and `REDIS PUBSUB` declares `metadata.channel` and `metadata.pattern`; every
+  field is optional and none is sensitive
 - a route expression may read any declared field; `CREATE` and `ALTER` refuse a route that reads a
   field its entity does not declare, naming the ingestor, the route's relay and the fields the
   entity does declare. `FILTER WHERE` reads headers but not `metadata.<field>`
 - an ingestor builds a metadata column only for the fields its route expressions or its
-  `TIMESTAMP AT metadata.<field>` read, so an ingestor that reads none spends nothing per message
-  on metadata
+  `TIMESTAMP AT metadata.<field>` read; an ingestor that reads none visits no metadata values and
+  builds no metadata columns
 - supported sources expose transport headers through `read_header(name)` and `read_headers(name)`;
   header names may be any `STRING` expression, and these functions may be used in both top-level
   `FILTER WHERE` and per-route expressions
@@ -978,7 +992,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | HTTP client |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
 | Modes (complete bodies after MODE) | NO ACK |
-| Options in statement order | `METHOD 'GET'` (string literal); required<br>`HEADERS { 'accept' = 'application/json' }` (named string literals); optional; omitted when unset<br>`MAX BODY SIZE 1MiB` (byte size); optional; default 16MiB<br>`EVERY 1s` (duration); required |
+| Options in statement order | `METHOD 'GET'` (string literal); required<br>`HEADERS { 'accept' = 'application/json' }` (named string literals or client secrets); optional; omitted when unset<br>`MAX BODY SIZE 1MiB` (byte size); optional; default 16MiB<br>`EVERY 1s` (duration); required |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
 | Metadata | metadata.status: U16 OPTIONAL<br>metadata.polled_at: DATETIME OPTIONAL |
@@ -993,10 +1007,40 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md#http-request-ingest).
 <!-- connector-matrix:ingest-http-request:end -->
 
-- `METHOD '<token>'` is required on the ingestor. `HEADERS { '<name>' = '<value>', … }` writes
-  literal request fields; each value is visible in `SHOW CREATE`. `MAX BODY SIZE` bounds the
-  response body at its declared size, or 16 MiB where omitted. A response above that bound fails
-  its poll.
+- `METHOD '<token>'` is required on the ingestor. `HEADERS { '<name>' = <value>, … }` writes request
+  fields. Names are case-insensitive, and `CREATE` and `ALTER` refuse a name written twice. A value
+  is UTF-8 text with no control character but a tab and no space or tab at either end. `MAX BODY SIZE`
+  bounds the response body at its declared size, or 16 MiB where omitted. A response above that
+  bound fails its poll.
+- A header's value is a string literal or `CLIENT SECRET '<key>'`. A literal is part of the statement,
+  so `SHOW CREATE` and `DESCRIBE INGESTOR` print it, and a credential does not belong in one.
+  `CLIENT SECRET` names a key of the ingestor's client and sends that key's value:
+
+  ```plexus
+  CREATE HTTP CLIENT orders_api CONFIG {
+    'endpoint' = 'https://api.example.com/orders',
+    'timeout_ms' = 5000,
+    'secret.api_token' = 'Bearer example-token'
+  };
+
+  CREATE HTTP REQUEST INGESTOR orders
+    FROM orders_api
+    METHOD 'GET'
+    HEADERS { 'accept' = 'application/json', 'authorization' = CLIENT SECRET 'secret.api_token' }
+    EVERY 30s MODE NO ACK ON QUIESCE SUSPEND DECODE USING orders_codec
+    TO orders_relay INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+    ON GENERAL ERROR LOG;
+  ```
+
+  The operator names each `secret.<name>` key of an `HTTP` client. Inspection prints the reference:
+  `SHOW CREATE`, `DESCRIBE INGESTOR` and the console show `CLIENT SECRET 'secret.api_token'`, and
+  `SHOW CREATE CLIENT` and `DESCRIBE CLIENT` mask the key as `********`. `CREATE` and `ALTER` refuse a
+  reference to a key the client does not hold, to a key that is not a secret, and to a value that
+  cannot be a header, naming the header and the key and never quoting the value. A value that keeps a
+  `{{ … }}` template is rendered and checked where the ingestor opens instead, and one that cannot be
+  a header fails the open. A poll sends the value only to the client's origin, because it follows a
+  redirect nowhere else. Complete serialization keeps the value, as it keeps every client secret, so
+  a backup archive holds it; see [Backup And Restore](backup-and-restore.md).
 - The HTTP client requires `endpoint` and `timeout_ms`. It also declares optional
   `follow_redirects` and `proxy` settings, plus TLS trust and client identity files. Polling follows
   a redirect only to the client's own origin and only with `follow_redirects = true`, sends its
@@ -1044,11 +1088,11 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers'` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
-| Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL |
+| Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL<br>metadata.key: BYTES OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.timestamp_type: STRING OPTIONAL<br>metadata.tombstone: BOOL OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | replayable |
 | Acknowledgement confirmation | answered |
-| Buffers | messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |
+| Buffers | a record conversion report after a gathered prefix: at most 1 report per ingestor instance; when full, holds back what fills it<br>messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |
 | Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group commit under ACK: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign and unsubscribe: unbounded<br>destroying a consumer that joined its group, for its LeaveGroup answer: driver default, 5 s per LeaveGroup request |
 | Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the source's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
@@ -1063,6 +1107,25 @@ a string literal of 1 to 255 bytes without control characters, passed to Kafka a
 ingestor names `ON QUIESCE SUSPEND`, the only quiesce mode it declares: the topic keeps its records
 after they are read, so a suspended ingestor resumes from its position, within the topic's
 retention. It reads a record's headers through `read_header` and `read_headers`.
+
+The record's metadata also exposes its key as `metadata.key` (`BYTES`), its broker timestamp as
+`metadata.timestamp` (`DATETIME`), its timestamp kind as `metadata.timestamp_type` (`STRING`), and
+whether its value is null as `metadata.tombstone` (`BOOL`). A missing key is null; an empty key is
+an empty byte sequence. `hex_encode(metadata.key)` or `bytes_to_utf8(metadata.key)` explicitly
+converts a key for a string field. Kafka timestamps count Unix milliseconds; Nervix preserves
+that instant exactly. The timestamp kind is `create_time` or `log_append_time`; a record without
+a timestamp has null timestamp and timestamp kind. `TIMESTAMP AT metadata.timestamp` uses that
+instant as the record's event time, while `TIMESTAMP NOW` uses the domain's execution time. An
+unavailable timestamp cannot satisfy `TIMESTAMP AT metadata.timestamp`; it never falls back to
+`NOW`. A present timestamp outside the signed Unix-nanosecond range fails the read with a typed
+conversion error.
+
+A null Kafka value is a tombstone and reaches the codec as an empty payload with
+`metadata.tombstone = true`. An empty non-null value has `metadata.tombstone = false`. The codec
+still determines how many rows the payload produces: an empty JSON payload produces none, while
+an empty TOML document can produce a row through its JAQ transformation. Metadata is available
+to each resulting row's route. Kafka declares only `SUSPEND` on quiesce, so it never copies these
+rows into a host quiesce buffer.
 
 Offset modes:
 
@@ -1458,27 +1521,53 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Capability | Declaration |
 | --- | --- |
 | Reference | REDIS client |
-| Locator and validation rule | CHANNEL 'orders' (redis_channel) |
+| Locator and validation rule | CHANNEL 'orders' (redis_channel) \| PATTERN 'orders.*' (redis_channel_pattern) |
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | No entity-specific options. |
-| Headers | Not offered: Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names. |
+| Headers | Not offered: Redis Pub/Sub carries a channel and a payload, and for a pattern subscription the pattern that matched, but no headers. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. An ingestor subscribes to a quoted channel or channel pattern and an emitter publishes to a quoted channel, each case-preserving. |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
-| Metadata | Not offered: The current Pub/Sub declaration delivers payloads without a typed channel metadata namespace. |
+| Metadata | metadata.channel: STRING OPTIONAL<br>metadata.pattern: STRING OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
 | Buffers | messages read ahead of intake: set by subscription_buffer_messages; when full, holds back what fills it |
-| Network waits | subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE: `connect_timeout_ms`; 30s when omitted<br>idle subscription activity, including its PING probe: `idle_timeout_ms`; required |
+| Network waits | subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE or PSUBSCRIBE: `connect_timeout_ms`; 30s when omitted<br>idle subscription activity, including its PING probe: `idle_timeout_ms`; required |
 | Driver limits | None declared. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |
 
 See the [REDIS PUBSUB capability and mirror reference](connector-capabilities.md#redis-pubsub-ingest).
 <!-- connector-matrix:ingest-redis-pubsub:end -->
 
+An ingestor names what it subscribes to with exactly one of `CHANNEL` and `PATTERN`.
+
 `CHANNEL` takes a nonempty string literal of at most 1,024 UTF-8 bytes. Nervix preserves its case,
 spaces and punctuation in both directions. For example, `CHANNEL 'Orders:EU/*'` subscribes to that
-exact channel: the star is a literal character. Redis Pub/Sub carries no transport headers, so
-`read_header` and `read_headers` are refused when the ingestor is created.
+exact channel: the star is a literal character.
+
+`PATTERN` subscribes to every channel a Redis glob pattern matches, through Redis's `PSUBSCRIBE`.
+It takes a nonempty string literal of at most 1,024 UTF-8 bytes, which Nervix sends exactly as
+written. Redis matches it byte by byte against the channel each message is published to: `*`
+matches any run of bytes, `?` any one byte, `[...]` one byte of a set or range, `[^...]` one byte
+outside it, and `\` makes the next byte literal. Redis accepts any text as a pattern, so a pattern
+without these characters matches only the channel of that exact name. For example,
+`PATTERN 'orders.*'` receives what is published to `orders.eu` and to `orders.us`, but not to
+`returns.eu`. An emitter always publishes to one `CHANNEL`.
+
+Every message exposes two typed metadata fields, both `STRING` and optional:
+
+| Field | Value |
+| --- | --- |
+| `metadata.channel` | The channel the message was published to. For a `CHANNEL` subscription it is the subscribed channel. A pattern can match a channel whose name is not UTF-8 text, published by another client; that message's `metadata.channel` is null. |
+| `metadata.pattern` | The pattern that matched the message. It is null for a `CHANNEL` subscription. |
+
+For example, `SET channel = metadata.channel` records which channel delivered each message of a
+`PATTERN 'orders.*'` subscription, and the same route's `WHERE channel = 'orders.eu'` then keeps
+only that channel's messages. `ALTER REDIS PUBSUB INGESTOR ... SET FROM` replaces the complete
+body, so it moves an ingestor from a channel to a pattern or back; the source then subscribes again
+with the new body.
+
+Redis Pub/Sub carries no transport headers, so `read_header` and `read_headers` are refused when
+the ingestor is created.
 
 Redis Pub/Sub has no retained backlog, so it cannot suspend honestly. Both `ON QUIESCE BUFFER`
 and `ON QUIESCE DROP` keep reading and keep the subscriber healthy. `BUFFER` retains payloads up
@@ -1544,8 +1633,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
-| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: at most 10240 bytes; when full, drops and counts what does not fit<br>ACK-mode QoS 1/2 outcomes in the packet-ordered read-ahead queue: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535; when full, holds back what fills it<br>ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the same packet-ordered read-ahead queue: at most 64 outcome; when full, drops and counts what does not fit<br>NO ACK outcomes in the packet-ordered read-ahead queue: at most 64 outcome; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE, PUBACK and PUBREC requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
-| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>ordinary and oversized-discard acknowledgements written to the connection: driver default, one keep-alive interval of 60 s, or the broker's<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |
+| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: set by max_packet_size, 10240 bytes when omitted; when full, drops and counts what does not fit<br>ACK-mode QoS 1/2 outcomes in the packet-ordered read-ahead queue: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535; when full, holds back what fills it<br>ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the same packet-ordered read-ahead queue: at most 64 outcome; when full, drops and counts what does not fit<br>NO ACK outcomes in the packet-ordered read-ahead queue: at most 64 outcome; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE, PUBACK and PUBREC requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
+| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>ordinary and oversized-discard acknowledgements written to the connection: client key `keep_alive_ms`; one interval of it, or of the broker's Server Keep Alive; 60 s when omitted<br>a silent connection: client key `keep_alive_ms`; two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 s when omitted |
 | Driver limits | A publish above the admission bound is acknowledged before it is counted as oversized; its topic, payload and properties never enter read-ahead. The raw framing bound is MQTT's protocol maximum, separate from the admission bound.<br>ACK-mode QoS 0 overflow is counted immediately and never consumes an acknowledged outcome's reserved capacity. An oversized QoS 0 publish refused here counts as overflow only. NO ACK retains backpressure. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
@@ -1558,12 +1647,29 @@ wildcards it may hold.
 The client's `addr` names the broker by its scheme, host and port alone: `mqtt://` or `mqtts://`, a
 host, and a nonzero port, such as `mqtt://broker.example.com:1883`. A connection reads nothing else
 from it, so `CREATE MQTT CLIENT` refuses an address that leaves out its port or writes credentials,
-a path, a query or a fragment.
+a path, a query or a fragment. Credentials, the keep-alive and the admitted publish size are keys
+of their own, and `CREATE MQTT CLIENT` refuses any key it does not declare:
 
-Connections use the driver's 60-second keep-alive unless the broker supplies a Server Keep Alive
-in `CONNACK`. Plexus exposes no client setting for this interval. A broker-supplied zero disables
-the keep-alive and the acknowledgement-write deadline derived from it; it does not make a silent
-connection fail within a fixed time.
+| Key | What it sets |
+| --- | --- |
+| `addr` | The broker: `mqtt://` or `mqtts://`, a host and a nonzero port. Required. |
+| `client_id` | The identity template every connection renders, at most 65,535 bytes, not empty and without NUL; see the identities below. Omitted, each connection uses its entity's default identity. |
+| `username`, `password` | The credentials every `CONNECT` carries, each at most 65,535 bytes. MQTT 5 lets a client write either alone. `DESCRIBE CLIENT` and `SHOW CREATE CLIENT` redact the password. |
+| `keep_alive_ms` | The keep-alive every `CONNECT` asks for: whole seconds from 1 s through 65,535 s, written in milliseconds. `60000` when omitted. |
+| `max_packet_size` | The largest complete publish, in bytes, a source admits; see the oversized publishes below. From 1 through 268,435,460, `10240` when omitted. Emitters do not read it. |
+| `tls_ca_file`, `tls_cert_file`, `tls_key_file` | The TLS files of an `mqtts` connection, refused with `mqtt`. An `mqtts` client requires `tls_ca_file`, its only trust root, and writes the certificate and key together. |
+
+A broker that refuses a client's credentials, or a client that writes none to a broker requiring
+them, refuses its connection. The source reports the broker's reason as its transient error, such
+as ``Connection refused, return code: `BadUserNamePassword` ``, and connects again on its declared
+`RETRY POLICY`, or on the host's reconnect cadence in `MODE NO ACK`; it never subscribes meanwhile.
+
+Every `CONNECT` asks the broker for the client's `keep_alive_ms`. A broker that supplies a Server
+Keep Alive in `CONNACK` replaces it for that connection. The connection pings its broker after one
+interval without traffic and ends when the following interval passes without an answer, and one
+interval bounds each acknowledgement write. A broker-supplied zero disables the keep-alive and the
+acknowledgement-write deadline derived from it; it does not make a silent connection fail within a
+fixed time.
 
 `SESSION CLEAN` starts a fresh broker session on every connection and retains no session after
 disconnect. `SESSION PERSISTENT` resumes the broker session for the same client identity and
@@ -1623,14 +1729,15 @@ ingestor reads again. See
 [MQTT source connections](connector-contract.md#mqtt-source-connections).
 
 Every MQTT connection advertises the full protocol framing limit of 268,435,460 bytes in its
-`CONNECT`. Nervix separately admits complete publishes of at most 10 KiB, including their topic,
-properties and framing, so the payload must leave room for that overhead. It drops larger
-publishes locally, acknowledges them when their QoS
+`CONNECT`. Nervix separately admits complete publishes of at most the client's `max_packet_size`
+bytes, 10,240 when omitted, including their topic, properties and framing, so the payload must
+leave room for that overhead. It drops larger publishes locally, acknowledges them when their QoS
 requires it, then counts them in `nervix_ingestor_oversized_payloads_total`, visible in
 `DESCRIBE INGESTOR`. They never reach the codec and do not count as decode rejections. Releasing
 their broker inflight slots lets a persistent session continue delivering ordinary messages even
-after many oversized publishes. Raw framing may therefore use substantially more memory than an
-admitted publish; the two bounds are declared separately above.
+after many oversized publishes; a broker told the smaller bound in `CONNECT` could instead keep a
+larger publish in its inflight window and stall the session. Raw framing may therefore use
+substantially more memory than an admitted publish; the two bounds are declared separately above.
 
 Cancellation retains any discard acknowledgement and its original keep-alive deadline for the
 next read. An ordinary partial batch ahead of a discard is returned and acknowledged first,
@@ -1639,10 +1746,15 @@ deadline and reports its size exactly once after that acknowledgement has been w
 
 Without a `client_id` in the client configuration, one instance connects as
 `<domain>~<ingestor>`. Multiple instances connect as `<domain>~<ingestor>~<instance>`, with
-zero-based instance indices. An explicit identity shared by multiple instances must contain
-`{{instance}}`. An explicit identity replaces the whole default, including its domain prefix:
-choose identities unique to each live connection on the same broker, across domains too.
-Identities remain stable across node ownership changes.
+zero-based instance indices. A `client_id` is a template: its `{{instance}}` placeholder, however
+its braces are spaced, renders the zero-based index of the instance that connects, and an emitter
+that shares the client connects as instance 0. Each instance must render an identity of its own, so
+an ingestor with more than one instance names `{{instance}}` in its `client_id`. Instances whose
+identities render alike never subscribe: each reports
+`MQTT client_id '<identity>' is shared by <count> instances` as its transient error. An explicit
+identity replaces the whole default, including its domain prefix: choose identities unique to each
+live connection on the same broker, across domains too. Identities remain stable across node
+ownership changes.
 
 `DROP INGESTOR` releases the broker sessions, including after `STOP`. Nervix stops the source,
 opens a clean cleanup connection for each distinct identity, sends `UNSUBSCRIBE` for its filter,
@@ -1891,7 +2003,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
-| Metadata | Not offered: The current queue declaration exposes message attributes through headers but no separate typed receipt metadata namespace. |
+| Metadata | metadata.message_id: STRING OPTIONAL<br>metadata.sent_at: DATETIME OPTIONAL<br>metadata.receive_count: U32 OPTIONAL<br>metadata.first_received_at: DATETIME OPTIONAL<br>metadata.group_id: STRING OPTIONAL<br>metadata.deduplication_id: STRING OPTIONAL<br>metadata.sequence_number: STRING OPTIONAL<br>metadata.sender_id: STRING OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | answered |
@@ -1922,6 +2034,28 @@ message holds a receive for that long poll before it answers. Without `timeout_m
 unbounded. `CREATE SQS CLIENT` reads `tls_ca_file` before it commits the client, and refuses a file
 holding a section that is not a certificate, or no certificate at all, as
 `invalid client config key 'tls_ca_file'`: a client that trusted it alone could reach no service.
+
+Each receive requests SQS system attributes separately from the message attributes that
+`read_header` and `read_headers` read. Routes can read the following optional, non-sensitive
+metadata fields:
+
+| Field | Type | Value |
+| --- | --- | --- |
+| `metadata.message_id` | `STRING` | The service's message identifier, retained across redelivery; this is not the receipt handle used to delete a delivery. |
+| `metadata.sent_at` | `DATETIME` | SQS `SentTimestamp`, converted exactly from Unix milliseconds. |
+| `metadata.receive_count` | `U32` | SQS `ApproximateReceiveCount`: receives across queues before deletion, including this receive. |
+| `metadata.first_received_at` | `DATETIME` | SQS `ApproximateFirstReceiveTimestamp`, converted exactly from Unix milliseconds and retained across redelivery. |
+| `metadata.group_id` | `STRING` | `MessageGroupId`, when supplied by the service. |
+| `metadata.deduplication_id` | `STRING` | `MessageDeduplicationId`, when supplied by the service. |
+| `metadata.sequence_number` | `STRING` | SQS's FIFO sequence number, preserved as text without narrowing its range. |
+| `metadata.sender_id` | `STRING` | The service's sender identifier. |
+
+A field the service omits is null. Invalid numeric system attributes fail the read with a typed
+error naming the attribute; they never become zero or null. Timestamps must fit Nervix's signed
+Unix-nanosecond range. `TIMESTAMP AT metadata.sent_at` selects the service's send time for event
+admission and downstream windows. A route may use `WHERE metadata.receive_count >= (2 AS U32)`
+to direct redeliveries to a retry relay. The values remain attached to their exact message through
+ingest grouping and an in-flight receive completed during quiesce.
 
 Starting the ingestor sends no request to the service. Each source instance looks its queue up
 before its first poll and keeps the queue's URL from then on, suspensions included. The source
@@ -1988,9 +2122,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | Not offered: QUERY is a PromQL expression option rather than an external entity name. |
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | `QUERY 'up'` (string literal); required<br>`MAX BODY SIZE 16MiB` (byte size); optional; default 16MiB<br>`EVERY 15s` (duration); required |
-| Headers | Not offered: The Prometheus query API is polled for samples; no Prometheus remote-write emitter is declared. |
+| Headers | Not offered: An HTTP response's headers describe a whole answer rather than one of its samples, and each sample's labels travel in its payload under metric, so a query source reads no transport headers. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
-| Metadata | Not offered: The current query result is decoded as payload; no separate typed query or evaluation-time metadata namespace is declared. |
+| Metadata | metadata.query: STRING OPTIONAL<br>metadata.evaluated_at: DATETIME OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -2002,53 +2136,157 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [PROMETHEUS QUERY capability and mirror reference](connector-capabilities.md#prometheus-query-ingest).
 <!-- connector-matrix:ingest-prometheus-query:end -->
 
-Prometheus samples are flattened into JSON before codec decoding.
+A `PROMETHEUS QUERY` ingestor evaluates one PromQL instant query on a cadence of domain time,
+through a `PROMETHEUS CLIENT`, and delivers one JSON object for each float sample of the answer. One
+scheduled node runs it. Every query asks for its own instant, so `NO ACK` is its only mode: nothing
+acknowledges a sample, and an instant no query read stays a gap in the series.
+
+```plexus
+CREATE SCHEMA sample ( job STRING, value F64, timestamp STRING );
+CREATE SCHEMA evaluated_sample (
+  job STRING,
+  value F64,
+  timestamp STRING,
+  evaluated_at DATETIME OPTIONAL
+);
+CREATE CODEC sample_codec FROM JSON TO SCHEMA sample
+  WITH JAQ TRANSFORMATIONS ON INGESTION '{job: .metric.job, value, timestamp}';
+CREATE RELAY samples SCHEMA evaluated_sample UNBRANCHED;
+
+CREATE PROMETHEUS CLIENT prom_main
+  CONFIG {
+    'addr' = 'https://prometheus.example.com/monitoring',
+    'timeout_ms' = 5000
+  };
+
+CREATE PROMETHEUS QUERY INGESTOR node_up
+  FROM prom_main
+  QUERY 'up{job="node"}'
+  EVERY 15s
+  MODE NO ACK
+  ON QUIESCE SUSPEND
+  DECODE USING sample_codec
+  TIMESTAMP AT metadata.evaluated_at
+  TO samples INHERIT ALL SET evaluated_at = metadata.evaluated_at
+  UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+#### Prometheus Samples
+
+A query source reads the `vector` of float samples an instant query answers. It delivers one object
+per sample: what the API's `vector` result holds for the sample, with the sample's instant written
+out as text.
+
+```json
+{"metric":{"__name__":"up","instance":"node-1:9100","job":"node"},"value":1,"timestamp":"2026-04-07T00:00:00.123Z"}
+```
+
+- `metric` holds the series' labels in ascending name order, its `__name__` among them where the
+  series has one. A label named `value` or `timestamp` stays under `metric`, beside the sample's own.
+- `value` is a JSON number: an integer the API writes as an integer stays that integer, and any other
+  value is the shortest text of the same float. JSON has no number for `NaN`, `+Inf` or `-Inf`, so
+  each travels as the string the API writes it as, for the codec to judge per record. A `string`
+  wire field reads it, and a `number` wire field refuses that record as a
+  [decode rejection](#when-the-codec-refuses-a-payload), while the samples beside it are delivered.
+- `timestamp` is the sample's own instant as RFC 3339 text in UTC, read from the digits of the API's
+  decimal seconds so that no float rounds them. Prometheus reports it to the millisecond.
+
+`WIRE JSON` declares no nested object, so a codec that reads a label is a JAQ codec, as in the
+example above. A codec that reads only the sample's own members can stay a `MODE LOOSE` wire schema,
+which drops `metric`:
+
+```plexus
+CREATE SCHEMA sample_value ( value F64 );
+CREATE WIRE JSON SCHEMA sample_wire MODE LOOSE ( value number );
+CREATE CODEC value_codec FROM WIRE JSON SCHEMA sample_wire TO SCHEMA sample_value;
+```
+
+A route reads what the sample answers through its metadata. `metadata.query` is the statement's
+`QUERY` as written, and `metadata.evaluated_at` is the instant the poll asked the API to evaluate it
+at, the due instant of the ingestor's cadence, which `TIMESTAMP AT metadata.evaluated_at` takes as
+each sample's event time.
+
+#### Prometheus Cadence
+
+The first query becomes due after one `EVERY` interval, where an `HTTP REQUEST` polls at once. Later
+queries stay on that anchored schedule of the domain clock. Nervix sends each due instant as the
+query's evaluation time, so a paced domain queries the instant its own clock has reached rather
+than the present. A query slower than `EVERY` coalesces the occurrences it missed into one query at
+the newest due instant, and returned samples are evaluated with a fresh domain execution snapshot.
+
+#### When A Prometheus Poll Fails
+
+A poll that cannot read its answer fails as a whole, before any sample of the answer is delivered.
+`DESCRIBE INGESTOR` shows the failure as the ingestor's transient error, in the form
+`transient error: failed to read from prometheus ingestor: <failure>`, and every attached session
+receives it as a server error. The next query that succeeds clears it. A failed poll is not sent
+again: the next query runs at the next due instant, so the failed instant stays a gap in the series.
+
+| What the poll met | `<failure>` |
+| --- | --- |
+| A `matrix`, `scalar` or `string` result, which a query source does not read | `Prometheus query returned unsupported result type 'matrix'` |
+| A `vector` that holds a native histogram | `Prometheus query returned unsupported result type 'native histogram'` |
+| A query the API refuses, in the API's own words | `Prometheus rejected the query with HTTP status 400 Bad Request: bad_data: invalid parameter "query": 1:5: parse error: unclosed left parenthesis` |
+| Any other status whose body is not the API's error, such as a proxy's page or a redirect | `Prometheus query failed with HTTP status 503 Service Unavailable` |
+| A response above `MAX BODY SIZE` | `Prometheus query response exceeds MAX BODY SIZE 16MiB` |
+| A successful status whose body is not the API's answer | `failed to decode Prometheus query response` |
+| A request that could not be sent, or had no answer within `timeout_ms` | `failed to send Prometheus query`, then the transport's cause |
+| A response body that ended early or outlasted `timeout_ms` | `failed to read Prometheus query response`, then the transport's cause |
+
+No failure names the request's URL, which carries the PromQL, the instant and any credentials `addr`
+holds.
+
+One sample can also fail alone, when its value is neither a number nor one of the API's non-finite
+strings, or its instant does not fit a timestamp. Prometheus writes neither, though another server
+that answers the same API can. That sample is left out and reported to every attached session as a
+server error, and the samples beside it are delivered.
+
+#### Prometheus Response Bound
+
 `MAX BODY SIZE <bytes>`, written between `QUERY` and `EVERY`, bounds how many bytes of one query
 response a poll reads; a statement that leaves it out reads at most `16MiB`. The size is a whole
 number greater than zero followed by `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB` or `TiB`, and
 `SHOW CREATE` renders it in the unit it was written in. The bound counts the bytes of the
 response's JSON: a response the server compressed is counted as it is decompressed, so the bound
 limits the JSON a poll reads rather than the size of its transfer. A response whose announced
-length or whose body exceeds the bound fails the poll before any of its samples is delivered:
-`DESCRIBE INGESTOR` shows the failure as the ingestor's transient error, such as `transient error:
-failed to read from prometheus source: Prometheus query response exceeds MAX BODY SIZE 16MiB`, and
-the next poll queries again. `DESCRIBE INGESTOR` prints the bound in effect, whether the statement
-wrote it or not, in `options: QUERY 'bulk' MAX BODY SIZE 16MiB EVERY 1s`. `SET FROM` replaces the
-whole body, so an
+length or whose body exceeds the bound fails its poll.
+
+`DESCRIBE INGESTOR` prints the bound in effect, whether the statement wrote it or not, in
+`options: QUERY 'bulk' MAX BODY SIZE 16MiB EVERY 1s`. `SET FROM` replaces the whole body, so an
 `ALTER PROMETHEUS QUERY INGESTOR` whose new body leaves `MAX BODY SIZE` out reads at most `16MiB`
 again.
+
+#### Prometheus Intake And Quiesce
+
 The samples of one response enter the graph in intake batches of at most 1024 samples, and each
 batch is decoded and routed as its own group, so a large vector is never taken in as one batch of
 any size. The remaining samples wait while a batch is routed, and the next query waits until every
 sample of the current one has entered the graph or, while a `BUFFER` quiesce holds the ingestor,
-has been handed to its buffer.
-The first query becomes due after one `EVERY` interval. Nervix supplies each anchored due instant
-as Prometheus's evaluation time; a slow query coalesces missed occurrences and returned samples are
-evaluated with a fresh domain execution snapshot.
-`SUSPEND` skips scrapes and leaves a sampling gap. `BUFFER` keeps querying at the declared cadence
-and delivers retained results in order after resume. It retains each intake batch as one payload:
-`MAX SIZE` counts the bytes of its samples' JSON, `ON OVERFLOW` drops whole batches, and
-`nervix_ingestor_quiesce_buffered_records` and `nervix_ingestor_quiesce_dropped_total` count
-batches rather than samples. On resume, each retained batch enters the graph as an ingest group of
-its own, oldest first. A scrape whose `ON INGESTION` unfolding finds the node's extension workers
-full waits for them; see [When The Extension Workers Are Full](#when-the-extension-workers-are-full).
+has been handed to its buffer. A query whose `ON INGESTION` unfolding finds the node's extension
+workers full waits for them; see [When The Extension Workers Are Full](#when-the-extension-workers-are-full).
 
-The ingestor reads through a `PROMETHEUS CLIENT`. Every key of its `CONFIG` is Nervix's own:
+`SUSPEND` skips queries and leaves a gap in the series. `BUFFER` keeps querying at the declared
+cadence and delivers retained results in order after resume. It retains each intake batch as one
+payload: `MAX SIZE` counts the bytes of its samples' JSON, `ON OVERFLOW` drops whole batches, and
+`nervix_ingestor_quiesce_buffered_records` and `nervix_ingestor_quiesce_dropped_total` count batches
+rather than samples. On resume, each retained batch enters the graph as an ingest group of its own,
+oldest first.
+
+A quiesce change or a stop that meets a query in flight abandons that query and keeps nothing of its
+answer. A hold that begins or ends during a query therefore leaves a gap of one occurrence, under
+`BUFFER` too.
+
+#### `PROMETHEUS CLIENT`
+
+Every key of a `PROMETHEUS CLIENT`'s `CONFIG` is Nervix's own:
 
 | Key | Required | Value |
 | --- | --- | --- |
 | `addr` | Yes | The root of the Prometheus HTTP API: an `http` or `https` URL with a host, whose path is the prefix the API is served under, such as `/monitoring` behind a reverse proxy. Each query is sent to `api/v1/query` beneath it, so the URL carries no query string and no fragment. |
-| `timeout_ms` | Yes | How long one query may take, as a positive whole number of milliseconds. It covers name resolution, connection setup, TLS and the response. |
-| `tls_ca_file` | No | A PEM certificate authority that HTTPS trusts in addition to the roots the client already trusts. |
+| `timeout_ms` | Yes | A positive whole number of milliseconds that bounds one query, as [Client Deadlines](#client-deadlines) defines. It covers name resolution, connection setup, TLS and the whole response. |
+| `tls_ca_file` | No | A PEM certificate authority that HTTPS trusts in addition to the platform's native roots. |
 | `tls_cert_file`, `tls_key_file` | Together | The PEM certificate chain and private key the client presents to authenticate over HTTPS. |
-
-```plexus
-CREATE PROMETHEUS CLIENT prom_main
-  CONFIG {
-    'addr' = 'https://prometheus.example.com/monitoring',
-    'timeout_ms' = 5000
-  };
-```
 
 `CREATE PROMETHEUS CLIENT` refuses a configuration that cannot configure a query source, and names the key:
 a key the client does not declare, a key written twice, a missing `addr` or `timeout_ms`, an
@@ -2059,6 +2297,29 @@ Keys are lowercase and case-sensitive. A value can name a file
 of the client's `MOUNT`, as in `'tls_ca_file' = '{{ dev_tls }}/ca.pem'`. The rendered configuration
 must satisfy these rules before commitment, and a source checks it again when opening, so the
 address it queries is the one the rules admit.
+
+#### Prometheus Client Transport
+
+A query travels through the HTTP client Nervix shares with Sentry and OTEL over HTTP, and inherits
+its [transport contract](connector-contract.md#http-client-transport):
+
+- Each query is one `GET` to `api/v1/query` beneath `addr`, with the PromQL in its `query` parameter
+  and the due instant, in decimal seconds, in its `time` parameter. The PromQL travels in the URL, so
+  it must fit what the server and any proxy in front of it accept in one. The request carries no
+  `timeout` parameter, so the server's own query timeout applies beside `timeout_ms`.
+- The host of `addr` is resolved through the node's DNS resolver. It stays the HTTP authority and the
+  name HTTPS verifies, as [Connection Identity](name-resolution.md#connection-identity) describes.
+- No proxy is used. A `PROMETHEUS CLIENT` declares no `proxy`, and the proxy environment variables
+  `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and their lowercase forms are never read.
+- No redirect is followed, so a query goes only to the host of `addr`. A `3xx` answer fails its poll
+  with its status, such as `Prometheus query failed with HTTP status 302 Found`, so `addr` must name
+  the root that answers rather than one that redirects to it.
+- A client declares no bearer token, and a query writes no headers. A server that requires
+  authentication is reached with a client certificate, or with Basic credentials in the user
+  information of `addr`, as in `https://reader:secret@prometheus.example.com`. Every query sends
+  them in its `Authorization` header. `SHOW CREATE CLIENT` and `DESCRIBE CLIENT` mask such an `addr`
+  as `********`, and complete serialization keeps it, so a backup archive holds it; see
+  [Backup And Restore](backup-and-restore.md).
 
 ### `HTTP ENDPOINT` And `WEBSOCKETS ENDPOINT`
 
@@ -2165,8 +2426,9 @@ A `WEBSOCKETS ENDPOINT` ingestor reads each data frame's metadata:
 | `metadata.remote_addr` | The address and port of the peer whose TCP connection opened the WebSocket. |
 | `metadata.path` | The path the connection's upgrade request named, which is the endpoint's `PATH`. |
 
-Every field is a `STRING`, and every frame of a connection reads the same `remote_addr` and `path`,
-including frames its signaling protocol accepts before the handshake ends. Each node reads the
+Every field is `STRING OPTIONAL` and declared non-sensitive. Every frame of a connection reads the
+same `remote_addr` and `path`, including frames its signaling protocol accepts before the handshake
+ends. Each node reads the
 requests and frames it receives, so a field never depends on the node that owns the ingestor's
 output. A body that `BUFFER` retains keeps its metadata, and its replay reads the values it
 arrived with. This route keeps only acme's requests and records the peer that sent each one:
@@ -2183,8 +2445,11 @@ CREATE HTTP ENDPOINT INGESTOR tenant_requests
   ON GENERAL ERROR LOG;
 ```
 
-Header values follow the same contract on both endpoints: a value that is UTF-8, whether or not it
-is ASCII, reaches `read_header` and `read_headers` unchanged, and a value that is not UTF-8 is
+Both endpoints record header names in ASCII lowercase and keep every value of a repeated name in
+that name's original value order. They declare no ordering between different names. WebSocket
+header reads refer to the opening upgrade request, not to later data frames.
+A value that is UTF-8, whether or not it is ASCII, reaches `read_header` and `read_headers` unchanged,
+and a value that is not UTF-8 is
 dropped and counted in `nervix_ingestor_header_values_dropped_total` for every ingestor the request
 or WebSocket upgrade was routed to.
 
@@ -2200,18 +2465,21 @@ CREATE HTTP ENDPOINT INGESTOR acknowledged
   ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 ```
 
-| HTTP result in `MODE ACK` | Meaning |
-| --- | --- |
-| 200 | The payload's graph acknowledgement root completed under the declared error policies. |
-| 400 | The codec or local route construction refused the input. |
-| 503 with `Retry-After` | The window or execution capacity is full, intake is quiesced, downstream negatively acknowledged, the ACK timeout expired, or the exact intake ended. |
+| HTTP result in `MODE ACK` | `outcome` | `cause` | Meaning |
+| --- | --- | --- | --- |
+| 200 | `completed` | `none` | The payload's graph acknowledgement root completed under the declared error policies. |
+| 400 | `processing_failed` | `rejected` | The codec or local route construction refused the input. |
+| 503 | `not_admitted` | `busy` | The response window or execution capacity is full. |
+| 503 | `not_admitted` | `suspended` | Intake is quiesced before admission. |
+| 503 | `processing_failed` | `rejected` | Downstream negatively acknowledged admitted work. |
+| 503 | `processing_failed` | `ack_timeout` | The absolute response deadline expired. |
+| 503 | `outcome_unknown` | `interrupted` | The exact intake stopped or ended while the response was held. |
 
 Every ACK response has a JSON object containing exactly `outcome` and `cause`, using the existing
 [client submission outcome vocabulary](client-io-architecture.md). For example, a local refusal
 is `{"outcome":"processing_failed","cause":"rejected"}`. Downstream rejection uses that same
-object with status 503. Timeout uses `processing_failed` / `ack_timeout`; a full window uses
-`not_admitted` / `busy`; intake ending uses `outcome_unknown` / `interrupted`. The response contains
-no payload or diagnostic details. Runtime events retain the ingestor's ordinary diagnostics.
+object with status 503. The response contains no payload or diagnostic details. Runtime events
+retain the ingestor's ordinary diagnostics.
 A 503 uses the declared retry delay, rounded up to whole seconds. A retry can duplicate output
 that already completed; timeout or interruption does not roll back admitted work.
 
@@ -2225,8 +2493,10 @@ limit, and WebSocket messages retain the driver's message and frame limits.
 
 In `MODE NO ACK`, admission still answers HTTP 202 without waiting for downstream acknowledgement.
 A codec refusal becomes a decode rejection consumed by `ON GENERAL ERROR`; it also answers 202.
-With `BUFFER`, bodies that fit receive 202 and drain after resume. A full buffer rejects new intake
-without discarding bodies already accepted. If extension workers cannot unfold a fresh payload,
+WebSocket data frames receive no per-frame graph-completion reply in this mode; signaling replies
+still follow their protocol. With `BUFFER`, HTTP bodies that fit receive 202 and drain after resume.
+A full buffer rejects new intake without discarding bodies already accepted. If extension workers
+cannot unfold a fresh payload,
 HTTP answers 503 and a WebSocket closes with 1013; buffered payloads instead retain their place
 until workers can take them. See [When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload).
 
@@ -2243,9 +2513,10 @@ JSON text. A protobuf outbound message must represent both string fields; startu
 fixed outcome before binding intake. The protocol's control frames retain their declared meaning.
 
 A WebSocket retains its selected route and signaling protocol throughout the connection. Stopping
-or replacing its source ends that exact intake, including signaling data intake. Held acknowledged
-responses resolve with 503 (or the equivalent outcome frame) when intake stops or ends; the next
-payload on a retained ended route closes with 1013. Open a new connection for a replacement source.
+or replacing its source ends that exact intake, including signaling data intake. An interrupted
+acknowledgement wait returns HTTP 503 or the equivalent WebSocket outcome frame. A request admitted
+before the ending may still finish. The next payload on a retained ended route closes with 1013.
+Open a new connection for a replacement source.
 Stopping a domain withdraws only its routes and intakes; other domains on the same host and path
 continue receiving requests. A withdrawn route returns HTTP 404.
 

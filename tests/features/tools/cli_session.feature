@@ -158,6 +158,7 @@ Feature: CLI public session dispatch
       | 1            |
       | 3            |
 
+  @slots_2
   Scenario Outline: CLI keeps printing notices and new subscription rows after its node restarts
     Given a <cluster_size> node nervix cluster is started
     When these Plexus commands are executed on the leader node
