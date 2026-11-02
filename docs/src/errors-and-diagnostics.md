@@ -1315,9 +1315,14 @@ is created. The refusal names the connector, the client and the domain, with the
 or timeout rule, that rule's error is beneath the key, such as `PROMETHEUS client 'prom_main' in
 domain 'shop' cannot use its CONFIG: 'addr' is not an API root: the URL has a query string`.
 A `WEBSOCKETS CLIENT` uses the same validation boundary with
-`WebsocketsClientConfigError`: unknown/repeated keys, invalid endpoint, positive-duration or
-portable positive limit values, an unschedulable ping-derived idle bound,
-TLS keys on `ws`, and unpaired identity files are typed refusals naming their key, client and domain.
+`WebsocketsClientConfigError`: unknown/repeated keys, invalid endpoint, an endpoint with a fragment
+or user information, positive-duration or portable positive limit values, an unschedulable
+ping-derived idle bound, TLS keys on `ws`, and unpaired identity files are typed refusals naming
+their key, client and domain without printing a value. The connector's offline check reports a
+`tls_ca_file` without a certificate as `OfflineClientConfigError::NoCertificate`, whose public
+message names only the key, and a file it cannot read as `InvalidKey` above the contract's
+`ClientConfigError`. A certificate section it cannot parse stays
+`TlsClientConfigError::ParseCaCertificate` beneath `IngestorError::Open` when the source opens.
 `WebsocketsUpgradeHeadersError` names the connection ingestor and offending field without printing
 its value; shared HTTP name, value and limit causes remain beneath it. Planning retains that typed
 cause if a ingestor cannot produce its validated header collection. Rendered client values are

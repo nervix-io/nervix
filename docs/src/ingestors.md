@@ -2687,33 +2687,44 @@ The client's Nervix-owned `CONFIG` is strict, with lowercase, case-sensitive key
 
 | Key | Contract |
 | --- | --- |
-| `endpoint` | Required `ws://` or `wss://` URL with a host and without a fragment. Its path and query are sent in the upgrade request. |
+| `endpoint` | Required `ws://` or `wss://` URL with a host, without a fragment and without user information. Its path and query are sent in the upgrade request. |
 | `connect_timeout_ms` | Positive whole milliseconds for DNS, TCP, TLS and upgrade together; omitted means 30000. |
 | `ping_interval_ms` | Positive whole milliseconds between client pings after signaling completes; omitted means only answering peer pings. |
 | `idle_timeout_ms` | Positive whole milliseconds without an inbound frame before reconnecting. When omitted, three configured ping intervals apply, or 30000 without configured pings. |
 | `handshake_buffer_capacity` | Accepted signaling messages retained before readiness: 1–65535, default 16. A full queue backpressures the connection within the signaling `TIMEOUT`. |
 | `max_message_size` | Positive whole bytes per incoming message, including fragmented messages: at most 4294967295, default 67108864 (64 MiB). |
 | `max_frame_size` | Positive whole bytes per incoming frame: at most 4294967295, default 16777216 (16 MiB). |
-| `tls_ca_file` | Optional PEM CA file; only with a `wss://` endpoint. Its certificates are trusted beside the bundled WebPKI roots and the platform's native roots, never instead of them. |
+| `tls_ca_file` | Optional PEM CA file holding at least one certificate; only with a `wss://` endpoint. Its certificates are trusted beside the bundled WebPKI roots and the platform's native roots, never instead of them. |
 | `tls_cert_file`, `tls_key_file` | Optional client identity files, supplied together; only with a `wss://` endpoint. |
 
 The client's declared key schema refuses unknown, repeated or mistyped keys and TLS file keys with
 `ws://`, and supplies the three declared defaults that `DESCRIBE CLIENT` shows. The WebSocket
-configuration then refuses an endpoint with a fragment, a count above its maximum and three ping
-intervals beyond the schedulable bound. Durations obey the shared schedulable physical-duration
-bound. Resource mounts and configuration templates keep their shared client contract; rendered
-values are checked before commitment and again when opening the source. A ping write has a
-one-second physical budget and a failure triggers recovery.
+configuration then refuses an endpoint with a fragment or user information, a count above its
+maximum and three ping intervals beyond the schedulable bound. Durations obey the shared
+schedulable physical-duration bound. Resource mounts and configuration templates keep their shared
+client contract; rendered values are checked before commitment and again when opening the source.
+A ping write has a one-second physical budget and a failure triggers recovery.
 
 No WebSockets key is declared confidential, but `DESCRIBE CLIENT` and `SHOW CREATE CLIENT` show an
-`endpoint` that carries user information or a query as `********`, because either can hold a
-credential. User information in the `endpoint` is not sent with the upgrade; a peer that needs
-credentials receives them as a `HEADERS` field, such as `authorization`, or in the query. `CREATE WEBSOCKETS CLIENT` requires each TLS file key, once its resource mount template
-is rendered, to name a readable regular file. The source parses the files when it opens: a CA
-certificate it cannot parse, or a client certificate chain and private key it cannot read or pair,
-fails the ingestor's start, which `DESCRIBE INGESTOR` shows as its transient status. A
-`tls_ca_file` that holds no PEM certificate adds no trust root, so the bundled and native roots
-alone verify the server. The server certificate is always verified against the endpoint's host.
+`endpoint` that carries a query as `********`, because a query can hold a credential. The upgrade
+never sends user information, so `CREATE WEBSOCKETS CLIENT` refuses an `endpoint` that carries it
+with `'endpoint' must not carry user information`, without printing the value. A peer that needs
+credentials receives them as a `HEADERS` field, such as `authorization`, or in the query.
+
+`CREATE WEBSOCKETS CLIENT` requires each TLS file key, once its resource mount template is
+rendered, to name a readable regular file. It also refuses a `tls_ca_file` that holds no PEM
+certificate, with `client config key 'tls_ca_file' holds no certificate`: such a file adds no trust
+root, so a private CA the client was meant to trust would surface only as a verification failure on
+every connection. `REBIND RESOURCE` applies the same checks to the version it moves a client to.
+The source parses the files when it opens: a CA certificate it cannot parse, or a client
+certificate chain and private key it cannot read or pair, fails the ingestor's start, which
+`DESCRIBE INGESTOR` shows as its transient status. The server certificate is always verified
+against the endpoint's host.
+
+These checks read the file on the node that validates the statement. A mounted file is the pinned
+version every node reads. A path outside a mount names each node's own file, and the source does
+not repeat the certificate check when it opens: a file that holds no certificate there adds no
+trust root, and the bundled and native roots alone verify the server.
 
 After signaling succeeds, the idle timer starts. An explicit idle timeout overrides the
 ping-derived value. Every received frame, including a ping or pong, refreshes activity. Sending a
