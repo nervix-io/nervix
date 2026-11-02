@@ -74,6 +74,13 @@ the group's row bound and the vocabulary's frame labels. An estimate that exceed
 is a typed error before allocation; the ingest group adds the opening operation's context and
 retains the cause for its general-error policy.
 
+A Kafka record keeps an unavailable timestamp distinct from its create-time and log-append-time
+variants. A present variant carries a validated signed-nanosecond timestamp converted exactly from
+the driver's milliseconds. Kafka's external unavailable encoding is resolved at this boundary;
+an out-of-range present timestamp is a typed conversion failure. Missing binary keys are `None`,
+empty keys remain present empty bytes, and the null-payload tombstone flag preserves the distinction
+from a present empty payload when both lend an empty slice to a codec.
+
 A paced poll message carries a typed metadata variant. HTTP polling supplies its response status
 and scheduled poll instant in that variant, while sources with no integration fields carry the
 headers-only variant. The host copies the variant into a matching quiesce buffer and Arrow builder;
@@ -236,12 +243,13 @@ The Sentry event Model keeps an omitted `PLATFORM` as `None`, separately from an
 written string, including an empty string or `other`. Its serialized field is required and holds
 either that string or an explicit null. Planning resolves the declared default into a required
 platform string; connector preparation uses it only when the codec's event omits the field.
-The registry's `NERVIX INGESTORS` archive signature identifies the current Model layout, including
-an owned Pulsar subscription's required start position, the required branch partition count,
-Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's
-`SEND` request shape, and the session and quality of service an MQTT TOPIC ingestor writes beside
-its delivery mode. Consensus's `raft_ingestor_choices_` keyspaces and current state metadata
-encoding identify its stored shapes. An unrecognized signature, namespace or
+The registry's `NERVIX REDIS SUB` archive signature identifies the current Model layout, including
+an owned Pulsar subscription's required start position, the required branch partition count, Sentry
+platform, an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND`
+request shape, the session and quality of service an MQTT TOPIC ingestor writes beside its delivery
+mode, and a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`.
+Consensus's `raft_redis_subscription_` keyspaces and current state metadata encoding identify its
+stored shapes. An unrecognized signature, namespace or
 encoding fails with the owning storage error and requires the stored data to be recreated.
 
 ## Absence And Distinct States

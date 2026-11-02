@@ -497,18 +497,21 @@ General notes:
 - public Models store structured expressions; the runtime never reparses Plexus
 - each source entity declares the typed transport metadata its messages expose as
   `metadata.<field>`, listed under Metadata in its reference below: `KAFKA TOPIC` declares
-  `metadata.topic`, `metadata.partition`, and `metadata.offset`, `SYSLOG LISTENER` declares
+  `metadata.topic`, `metadata.partition`, `metadata.offset`, `metadata.key`, `metadata.timestamp`,
+  `metadata.timestamp_type`, and `metadata.tombstone`, `SYSLOG LISTENER` declares
   `metadata.peer_addr`, `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`,
   `HTTP ENDPOINT` declares `metadata.method`, `metadata.path`, `metadata.query`,
-  `metadata.remote_addr`, and `metadata.host`, `WEBSOCKETS CONNECTION` declares
-  `metadata.frame_type`, and `WEBSOCKETS ENDPOINT` declares `metadata.frame_type`,
-  `metadata.remote_addr`, and `metadata.path`; every field is optional and none is sensitive
+  `metadata.remote_addr`, and `metadata.host`, `PROMETHEUS QUERY` declares `metadata.query` and
+  `metadata.evaluated_at`, `WEBSOCKETS CONNECTION` declares `metadata.frame_type`,
+  `WEBSOCKETS ENDPOINT` declares `metadata.frame_type`, `metadata.remote_addr`, and
+  `metadata.path`, and `REDIS PUBSUB` declares `metadata.channel` and `metadata.pattern`; every
+  field is optional and none is sensitive
 - a route expression may read any declared field; `CREATE` and `ALTER` refuse a route that reads a
   field its entity does not declare, naming the ingestor, the route's relay and the fields the
   entity does declare. `FILTER WHERE` reads headers but not `metadata.<field>`
 - an ingestor builds a metadata column only for the fields its route expressions or its
-  `TIMESTAMP AT metadata.<field>` read, so an ingestor that reads none spends nothing per message
-  on metadata
+  `TIMESTAMP AT metadata.<field>` read; an ingestor that reads none visits no metadata values and
+  builds no metadata columns
 - supported sources expose transport headers through `read_header(name)` and `read_headers(name)`;
   header names may be any `STRING` expression, and these functions may be used in both top-level
   `FILTER WHERE` and per-route expressions
@@ -1054,11 +1057,11 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers'` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
-| Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL |
+| Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL<br>metadata.key: BYTES OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.timestamp_type: STRING OPTIONAL<br>metadata.tombstone: BOOL OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | replayable |
 | Acknowledgement confirmation | answered |
-| Buffers | messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |
+| Buffers | a record conversion report after a gathered prefix: at most 1 report per ingestor instance; when full, holds back what fills it<br>messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |
 | Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group commit under ACK: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign and unsubscribe: unbounded<br>destroying a consumer that joined its group, for its LeaveGroup answer: driver default, 5 s per LeaveGroup request |
 | Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the source's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
@@ -1073,6 +1076,25 @@ a string literal of 1 to 255 bytes without control characters, passed to Kafka a
 ingestor names `ON QUIESCE SUSPEND`, the only quiesce mode it declares: the topic keeps its records
 after they are read, so a suspended ingestor resumes from its position, within the topic's
 retention. It reads a record's headers through `read_header` and `read_headers`.
+
+The record's metadata also exposes its key as `metadata.key` (`BYTES`), its broker timestamp as
+`metadata.timestamp` (`DATETIME`), its timestamp kind as `metadata.timestamp_type` (`STRING`), and
+whether its value is null as `metadata.tombstone` (`BOOL`). A missing key is null; an empty key is
+an empty byte sequence. `hex_encode(metadata.key)` or `bytes_to_utf8(metadata.key)` explicitly
+converts a key for a string field. Kafka timestamps count Unix milliseconds; Nervix preserves
+that instant exactly. The timestamp kind is `create_time` or `log_append_time`; a record without
+a timestamp has null timestamp and timestamp kind. `TIMESTAMP AT metadata.timestamp` uses that
+instant as the record's event time, while `TIMESTAMP NOW` uses the domain's execution time. An
+unavailable timestamp cannot satisfy `TIMESTAMP AT metadata.timestamp`; it never falls back to
+`NOW`. A present timestamp outside the signed Unix-nanosecond range fails the read with a typed
+conversion error.
+
+A null Kafka value is a tombstone and reaches the codec as an empty payload with
+`metadata.tombstone = true`. An empty non-null value has `metadata.tombstone = false`. The codec
+still determines how many rows the payload produces: an empty JSON payload produces none, while
+an empty TOML document can produce a row through its JAQ transformation. Metadata is available
+to each resulting row's route. Kafka declares only `SUSPEND` on quiesce, so it never copies these
+rows into a host quiesce buffer.
 
 Offset modes:
 
@@ -1494,27 +1516,53 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Capability | Declaration |
 | --- | --- |
 | Reference | REDIS client |
-| Locator and validation rule | CHANNEL 'orders' (redis_channel) |
+| Locator and validation rule | CHANNEL 'orders' (redis_channel) \| PATTERN 'orders.*' (redis_channel_pattern) |
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | No entity-specific options. |
-| Headers | Not offered: Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names. |
+| Headers | Not offered: Redis Pub/Sub carries a channel and a payload, and for a pattern subscription the pattern that matched, but no headers. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. An ingestor subscribes to a quoted channel or channel pattern and an emitter publishes to a quoted channel, each case-preserving. |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
-| Metadata | Not offered: The current Pub/Sub declaration delivers payloads without a typed channel metadata namespace. |
+| Metadata | metadata.channel: STRING OPTIONAL<br>metadata.pattern: STRING OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
 | Buffers | messages read ahead of intake: set by subscription_buffer_messages; when full, holds back what fills it |
-| Network waits | subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE: `connect_timeout_ms`; 30s when omitted<br>idle subscription activity, including its PING probe: `idle_timeout_ms`; required |
+| Network waits | subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE or PSUBSCRIBE: `connect_timeout_ms`; 30s when omitted<br>idle subscription activity, including its PING probe: `idle_timeout_ms`; required |
 | Driver limits | None declared. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |
 
 See the [REDIS PUBSUB capability and mirror reference](connector-capabilities.md#redis-pubsub-ingest).
 <!-- connector-matrix:ingest-redis-pubsub:end -->
 
+An ingestor names what it subscribes to with exactly one of `CHANNEL` and `PATTERN`.
+
 `CHANNEL` takes a nonempty string literal of at most 1,024 UTF-8 bytes. Nervix preserves its case,
 spaces and punctuation in both directions. For example, `CHANNEL 'Orders:EU/*'` subscribes to that
-exact channel: the star is a literal character. Redis Pub/Sub carries no transport headers, so
-`read_header` and `read_headers` are refused when the ingestor is created.
+exact channel: the star is a literal character.
+
+`PATTERN` subscribes to every channel a Redis glob pattern matches, through Redis's `PSUBSCRIBE`.
+It takes a nonempty string literal of at most 1,024 UTF-8 bytes, which Nervix sends exactly as
+written. Redis matches it byte by byte against the channel each message is published to: `*`
+matches any run of bytes, `?` any one byte, `[...]` one byte of a set or range, `[^...]` one byte
+outside it, and `\` makes the next byte literal. Redis accepts any text as a pattern, so a pattern
+without these characters matches only the channel of that exact name. For example,
+`PATTERN 'orders.*'` receives what is published to `orders.eu` and to `orders.us`, but not to
+`returns.eu`. An emitter always publishes to one `CHANNEL`.
+
+Every message exposes two typed metadata fields, both `STRING` and optional:
+
+| Field | Value |
+| --- | --- |
+| `metadata.channel` | The channel the message was published to. For a `CHANNEL` subscription it is the subscribed channel. A pattern can match a channel whose name is not UTF-8 text, published by another client; that message's `metadata.channel` is null. |
+| `metadata.pattern` | The pattern that matched the message. It is null for a `CHANNEL` subscription. |
+
+For example, `SET channel = metadata.channel` records which channel delivered each message of a
+`PATTERN 'orders.*'` subscription, and the same route's `WHERE channel = 'orders.eu'` then keeps
+only that channel's messages. `ALTER REDIS PUBSUB INGESTOR ... SET FROM` replaces the complete
+body, so it moves an ingestor from a channel to a pattern or back; the source then subscribes again
+with the new body.
+
+Redis Pub/Sub carries no transport headers, so `read_header` and `read_headers` are refused when
+the ingestor is created.
 
 Redis Pub/Sub has no retained backlog, so it cannot suspend honestly. Both `ON QUIESCE BUFFER`
 and `ON QUIESCE DROP` keep reading and keep the subscriber healthy. `BUFFER` retains payloads up
@@ -2026,7 +2074,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | `QUERY 'up'` (string literal); required<br>`MAX BODY SIZE 16MiB` (byte size); optional; default 16MiB<br>`EVERY 15s` (duration); required |
 | Headers | Not offered: The Prometheus query API is polled for samples; no Prometheus remote-write emitter is declared. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
-| Metadata | Not offered: The current query result is decoded as payload; no separate typed query or evaluation-time metadata namespace is declared. |
+| Metadata | metadata.query: STRING OPTIONAL<br>metadata.evaluated_at: DATETIME OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -2038,7 +2086,44 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [PROMETHEUS QUERY capability and mirror reference](connector-capabilities.md#prometheus-query-ingest).
 <!-- connector-matrix:ingest-prometheus-query:end -->
 
-Prometheus samples are flattened into JSON before codec decoding.
+A query source reads the `vector` of float samples an instant query answers, and delivers one JSON
+object per sample, in the shape the API's own `vector` result holds it:
+
+```json
+{"metric":{"__name__":"up","instance":"node-1:9100","job":"node"},"value":1,"timestamp":"2026-04-07T00:00:00.123Z"}
+```
+
+- `metric` holds the series' labels in ascending name order, its `__name__` among them where the
+  series has one. A label named `value` or `timestamp` stays under `metric`, beside the sample's own.
+- `value` is a JSON number: an integer the API writes as an integer stays that integer, and any other
+  value is the shortest text of the same float. JSON has no number for `NaN`, `+Inf` or `-Inf`, so
+  each travels as the string the API writes it as, for the codec to judge per record. A `string`
+  wire field reads it, and a `number` wire field refuses that record as a
+  [decode rejection](#when-the-codec-refuses-a-payload), while the samples beside it are delivered.
+- `timestamp` is the sample's own instant as RFC 3339 text in UTC, read from the digits of the API's
+  decimal seconds so that no float rounds them. Prometheus reports it to the millisecond.
+
+`WIRE JSON` declares no nested object, so a codec that reads a label is a JAQ codec, and one that
+reads only the sample's own members can stay a `MODE LOOSE` wire schema, which drops `metric`:
+
+```plexus
+CREATE CODEC sample_codec FROM JSON TO SCHEMA sample
+  WITH JAQ TRANSFORMATIONS ON INGESTION '{job: .metric.job, value, timestamp}';
+```
+
+A route reads what the sample answers through its metadata. `metadata.query` is the statement's
+`QUERY` as written, and `metadata.evaluated_at` is the instant the poll asked the API to evaluate it
+at, the due instant of the ingestor's cadence, which `TIMESTAMP AT metadata.evaluated_at` takes as
+each sample's event time.
+
+A `matrix`, `scalar` or `string` result, and a `vector` that holds a native histogram, are not read.
+Each fails its poll before any sample of the answer is delivered, as a transient error that names
+it, such as `Prometheus query returned unsupported result type 'matrix'`, and the next poll queries
+again. A query the API refuses reports the API's own words, such as `Prometheus rejected the query
+with HTTP status 400 Bad Request: bad_data: invalid parameter "query": 1:5: parse error: unclosed
+left parenthesis`. A status whose body is not the API's error, such as a proxy's page, reports that
+status. No failure names the request's URL, which carries the PromQL and the instant.
+
 `MAX BODY SIZE <bytes>`, written between `QUERY` and `EVERY`, bounds how many bytes of one query
 response a poll reads; a statement that leaves it out reads at most `16MiB`. The size is a whole
 number greater than zero followed by `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB` or `TiB`, and
