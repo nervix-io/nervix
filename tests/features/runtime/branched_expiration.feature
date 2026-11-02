@@ -1,4 +1,5 @@
 Feature: Branched branch expiration
+  @slots_2
   Scenario Outline: Subscription survives reingestor branch expiration and re-creation
     Given branched relay expiration scan interval is configured as "100ms"
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"

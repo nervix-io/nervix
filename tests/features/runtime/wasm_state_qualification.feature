@@ -368,6 +368,7 @@ Feature: WASM guest-state qualification across crash windows
       """
 
 
+  @slots_2
   Scenario Outline: A reset committed but not usable when the cluster stops resumes its one lifetime
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And the production sticky scheduler is configured

@@ -204,6 +204,25 @@ async fn a_receive_in_flight_when_the_host_cancels_the_read_still_hands_over_its
     );
     assert!(request.contains(r#""MaxNumberOfMessages":1"#), "{request}");
     assert!(request.contains(r#""WaitTimeSeconds":1"#), "{request}");
+    assert!(
+        request.contains(r#""MessageAttributeNames":["All"]"#),
+        "{request}"
+    );
+    assert!(
+        request.contains(r#""MessageSystemAttributeNames":["#),
+        "{request}"
+    );
+    for attribute in [
+        "SentTimestamp",
+        "ApproximateReceiveCount",
+        "ApproximateFirstReceiveTimestamp",
+        "MessageGroupId",
+        "MessageDeduplicationId",
+        "SequenceNumber",
+        "SenderId",
+    ] {
+        assert!(request.contains(&format!("\"{attribute}\"")), "{request}");
+    }
 }
 
 #[nervix_primitives::test]

@@ -450,7 +450,10 @@ current connection, retry and deadline limits.
   required capacity and idle-probe keys against `Ingestors` → `Redis Pub/Sub`; retain the source's explicit
   `BUFFER` or `DROP` policy in generated Plexus.
 - Redis Pub/Sub uses `NO ACK` in both directions. Treat `CHANNEL` as a literal, case-preserving
-  name and consult the Redis manual sections for its byte bound and unavailable header operations.
+  name. An ingestor writes exactly one of `CHANNEL` and `PATTERN`; use `PATTERN` only for a Redis
+  glob over channel names, and read `metadata.channel` and `metadata.pattern` to tell deliveries
+  apart. Consult the Redis manual sections for the byte bounds, how a pattern matches, the
+  metadata's nulls and unavailable header operations.
 - An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL` with `ON QUIESCE SUSPEND`. An emitter writes
   its request shape, `SEND SINGLE` or `SEND BATCH`, before `MODE ACK RETRY POLICY ...`. Treat
   `QUEUE` as a literal, case-preserving SQS name, and check `SQS CLIENT` keys against `Ingestors` →
@@ -459,6 +462,9 @@ current connection, retry and deadline limits.
   `DELAY <whole seconds from 1s to 900s>` for a standard queue or `DEDUPLICATION ID <string_expression>`
   for a `.fifo` queue. Its `write_header` values may be `STRING`, an integer type or `BYTES`, sent
   as `String`, `Number` and `Binary` attributes; read `Emitters` → `SQS`.
+  For source identity, redelivery routing and event time, read the metadata table in `Ingestors` →
+  `SQS`; use its exact field types and `TIMESTAMP AT metadata.sent_at` where appropriate. User
+  message attributes remain transport headers.
 - `NATS SUBJECT` ingestors use `NO ACK` with a required `QUEUE GROUP` and `INSTANCES`, and
   `BUFFER` or `DROP` quiesce. Write NATS wildcards only in an ingestor's `SUBJECT`, as whole
   tokens with `>` last; an emitter's `SUBJECT` is one literal subject. Check both against the NATS
@@ -507,11 +513,22 @@ current connection, retry and deadline limits.
   between `QUERY` and `EVERY` and `16MiB` when left out. A larger response fails the poll as the
   ingestor's transient error rather than delivering part of it; raise the bound for a query that
   legitimately returns more. Samples enter the graph in batches of at most 1024.
+- A `PROMETHEUS QUERY` ingestor delivers one object per sample in the API's own shape,
+  `{"metric":{...},"value":...,"timestamp":"..."}`, with `NaN`, `+Inf` and `-Inf` as strings. Labels
+  sit under `metric`, which `WIRE JSON` cannot read, so write a JAQ codec such as
+  `'{job: .metric.job, value, timestamp}'`, or a `MODE LOOSE` wire schema when no label is needed.
+  Use `metadata.query`, `metadata.evaluated_at` and `TIMESTAMP AT metadata.evaluated_at` for the
+  query and its evaluation instant. A `matrix`, `scalar` or `string` result or a native histogram
+  fails the poll; ask for an instant vector.
 - Treat Kafka `NO ACK` emitter success as local librdkafka producer-queue admission. Even in
   `ATTACHED` mode, Nervix does not wait for a broker delivery receipt before completing its ACK
   share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces the
   client's `delivery.timeout.ms` as the producer's delivery bound. The producer always reports every record, so `delivery.report.only.error` in a client's
   `CONFIG` has no effect.
+- A `KAFKA TOPIC` emitter's `TIMESTAMP <expression>` is each record's Kafka create time: an exact,
+  non-null, non-sensitive `DATETIME`, written as the millisecond that contains it. A time before
+  `1970-01-01T00:00:00.001Z` rejects its record through `ON MESSAGE ERROR`. Read `Emitters` →
+  `Kafka`.
 - Every Sentry emitter references a `SENTRY CLIENT` with a project DSN and a positive `timeout_ms`,
   encodes one event JSON object per record, or per batch through `ON EMITTING BATCH`, and has no
   `write_header` invocation.

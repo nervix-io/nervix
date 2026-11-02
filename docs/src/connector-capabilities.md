@@ -38,7 +38,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Reference | HTTP client |  |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |  |
 | Modes (complete bodies after MODE) | NO ACK |  |
-| Options in statement order | `METHOD 'GET'` (string literal); required<br>`HEADERS { 'accept' = 'application/json' }` (named string literals); optional; omitted when unset<br>`MAX BODY SIZE 1MiB` (byte size); optional; default 16MiB<br>`EVERY 1s` (duration); required |  |
+| Options in statement order | `METHOD 'GET'` (string literal); required<br>`HEADERS { 'accept' = 'application/json' }` (named string literals or client secrets); optional; omitted when unset<br>`MAX BODY SIZE 1MiB` (byte size); optional; default 16MiB<br>`EVERY 1s` (duration); required |  |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |  |
 | Metadata | metadata.status: U16 OPTIONAL<br>metadata.polled_at: DATETIME OPTIONAL |  |
@@ -174,19 +174,19 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | REDIS PUBSUB | Compare `REDIS PUBSUB`: modes. Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names. |
+| Entity | REDIS PUBSUB | Compare `REDIS PUBSUB`: locator, modes, ingest metadata. Redis Pub/Sub carries a channel and a payload, and for a pattern subscription the pattern that matched, but no headers. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. An ingestor subscribes to a quoted channel or channel pattern and an emitter publishes to a quoted channel, each case-preserving. |
 | Reference | REDIS client |  |
-| Locator and validation rule | CHANNEL 'orders' (redis_channel) |  |
+| Locator and validation rule | CHANNEL 'orders' (redis_channel) \| PATTERN 'orders.*' (redis_channel_pattern) |  |
 | Modes (complete bodies after MODE) | NO ACK |  |
 | Options in statement order | No entity-specific options. |  |
-| Headers | Not offered: Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names. |  |
+| Headers | Not offered: Redis Pub/Sub carries a channel and a payload, and for a pattern subscription the pattern that matched, but no headers. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. An ingestor subscribes to a quoted channel or channel pattern and an emitter publishes to a quoted channel, each case-preserving. |  |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
-| Metadata | Not offered: The current Pub/Sub declaration delivers payloads without a typed channel metadata namespace. |  |
+| Metadata | metadata.channel: STRING OPTIONAL<br>metadata.pattern: STRING OPTIONAL |  |
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
 | Buffers | messages read ahead of intake: set by subscription_buffer_messages; when full, holds back what fills it |  |
-| Network waits | subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE: `connect_timeout_ms`; 30s when omitted<br>idle subscription activity, including its PING probe: `idle_timeout_ms`; required |  |
+| Network waits | subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE or PSUBSCRIBE: `connect_timeout_ms`; 30s when omitted<br>idle subscription activity, including its PING probe: `idle_timeout_ms`; required |  |
 | Driver limits | None declared. |  |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |  |
 
@@ -201,7 +201,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Options in statement order | `QUERY 'up'` (string literal); required<br>`MAX BODY SIZE 16MiB` (byte size); optional; default 16MiB<br>`EVERY 15s` (duration); required |  |
 | Headers | Not offered: The Prometheus query API is polled for samples; no Prometheus remote-write emitter is declared. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |  |
-| Metadata | Not offered: The current query result is decoded as payload; no separate typed query or evaluation-time metadata namespace is declared. |  |
+| Metadata | metadata.query: STRING OPTIONAL<br>metadata.evaluated_at: DATETIME OPTIONAL |  |
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
@@ -234,14 +234,14 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | SQS QUEUE | Compare `SQS QUEUE`: options, modes, headers. Receiving uses a visibility timeout and deletion; publishing sends SEND SINGLE or SEND BATCH service requests, may declare a FIFO group, and writes typed message attributes and a per-message delay or deduplication id. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix. |
+| Entity | SQS QUEUE | Compare `SQS QUEUE`: options, modes, headers, ingest metadata. Receiving uses a visibility timeout and deletion; publishing sends SEND SINGLE or SEND BATCH service requests, may declare a FIFO group, and writes typed message attributes and a per-message delay or deduplication id. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix. |
 | Reference | SQS client |  |
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |  |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |  |
 | Headers | `read_header`, `read_headers`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
-| Metadata | Not offered: The current queue declaration exposes message attributes through headers but no separate typed receipt metadata namespace. |  |
+| Metadata | metadata.message_id: STRING OPTIONAL<br>metadata.sent_at: DATETIME OPTIONAL<br>metadata.receive_count: U32 OPTIONAL<br>metadata.first_received_at: DATETIME OPTIONAL<br>metadata.group_id: STRING OPTIONAL<br>metadata.deduplication_id: STRING OPTIONAL<br>metadata.sequence_number: STRING OPTIONAL<br>metadata.sender_id: STRING OPTIONAL |  |
 | Every live node | no; scheduled owner |  |
 | Position class | broker_redelivered |  |
 | Acknowledgement confirmation | answered |  |
@@ -358,7 +358,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | KAFKA TOPIC | Compare `KAFKA TOPIC`: options, modes. Consumption tracks replayable log offsets and consumer groups; publication uses a producer queue or delivery report. Both directions use the same quoted, case-preserving Kafka topic names. |
+| Entity | KAFKA TOPIC | Compare `KAFKA TOPIC`: options, modes, emit envelope/properties. Consumption tracks replayable log offsets and consumer groups; publication uses a producer queue or delivery report. Both directions use the same quoted, case-preserving Kafka topic names. |
 | Reference | KAFKA client |  |
 | Locator and validation rule | TOPIC 'orders' (kafka_topic) |  |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -368,7 +368,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | BATCH | optional |  |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |  |
 | Batch transformation required | no |  |
-| Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |  |
+| Envelope | TIMESTAMP occurred_at |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | records the producer queues under ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, holds back what fills it<br>records the producer queues under NO ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |  |
 | Network waits | a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, delivery.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT`<br>destroying a producer, for its polling thread and the reports of the records its purge failed: driver default, 100 ms poll, then a 500 ms flush |  |
@@ -442,12 +442,12 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | REDIS PUBSUB | Compare `REDIS PUBSUB`: modes. Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names. |
+| Entity | REDIS PUBSUB | Compare `REDIS PUBSUB`: locator, modes. Redis Pub/Sub carries a channel and a payload, and for a pattern subscription the pattern that matched, but no headers. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. An ingestor subscribes to a quoted channel or channel pattern and an emitter publishes to a quoted channel, each case-preserving. |
 | Reference | REDIS client |  |
 | Locator and validation rule | CHANNEL 'orders' (redis_channel) |  |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | No entity-specific options. |  |
-| Headers | Not offered: Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names. |  |
+| Headers | Not offered: Redis Pub/Sub carries a channel and a payload, and for a pattern subscription the pattern that matched, but no headers. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. An ingestor subscribes to a quoted channel or channel pattern and an emitter publishes to a quoted channel, each case-preserving. |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
 | BATCH | optional |  |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |  |
@@ -787,7 +787,9 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
 | `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 
-Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
+Delegated property namespaces: none. Reserved keys: none.
+
+Secret keys an operator names: `secret.*`, each a confidential string a statement reads by its whole key. Nervix owns them; no driver reads them, and every other key must be declared.
 
 ### WEBSOCKETS client
 

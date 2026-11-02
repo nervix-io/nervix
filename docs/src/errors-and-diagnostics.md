@@ -749,14 +749,25 @@ HTTP request-field compilation retains the VM report beneath the emitter's reque
 and attaches its safe message for diagnostics; an invalid request program never starts the emitter.
 
 A Prometheus query that fails is a `PrometheusQueryIngestorError` beneath `IngestorError::Read`: a request
-that could not be sent, a status other than success, a response whose announced length or body
-exceeds the ingestor's `MAX BODY SIZE`, a body that could not be read, a payload that does not
-decode, a query Prometheus answers with an error status, or a result that is not a vector. The
-oversized response is `ResponseTooLarge`, which names the bound and never the body, such as
-`Prometheus query response exceeds MAX BODY SIZE 16MiB`. The host shows the chain as the
+that could not be sent, a response whose announced length or body exceeds the ingestor's
+`MAX BODY SIZE`, a body that could not be read, a payload that does not decode, a query the API
+refuses, a status with nothing of the API's in its body, or a result a query source does not read.
+The oversized response is `ResponseTooLarge`, which names the bound and never the body, such as
+`Prometheus query response exceeds MAX BODY SIZE 16MiB`. A refused query is `QueryRejected`, whose
+HTTP status, `errorType` and `error` are typed fields read from the answer, and whose `error` is as
+long as the API wrote it within that bound. A status whose body holds neither, such as a proxy's page
+in front of the API, is `QueryStatus`, and a body that could not be read stays beneath it. A
+result that is not a vector of float samples is `UnsupportedResultType`, which carries the
+vocabulary's `PrometheusUnsupportedResult`: a `matrix`, `scalar` or `string` result, or a native
+histogram among the samples, which fails the whole poll.
+
+The request URL carries the PromQL and the evaluation instant, and an API root can carry
+credentials, so a request that could not be sent keeps Reqwest's error stripped of its URL beneath
+`QueryRequest`, and no report holds that URL in any rendering. The host shows the chain as the
 ingestor's transient error, which `DESCRIBE INGESTOR` prints, and the next poll queries again. A
-sample whose value or timestamp cannot be read fails only its own record, reported beside the
-poll's other messages.
+sample whose value or instant cannot be read fails only its own record, reported beside the poll's
+other messages. A value of `NaN`, `+Inf` or `-Inf` is not such a failure: it reaches the codec as the
+API's string, and a codec that refuses it reports a decode rejection.
 
 Iceberg object storage retains the Iceberg storage error contract when it installs the node's
 HTTP resolver. Invalid object URLs are `DataInvalid`, and an unsupported Azure connection string
@@ -973,7 +984,10 @@ drops without a delivery report keeps the report channel's cancellation the same
 the connector's description of the failure for the emitter's transient error, and a missed `ACK
 TIMEOUT` is again the confirmation window's `ConfirmationWindowError`. A delivery error about the
 record itself, an invalid or oversized message, timestamp or record, rejects that record through
-`ON MESSAGE ERROR` instead. A producer that librdkafka cannot create keeps its `KafkaError` beneath
+`ON MESSAGE ERROR` instead. A record whose `TIMESTAMP` falls before the Unix epoch's first
+millisecond, which a Kafka record cannot carry, is a record rejection in either mode before the
+producer takes it, rendered from `KafkaCreateTimeError::BeforeFirstMillisecond` with the timestamp.
+A producer that librdkafka cannot create keeps its `KafkaError` beneath
 `EmitterOpenError::Initialize`, and an `ACK TIMEOUT` longer than librdkafka's `delivery.timeout.ms` can
 hold is `KafkaMessageTimeoutError::TooLong` beneath `EmitterOpenError::InvalidConfiguration`. A
 finish whose producer queue does not empty before its deadline keeps librdkafka's `KafkaError`
@@ -1063,6 +1077,12 @@ response from the service keeps its existing description. None is a record rejec
 acknowledges input. A source read the host cancelled still waits for its receive in flight, and a
 service that has not answered it within 10 seconds of the cancellation ends the read with
 `SqsQueueIngestorError::CancelledReceiveUnanswered`, which names that budget, beneath `IngestorError::Read`.
+
+An SQS receive whose system attribute cannot be represented in its declared metadata type reports
+`SqsQueueIngestorError::SystemAttribute` with the typed attribute name beneath `IngestorError::Read`.
+The original integer-parse or timestamp-range cause remains inspectable in the report. The
+diagnostic prints no attribute value. An omitted attribute remains an optional metadata value;
+an invalid receive count or timestamp never becomes zero or null.
 The host shows it as the source's transient error; nothing is rejected or acknowledged, and a message
 the receive was returning stays invisible until its visibility timeout.
 
@@ -1287,6 +1307,11 @@ TLS keys on `ws`, and unpaired identity files are typed refusals naming their ke
 its value; shared HTTP name, value and limit causes remain beneath it. Planning retains that typed
 cause if a ingestor cannot produce its validated header collection. Rendered client values are
 validated again by the connector before opening transport.
+`HttpRequestHeadersError` is the frame beneath the registry's `InvalidHttpRequestHeaders` context,
+which names only the ingestor and its domain. It names the offending header of a polling
+ingestor's `HEADERS`, and the client key of a `CLIENT SECRET` it cannot read, with the client where
+the key is undeclared. It never quotes the key's value, and neither does the connector's
+`InvalidHeader` when a rendered secret cannot be a header at open.
 An Iceberg emitter's location refusal names its domain, emitter and `LOCATION`, with the
 vocabulary's typed location failure beneath that context. A malformed URL retains its URL-parser
 cause; a storage-scheme mismatch names the found scheme and the schemes its declared client

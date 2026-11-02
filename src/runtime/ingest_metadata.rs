@@ -205,6 +205,7 @@ enum IngestMetadataColumnBuilder {
     Bytes(BinaryBuilder),
     Bool(BooleanBuilder),
     U16(UInt16Builder),
+    U32(UInt32Builder),
     I32(Int32Builder),
     I64(Int64Builder),
     Datetime(TimestampNanosecondBuilder),
@@ -221,6 +222,7 @@ impl IngestMetadataColumnBuilder {
             IngestorMetadataType::Bytes => Self::Bytes(BinaryBuilder::with_capacity(row_bound, 0)),
             IngestorMetadataType::Bool => Self::Bool(BooleanBuilder::with_capacity(row_bound)),
             IngestorMetadataType::U16 => Self::U16(UInt16Builder::with_capacity(row_bound)),
+            IngestorMetadataType::U32 => Self::U32(UInt32Builder::with_capacity(row_bound)),
             IngestorMetadataType::I32 => Self::I32(Int32Builder::with_capacity(row_bound)),
             IngestorMetadataType::I64 => Self::I64(Int64Builder::with_capacity(row_bound)),
             IngestorMetadataType::Datetime => {
@@ -236,6 +238,7 @@ impl IngestMetadataColumnBuilder {
             Self::Bytes(_) => IngestorMetadataType::Bytes,
             Self::Bool(_) => IngestorMetadataType::Bool,
             Self::U16(_) => IngestorMetadataType::U16,
+            Self::U32(_) => IngestorMetadataType::U32,
             Self::I32(_) => IngestorMetadataType::I32,
             Self::I64(_) => IngestorMetadataType::I64,
             Self::Datetime(_) => IngestorMetadataType::Datetime,
@@ -248,6 +251,7 @@ impl IngestMetadataColumnBuilder {
             Self::Bytes(builder) => builder.append_null(),
             Self::Bool(builder) => builder.append_null(),
             Self::U16(builder) => builder.append_null(),
+            Self::U32(builder) => builder.append_null(),
             Self::I32(builder) => builder.append_null(),
             Self::I64(builder) => builder.append_null(),
             Self::Datetime(builder) => builder.append_null(),
@@ -260,6 +264,7 @@ impl IngestMetadataColumnBuilder {
             Self::Bytes(builder) => StdArc::new(builder.finish()),
             Self::Bool(builder) => StdArc::new(builder.finish()),
             Self::U16(builder) => StdArc::new(builder.finish()),
+            Self::U32(builder) => StdArc::new(builder.finish()),
             Self::I32(builder) => StdArc::new(builder.finish()),
             Self::I64(builder) => StdArc::new(builder.finish()),
             Self::Datetime(builder) => StdArc::new(builder.finish().with_timezone("+00:00")),
@@ -396,6 +401,14 @@ impl IngestMetadataValues for ProjectedMetadataValues<'_> {
     fn u16(&mut self, value: u16) {
         if let Some(IngestMetadataColumnBuilder::U16(builder)) =
             self.next_column(IngestorMetadataType::U16)
+        {
+            builder.append_value(value);
+        }
+    }
+
+    fn u32(&mut self, value: u32) {
+        if let Some(IngestMetadataColumnBuilder::U32(builder)) =
+            self.next_column(IngestorMetadataType::U32)
         {
             builder.append_value(value);
         }
