@@ -1644,6 +1644,16 @@ including while the host waits for downstream acknowledgement. Prometheus expose
 `domain`, `ingestor` and `physical_node_id` labels; a reconnect does not reset it. It is separate
 from codec rejections, oversized payloads, quiesce drops and transport redeliveries.
 
+Every MQTT subscription checks the successful `SUBACK` grant against its declared QoS before
+publishing readiness, including under `NO ACK`. A lower grant is
+`MqttTopicIngestorError::SubscriptionDowngraded`, carrying the requested and granted levels, beneath
+the host's resume context. The connector retains a `RetiringSubscription` phase. Before another
+subscription attempt, it runs the existing retirement exchange: clean CONNECT, UNSUBSCRIBE and
+DISCONNECT with session expiry zero, bounded by the client's connection budget. A failed or
+cancelled retirement keeps that phase, including across suspension; only successful cleanup
+allows another attempt. A successfully retained session uses its original accepted grant and
+needs no new `SUBACK`; filter and QoS alterations retire it.
+
 Under `NO ACK`, the client acknowledges every publish on receipt and the broker holds back none.
 Its read-ahead holds 64 outcomes. Once it is full, the task holds the next outcome and polls
 nothing until the source reads one, so the connection's flow control holds the broker back and
@@ -1797,7 +1807,7 @@ it did not get:
 | --- | --- | --- |
 | `answered` | `KAFKA TOPIC`, `PULSAR TOPIC`, `SQS QUEUE` | Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. A Pulsar source in an `ACK` mode acknowledges a batch's positions of each topic in one command that carries a request id, and acknowledging returns once the broker's `CommandAckResponse` arrived, within the client's operation timeout. |
 | `none` | `CLIENT PRODUCER`, `HTTP REQUEST`, `HTTP ENDPOINT`, `NATS SUBJECT`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, `SYSLOG LISTENER` | The source acknowledges nothing on its transport. |
-| `written` | `MQTT TOPIC`, `RABBITMQ QUEUE` | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, and MQTT answers a `PUBACK` with nothing and a QoS 2 `PUBREC` only with the `PUBREL` the client completes on its own, so nothing more can be confirmed. An MQTT source returns once the client's event loop, which its connection's driver task keeps polling, has flushed every `PUBACK` and `PUBREC` the batch asks for to the connection. |
+| `written` | `MQTT TOPIC`, `RABBITMQ QUEUE` | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, and MQTT answers a `PUBACK` with nothing and a QoS 2 `PUBREC` only with the `PUBREL` the client completes on its own, so nothing more can be confirmed. An MQTT source returns once the client's event loop, which its connection's driver task keeps polling, has flushed every `PUBACK` and `PUBREC` the batch asks for to the connection. An MQTT subscription becomes ready only when its declared QoS is granted; a lower `SUBACK` grant fails in every mode, including `NO ACK`. |
 <!-- connector-matrix:confirmation:end -->
 
 `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` and `CLIENT PRODUCER` declare `none` as both their position

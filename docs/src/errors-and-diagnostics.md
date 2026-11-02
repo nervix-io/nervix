@@ -920,6 +920,12 @@ to take a record, and its `PublishNoticeError` when an answer leaves a record un
 emitter's transient error. A missed `ACK TIMEOUT` is the confirmation window's
 `ConfirmationWindowError`, which the window describes the same way.
 
+An MQTT broker's successful `SUBACK` with a grant below the requested QoS fails readiness with
+`MqttTopicIngestorError::SubscriptionDowngraded { requested, granted }` beneath
+`IngestorError::Resume`. Both fields are typed quality-of-service levels. The general error
+policy and `DESCRIBE INGESTOR` report those levels without payload or client credentials, in
+acknowledged and `NO ACK` modes alike.
+
 MQTT input retirement reports `RuntimeError::RetireIngestorEntity`, naming its domain and
 ingestor, above the connector's `MqttTopicIngestorError::RetireInstance` and instance index. The report
 keeps typed client and connection causes, an unsubscribe refusal's reason codes, or the cleanup

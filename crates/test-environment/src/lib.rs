@@ -167,6 +167,9 @@ pub const REDIS_ADDR: &str = "redis_addr";
 pub const REDIS_TLS_ADDR: &str = "redis_tls_addr";
 pub const MQTT_ADDR: &str = "mqtt_addr";
 pub const MQTT_TLS_ADDR: &str = "mqtt_tls_addr";
+/// Listeners that cap subscription grants below the ordinary broker's QoS 2 maximum.
+pub const MQTT_QOS0_ADDR: &str = "mqtt_qos0_addr";
+pub const MQTT_QOS1_ADDR: &str = "mqtt_qos1_addr";
 /// A listener of the same MQTT broker that holds a client to a keep-alive of
 /// [`MQTT_SHORT_KEEPALIVE`]: it announces that keep-alive in every CONNACK, checks it every second,
 /// and lets a subscriber hold as many unacknowledged publishes as its own Receive Maximum asks
@@ -662,11 +665,16 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         let short_keepalive = MQTT_SHORT_KEEPALIVE.as_secs().to_string();
         let container = self
             .start_container("mqtt", 1883.tcp(), "MQTT", || {
-                GenericImage::new("emqx/emqx", "5.8.4")
+                // Capped zones must report their grant in SUBACK (EMQX #14931).
+                GenericImage::new("emqx/emqx", "5.9.0")
                     .with_exposed_port(1883.tcp())
                     .with_exposed_port(1884.tcp())
+                    .with_exposed_port(1886.tcp())
+                    .with_exposed_port(1887.tcp())
                     .with_exposed_port(8883.tcp())
-                    .with_wait_for(WaitFor::message_on_either_std("EMQX 5.8.4 is running now"))
+                    .with_wait_for(WaitFor::message_on_either_std(
+                        "EMQX Enterprise 5.9.0 is running now",
+                    ))
                     .with_env_var("EMQX_LISTENERS__TCP__DEFAULT__BIND", "0.0.0.0:1883")
                     // The broker announces this keep-alive in every CONNACK of the zone's listener
                     // and checks every second whether a client sent anything within one and a half
@@ -685,6 +693,14 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                         "EMQX_LISTENERS__TCP__SHORT_KEEPALIVE__ZONE",
                         "short_keepalive",
                     )
+                    .with_env_var("EMQX_ZONES__QOS0__MQTT__MAX_QOS_ALLOWED", "0")
+                    .with_env_var("EMQX_LISTENERS__TCP__QOS0__BIND", "0.0.0.0:1886")
+                    .with_env_var("EMQX_LISTENERS__TCP__QOS0__ZONE", "qos0")
+                    .with_env_var("EMQX_LISTENERS__TCP__QOS0__ENABLE_AUTHN", "false")
+                    .with_env_var("EMQX_ZONES__QOS1__MQTT__MAX_QOS_ALLOWED", "1")
+                    .with_env_var("EMQX_LISTENERS__TCP__QOS1__BIND", "0.0.0.0:1887")
+                    .with_env_var("EMQX_LISTENERS__TCP__QOS1__ZONE", "qos1")
+                    .with_env_var("EMQX_LISTENERS__TCP__QOS1__ENABLE_AUTHN", "false")
                     .with_env_var("EMQX_LISTENERS__SSL__DEFAULT__BIND", "0.0.0.0:8883")
                     .with_env_var(
                         "EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__CACERTFILE",
@@ -717,7 +733,13 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             .await?;
         let port = mapped_port(&container, 1883, "MQTT").await?;
         let short_keepalive_port = mapped_port(&container, 1884, "MQTT short keep-alive").await?;
+        let qos0_port = mapped_port(&container, 1886, "MQTT QoS 0").await?;
+        let qos1_port = mapped_port(&container, 1887, "MQTT QoS 1").await?;
         let tls_port = mapped_port(&container, 8883, "MQTT TLS").await?;
+        self.endpoints
+            .insert(MQTT_QOS0_ADDR, format!("mqtt://127.0.0.1:{qos0_port}"));
+        self.endpoints
+            .insert(MQTT_QOS1_ADDR, format!("mqtt://127.0.0.1:{qos1_port}"));
         self.endpoints
             .insert(MQTT_ADDR, format!("mqtt://127.0.0.1:{port}"));
         self.endpoints.insert(

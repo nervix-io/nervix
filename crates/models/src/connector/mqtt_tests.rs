@@ -342,6 +342,7 @@ fn topic_ingestion_bounds_its_connection_by_the_keep_alive_but_not_its_suback() 
         vec![
             WaitBound::Driver("5 s"),
             WaitBound::Unbounded,
+            WaitBound::Driver("5 s"),
             WaitBound::Driver("one keep-alive interval of 60 s, or the broker's"),
             WaitBound::Driver("keep-alive of 60 s, or the broker's"),
         ]

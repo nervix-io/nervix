@@ -479,6 +479,13 @@ in total while the broker answered each publication well within it. The fixture 
 a real broker connection for 500 ms and compares every complete delivered payload for QoS 0 and
 QoS 1, as individual messages and bursts of five.
 
+The MQTT subscription-grant fixture has listeners capped at QoS 0 and 1. Their actual `SUBACK`
+grants qualify a downgrade; the maximum advertised in `CONNACK` alone does not. Its scenarios
+publish through the same broker's ordinary listener and require the typed requested/granted error
+and no relay delivery on one and three nodes, including under `NO ACK`. Their direct publisher
+waits for broker confirmation without requiring ingestor readiness. A broker-pin change must
+preserve those wire grants.
+
 The reclaimed-command-identity scenario configures a 20-second retry validity for its initial
 admission and exact retry. Its reclamation wait includes the configured validity followed by
 60 seconds for reclamation. The assertions still require the identity to remain expired after a

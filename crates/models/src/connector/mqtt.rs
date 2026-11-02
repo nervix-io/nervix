@@ -254,6 +254,10 @@ const MQTT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Unbounded,
         },
         DeclaredWait {
+            wait: "retire a downgraded subscription before retrying",
+            bound: WaitBound::Driver("5 s"),
+        },
+        DeclaredWait {
             wait: "ordinary and oversized-discard acknowledgements written to the connection",
             bound: WaitBound::Driver("one keep-alive interval of 60 s, or the broker's"),
         },
