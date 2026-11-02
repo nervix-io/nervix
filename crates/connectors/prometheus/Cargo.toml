@@ -10,20 +10,20 @@ workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
-chrono = { workspace = true }
 error-stack = { workspace = true }
 meticulous = { workspace = true }
-nervix-approx-into = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 serde = { workspace = true }
-serde_json = { workspace = true }
+# `raw_value` reads an instant from the digits the API wrote; a float would round them.
+serde_json = { workspace = true, features = ["raw_value"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 url = { workspace = true }
 
 [dev-dependencies]
+bolero = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt"] }

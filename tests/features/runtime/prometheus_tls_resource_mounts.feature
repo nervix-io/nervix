@@ -23,14 +23,10 @@ Feature: Prometheus TLS resource mounts
         value F64,
         timestamp STRING
       );
-        CREATE WIRE JSON SCHEMA sample_wire MODE STRICT (
-        source string,
-        value number,
-        timestamp string
-      );
         CREATE CODEC sample_codec
-        FROM WIRE JSON SCHEMA sample_wire
-        TO SCHEMA sample;
+        FROM JSON
+        TO SCHEMA sample
+        WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, value, timestamp}';
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
         CREATE IF NOT EXISTS BRANCH by_prom_samples SCHEMA source_branch TTL 5m;
         CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;

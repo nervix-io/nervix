@@ -3,7 +3,8 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Prometheus client configuration interpretation, instant queries, the bounded read
-//!   of each response, sample parsing, payload encoding and ingestor-boundary arrival observation.
+//!   of each response, the metadata of a poll and ingestor-boundary arrival observation. Reading an
+//!   answer into samples belongs to [`answer`].
 //! - **Depends on.** The connector contract, vocabulary configuration and the Prometheus HTTP
 //!   API.
 //! - **Must not know.** Domain clocks, runtime collectors, relays, branches, schedules, registry
@@ -21,24 +22,24 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
-use std::collections::BTreeMap;
-
 use async_trait::async_trait;
-use chrono::{TimeZone as _, Utc};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_approx_into::CheckedApproxInto as _;
 use nervix_connector::{
     HttpClientConfig, HttpClientConfigError, IngestorConnector, IngestorError, IngestorPoll,
     IngestorPollMessage, IngestorResult, PacedIngestorConnector, RetainedIngestHeaders,
-    physical_time::actual_utc_now,
+    RetainedIngestMetadata, RetainedIngestMetadataValue, physical_time::actual_utc_now,
 };
 use nervix_dns::DnsResolver;
-use nervix_models::{ClientConfigEntry, PayloadSizeLimit, PrometheusApiRoot, Timestamp};
+use nervix_models::{
+    ClientConfigEntry, PayloadSizeLimit, PrometheusApiRoot, PrometheusUnsupportedResult, Timestamp,
+};
 use reqwest::Client as HttpClient;
-use serde::Deserialize;
 use thiserror::Error;
 use url::Url;
+
+mod answer;
+use answer::PrometheusQueryResponse;
 
 const PROMETHEUS: &str = "prometheus";
 
@@ -61,8 +62,17 @@ pub struct PrometheusQueryIngestor {
 pub enum PrometheusQueryIngestorError {
     #[error("failed to send Prometheus query")]
     QueryRequest,
+    /// An answer that is not the API's own, such as a proxy's page, has only its status.
     #[error("Prometheus query failed with HTTP status {status}")]
     QueryStatus { status: reqwest::StatusCode },
+    /// The API refused the query, in the words of its own `errorType` and `error`. The answer that
+    /// holds them was read within `MAX BODY SIZE`.
+    #[error("Prometheus rejected the query with HTTP status {status}: {error_type}: {error}")]
+    QueryRejected {
+        status: reqwest::StatusCode,
+        error_type: String,
+        error: String,
+    },
     /// The response announced or carried more than the ingestor's `MAX BODY SIZE`. It names the
     /// bound and never the body.
     #[error("Prometheus query response exceeds MAX BODY SIZE {limit}")]
@@ -71,37 +81,16 @@ pub enum PrometheusQueryIngestorError {
     ReadResponse,
     #[error("failed to decode Prometheus query response")]
     DecodeResponse,
-    #[error("Prometheus query returned status '{status}'")]
-    QueryRejected { status: String },
     #[error("Prometheus query returned unsupported result type '{result_type}'")]
-    UnsupportedResultType { result_type: String },
+    UnsupportedResultType {
+        result_type: PrometheusUnsupportedResult,
+    },
     #[error("invalid Prometheus sample value")]
     InvalidSampleValue,
-    #[error("non-finite Prometheus sample value")]
-    NonFiniteSampleValue,
     #[error("failed to encode Prometheus sample")]
     EncodeSample,
     #[error("invalid Prometheus timestamp")]
     InvalidTimestamp,
-}
-
-#[derive(Debug, Deserialize)]
-struct PrometheusQueryResponse {
-    status: String,
-    data: PrometheusQueryData,
-}
-
-#[derive(Debug, Deserialize)]
-struct PrometheusQueryData {
-    #[serde(rename = "resultType")]
-    result_type: String,
-    result: Vec<PrometheusVectorResult>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PrometheusVectorResult {
-    metric: BTreeMap<String, String>,
-    value: (f64, String),
 }
 
 #[async_trait]
@@ -135,25 +124,26 @@ impl IngestorConnector for PrometheusQueryIngestor {
 #[async_trait]
 impl PacedIngestorConnector for PrometheusQueryIngestor {
     async fn poll(&mut self, scheduled_at: Timestamp) -> IngestorResult<IngestorPoll> {
-        let samples =
-            self.query_vector(Some(scheduled_at))
-                .await
-                .change_context(IngestorError::Read {
-                    connector: PROMETHEUS,
-                })?;
+        let read = || IngestorError::Read {
+            connector: PROMETHEUS,
+        };
+        let response = self
+            .query_at(scheduled_at)
+            .await
+            .change_context_lazy(read)?;
+        let samples = response.samples().change_context_lazy(read)?;
+        let metadata = Self::poll_metadata(&self.query, scheduled_at);
         let mut messages = Vec::with_capacity(samples.len());
         let mut failures = Vec::new();
         for sample in samples {
             nervix_primitives::task::consume_budget().await;
-            match Self::sample_payload(&sample) {
+            match sample.payload() {
                 Ok(payload) => messages.push(IngestorPollMessage {
                     payload,
                     headers: RetainedIngestHeaders::none(),
-                    metadata: nervix_connector::RetainedIngestMetadata::none(),
+                    metadata: metadata.clone(),
                 }),
-                Err(error) => failures.push(error.change_context(IngestorError::Read {
-                    connector: PROMETHEUS,
-                })),
+                Err(error) => failures.push(error.change_context(read())),
             }
         }
         Ok(IngestorPoll {
@@ -173,46 +163,41 @@ impl PrometheusQueryIngestor {
         HttpClientConfig::new(config, "Prometheus", dns).build()
     }
 
-    async fn query_vector(
+    /// The values of the fields a query source declares, in their declared order, for one poll:
+    /// the same for every sample of it, so its messages share one copy however many there are.
+    fn poll_metadata(query: &str, evaluated_at: Timestamp) -> RetainedIngestMetadata {
+        RetainedIngestMetadata::from_values(vec![
+            RetainedIngestMetadataValue::String(query.to_string()),
+            RetainedIngestMetadataValue::Datetime(evaluated_at),
+        ])
+    }
+
+    /// The response to this ingestor's query evaluated at `evaluated_at`, its body read within
+    /// `MAX BODY SIZE`.
+    ///
+    /// The URL carries the PromQL and the instant, and its root can carry credentials, so a request
+    /// that fails keeps the transport's typed cause without it.
+    async fn query_at(
         &self,
-        query_time: Option<Timestamp>,
-    ) -> Result<Vec<PrometheusVectorResult>, Report<PrometheusQueryIngestorError>> {
-        let mut params = vec![("query".to_string(), self.query.clone())];
-        if let Some(query_time) = query_time {
-            params.push(("time".to_string(), Self::query_time_seconds(query_time)));
-        }
+        evaluated_at: Timestamp,
+    ) -> Result<PrometheusQueryResponse, Report<PrometheusQueryIngestorError>> {
+        let params = vec![
+            ("query".to_string(), self.query.clone()),
+            ("time".to_string(), Self::query_time_seconds(evaluated_at)),
+        ];
         let url = Self::query_url(&self.api_root, params);
         let response = self.client.get(url).send().await.map_err(|source| {
-            Report::new(PrometheusQueryIngestorError::QueryRequest)
-                .attach_printable(source.to_string())
+            Report::new(source.without_url())
+                .change_context(PrometheusQueryIngestorError::QueryRequest)
         })?;
         let status = response.status();
-        if !status.is_success() {
-            return Err(Report::new(PrometheusQueryIngestorError::QueryStatus {
-                status,
-            }));
+        match Self::bounded_body(response, self.max_body_size).await {
+            Ok(body) => Ok(PrometheusQueryResponse { status, body }),
+            Err(unread) if status.is_success() => Err(unread),
+            Err(unread) => {
+                Err(unread.change_context(PrometheusQueryIngestorError::QueryStatus { status }))
+            }
         }
-        let body = Self::bounded_body(response, self.max_body_size).await?;
-        // The decoder's own message can quote the payload, so it stays an attachment and out of
-        // the transient error the ingestor reports.
-        let payload =
-            serde_json::from_slice::<PrometheusQueryResponse>(&body).map_err(|source| {
-                Report::new(PrometheusQueryIngestorError::DecodeResponse)
-                    .attach_printable(source.to_string())
-            })?;
-        if payload.status != "success" {
-            return Err(Report::new(PrometheusQueryIngestorError::QueryRejected {
-                status: payload.status,
-            }));
-        }
-        if payload.data.result_type != "vector" {
-            return Err(Report::new(
-                PrometheusQueryIngestorError::UnsupportedResultType {
-                    result_type: payload.data.result_type,
-                },
-            ));
-        }
-        Ok(payload.data.result)
     }
 
     /// The body of `response`, read only while it stays within `limit`.
@@ -287,53 +272,6 @@ impl PrometheusQueryIngestor {
         url.query_pairs_mut().extend_pairs(params);
         url
     }
-
-    fn sample_payload(
-        sample: &PrometheusVectorResult,
-    ) -> Result<Vec<u8>, Report<PrometheusQueryIngestorError>> {
-        let mut object = serde_json::Map::new();
-        for (key, value) in &sample.metric {
-            object.insert(key.clone(), serde_json::Value::String(value.clone()));
-        }
-
-        let value = sample.value.1.parse::<f64>().map_err(|source| {
-            Report::new(PrometheusQueryIngestorError::InvalidSampleValue)
-                .attach_printable(source.to_string())
-        })?;
-        let value = serde_json::Number::from_f64(value)
-            .ok_or_else(|| Report::new(PrometheusQueryIngestorError::NonFiniteSampleValue))?;
-        object.insert("value".to_string(), serde_json::Value::Number(value));
-        object.insert(
-            "timestamp".to_string(),
-            serde_json::Value::String(Self::timestamp_to_rfc3339(sample.value.0)?),
-        );
-
-        serde_json::to_vec(&serde_json::Value::Object(object)).map_err(|source| {
-            Report::new(PrometheusQueryIngestorError::EncodeSample)
-                .attach_printable(source.to_string())
-        })
-    }
-
-    fn timestamp_to_rfc3339(
-        timestamp: f64,
-    ) -> Result<String, Report<PrometheusQueryIngestorError>> {
-        if !timestamp.is_finite() {
-            return Err(Report::new(PrometheusQueryIngestorError::InvalidTimestamp));
-        }
-        let secs: i64 = timestamp
-            .trunc()
-            .checked_approx_into()
-            .ok_or_else(|| Report::new(PrometheusQueryIngestorError::InvalidTimestamp))?;
-        let nanos: u32 = (timestamp.fract().abs() * 1_000_000_000.0)
-            .round()
-            .checked_approx_into()
-            .verified("a fractional part scaled by a billion stays inside the u32 range");
-        let datetime = Utc
-            .timestamp_opt(secs, nanos.min(999_999_999))
-            .single()
-            .ok_or_else(|| Report::new(PrometheusQueryIngestorError::InvalidTimestamp))?;
-        Ok(datetime.to_rfc3339())
-    }
 }
 
 #[cfg(test)]
@@ -403,31 +341,6 @@ mod tests {
             .expect_err("invalid Prometheus timeout");
         assert!(error.to_string().contains("Prometheus timeout_ms"));
         Ok(())
-    }
-
-    #[test]
-    fn prometheus_helpers_render_payload_and_validate_inputs() {
-        let sample = PrometheusVectorResult {
-            metric: BTreeMap::from([("source".to_string(), "local".to_string())]),
-            value: (1_735_782_245.25, "12.5".to_string()),
-        };
-
-        let timestamp =
-            PrometheusQueryIngestor::timestamp_to_rfc3339(sample.value.0).expect("valid ts");
-        assert!(timestamp.starts_with("2025-"));
-
-        let payload = PrometheusQueryIngestor::sample_payload(&sample).expect("must render");
-        let value: serde_json::Value = serde_json::from_slice(&payload).expect("valid json");
-        assert_eq!(value["source"], "local");
-        assert_eq!(value["value"], 12.5);
-        assert_eq!(value["timestamp"], timestamp);
-
-        let bad_value = PrometheusVectorResult {
-            metric: BTreeMap::new(),
-            value: (1.0, "NaN".to_string()),
-        };
-        assert!(PrometheusQueryIngestor::sample_payload(&bad_value).is_err());
-        assert!(PrometheusQueryIngestor::timestamp_to_rfc3339(f64::INFINITY).is_err());
     }
 
     #[test]
@@ -509,7 +422,7 @@ mod tests {
     async fn query_response(
         status: &str,
         body: &str,
-    ) -> Result<Vec<PrometheusVectorResult>, Report<PrometheusQueryIngestorError>> {
+    ) -> Result<PrometheusQueryResponse, Report<PrometheusQueryIngestorError>> {
         query_response_within(
             status,
             body,
@@ -519,28 +432,33 @@ mod tests {
         .await
     }
 
-    /// What an ingestor bounded by `max_body_size` reads from a server that answers its one query
-    /// with `status` and `body`, framed as `framing` says.
-    async fn query_response_within(
-        status: &str,
-        body: &str,
-        framing: Framing,
+    /// An ingestor of `query`, bounded by `max_body_size`, that queries `address`.
+    fn ingestor_of(
+        address: std::net::SocketAddr,
+        query: &str,
         max_body_size: PayloadSizeLimit,
-    ) -> Result<Vec<PrometheusVectorResult>, Report<PrometheusQueryIngestorError>> {
-        let listener = nervix_primitives::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("test Prometheus listener should bind");
-        let address = listener
-            .local_addr()
-            .expect("test Prometheus listener should have an address");
-        let response = framing.response(status, body);
-        let server = nervix_primitives::task::spawn(async move {
+    ) -> PrometheusQueryIngestor {
+        PrometheusQueryIngestor {
+            client: HttpClient::new(),
+            api_root: PrometheusApiRoot::parse(&format!("http://{address}"))
+                .expect("the test listener's address is an API root"),
+            query: query.to_string(),
+            max_body_size,
+        }
+    }
+
+    /// Answers one request on `listener` with `response`, and returns what the request said.
+    fn answer_once(
+        listener: nervix_primitives::net::TcpListener,
+        response: String,
+    ) -> nervix_primitives::task::JoinHandle<String> {
+        nervix_primitives::task::spawn(async move {
             let (mut stream, _) = listener
                 .accept()
                 .await
                 .expect("test Prometheus listener should accept");
             let mut request = [0_u8; 2048];
-            let _ = stream
+            let read = stream
                 .read(&mut request)
                 .await
                 .expect("test Prometheus request should be readable");
@@ -548,15 +466,27 @@ mod tests {
                 .write_all(response.as_bytes())
                 .await
                 .expect("test Prometheus response should be writable");
-        });
-        let source = PrometheusQueryIngestor {
-            client: HttpClient::new(),
-            api_root: PrometheusApiRoot::parse(&format!("http://{address}"))
-                .expect("the test listener's address is an API root"),
-            query: "up".to_string(),
-            max_body_size,
-        };
-        let result = source.query_vector(None).await;
+            String::from_utf8_lossy(&request[..read]).into_owned()
+        })
+    }
+
+    /// What an ingestor bounded by `max_body_size` reads from a server that answers its one query
+    /// with `status` and `body`, framed as `framing` says.
+    async fn query_response_within(
+        status: &str,
+        body: &str,
+        framing: Framing,
+        max_body_size: PayloadSizeLimit,
+    ) -> Result<PrometheusQueryResponse, Report<PrometheusQueryIngestorError>> {
+        let listener = nervix_primitives::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test Prometheus listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test Prometheus listener should have an address");
+        let server = answer_once(listener, framing.response(status, body));
+        let source = ingestor_of(address, "up", max_body_size);
+        let result = source.query_at(Timestamp::from_unix_nanos(0)).await;
         server
             .await
             .expect("test Prometheus response task should finish");
@@ -584,16 +514,11 @@ mod tests {
         .expect("one byte less is a byte count");
 
         for framing in [Framing::Announced, Framing::Chunked] {
-            let samples = match query_response_within("200 OK", body, framing, exact).await {
-                Ok(samples) => samples,
+            let response = match query_response_within("200 OK", body, framing, exact).await {
+                Ok(response) => response,
                 Err(error) => panic!("{framing:?}: a body of its bound reads: {error:?}"),
             };
-            assert_eq!(samples.len(), 1, "{framing:?}");
-            assert_eq!(
-                samples[0].metric.get("source").map(String::as_str),
-                Some("bounded"),
-                "{framing:?}"
-            );
+            assert_eq!(response.body, body.as_bytes(), "{framing:?}");
 
             let refused = query_response_within("200 OK", body, framing, short)
                 .await
@@ -622,21 +547,17 @@ mod tests {
             query: "up".to_string(),
             max_body_size: nervix_models::PROMETHEUS_DEFAULT_MAX_BODY_SIZE,
         }
-        .query_vector(None)
+        .query_at(Timestamp::from_unix_nanos(0))
         .await
         .expect_err("an unavailable endpoint must fail the request");
         assert!(matches!(
             unavailable.current_context(),
             PrometheusQueryIngestorError::QueryRequest
         ));
-
-        let status = query_response("503 Service Unavailable", "{}")
-            .await
-            .expect_err("a non-success status must fail");
-        assert!(matches!(
-            status.current_context(),
-            PrometheusQueryIngestorError::QueryStatus { .. }
-        ));
+        assert!(
+            unavailable.downcast_ref::<reqwest::Error>().is_some(),
+            "the transport's failure stays beneath the request failure: {unavailable:?}"
+        );
 
         let truncated = query_response_within(
             "200 OK",
@@ -657,49 +578,156 @@ mod tests {
             truncated.downcast_ref::<reqwest::Error>().is_some(),
             "the transport's failure stays beneath the read failure: {truncated:?}"
         );
+    }
 
-        let decode = query_response("200 OK", "not-json")
+    /// A status whose body cannot be read still reports the status, with what stopped the read
+    /// beneath it, and the body of a refused query is read within the same bound.
+    #[nervix_primitives::test]
+    async fn a_refusal_whose_body_cannot_be_read_reports_its_status() {
+        let response = query_response("503 Service Unavailable", "{}")
             .await
-            .expect_err("a malformed response must fail decoding");
-        assert!(matches!(
-            decode.current_context(),
-            PrometheusQueryIngestorError::DecodeResponse
-        ));
+            .expect("a status with a readable body is a response");
+        assert_eq!(response.status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
 
-        let rejected = query_response(
-            "200 OK",
-            r#"{"status":"error","data":{"resultType":"vector","result":[]}}"#,
+        let bound = PayloadSizeLimit::new(
+            NonZeroU64::new(1).expect("one is not zero"),
+            nervix_models::ByteSizeUnit::B,
+        )
+        .expect("one byte is a byte count");
+        let unread = query_response_within(
+            "503 Service Unavailable",
+            "<html>a page past the bound</html>",
+            Framing::Announced,
+            bound,
         )
         .await
-        .expect_err("an unsuccessful Prometheus payload must fail");
-        assert!(matches!(
-            rejected.current_context(),
-            PrometheusQueryIngestorError::QueryRejected { .. }
-        ));
+        .expect_err("a body past the bound is not read");
+        assert!(
+            matches!(
+                unread.current_context(),
+                PrometheusQueryIngestorError::QueryStatus { status }
+                    if *status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+            ),
+            "{unread:?}"
+        );
+        assert!(
+            unread
+                .downcast_ref::<PrometheusQueryIngestorError>()
+                .is_some(),
+            "{unread:?}"
+        );
+        assert_eq!(
+            format!("{unread:#}"),
+            "Prometheus query failed with HTTP status 503 Service Unavailable: Prometheus query \
+             response exceeds MAX BODY SIZE 1B"
+        );
+    }
 
-        let result_type = query_response(
-            "200 OK",
-            r#"{"status":"success","data":{"resultType":"matrix","result":[]}}"#,
-        )
-        .await
-        .expect_err("a non-vector Prometheus payload must fail");
+    /// One poll against a loopback endpoint: the instant it was scheduled for is the instant it
+    /// asks the API to evaluate, every sample is its declared object, and every message of the poll
+    /// carries the entity's declared metadata, sharing one copy of it.
+    #[nervix_primitives::test]
+    async fn a_poll_delivers_every_sample_with_the_metadata_of_that_poll() {
+        let body = r#"{"status":"success","data":{"resultType":"vector","result":[{"metric":{"value":"a label"},"value":[1775520000.123,"1.5"]},{"metric":{},"value":[1775520000.123,"+Inf"]},{"metric":{},"value":[1775520000.123,"not-a-number"]}]}}"#;
+        let listener = nervix_primitives::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test Prometheus listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test Prometheus listener should have an address");
+        let server = answer_once(listener, Framing::Announced.response("200 OK", body));
+        let mut source = ingestor_of(
+            address,
+            "vector(1)",
+            nervix_models::PROMETHEUS_DEFAULT_MAX_BODY_SIZE,
+        );
+        let evaluated_at = Timestamp::from_unix_nanos(1_775_520_000_123_456_789);
+
+        let poll = source
+            .poll(evaluated_at)
+            .await
+            .expect("the answer is a vector");
+
+        let request = server
+            .await
+            .expect("test Prometheus response task should finish");
+        assert!(
+            request.starts_with(
+                "GET /api/v1/query?query=vector%281%29&time=1775520000.123456789 HTTP/1.1"
+            ),
+            "{request}"
+        );
+
+        let payloads: Vec<&str> = poll
+            .messages
+            .iter()
+            .map(|message| std::str::from_utf8(&message.payload).expect("a payload is JSON"))
+            .collect();
+        assert_eq!(
+            payloads,
+            [
+                r#"{"metric":{"value":"a label"},"value":1.5,"timestamp":"2026-04-07T00:00:00.123Z"}"#,
+                r#"{"metric":{},"value":"+Inf","timestamp":"2026-04-07T00:00:00.123Z"}"#,
+            ]
+        );
+        let [first, second] = poll.messages.as_slice() else {
+            panic!("two of the three samples are valid");
+        };
+        assert_eq!(
+            first.metadata.values(),
+            [
+                RetainedIngestMetadataValue::String("vector(1)".to_string()),
+                RetainedIngestMetadataValue::Datetime(evaluated_at),
+            ]
+        );
+        assert_eq!(
+            first.metadata.values().as_ptr(),
+            second.metadata.values().as_ptr(),
+            "the messages of one poll share one copy of its metadata"
+        );
+
+        let [failure] = poll.failures.as_slice() else {
+            panic!("one of the three samples is not a number");
+        };
         assert!(matches!(
-            result_type.current_context(),
-            PrometheusQueryIngestorError::UnsupportedResultType { .. }
+            failure.current_context(),
+            IngestorError::Read { .. }
+        ));
+        assert!(matches!(
+            failure.downcast_ref::<PrometheusQueryIngestorError>(),
+            Some(PrometheusQueryIngestorError::InvalidSampleValue)
         ));
     }
 
-    #[test]
-    fn prometheus_helpers_classify_parse_failures() {
-        let sample = PrometheusVectorResult {
-            metric: BTreeMap::new(),
-            value: (1.0, "not-a-number".to_string()),
-        };
-        let value = PrometheusQueryIngestor::sample_payload(&sample)
-            .expect_err("an invalid sample value must fail");
-        assert!(matches!(
-            value.current_context(),
-            PrometheusQueryIngestorError::InvalidSampleValue
-        ));
+    /// The URL carries the PromQL and the instant, and an API root can carry credentials, so a
+    /// failed request's report holds none of them in any rendering of it.
+    #[nervix_primitives::test]
+    async fn a_failed_request_reports_nothing_of_its_url() {
+        let unavailable = PrometheusQueryIngestor {
+            client: HttpClient::new(),
+            api_root: PrometheusApiRoot::parse("http://reader:hunter2@127.0.0.1:1/behind-a-proxy")
+                .expect("the unused port's address is an API root"),
+            query: "secret_metric".to_string(),
+            max_body_size: nervix_models::PROMETHEUS_DEFAULT_MAX_BODY_SIZE,
+        }
+        .query_at(Timestamp::from_unix_nanos(1_775_520_000_000_000_000))
+        .await
+        .expect_err("an unavailable endpoint must fail the request");
+
+        for rendered in [format!("{unavailable:#}"), format!("{unavailable:?}")] {
+            assert!(
+                rendered.contains("failed to send Prometheus query"),
+                "{rendered}"
+            );
+            for leaked in [
+                "api/v1/query",
+                "secret_metric",
+                "hunter2",
+                "behind-a-proxy",
+                "1775520000",
+            ] {
+                assert!(!rendered.contains(leaked), "{leaked} in {rendered}");
+            }
+        }
     }
 }

@@ -1382,7 +1382,9 @@ pending. The source declares this single-report bound beside its driver buffers.
 Beside its fields and headers, a message names the position its transport gives it, where the
 transport has one: a Kafka record's topic, partition and offset, or a syslog frame's peer. It is the
 transport's own coordinate, never a header value its sender wrote, and a decode rejection names it.
-A paced source returns each polled message owned, its declared values already copied.
+A paced source returns each polled message owned, its declared values already copied. A clone of a
+retained copy shares its values, so the samples of one Prometheus poll, which all carry the same
+query and evaluation instant, hold them once however many samples the poll returned.
 
 Transport headers are visited from the borrowed message in the order the entity's
 [header model](#header-models) declares. The host copies them only when the quiesce control decides
@@ -2387,9 +2389,11 @@ envelope grouping and the exact container bytes, `codec-bounded-encodings` and
 `bounded-write-limits` the exact sizes under `MAX SIZE`, `emitter-row-preparations` and
 `emitter-retained-payloads` the membership and byte-for-byte retry, text and typed headers
 included, `sqs-batch-requests`, `mqtt-publish-packets`, `postgres-insert-measures` and
-`mysql-insert-measures` the connector-specific measures. The MySQL property compares the complete
-statement and bound parameters with the driver's binary serializer, including qualified table
-names, quoted column keys, nulls and nonempty slices of a rotated membership sequence.
+`mysql-insert-measures` the connector-specific measures. `prometheus-sample-encoding` checks the
+bytes of the object a query source delivers for a sample against the vocabulary's declaration. The
+MySQL property compares the complete statement and bound parameters with the driver's binary
+serializer, including qualified table names, quoted column keys, nulls and nonempty slices of a
+rotated membership sequence.
 `mongodb-write-answers` checks the rows a failed MongoDB write delivers, rejects and leaves unresolved.
 `mongodb-bson-mapping` checks the complete native document encoding and stored-size measure:
 integer widths, floating-point bits (including non-finite values), native dates at millisecond
