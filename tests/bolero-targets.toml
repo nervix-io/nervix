@@ -1121,6 +1121,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/syslog/src/listener/__fuzz__/listener__metadata__tests__bolero_listener_metadata_is_retained_exactly/corpus"
+domain_version = 1
+features = []
+id = "syslog-listener-metadata"
+invariant = "Every bounded current UDP, TCP or TLS peer preserves its complete address, transport and optional verified client subject in declared order through the production metadata visit and owned retention after its message is dropped."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-connector-syslog"
+random_iterations = 256
+source = "crates/connectors/syslog/src/listener/metadata.rs"
+test = "listener::metadata::tests::bolero_listener_metadata_is_retained_exactly"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/connectors/rabbitmq/src/address/__fuzz__/address__tests__bolero_addresses_name_the_broker_written_into_them/corpus"
 domain_version = 1
 features = []

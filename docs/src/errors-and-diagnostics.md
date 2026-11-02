@@ -715,6 +715,11 @@ injector follows the same typed path. WebSocket signaling compilation and execut
 frame encoding and transport causes. The runtime's Syslog source-plan and signaling compilation
 errors keep those reports as typed fields while preserving their startup messages.
 
+A Syslog listener that cannot decode the subject of a verified TLS client certificate keeps the
+X.509 parser's typed cause beneath `SyslogConnectionError::TlsPeerCertificate`. It ends that
+connection before handing over frames. A connection without client authentication is an ordinary
+absent TLS peer and produces no failure.
+
 A MySQL pool is kept at its `POOL SIZE MIN` by a task no caller waits on, so that task is the only
 witness of a pass that ends below the minimum. It reports `PoolMinimumError::NotRestored`, naming
 the minimum, above the failed checkout's `PoolMinimumError::CheckOut` and the driver's error, at
@@ -963,6 +968,12 @@ to take a record, and its `PublishNoticeError` when an answer leaves a record un
 `EmitterWriteError::Publish`, each with the connector's description of the failure for the
 emitter's transient error. A missed `ACK TIMEOUT` is the confirmation window's
 `ConfirmationWindowError`, which the window describes the same way.
+
+An MQTT broker's successful `SUBACK` with a grant below the requested QoS fails readiness with
+`MqttTopicIngestorError::SubscriptionDowngraded { requested, granted }` beneath
+`IngestorError::Resume`. Both fields are typed quality-of-service levels. The general error
+policy and `DESCRIBE INGESTOR` report those levels without payload or client credentials, in
+acknowledged and `NO ACK` modes alike.
 
 MQTT input retirement reports `RuntimeError::RetireIngestorEntity`, naming its domain and
 ingestor, above the connector's `MqttTopicIngestorError::RetireInstance` and instance index. The report

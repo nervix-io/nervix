@@ -855,9 +855,12 @@ async fn an_acknowledgement_after_its_connection_ended_fails_and_drops_the_conne
         .assured("thirty seconds after now fits the monotonic clock");
     loop {
         nervix_primitives::task::consume_budget().await;
-        let ended = match source.connection.as_ref() {
-            Some(connection) => connection.has_ended(),
-            None => panic!("the source keeps its connection until it reads or acknowledges"),
+        let ended = match &source.connection {
+            super::MqttSourceConnection::Running(connection) => connection.has_ended(),
+            super::MqttSourceConnection::Disconnected
+            | super::MqttSourceConnection::RetiringSubscription => {
+                panic!("the source keeps its connection until it reads or acknowledges")
+            }
         };
         if ended {
             break;
@@ -894,4 +897,153 @@ async fn an_acknowledgement_after_its_connection_ended_fails_and_drops_the_conne
         rejected.current_context(),
         IngestorError::Reject { connector: "mqtt" }
     ));
+}
+
+#[nervix_primitives::test]
+async fn every_downgraded_subscription_fails_before_the_ingestor_is_ready() {
+    let fixture = DnsFixture::start().await;
+    for (requested, granted) in [(MqttQos::Qos1, 0), (MqttQos::Qos2, 0), (MqttQos::Qos2, 1)] {
+        nervix_primitives::task::consume_budget().await;
+        for manual in [false, true] {
+            nervix_primitives::task::consume_budget().await;
+            let broker = ScriptedBroker::start().await;
+            let mut plan = acknowledged_plan_at(
+                &broker.addr(),
+                fixture.dns.clone(),
+                NonZeroU64::MIN,
+                requested,
+            );
+            if !manual {
+                plan.acknowledgement = super::IngestorAcknowledgement::OnReceipt;
+            }
+            let mut source = MqttTopicIngestor::open(&plan, 0)
+                .await
+                .assured("opening does not connect");
+            let grant = async {
+                let mut connection = broker.accept().await;
+                connection.grant_subscription_at(granted).await;
+                connection
+            };
+            let Ok((resumed, _connection)) = timeout(OBSERVATION_BUDGET, async {
+                tokio::join!(source.resume(), grant)
+            })
+            .await
+            else {
+                panic!("the broker did not answer the subscription within {OBSERVATION_BUDGET:?}");
+            };
+            let error = resumed.expect_err("a grant below the declared QoS refuses readiness");
+            assert!(format!("{error:#}").contains(&format!(
+                "the MQTT broker granted QOS {granted} below requested QOS {}",
+                requested.spelling()
+            )));
+            let cause = error
+                .downcast_ref::<MqttTopicIngestorError>()
+                .expect("the resume report retains its typed subscription cause");
+            let MqttTopicIngestorError::SubscriptionDowngraded {
+                requested: observed_requested,
+                granted: observed_granted,
+            } = cause
+            else {
+                panic!("expected the typed downgrade, got {error:?}");
+            };
+            assert_eq!(*observed_requested, requested);
+            assert_eq!(observed_granted.level(), granted);
+            assert!(
+                source.needs_resume(),
+                "a refused subscription installs no running connection"
+            );
+            assert!(matches!(
+                source.connection,
+                super::MqttSourceConnection::RetiringSubscription
+            ));
+            source
+                .suspend()
+                .await
+                .assured("suspension just drops the connection");
+            assert!(
+                matches!(
+                    source.connection,
+                    super::MqttSourceConnection::RetiringSubscription
+                ),
+                "suspension preserves the retirement before another resume"
+            );
+        }
+    }
+}
+
+#[nervix_primitives::test]
+async fn a_downgraded_subscription_retires_its_session_before_another_attempt() {
+    let fixture = DnsFixture::start().await;
+    let broker = ScriptedBroker::start().await;
+    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
+    let mut source = MqttTopicIngestor::open(&plan, 0)
+        .await
+        .assured("opening does not connect");
+    let refused = async {
+        let mut connection = broker.accept().await;
+        connection.grant_subscription_at(0).await;
+        connection
+    };
+    let Ok((result, connection)) = timeout(OBSERVATION_BUDGET, async {
+        tokio::join!(source.resume(), refused)
+    })
+    .await
+    else {
+        panic!("the first subscription did not complete within {OBSERVATION_BUDGET:?}");
+    };
+    assert!(result.is_err(), "the first grant is below the declaration");
+    drop(connection);
+
+    // A failed retirement must keep the pending phase, even if the connector is suspended.
+    let failed_cleanup = async {
+        let _connection = broker.accept_without_reply().await;
+    };
+    let Ok((result, ())) = timeout(OBSERVATION_BUDGET, async {
+        tokio::join!(source.resume(), failed_cleanup)
+    })
+    .await
+    else {
+        panic!("the failed cleanup did not complete within {OBSERVATION_BUDGET:?}");
+    };
+    assert!(
+        result.is_err(),
+        "a peer that closes before CONNACK cannot confirm retirement"
+    );
+    source
+        .suspend()
+        .await
+        .assured("suspension just drops the running connection");
+    assert!(matches!(
+        source.connection,
+        super::MqttSourceConnection::RetiringSubscription
+    ));
+
+    let cleanup_and_grant = async {
+        let mut cleanup = broker.accept_expiring_session().await;
+        let (packet_type, body) = cleanup.read_packet().await;
+        assert_eq!(
+            packet_type, 10,
+            "the rejected filter is unsubscribed before retrying"
+        );
+        cleanup.write(&[0xb0, 4, body[0], body[1], 0, 0]).await;
+        cleanup.expect_session_expiry_zero().await;
+        let mut replacement = broker.accept().await;
+        replacement.grant_subscription_at(1).await;
+        replacement
+    };
+    let Ok((result, _replacement)) = timeout(OBSERVATION_BUDGET, async {
+        tokio::join!(source.resume(), cleanup_and_grant)
+    })
+    .await
+    else {
+        panic!(
+            "the cleanup and replacement subscription did not complete within \
+             {OBSERVATION_BUDGET:?}"
+        );
+    };
+    result.assured("the broker retired the rejected session and granted the declared QoS");
+    assert!(
+        !source.needs_resume(),
+        "only the accepted replacement becomes ready"
+    );
 }

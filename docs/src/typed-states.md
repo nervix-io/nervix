@@ -314,6 +314,13 @@ only once the driver drains its buffer, and a mismatched connection becomes a ty
 instead of certifying discarded bytes. A deadline leaves the pending state intact. This is
 volatile connector state, never a stored shape or a separate representation of the host's rows.
 
+**MQTT subscription admission.** An instance's connection is disconnected, running, or waiting
+to retire a downgraded broker subscription. The last state survives a failed or cancelled cleanup
+and suspension of the connector; only the completed retirement exchange permits another resume.
+It is not ordinary disconnection: trusting a retained session there would bypass the refused QoS
+grant. This is exclusively owned, in-memory connection state, separate from a retained accepted
+broker session and from the runtime's input-plan retirement.
+
 **MQTT input retirement.** A retiring input keeps the previous typed plan and an optional
 replacement plan. Absence means the declaration is removed; stopping an execution whose input
 is unchanged creates no retirement. A connector session catalog has a private constructor that
@@ -1105,6 +1112,13 @@ presence. An absent socket after accept failure requires rebind, while the same 
 owns established connection tasks and queued frames; source close ends that retained state.
 The testing capability shares one named listener-fault request between the connector and host:
 the selected bound address and its acknowledgement belong to that same armed request.
+
+A Syslog frame's peer is a UDP address, a TCP address or a shared TLS connection identity. Only the
+TLS variant can hold a verified client-certificate subject, whose absence represents a connection
+without client authentication. Subject decoding happens after successful TLS verification; a
+decoding failure ends the connection with its typed cause. Each metadata visit projects the peer
+address, transport and optional subject from that one value, and retained metadata preserves every
+field after the message ends.
 
 Domain-clock publication carries lifecycle pause, generation and start
 point beside the installation. Entity assignment absence invalidates a retained checkpoint reader;

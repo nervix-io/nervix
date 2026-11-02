@@ -35,7 +35,7 @@ direct-value sections. Nervix validates the entity's declared limits and exact m
 `CREATE` and `ALTER`; correct a refused declaration before starting the domain.
 For MQTT sources, read [Ingestors → MQTT](../../../docs/src/ingestors.md#mqtt) before promising
 delivery during downstream stalls; it distinguishes QoS 0 overflow, acknowledged capacity and
-the counters that expose each outcome.
+the counters that expose each outcome, and the refusal of a broker grant below the declared QoS.
 
 For RabbitMQ consumption choose `MODE NO ACK`, `MODE ACK SEQUENTIAL`, or
 `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
