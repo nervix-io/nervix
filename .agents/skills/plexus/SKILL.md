@@ -483,6 +483,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   wait it bounds. Read `Ingestors` or
   `Emitters` → `Client Deadlines`, and `Connector Capabilities` for each entity's waits and what
   bounds them.
+- For HTTP polling, keep a credential out of the statement: `SHOW CREATE` prints a `HEADERS` literal.
+  Declare a `secret.<name>` key on the `HTTP` client and write
+  `'authorization' = CLIENT SECRET 'secret.<name>'`; see
+  [HTTP REQUEST](../../../docs/src/ingestors.md#http-request). Change `METHOD`, `HEADERS` or
+  `MAX BODY SIZE` with `ALTER HTTP REQUEST INGESTOR … SET FROM <complete body>`.
 - For an HTTP emitter, write `CREATE HTTP REQUEST EMITTER <name> FROM <relay> TO <client> METHOD <string_expression> PATH
   <string_expression> MODE ACK RETRY POLICY BACKOFF <duration> MAX <duration>` followed by exactly
   one of `ENCODE USING <codec>` or `WITHOUT BODY`. Do not add an ACK window, `ACK TIMEOUT`,

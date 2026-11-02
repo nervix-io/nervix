@@ -214,8 +214,9 @@ again under the other head instead.
 
 `SET FROM` accepts the complete body that follows `FROM` in a `CREATE` statement with the same
 head, and only that pair's body. Change a client or endpoint, a Kafka topic or offset mode,
-`INSTANCES`, the delivery mode, or source-specific subscription settings by supplying that complete
-body, including its required `ON QUIESCE` clause. `SET QUIESCE` changes only the quiesce mode and
+`INSTANCES`, the delivery mode, an `HTTP REQUEST`'s `METHOD`, `HEADERS` or `MAX BODY SIZE`, or
+source-specific subscription settings by supplying that complete body, including its required
+`ON QUIESCE` clause. `SET QUIESCE` changes only the quiesce mode and
 its variables. It parses every quiesce body, and the stored source refuses one it does not honor,
 for example with `HTTP ENDPOINT ingestors do not support ON QUIESCE SUSPEND`; there is no
 `DROP QUIESCE` operation. `SET DECODE USING` exists under every head except `CLIENT PRODUCER`,
@@ -501,10 +502,11 @@ General notes:
   `metadata.timestamp_type`, and `metadata.tombstone`, `SYSLOG LISTENER` declares
   `metadata.peer_addr`, `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`,
   `HTTP ENDPOINT` declares `metadata.method`, `metadata.path`, `metadata.query`,
-  `metadata.remote_addr`, and `metadata.host`, `WEBSOCKETS CONNECTION` declares
-  `metadata.frame_type`, `WEBSOCKETS ENDPOINT` declares `metadata.frame_type`,
-  `metadata.remote_addr`, and `metadata.path`, and `REDIS PUBSUB` declares `metadata.channel` and
-  `metadata.pattern`; every field is optional and none is sensitive
+  `metadata.remote_addr`, and `metadata.host`, `PROMETHEUS QUERY` declares `metadata.query` and
+  `metadata.evaluated_at`, `WEBSOCKETS CONNECTION` declares `metadata.frame_type`,
+  `WEBSOCKETS ENDPOINT` declares `metadata.frame_type`, `metadata.remote_addr`, and
+  `metadata.path`, and `REDIS PUBSUB` declares `metadata.channel` and `metadata.pattern`; every
+  field is optional and none is sensitive
 - a route expression may read any declared field; `CREATE` and `ALTER` refuse a route that reads a
   field its entity does not declare, naming the ingestor, the route's relay and the fields the
   entity does declare. `FILTER WHERE` reads headers but not `metadata.<field>`
@@ -990,7 +992,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | HTTP client |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
 | Modes (complete bodies after MODE) | NO ACK |
-| Options in statement order | `METHOD 'GET'` (string literal); required<br>`HEADERS { 'accept' = 'application/json' }` (named string literals); optional; omitted when unset<br>`MAX BODY SIZE 1MiB` (byte size); optional; default 16MiB<br>`EVERY 1s` (duration); required |
+| Options in statement order | `METHOD 'GET'` (string literal); required<br>`HEADERS { 'accept' = 'application/json' }` (named string literals or client secrets); optional; omitted when unset<br>`MAX BODY SIZE 1MiB` (byte size); optional; default 16MiB<br>`EVERY 1s` (duration); required |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
 | Metadata | metadata.status: U16 OPTIONAL<br>metadata.polled_at: DATETIME OPTIONAL |
@@ -1005,10 +1007,40 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md#http-request-ingest).
 <!-- connector-matrix:ingest-http-request:end -->
 
-- `METHOD '<token>'` is required on the ingestor. `HEADERS { '<name>' = '<value>', … }` writes
-  literal request fields; each value is visible in `SHOW CREATE`. `MAX BODY SIZE` bounds the
-  response body at its declared size, or 16 MiB where omitted. A response above that bound fails
-  its poll.
+- `METHOD '<token>'` is required on the ingestor. `HEADERS { '<name>' = <value>, … }` writes request
+  fields. Names are case-insensitive, and `CREATE` and `ALTER` refuse a name written twice. A value
+  is UTF-8 text with no control character but a tab and no space or tab at either end. `MAX BODY SIZE`
+  bounds the response body at its declared size, or 16 MiB where omitted. A response above that
+  bound fails its poll.
+- A header's value is a string literal or `CLIENT SECRET '<key>'`. A literal is part of the statement,
+  so `SHOW CREATE` and `DESCRIBE INGESTOR` print it, and a credential does not belong in one.
+  `CLIENT SECRET` names a key of the ingestor's client and sends that key's value:
+
+  ```plexus
+  CREATE HTTP CLIENT orders_api CONFIG {
+    'endpoint' = 'https://api.example.com/orders',
+    'timeout_ms' = 5000,
+    'secret.api_token' = 'Bearer example-token'
+  };
+
+  CREATE HTTP REQUEST INGESTOR orders
+    FROM orders_api
+    METHOD 'GET'
+    HEADERS { 'accept' = 'application/json', 'authorization' = CLIENT SECRET 'secret.api_token' }
+    EVERY 30s MODE NO ACK ON QUIESCE SUSPEND DECODE USING orders_codec
+    TO orders_relay INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+    ON GENERAL ERROR LOG;
+  ```
+
+  The operator names each `secret.<name>` key of an `HTTP` client. Inspection prints the reference:
+  `SHOW CREATE`, `DESCRIBE INGESTOR` and the console show `CLIENT SECRET 'secret.api_token'`, and
+  `SHOW CREATE CLIENT` and `DESCRIBE CLIENT` mask the key as `********`. `CREATE` and `ALTER` refuse a
+  reference to a key the client does not hold, to a key that is not a secret, and to a value that
+  cannot be a header, naming the header and the key and never quoting the value. A value that keeps a
+  `{{ … }}` template is rendered and checked where the ingestor opens instead, and one that cannot be
+  a header fails the open. A poll sends the value only to the client's origin, because it follows a
+  redirect nowhere else. Complete serialization keeps the value, as it keeps every client secret, so
+  a backup archive holds it; see [Backup And Restore](backup-and-restore.md).
 - The HTTP client requires `endpoint` and `timeout_ms`. It also declares optional
   `follow_redirects` and `proxy` settings, plus TLS trust and client identity files. Polling follows
   a redirect only to the client's own origin and only with `follow_redirects = true`, sends its
@@ -2047,7 +2079,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | `QUERY 'up'` (string literal); required<br>`MAX BODY SIZE 16MiB` (byte size); optional; default 16MiB<br>`EVERY 15s` (duration); required |
 | Headers | Not offered: The Prometheus query API is polled for samples; no Prometheus remote-write emitter is declared. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST |
-| Metadata | Not offered: The current query result is decoded as payload; no separate typed query or evaluation-time metadata namespace is declared. |
+| Metadata | metadata.query: STRING OPTIONAL<br>metadata.evaluated_at: DATETIME OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -2059,7 +2091,44 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [PROMETHEUS QUERY capability and mirror reference](connector-capabilities.md#prometheus-query-ingest).
 <!-- connector-matrix:ingest-prometheus-query:end -->
 
-Prometheus samples are flattened into JSON before codec decoding.
+A query source reads the `vector` of float samples an instant query answers, and delivers one JSON
+object per sample, in the shape the API's own `vector` result holds it:
+
+```json
+{"metric":{"__name__":"up","instance":"node-1:9100","job":"node"},"value":1,"timestamp":"2026-04-07T00:00:00.123Z"}
+```
+
+- `metric` holds the series' labels in ascending name order, its `__name__` among them where the
+  series has one. A label named `value` or `timestamp` stays under `metric`, beside the sample's own.
+- `value` is a JSON number: an integer the API writes as an integer stays that integer, and any other
+  value is the shortest text of the same float. JSON has no number for `NaN`, `+Inf` or `-Inf`, so
+  each travels as the string the API writes it as, for the codec to judge per record. A `string`
+  wire field reads it, and a `number` wire field refuses that record as a
+  [decode rejection](#when-the-codec-refuses-a-payload), while the samples beside it are delivered.
+- `timestamp` is the sample's own instant as RFC 3339 text in UTC, read from the digits of the API's
+  decimal seconds so that no float rounds them. Prometheus reports it to the millisecond.
+
+`WIRE JSON` declares no nested object, so a codec that reads a label is a JAQ codec, and one that
+reads only the sample's own members can stay a `MODE LOOSE` wire schema, which drops `metric`:
+
+```plexus
+CREATE CODEC sample_codec FROM JSON TO SCHEMA sample
+  WITH JAQ TRANSFORMATIONS ON INGESTION '{job: .metric.job, value, timestamp}';
+```
+
+A route reads what the sample answers through its metadata. `metadata.query` is the statement's
+`QUERY` as written, and `metadata.evaluated_at` is the instant the poll asked the API to evaluate it
+at, the due instant of the ingestor's cadence, which `TIMESTAMP AT metadata.evaluated_at` takes as
+each sample's event time.
+
+A `matrix`, `scalar` or `string` result, and a `vector` that holds a native histogram, are not read.
+Each fails its poll before any sample of the answer is delivered, as a transient error that names
+it, such as `Prometheus query returned unsupported result type 'matrix'`, and the next poll queries
+again. A query the API refuses reports the API's own words, such as `Prometheus rejected the query
+with HTTP status 400 Bad Request: bad_data: invalid parameter "query": 1:5: parse error: unclosed
+left parenthesis`. A status whose body is not the API's error, such as a proxy's page, reports that
+status. No failure names the request's URL, which carries the PromQL and the instant.
+
 `MAX BODY SIZE <bytes>`, written between `QUERY` and `EVERY`, bounds how many bytes of one query
 response a poll reads; a statement that leaves it out reads at most `16MiB`. The size is a whole
 number greater than zero followed by `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB` or `TiB`, and

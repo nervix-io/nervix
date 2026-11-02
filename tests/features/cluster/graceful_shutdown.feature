@@ -1260,7 +1260,7 @@ Feature: Graceful shutdown
       {"event_id":2}
       """
 
-  @long_running
+  @long_running @slots_2
   Scenario Outline: Every node stopping at once ends its generators together on a cluster of <cluster_size>
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And shutdown timeout is configured as "20s"

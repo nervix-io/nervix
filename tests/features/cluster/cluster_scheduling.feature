@@ -39,7 +39,7 @@ Feature: Cluster scheduling
       | 1            |
       | 3            |
 
-  @random_scheduler
+  @random_scheduler @slots_2
   Scenario: The default three-node test scheduler executes a graph across node boundaries
     Given a 3 node nervix cluster is started
     And the leader node is configured with these Plexus commands

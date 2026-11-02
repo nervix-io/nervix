@@ -871,6 +871,7 @@ Feature: Resource version bindings
       | 1            | DENSE TENSOR<F32> | ARRAY<F32, 2> | ARRAY<F32, 1> |
       | 3            | DENSE TENSOR<F32> | ARRAY<F32, 2> | ARRAY<F32, 1> |
 
+  @slots_3
   Scenario Outline: Pinned bindings keep their version through uploads, dynamic alterations and a cluster restart
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And the production sticky scheduler is configured
