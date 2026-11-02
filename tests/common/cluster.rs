@@ -5265,7 +5265,7 @@ async fn publish_mqtt(
     publish_mqtt_with_qos(dependencies, topic, payload, QoS::AtMostOnce, true).await
 }
 
-async fn publish_mqtt_with_qos(
+pub(crate) async fn publish_mqtt_with_qos(
     dependencies: &DependencyEndpoints,
     topic: &str,
     payload: &str,

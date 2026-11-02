@@ -315,6 +315,13 @@ only once the driver drains its buffer, and a mismatched connection becomes a ty
 instead of certifying discarded bytes. A deadline leaves the pending state intact. This is
 volatile connector state, never a stored shape or a separate representation of the host's rows.
 
+**MQTT subscription admission.** An instance's connection is disconnected, running, or waiting
+to retire a downgraded broker subscription. The last state survives a failed or cancelled cleanup
+and suspension of the connector; only the completed retirement exchange permits another resume.
+It is not ordinary disconnection: trusting a retained session there would bypass the refused QoS
+grant. This is exclusively owned, in-memory connection state, separate from a retained accepted
+broker session and from the runtime's input-plan retirement.
+
 **MQTT input retirement.** A retiring input keeps the previous typed plan and an optional
 replacement plan. Absence means the declaration is removed; stopping an execution whose input
 is unchanged creates no retirement. A connector session catalog has a private constructor that
@@ -507,6 +514,13 @@ lookup. A Postgres address's TLS policy is the typed `PostgresSslMode`, read thr
 option written twice, is refused rather than defaulted to a policy. A Postgres conflict clause's
 rules belong to `PostgresConflictAction`, whose typed refusal names a missing `DO UPDATE` target, an
 empty target column or an update without a mapped column outside its target.
+
+Postgres connection options and their `Option<PostgresStatementDeadline>` are constructed together
+before the pool opens. Absence means the client omitted a Nervix statement bound; presence has
+passed both the shared positive-millisecond rule and PostgreSQL's signed integer range. Every
+borrow copies that immutable deadline, so the server option and local query wait consume the same
+validated value. A local elapsed wait and a server-canceled statement have distinct typed contexts:
+the latter may name the configured bound without asserting why the server canceled it.
 
 RabbitMQ's consumer enum distinguishes automatic acknowledgement, sequential acknowledgement
 and parallel acknowledgement. The parallel variant owns a `NonZeroU16` prefetch count and batch

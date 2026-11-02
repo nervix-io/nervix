@@ -6,6 +6,22 @@
 
 use super::*;
 
+/// Publishes through the broker while a subscription is deliberately refused.
+#[when(expr = "MQTT QoS 2 message is published directly to broker topic {string}")]
+async fn publish_directly_to_broker(world: &mut ScenarioWorld, topic: String, #[step] step: &Step) {
+    let topic = expand_placeholders(world, &topic);
+    let payload = expand_placeholders(world, docstring(step));
+    common::cluster::publish_mqtt_with_qos(
+        world.dependencies.endpoints(),
+        &topic,
+        &payload,
+        rumqttc::QoS::ExactlyOnce,
+        true,
+    )
+    .await
+    .expect("the broker must confirm the QoS 2 publication");
+}
+
 pub(super) struct Publication {
     observer: common::cluster::BrokerObserver,
     payload: String,

@@ -1204,3 +1204,47 @@ Feature: MQTT ingestion
       | cluster_size |
       | 1            |
       | 3            |
+
+  @mqtt_subscription_downgrade
+  Scenario Outline: An MQTT ingestor refuses a broker grant below its declared QoS
+    Given MQTT is running
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE MQTT CLIENT mqtt_capped CONFIG { 'addr' = '{{mqtt_qos<granted>_addr}}' };
+      CREATE MQTT TOPIC INGESTOR mqtt_downgraded
+        FROM mqtt_capped TOPIC 'downgraded_{{test_id}}' SESSION PERSISTENT QOS <requested> MODE <mode>
+        ON QUIESCE <quiesce> DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
+      START;
+      """
+    Then within "30s" DESCRIBE INGESTOR "mqtt_downgraded" on the leader node contains
+      """
+      the MQTT broker granted QOS <granted> below requested QOS <requested>
+      """
+    When MQTT QoS 2 message is published directly to broker topic "downgraded_{{test_id}}"
+      """
+      {"user_id":42}
+      """
+    Then the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size | requested | granted | mode                                                                                       | quiesce |
+      | 1            | 1         | 0       | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms                         | SUSPEND |
+      | 3            | 1         | 0       | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms                         | SUSPEND |
+      | 1            | 2         | 0       | ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms | SUSPEND |
+      | 3            | 2         | 0       | ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms | SUSPEND |
+      | 1            | 2         | 1       | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms                         | SUSPEND |
+      | 3            | 2         | 1       | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms                         | SUSPEND |
+      | 1            | 1         | 0       | NO ACK                                                                                     | DROP    |
+      | 3            | 1         | 0       | NO ACK                                                                                     | DROP    |

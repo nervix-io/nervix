@@ -502,6 +502,7 @@ fn topic_ingestion_bounds_its_connection_by_the_keep_alive_but_not_its_suback() 
         vec![
             WaitBound::Driver("5 s"),
             WaitBound::Unbounded,
+            WaitBound::Driver("5 s"),
             ONE_KEEP_ALIVE,
             TWO_KEEP_ALIVES,
         ]
