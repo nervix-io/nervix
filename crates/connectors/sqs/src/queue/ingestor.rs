@@ -2,10 +2,11 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The queue-URL lookup each instance makes when it resumes, long polling, the
-//!   deadline a receive keeps beyond its long poll and how a receive in flight completes when the
-//!   host cancels a read, message attributes as ingest headers, and deleting a message once it is
-//!   acknowledged.
+//! - **Owns.** The queue-URL lookup each instance makes when it resumes, long polling, gathering a
+//!   batch of up to the ten messages one receive returns, the deadline a receive keeps beyond its
+//!   long poll and how a receive in flight completes when the host cancels a read, message
+//!   attributes as ingest headers, deleting messages in batches once they are acknowledged, and
+//!   making rejected messages visible again at once.
 //! - **Depends on.** The connector contract, the SQS client both directions build, typed client
 //!   configuration entries, `error-stack`, Tokio, the node resolver, and the AWS SQS SDK.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
@@ -22,26 +23,30 @@
     )
 )]
 
-use std::{borrow::Cow, fmt::Debug, future::Future, pin::pin, time::Duration};
+use std::{borrow::Cow, fmt::Debug, future::Future, num::NonZeroUsize, pin::pin, time::Duration};
 
 use async_trait::async_trait;
 use aws_sdk_sqs::{
     error::SdkError,
     operation::get_queue_url::GetQueueUrlError,
-    types::{Message as SqsMessage, MessageAttributeValue},
+    types::{
+        BatchResultErrorEntry, ChangeMessageVisibilityBatchRequestEntry,
+        DeleteMessageBatchRequestEntry, Message as SqsMessage, MessageAttributeValue,
+    },
 };
 use error_stack::{Report, ResultExt as _};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     BrokerIngestorConnector, IngestMessageHeaders, IngestMetadataRow, IngestorBatch,
     IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
     IngestorReadCancellation, IngestorResult, IngestorResume,
 };
 use nervix_dns::DnsResolver;
-use nervix_models::{ClientConfigEntry, SqsQueueName};
-use nervix_primitives::time::timeout;
+use nervix_models::{ClientConfigEntry, SqsQueueName, SqsReceiveMax};
+use nervix_primitives::time::{Instant, timeout};
 use thiserror::Error;
 
+use super::SQS_MAX_BATCH_ENTRIES;
 use crate::queue::connection::{SqsClientConfig, SqsRequest, SqsServiceClient};
 
 const SQS: &str = "sqs";
@@ -67,9 +72,9 @@ const CANCELLED_RECEIVE_BUDGET: Duration = match LONG_POLL.checked_add(RECEIVE_A
 /// The JSON protocol's error type for a queue the service does not have.
 const QUEUE_DOES_NOT_EXIST: &str = "QueueDoesNotExist";
 
-/// Why an SQS ingestor could not build its client, look its queue up, receive from it, or delete a
-/// message.
-#[derive(Debug, Error)]
+/// Why an SQS ingestor could not build its client, look its queue up, receive from it, or settle
+/// the messages it received.
+#[derive(Debug, PartialEq, Eq, Error)]
 pub enum SqsQueueIngestorError {
     #[error("invalid SQS client configuration")]
     ClientConfig,
@@ -81,12 +86,36 @@ pub enum SqsQueueIngestorError {
     MissingQueueUrl { queue: String },
     #[error("failed to receive SQS messages")]
     Receive,
+    /// The service answered a receive with a message it gave no receipt handle, so the message can
+    /// be neither deleted nor made visible again. It reappears once its visibility timeout ends.
+    #[error("SQS returned a message without the receipt handle that settles it")]
+    MissingReceiptHandle { message_id: Option<String> },
     #[error(
         "the SQS receive in flight did not answer within {budget:?} of its read's cancellation"
     )]
     CancelledReceiveUnanswered { budget: Duration },
-    #[error("failed to delete an acknowledged SQS message")]
+    #[error("failed to delete acknowledged SQS messages")]
     Delete,
+    #[error(
+        "SQS did not delete {refused} of {requested} acknowledged messages; the first failed with \
+         {code}"
+    )]
+    DeleteRefused {
+        refused: NonZeroUsize,
+        requested: usize,
+        code: String,
+    },
+    #[error("failed to make rejected SQS messages visible again")]
+    ChangeVisibility,
+    #[error(
+        "SQS failed to make {failed} of {requested} rejected messages visible again; the first \
+         failed with {code}"
+    )]
+    VisibilityFailed {
+        failed: NonZeroUsize,
+        requested: usize,
+        code: String,
+    },
 }
 
 type SqsQueueIngestorResult<T> = Result<T, Report<SqsQueueIngestorError>>;
@@ -118,13 +147,11 @@ impl SqsQueueIngestorPlan {
     }
 }
 
-/// The receipt handle that deletes one received message once it is acknowledged.
-///
-/// A message the service returned without one cannot be deleted and reappears after its
-/// visibility timeout.
+/// The receipt handle that deletes one received message once it is acknowledged, or makes it
+/// visible again once it is rejected.
 #[derive(Debug, Clone)]
 pub struct SqsQueueIngestorPosition {
-    receipt_handle: Option<String>,
+    receipt_handle: String,
 }
 
 /// One received SQS message, whose message attributes are its ingest headers.
@@ -177,14 +204,17 @@ pub struct SqsQueueIngestorMessage {
 }
 
 impl SqsQueueIngestorMessage {
-    fn new(message: SqsMessage) -> Self {
-        let position = SqsQueueIngestorPosition {
-            receipt_handle: message.receipt_handle().map(ToOwned::to_owned),
+    /// A message a receive brought, which the source can settle only through its receipt handle.
+    fn new(message: SqsMessage) -> SqsQueueIngestorResult<Self> {
+        let Some(receipt_handle) = message.receipt_handle().map(ToOwned::to_owned) else {
+            return Err(Report::new(SqsQueueIngestorError::MissingReceiptHandle {
+                message_id: message.message_id().map(ToOwned::to_owned),
+            }));
         };
-        Self {
+        Ok(Self {
             attributes: SqsMessageAttributes { message },
-            position,
-        }
+            position: SqsQueueIngestorPosition { receipt_handle },
+        })
     }
 }
 
@@ -216,9 +246,154 @@ impl IngestorMessage for SqsQueueIngestorMessage {
 pub struct SqsQueueIngestor {
     client: SqsServiceClient,
     queue: SqsQueueName,
-    /// The URL every receive and deletion addresses: absent until `resume` looks the queue up, and
-    /// kept from then on, because a named queue keeps its URL.
+    /// The URL every receive, deletion and visibility change addresses: absent until `resume`
+    /// looks the queue up, and kept from then on, because a named queue keeps its URL.
     queue_url: Option<String>,
+    /// A failure the last read met after it had already taken messages off the queue. Those
+    /// messages reached the host with that read, and the next read reports the failure.
+    failure: Option<Report<SqsQueueIngestorError>>,
+}
+
+/// How long one receive waits for a message to arrive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReceiveWait {
+    /// The long poll, which the service ends as soon as a message arrives.
+    LongPoll,
+    /// None: the service answers at once with the messages it holds.
+    Immediate,
+}
+
+impl ReceiveWait {
+    /// The whole seconds the receive's request carries.
+    const fn seconds(self) -> i32 {
+        match self {
+            Self::LongPoll => LONG_POLL_SECONDS,
+            Self::Immediate => 0,
+        }
+    }
+
+    /// How long the service holds the receive before it answers empty, which the client's
+    /// `timeout_ms` counts from.
+    const fn duration(self) -> Duration {
+        match self {
+            Self::LongPoll => LONG_POLL,
+            Self::Immediate => Duration::ZERO,
+        }
+    }
+
+    /// The wait of a receive that tops a batch up within a window with `remaining` left: the long
+    /// poll while a whole one fits, and no wait after that, so the batch never outlasts its window
+    /// by more than one answer's round trip.
+    fn within(remaining: Duration) -> Self {
+        if remaining >= LONG_POLL {
+            return Self::LongPoll;
+        }
+        Self::Immediate
+    }
+}
+
+/// One receive: how many messages it asks for, never more than one receive returns, and how long
+/// it waits for the first of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReceiveRequest {
+    count: i32,
+    wait: ReceiveWait,
+}
+
+impl ReceiveRequest {
+    /// A receive for `count` messages, or for as many of them as one receive returns.
+    fn new(count: NonZeroUsize, wait: ReceiveWait) -> Self {
+        let bounded = count.min(NonZeroUsize::from(SqsReceiveMax::LARGEST));
+        let count = i32::try_from(bounded.get())
+            .assured("a count of at most the ten messages one receive returns fits its request");
+        Self { count, wait }
+    }
+}
+
+/// The messages one read has taken off the queue so far, and a failure it met after taking some.
+struct BatchUnderway {
+    /// How many messages the batch takes: the host's request, within what one receive returns.
+    wanted: NonZeroUsize,
+    messages: Vec<SqsQueueIngestorMessage>,
+    deferred: Option<Report<SqsQueueIngestorError>>,
+}
+
+impl BatchUnderway {
+    fn new(wanted: NonZeroUsize) -> Self {
+        Self {
+            wanted,
+            messages: Vec::with_capacity(wanted.get()),
+            deferred: None,
+        }
+    }
+
+    /// Takes in what one receive brought. A message without a receipt handle stays off the batch,
+    /// because the source could neither delete it nor make it visible again, and the first such
+    /// message becomes the failure the next read reports.
+    fn take(&mut self, received: Vec<SqsMessage>) {
+        for message in received {
+            match SqsQueueIngestorMessage::new(message) {
+                Ok(message) => self.messages.push(message),
+                Err(failure) => {
+                    if self.deferred.is_none() {
+                        self.deferred = Some(failure);
+                    }
+                }
+            }
+        }
+    }
+
+    /// How many more messages the batch takes, where it is not full yet. A service that answered a
+    /// receive with more messages than it asked for leaves none missing, and the batch keeps them
+    /// all rather than lose any.
+    fn missing(&self) -> Option<NonZeroUsize> {
+        let missing = self.wanted.get().checked_sub(self.messages.len())?;
+        NonZeroUsize::new(missing)
+    }
+
+    /// What the read hands the host: every message it took, as an interrupted batch where the
+    /// host cancelled the read.
+    fn into_gathered(self, cancelled: bool) -> GatheredBatch {
+        let batch = if cancelled {
+            IngestorBatch::Interrupted {
+                gathered: self.messages,
+            }
+        } else {
+            IngestorBatch::Messages(self.messages)
+        };
+        GatheredBatch {
+            batch,
+            deferred: self.deferred,
+        }
+    }
+}
+
+/// What one read hands the host, and a failure it met after it had taken messages, which the next
+/// read reports so that those messages reach the host first.
+struct GatheredBatch {
+    batch: IngestorBatch<SqsQueueIngestorMessage>,
+    deferred: Option<Report<SqsQueueIngestorError>>,
+}
+
+/// The entries of one batch request that the service did not carry out: how many, and the code
+/// the first of them failed with, as the service names it.
+struct FailedEntries {
+    count: NonZeroUsize,
+    first_code: String,
+}
+
+impl FailedEntries {
+    /// The entries of `failed`, or `None` where there are none.
+    fn of(failed: &[&BatchResultErrorEntry]) -> Option<Self> {
+        let (first, rest) = failed.split_first()?;
+        let count = NonZeroUsize::MIN
+            .checked_add(rest.len())
+            .assured("a batch request holds at most ten entries");
+        Some(Self {
+            count,
+            first_code: first.code().to_string(),
+        })
+    }
 }
 
 impl SqsQueueIngestor {
@@ -271,30 +446,93 @@ impl SqsQueueIngestor {
     }
 
     /// Long-polls `queue` until the service returns at least one message, or the host cancels the
-    /// read. The cancellation is observed between receives, so a cancelled read sends no further
-    /// receive, and a receive already in flight still completes and hands over what it brought.
+    /// read, asking each receive for the host's `request.max_messages`, within the ten one receive
+    /// returns. Where the host asks for several and gives them a batch timeout, further receives
+    /// then top the batch up until it is full or its window has passed. The cancellation is
+    /// observed between receives, so a cancelled read sends no further receive, and a receive
+    /// already in flight still completes and hands over what it brought. A failure met after the
+    /// read took messages ends the gathering: the read hands those messages over and leaves the
+    /// failure for the next read.
     async fn read_batch<Q: QueueReceive>(
         queue: &Q,
+        request: IngestorBatchRequest,
         cancellation: &IngestorReadCancellation,
-    ) -> IngestorResult<IngestorBatch<SqsQueueIngestorMessage>> {
-        loop {
+    ) -> IngestorResult<GatheredBatch> {
+        let wanted = request
+            .max_messages
+            .min(NonZeroUsize::from(SqsReceiveMax::LARGEST));
+        let first = loop {
             nervix_primitives::task::consume_budget().await;
             if cancellation.is_cancelled() {
-                return Ok(IngestorBatch::Interrupted {
-                    gathered: Vec::new(),
-                });
+                return Ok(BatchUnderway::new(wanted).into_gathered(true));
             }
-            let received = Self::complete_receive(queue.receive(), cancellation)
+            let receive = ReceiveRequest::new(wanted, ReceiveWait::LongPoll);
+            let received = Self::complete_receive(queue.receive(receive), cancellation)
                 .await
                 .change_context(IngestorError::Read { connector: SQS })?;
-            if received.is_empty() {
-                continue;
+            if !received.is_empty() {
+                break received;
             }
-            let mut messages = Vec::with_capacity(received.len());
-            for message in received {
-                messages.push(SqsQueueIngestorMessage::new(message));
+        };
+        let mut batch = BatchUnderway::new(wanted);
+        batch.take(first);
+        if batch.messages.is_empty() {
+            let failure = batch
+                .deferred
+                .verified("an answer with messages, none of which joined the batch, left why");
+            return Err(failure.change_context(IngestorError::Read { connector: SQS }));
+        }
+        if let Some(window) = request.batch_timeout {
+            Self::top_up(queue, &mut batch, window, cancellation).await;
+        }
+        Ok(batch.into_gathered(cancellation.is_cancelled()))
+    }
+
+    /// Tops `batch` up with further receives until it is full, the window `window` opened when its
+    /// first message arrived has passed, a receive that does not wait brings nothing, a receive
+    /// fails, or the host cancels the read. A receive is never sent once the window has passed and
+    /// never abandoned once it was sent.
+    async fn top_up<Q: QueueReceive>(
+        queue: &Q,
+        batch: &mut BatchUnderway,
+        window: Duration,
+        cancellation: &IngestorReadCancellation,
+    ) {
+        // A window longer than the clock can represent never ends before the batch is full.
+        let deadline = Instant::now().checked_add(window);
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if cancellation.is_cancelled() || batch.deferred.is_some() {
+                return;
             }
-            return Ok(IngestorBatch::Messages(messages));
+            let Some(missing) = batch.missing() else {
+                return;
+            };
+            let wait = match deadline {
+                Some(deadline) => {
+                    // A deadline that has passed leaves no time at all.
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return;
+                    }
+                    ReceiveWait::within(remaining)
+                }
+                None => ReceiveWait::LongPoll,
+            };
+            let receive = ReceiveRequest::new(missing, wait);
+            let received = match Self::complete_receive(queue.receive(receive), cancellation).await
+            {
+                Ok(received) => received,
+                Err(failure) => {
+                    batch.deferred = Some(failure);
+                    return;
+                }
+            };
+            let answered_empty = received.is_empty();
+            batch.take(received);
+            if answered_empty && wait == ReceiveWait::Immediate {
+                return;
+            }
         }
     }
 
@@ -337,9 +575,13 @@ impl SqsQueueIngestor {
     )
 )]
 trait QueueReceive: Sync {
-    /// Asks the queue for one message with all of its attributes, waiting up to the long poll for
-    /// one to arrive, and returns the messages the service answered with, possibly none.
-    fn receive(&self) -> impl Future<Output = SqsQueueIngestorResult<Vec<SqsMessage>>> + Send;
+    /// Asks the queue for `receive.count` messages with all of their attributes, waiting as
+    /// `receive.wait` says for the first to arrive, and returns the messages the service answered
+    /// with, possibly none.
+    fn receive(
+        &self,
+        receive: ReceiveRequest,
+    ) -> impl Future<Output = SqsQueueIngestorResult<Vec<SqsMessage>>> + Send;
 }
 
 /// The queue an ingestor instance receives from through its SDK client.
@@ -349,19 +591,23 @@ struct SdkQueue<'a> {
 }
 
 impl QueueReceive for SdkQueue<'_> {
-    /// The client's `timeout_ms` bounds the receive once its long poll has passed, because a
-    /// service with no message holds the request for the whole long poll before it answers.
-    fn receive(&self) -> impl Future<Output = SqsQueueIngestorResult<Vec<SqsMessage>>> + Send {
+    /// The client's `timeout_ms` bounds the receive once the wait it asks the service to hold it
+    /// for has passed, because a service with no message holds the request for that whole wait
+    /// before it answers.
+    fn receive(
+        &self,
+        receive: ReceiveRequest,
+    ) -> impl Future<Output = SqsQueueIngestorResult<Vec<SqsMessage>>> + Send {
         let client = self.client;
         let request = client
             .sdk()
             .receive_message()
             .queue_url(self.url)
-            .max_number_of_messages(1)
+            .max_number_of_messages(receive.count)
             .message_attribute_names("All")
-            .wait_time_seconds(LONG_POLL_SECONDS)
+            .wait_time_seconds(receive.wait.seconds())
             .customize()
-            .config_override(client.receive_override(LONG_POLL))
+            .config_override(client.receive_override(receive.wait.duration()))
             .send();
         async move {
             match request.await {
@@ -386,6 +632,7 @@ impl IngestorConnector for SqsQueueIngestor {
             client: plan.client.clone(),
             queue: plan.queue.clone(),
             queue_url: None,
+            failure: None,
         })
     }
 
@@ -413,13 +660,18 @@ impl BrokerIngestorConnector for SqsQueueIngestor {
     type Message = SqsQueueIngestorMessage;
     type Position = SqsQueueIngestorPosition;
 
-    /// Long-polls until the service returns at least one message. Every request asks for one
-    /// message with all of its attributes.
+    /// Long-polls until the service returns at least one message, and gathers up to the host's
+    /// `request` from there. Every receive asks for the messages the batch still needs with all
+    /// of their attributes. A failure the previous read met after it had taken messages fails this
+    /// read before it sends a receive.
     async fn next_batch(
         &mut self,
-        _request: IngestorBatchRequest,
+        request: IngestorBatchRequest,
         cancellation: &IngestorReadCancellation,
     ) -> IngestorResult<IngestorBatch<Self::Message>> {
+        if let Some(failure) = self.failure.take() {
+            return Err(failure.change_context(IngestorError::Read { connector: SQS }));
+        }
         let Some(url) = self.queue_url.as_deref() else {
             return Ok(IngestorBatch::ResumeRequired);
         };
@@ -427,41 +679,121 @@ impl BrokerIngestorConnector for SqsQueueIngestor {
             client: &self.client,
             url,
         };
-        Self::read_batch(&queue, cancellation).await
+        let gathered = Self::read_batch(&queue, request, cancellation).await?;
+        self.failure = gathered.deferred;
+        Ok(gathered.batch)
     }
 
+    /// Deletes the acknowledged messages with one `DeleteMessageBatch` request per ten of them,
+    /// and returns once the service answered every request. A request that fails, or an entry the
+    /// service did not delete, fails the acknowledgement, and the message stays on the queue for
+    /// the rejection that follows a failed acknowledgement.
     async fn acknowledge(&mut self, positions: &[Self::Position]) -> IngestorResult<()> {
-        for position in positions {
+        for batch in positions.chunks(SQS_MAX_BATCH_ENTRIES) {
             nervix_primitives::task::consume_budget().await;
-            let Some(receipt_handle) = position.receipt_handle.as_deref() else {
-                continue;
-            };
             let queue_url = self.queue_url.as_deref().assured(
                 "a position comes from a receive, which addressed the URL `resume` looked up, and \
                  nothing clears it",
             );
-            let deleted = self
+            let mut entries = Vec::with_capacity(batch.len());
+            for (index, position) in batch.iter().enumerate() {
+                let entry = DeleteMessageBatchRequestEntry::builder()
+                    .id(index.to_string())
+                    .receipt_handle(&position.receipt_handle)
+                    .build()
+                    .assured("an entry sets its id and receipt handle, every field it requires");
+                entries.push(entry);
+            }
+            let answered = self
                 .client
                 .sdk()
-                .delete_message()
+                .delete_message_batch()
                 .queue_url(queue_url)
-                .receipt_handle(receipt_handle)
+                .set_entries(Some(entries))
                 .send()
                 .await;
-            if let Err(error) = deleted {
-                let failure = self
-                    .client
-                    .failed(SqsRequest::Delete, &error)
-                    .report(SqsQueueIngestorError::Delete);
-                return Err(failure.change_context(IngestorError::Acknowledge { connector: SQS }));
+            let answer = match answered {
+                Ok(answer) => answer,
+                Err(error) => {
+                    let failure = self
+                        .client
+                        .failed(SqsRequest::DeleteBatch, &error)
+                        .report(SqsQueueIngestorError::Delete);
+                    return Err(
+                        failure.change_context(IngestorError::Acknowledge { connector: SQS })
+                    );
+                }
+            };
+            let undeleted: Vec<&BatchResultErrorEntry> = answer.failed().iter().collect();
+            if let Some(failed) = FailedEntries::of(&undeleted) {
+                let refused = Report::new(SqsQueueIngestorError::DeleteRefused {
+                    refused: failed.count,
+                    requested: batch.len(),
+                    code: failed.first_code,
+                });
+                return Err(refused.change_context(IngestorError::Acknowledge { connector: SQS }));
             }
         }
         Ok(())
     }
 
-    /// A rejected message is left in the queue: it stays invisible until its visibility timeout
-    /// and is then delivered again.
-    async fn reject(&mut self, _positions: &[Self::Position]) -> IngestorResult<()> {
+    /// Makes the rejected messages visible again at once, with one `ChangeMessageVisibilityBatch`
+    /// request per ten of them, so a receive takes them back on the ingestor's `RETRY POLICY`
+    /// instead of after the queue's visibility timeout. An entry the service refuses as the
+    /// sender's fault names a receipt handle that no longer holds a message invisible: the message
+    /// was deleted, or its visibility timeout ended and it is visible already, so nothing is left
+    /// to do for it. A request that fails, or an entry the service fails on its side, fails the
+    /// rejection, and such a message is received again once its visibility timeout ends.
+    async fn reject(&mut self, positions: &[Self::Position]) -> IngestorResult<()> {
+        for batch in positions.chunks(SQS_MAX_BATCH_ENTRIES) {
+            nervix_primitives::task::consume_budget().await;
+            let queue_url = self.queue_url.as_deref().assured(
+                "a position comes from a receive, which addressed the URL `resume` looked up, and \
+                 nothing clears it",
+            );
+            let mut entries = Vec::with_capacity(batch.len());
+            for (index, position) in batch.iter().enumerate() {
+                let entry = ChangeMessageVisibilityBatchRequestEntry::builder()
+                    .id(index.to_string())
+                    .receipt_handle(&position.receipt_handle)
+                    .visibility_timeout(0)
+                    .build()
+                    .assured("an entry sets its id and receipt handle, every field it requires");
+                entries.push(entry);
+            }
+            let answered = self
+                .client
+                .sdk()
+                .change_message_visibility_batch()
+                .queue_url(queue_url)
+                .set_entries(Some(entries))
+                .send()
+                .await;
+            let answer = match answered {
+                Ok(answer) => answer,
+                Err(error) => {
+                    let failure = self
+                        .client
+                        .failed(SqsRequest::ChangeVisibilityBatch, &error)
+                        .report(SqsQueueIngestorError::ChangeVisibility);
+                    return Err(failure.change_context(IngestorError::Reject { connector: SQS }));
+                }
+            };
+            let mut service_failures = Vec::new();
+            for failed in answer.failed() {
+                if !failed.sender_fault() {
+                    service_failures.push(failed);
+                }
+            }
+            if let Some(failed) = FailedEntries::of(&service_failures) {
+                let failure = Report::new(SqsQueueIngestorError::VisibilityFailed {
+                    failed: failed.count,
+                    requested: batch.len(),
+                    code: failed.first_code,
+                });
+                return Err(failure.change_context(IngestorError::Reject { connector: SQS }));
+            }
+        }
         Ok(())
     }
 }
@@ -649,6 +981,14 @@ mod tests {
 )]
 #[path = "ingestor_read_tests.rs"]
 mod read_tests;
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+#[path = "ingestor_batch_tests.rs"]
+mod batch_tests;
 
 #[cfg(all(test, feature = "shuttle"))]
 #[path = "ingestor_shuttle_tests.rs"]

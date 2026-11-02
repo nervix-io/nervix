@@ -17,7 +17,8 @@ use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_sqs::{
     Client as SqsClient,
-    types::{MessageSystemAttributeName, QueueAttributeName},
+    operation::get_queue_attributes::GetQueueAttributesOutput,
+    types::{MessageSystemAttributeName, QueueAttributeName, SendMessageBatchRequestEntry},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use error_stack::Report;
@@ -2664,6 +2665,82 @@ impl Cluster {
 
     pub(crate) async fn publish_sqs_tls(&self, queue: &str, payload: &str) -> io::Result<()> {
         publish_sqs_tls(&self.dependencies, queue, payload).await
+    }
+
+    /// Sends `payloads` to `queue` in batch requests of up to the ten messages one request carries,
+    /// so a batch's messages become receivable together.
+    pub(crate) async fn publish_sqs_messages(
+        &self,
+        queue: &str,
+        payloads: &[String],
+    ) -> io::Result<()> {
+        let client = sqs_client(&self.dependencies).await?;
+        let queue_url = sqs_queue_url(&client, queue).await?;
+        for (batch, chunk) in payloads.chunks(SQS_BATCH_ENTRIES).enumerate() {
+            nervix_primitives::task::consume_budget().await;
+            let mut request = client.send_message_batch().queue_url(&queue_url);
+            for (index, payload) in chunk.iter().enumerate() {
+                let entry = SendMessageBatchRequestEntry::builder()
+                    .id(format!("message-{batch}-{index}"))
+                    .message_body(payload)
+                    .build()
+                    .map_err(io::Error::other)?;
+                request = request.entries(entry);
+            }
+            let response = request.send().await.map_err(io::Error::other)?;
+            if !response.failed().is_empty() {
+                return Err(io::Error::other(format!(
+                    "SQS refused messages of a batch sent to queue '{queue}': {:?}",
+                    response.failed()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Waits until `queue` holds exactly `in_flight` messages a receive took and nobody deleted or
+    /// made visible again.
+    pub(crate) async fn wait_for_sqs_messages_in_flight(
+        &self,
+        queue: &str,
+        in_flight: u64,
+    ) -> io::Result<()> {
+        self.wait_for_sqs_queue(queue, &format!("{in_flight} messages in flight"), |held| {
+            held.in_flight == in_flight
+        })
+        .await
+    }
+
+    /// Waits until `queue` holds no message at all: none to receive, none in flight and none
+    /// delayed.
+    pub(crate) async fn wait_for_sqs_queue_empty(&self, queue: &str) -> io::Result<()> {
+        self.wait_for_sqs_queue(queue, "no messages", |held| held == SqsQueueHeld::EMPTY)
+            .await
+    }
+
+    async fn wait_for_sqs_queue(
+        &self,
+        queue: &str,
+        expected: &str,
+        reached: impl Fn(SqsQueueHeld) -> bool,
+    ) -> io::Result<()> {
+        let client = sqs_client(&self.dependencies).await?;
+        let queue_url = sqs_queue_url(&client, queue).await?;
+        let deadline = Instant::now() + SQS_QUEUE_WAIT_BUDGET;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let held = SqsQueueHeld::read(&client, &queue_url).await?;
+            if reached(held) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::other(format!(
+                    "timed out after {SQS_QUEUE_WAIT_BUDGET:?} waiting for SQS queue '{queue}' to \
+                     hold {expected}; it holds {held:?}"
+                )));
+            }
+            sleep(POLL_INTERVAL).await;
+        }
     }
 
     pub(crate) async fn publish_nats(&self, subject: &str, payload: &str) -> io::Result<()> {
@@ -6397,6 +6474,82 @@ pub(crate) async fn assert_kafka_consumer_group_next_offset_through(
             return Ok(());
         }
         sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// The most messages one SQS batch request carries.
+const SQS_BATCH_ENTRIES: usize = 10;
+/// How long a step waits for an SQS queue to hold what it expects: long enough for a loaded machine
+/// to start a source, receive a batch and settle it.
+const SQS_QUEUE_WAIT_BUDGET: Duration = Duration::from_secs(60);
+
+/// What an SQS queue holds, by the approximate counts the service reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SqsQueueHeld {
+    /// Messages a receive can take.
+    visible: u64,
+    /// Messages a receive took that are neither deleted nor visible again.
+    in_flight: u64,
+    /// Messages sent with a delay that has not passed.
+    delayed: u64,
+}
+
+impl SqsQueueHeld {
+    const EMPTY: Self = Self {
+        visible: 0,
+        in_flight: 0,
+        delayed: 0,
+    };
+
+    async fn read(client: &SqsClient, queue_url: &str) -> io::Result<Self> {
+        let response = client
+            .get_queue_attributes()
+            .queue_url(queue_url)
+            .attribute_names(QueueAttributeName::ApproximateNumberOfMessages)
+            .attribute_names(QueueAttributeName::ApproximateNumberOfMessagesNotVisible)
+            .attribute_names(QueueAttributeName::ApproximateNumberOfMessagesDelayed)
+            .send()
+            .await
+            .map_err(io::Error::other)?;
+        Ok(Self {
+            visible: Self::count(
+                &response,
+                queue_url,
+                QueueAttributeName::ApproximateNumberOfMessages,
+            )?,
+            in_flight: Self::count(
+                &response,
+                queue_url,
+                QueueAttributeName::ApproximateNumberOfMessagesNotVisible,
+            )?,
+            delayed: Self::count(
+                &response,
+                queue_url,
+                QueueAttributeName::ApproximateNumberOfMessagesDelayed,
+            )?,
+        })
+    }
+
+    fn count(
+        response: &GetQueueAttributesOutput,
+        queue_url: &str,
+        name: QueueAttributeName,
+    ) -> io::Result<u64> {
+        let Some(attributes) = response.attributes() else {
+            return Err(io::Error::other(format!(
+                "SQS answered no attributes for queue {queue_url}"
+            )));
+        };
+        let Some(value) = attributes.get(&name) else {
+            return Err(io::Error::other(format!(
+                "SQS answered no {name} attribute"
+            )));
+        };
+        value.parse().map_err(|error| {
+            io::Error::other(format!(
+                "SQS answered a {name} that is not a count: {error}"
+            ))
+        })
     }
 }
 

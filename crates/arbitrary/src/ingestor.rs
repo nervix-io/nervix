@@ -15,9 +15,10 @@ use nervix_models::{
     PulsarSubscriptionOwnership, PulsarTopicIngestor, RabbitMqIngestMode, RabbitMqIngestorEntity,
     RabbitMqQueueIngestor, RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor,
     RedisSubscriptionTarget, RetryPolicy, SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor,
-    SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor, TransportIngestorInput,
-    WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
-    WebsocketsIngestorEntity, ZeroMqIngestMode, ZeroMqIngestorEntity, ZeroMqPullIngestor,
+    SqsReceiveMax, SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor,
+    TransportIngestorInput, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
+    WebsocketsIngestMode, WebsocketsIngestorEntity, ZeroMqIngestMode, ZeroMqIngestorEntity,
+    ZeroMqPullIngestor,
 };
 
 use crate::{
@@ -349,10 +350,7 @@ impl Arbitrary<'_> {
             client: self.name(),
             queue: self.sqs_queue_name(),
             instances: self.positive_u64(),
-            mode: SqsIngestMode::AckSequential {
-                timeout: self.duration(),
-                retry_policy: self.retry_policy(),
-            },
+            mode: self.sqs_mode(),
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
@@ -494,6 +492,26 @@ impl Arbitrary<'_> {
                 retry_policy: self.retry_policy(),
             },
             _ => PulsarIngestMode::NoAck,
+        }
+    }
+
+    fn sqs_mode(&mut self) -> SqsIngestMode {
+        if self.entropy.flag() {
+            return SqsIngestMode::AckSequential {
+                timeout: self.duration(),
+                retry_policy: self.retry_policy(),
+            };
+        }
+        let value = self
+            .entropy
+            .boundary_biased(1..=u64::from(SqsReceiveMax::MAX));
+        let max = SqsReceiveMax::try_from(value)
+            .verified("the sampled range is the receive window's whole range");
+        SqsIngestMode::AckParallel {
+            max,
+            batch_timeout: self.duration(),
+            timeout: self.duration(),
+            retry_policy: self.retry_policy(),
         }
     }
 

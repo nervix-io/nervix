@@ -21,7 +21,7 @@ use nervix_primitives::{
 use tokio::io::AsyncWriteExt as _;
 
 use super::{
-    CANCELLED_RECEIVE_BUDGET, LONG_POLL, QueueReceive, SQS, SqsQueueIngestor,
+    CANCELLED_RECEIVE_BUDGET, LONG_POLL, QueueReceive, ReceiveRequest, SQS, SqsQueueIngestor,
     SqsQueueIngestorError, SqsQueueIngestorMessage, SqsQueueIngestorPosition,
     SqsQueueIngestorResult,
 };
@@ -183,17 +183,20 @@ async fn a_receive_in_flight_when_the_host_cancels_the_read_still_hands_over_its
     let read =
         read_while_the_receive_is_held(&fixture, ReceiveAnswer::Message, HostAction::Cancels).await;
 
-    let IngestorBatch::Messages(messages) = read.batch else {
-        panic!(
-            "the read abandoned the receive it had in flight, leaving its message invisible until \
-             its visibility timeout"
-        );
+    // The cancelled read ends interrupted, with every message it had already taken.
+    let IngestorBatch::Interrupted { gathered: messages } = read.batch else {
+        panic!("a read the host cancelled ends interrupted");
     };
-    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        messages.len(),
+        1,
+        "the read abandoned the receive it had in flight, leaving its message invisible until its \
+         visibility timeout"
+    );
     assert_eq!(messages[0].payload(), BODY.as_bytes());
     assert_eq!(
-        messages[0].position().receipt_handle.as_deref(),
-        Some(RECEIPT_HANDLE),
+        messages[0].position().receipt_handle,
+        RECEIPT_HANDLE,
         "the message the read hands over can be deleted once it is acknowledged"
     );
     let request = read.service.await.expect("the stand-in does not panic");
@@ -224,7 +227,10 @@ async fn a_cancelled_read_whose_receive_brings_nothing_sends_no_further_receive(
 struct SilentQueue;
 
 impl QueueReceive for SilentQueue {
-    fn receive(&self) -> impl Future<Output = SqsQueueIngestorResult<Vec<SqsMessage>>> + Send {
+    fn receive(
+        &self,
+        _receive: ReceiveRequest,
+    ) -> impl Future<Output = SqsQueueIngestorResult<Vec<SqsMessage>>> + Send {
         std::future::pending()
     }
 }
@@ -232,7 +238,11 @@ impl QueueReceive for SilentQueue {
 #[nervix_primitives::test(start_paused = true)]
 async fn a_cancelled_read_waits_for_a_receive_the_service_does_not_answer_only_until_its_budget() {
     let cancellation = IngestorReadCancellation::new();
-    let mut read = pin!(SqsQueueIngestor::read_batch(&SilentQueue, &cancellation));
+    let mut read = pin!(SqsQueueIngestor::read_batch(
+        &SilentQueue,
+        batch_request(),
+        &cancellation
+    ));
 
     // A read nobody cancelled has no budget: it waits for its receive however long that takes.
     let uncancelled = timeout(Duration::from_secs(3_600), &mut read).await;
@@ -369,36 +379,66 @@ async fn a_receive_the_service_never_answers_ends_within_timeout_ms_after_its_lo
     );
 }
 
-#[nervix_primitives::test]
-async fn a_delete_the_service_never_answers_ends_within_timeout_ms() {
-    let fixture = Fixture::start().await;
-    let budget = Duration::from_millis(300);
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-        .await
-        .expect("a loopback port is available");
-    let port = listener
-        .local_addr()
-        .expect("a bound listener has an address")
-        .port();
-    let (accepted, _connections) = nervix_primitives::sync::mpsc::channel(8);
-    let _service = silent_service(listener, accepted);
-    let mut config = client_config(&format!("http://127.0.0.1:{port}"));
-    config.push(nervix_models::ClientConfigEntry {
-        key: "timeout_ms".to_string(),
-        value: budget.as_millis().to_string(),
-    });
-    let mut source = open_source(&config, fixture.dns()).await;
-    source.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
-    let position = SqsQueueIngestorPosition {
-        receipt_handle: Some("receipt-handle".to_string()),
-    };
+/// A source whose client's `timeout_ms` is its `budget`, addressing a queue on a service that
+/// accepts every connection and never answers, with the service and the connections it holds open.
+struct UnansweredSource {
+    source: SqsQueueIngestor,
+    budget: Duration,
+    _service: JoinHandle<()>,
+    _connections: nervix_primitives::sync::mpsc::Receiver<nervix_primitives::net::TcpStream>,
+}
 
-    let acknowledged = timeout(GENEROUS_BUDGET, source.acknowledge(&[position]))
-        .await
-        .expect("a delete the service never answers ends within the client's timeout_ms");
+impl UnansweredSource {
+    async fn start(fixture: &Fixture) -> Self {
+        let budget = Duration::from_millis(300);
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("a loopback port is available");
+        let port = listener
+            .local_addr()
+            .expect("a bound listener has an address")
+            .port();
+        let (accepted, connections) = nervix_primitives::sync::mpsc::channel(8);
+        let service = silent_service(listener, accepted);
+        let mut config = client_config(&format!("http://127.0.0.1:{port}"));
+        config.push(nervix_models::ClientConfigEntry {
+            key: "timeout_ms".to_string(),
+            value: budget.as_millis().to_string(),
+        });
+        let mut source = open_source(&config, fixture.dns()).await;
+        source.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
+        Self {
+            source,
+            budget,
+            _service: service,
+            _connections: connections,
+        }
+    }
+
+    /// The position of a message the source received, which a settlement addresses.
+    fn position() -> SqsQueueIngestorPosition {
+        SqsQueueIngestorPosition {
+            receipt_handle: "receipt-handle".to_string(),
+        }
+    }
+}
+
+#[nervix_primitives::test]
+async fn a_batch_delete_the_service_never_answers_ends_within_timeout_ms() {
+    let fixture = Fixture::start().await;
+    let mut unanswered = UnansweredSource::start(&fixture).await;
+
+    let acknowledged = timeout(
+        GENEROUS_BUDGET,
+        unanswered
+            .source
+            .acknowledge(&[UnansweredSource::position()]),
+    )
+    .await
+    .expect("a batch delete the service never answers ends within the client's timeout_ms");
 
     let Err(report) = acknowledged else {
-        panic!("a delete the service never answers acknowledges nothing");
+        panic!("a batch delete the service never answers acknowledges nothing");
     };
     assert_eq!(
         report.current_context(),
@@ -408,7 +448,43 @@ async fn a_delete_the_service_never_answers_ends_within_timeout_ms() {
         report
             .downcast_ref::<nervix_connector::DeadlineElapsed>()
             .map(|elapsed| (elapsed.operation, elapsed.key, elapsed.bound)),
-        Some(("an SQS delete", nervix_models::DeadlineKey::Timeout, budget)),
+        Some((
+            "an SQS batch delete",
+            nervix_models::DeadlineKey::Timeout,
+            unanswered.budget
+        )),
+        "{report:?}"
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_visibility_change_the_service_never_answers_ends_within_timeout_ms() {
+    let fixture = Fixture::start().await;
+    let mut unanswered = UnansweredSource::start(&fixture).await;
+
+    let rejected = timeout(
+        GENEROUS_BUDGET,
+        unanswered.source.reject(&[UnansweredSource::position()]),
+    )
+    .await
+    .expect("a visibility change the service never answers ends within the client's timeout_ms");
+
+    let Err(report) = rejected else {
+        panic!("a visibility change the service never answers makes nothing visible again");
+    };
+    assert_eq!(
+        report.current_context(),
+        &IngestorError::Reject { connector: SQS }
+    );
+    assert_eq!(
+        report
+            .downcast_ref::<nervix_connector::DeadlineElapsed>()
+            .map(|elapsed| (elapsed.operation, elapsed.key, elapsed.bound)),
+        Some((
+            "an SQS visibility change",
+            nervix_models::DeadlineKey::Timeout,
+            unanswered.budget
+        )),
         "{report:?}"
     );
 }

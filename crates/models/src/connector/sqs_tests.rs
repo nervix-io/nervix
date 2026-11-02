@@ -23,16 +23,21 @@ use crate::{
 };
 
 #[test]
-fn queue_declarations_match_the_sequentially_acknowledged_transport() {
+fn queue_declarations_match_the_acknowledged_transport() {
     let ingest = IngestorEntityKind::Sqs(SqsIngestorEntity::Queue).capabilities();
     let emit = EmitterEntityKind::Sqs(SqsEmitterEntity::Queue).capabilities();
 
-    assert_eq!(ingest.delivery, &[DeclaredDelivery::ACK_SEQUENTIAL]);
-    for undeclared in [
-        IngestDeliveryKind::NoAck,
-        IngestDeliveryKind::AckParallel,
-        IngestDeliveryKind::AckRequest,
-    ] {
+    assert_eq!(
+        ingest.delivery,
+        &[DeclaredDelivery::ACK_SEQUENTIAL, SQS_ACK_PARALLEL]
+    );
+    assert!(
+        SQS_ACK_PARALLEL
+            .example
+            .starts_with(&format!("ACK PARALLEL MAX {} ", SqsReceiveMax::MAX)),
+        "the declared window example is the largest one receive returns"
+    );
+    for undeclared in [IngestDeliveryKind::NoAck, IngestDeliveryKind::AckRequest] {
         assert_eq!(ingest.declared_delivery(undeclared), None);
     }
     assert_eq!(ingest.position_class, PositionClass::BrokerRedelivered);
@@ -193,17 +198,104 @@ fn every_request_of_both_directions_is_bounded_by_timeout_ms() {
         omitted: OmittedDeadline::Unbounded,
     };
 
-    assert!(ingest.bounds.buffers.is_empty());
+    let [gathered] = ingest.bounds.buffers else {
+        panic!("an SQS queue ingestor holds only the messages it gathers for one host read");
+    };
+    assert_eq!(
+        gathered.bound,
+        BufferBound::Bounded {
+            capacity: BufferCapacity::Setting(
+                "1 under ACK SEQUENTIAL; ACK PARALLEL MAX otherwise, at most 10",
+            ),
+            overflow: BufferOverflow::Backpressure,
+        }
+    );
     assert!(emit.bounds.buffers.is_empty());
     assert_eq!(ingest.bounds.deadline_keys(), vec![DeadlineKey::Timeout]);
     let ingest_waits: Vec<WaitBound> = ingest.bounds.waits.iter().map(|wait| wait.bound).collect();
     assert_eq!(
         ingest_waits,
-        vec![WaitBound::Driver("3.1 s"), timeout, timeout]
+        vec![
+            WaitBound::Clause("BATCH TIMEOUT"),
+            WaitBound::Driver("3.1 s"),
+            timeout,
+            timeout
+        ]
     );
     assert_eq!(emit.bounds.deadline_keys(), vec![DeadlineKey::Timeout]);
     let emit_waits: Vec<WaitBound> = emit.bounds.waits.iter().map(|wait| wait.bound).collect();
     assert_eq!(emit_waits, vec![WaitBound::Driver("3.1 s"), timeout]);
+}
+
+#[rstest]
+#[case(1)]
+#[case(7)]
+#[case(10)]
+fn receive_windows_from_one_to_ten_hold_their_count(#[case] count: u64) {
+    let window = SqsReceiveMax::try_from(count).expect("the window is within one receive");
+
+    assert_eq!(window.get().get(), count);
+    assert_eq!(u64::from(window), count);
+    assert_eq!(window.to_string(), count.to_string());
+}
+
+#[rstest]
+#[case(0)]
+#[case(11)]
+#[case(256)]
+#[case(u64::MAX)]
+fn receive_windows_outside_one_to_ten_are_refused(#[case] count: u64) {
+    assert_eq!(
+        SqsReceiveMax::try_from(count),
+        Err(SqsReceiveMaxError::OutOfRange { value: count })
+    );
+}
+
+#[test]
+fn the_largest_window_takes_what_one_receive_returns() {
+    assert_eq!(
+        u64::from(SqsReceiveMax::LARGEST),
+        u64::from(SqsReceiveMax::MAX)
+    );
+    assert_eq!(
+        SqsReceiveMaxError::OutOfRange { value: 11 }.to_string(),
+        "SQS ACK PARALLEL MAX must be between 1 and 10, found 11"
+    );
+}
+
+#[test]
+fn each_delivery_mode_states_its_acknowledgement() {
+    let retry_policy = RetryPolicy {
+        backoff: "1s".to_string(),
+        max_backoff: "30s".to_string(),
+    };
+    let sequential = SqsIngestMode::AckSequential {
+        timeout: "5s".to_string(),
+        retry_policy: retry_policy.clone(),
+    };
+    let parallel = SqsIngestMode::AckParallel {
+        max: SqsReceiveMax::LARGEST,
+        batch_timeout: "100ms".to_string(),
+        timeout: "5s".to_string(),
+        retry_policy: retry_policy.clone(),
+    };
+
+    assert_eq!(
+        sequential.acknowledgement(),
+        IngestAcknowledgement::Sequential {
+            timeout: "5s",
+            retry: &retry_policy,
+        }
+    );
+    assert_eq!(
+        parallel.acknowledgement(),
+        IngestAcknowledgement::Parallel {
+            max: NonZeroU64::new(10).expect("ten is positive"),
+            batch_timeout: "100ms",
+            timeout: "5s",
+            retry: &retry_policy,
+        }
+    );
 }
 
 fn config_entry(key: &str, value: &str) -> ClientConfigEntry {

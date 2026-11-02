@@ -29,7 +29,7 @@ use nervix_models::{
     PulsarTopicIngestor, PulsarTopicName, RabbitMqIngestMode, RabbitMqIngestorEntity,
     RabbitMqQueueIngestor, RabbitMqQueueName, RedisChannelName, RedisChannelPattern,
     RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor, RedisSubscriptionTarget,
-    RetryPolicy, SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor, SqsQueueName,
+    RetryPolicy, SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor, SqsQueueName, SqsReceiveMax,
     SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor, WebsocketsConnectionIngestor,
     WebsocketsEndpointIngestor, WebsocketsIngestMode, WebsocketsIngestorEntity,
     WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders, ZeroMqIngestMode, ZeroMqIngestorEntity,
@@ -372,10 +372,7 @@ impl IngestorEntityDraft {
                 queue: SqsQueueName::parse(&self.queue)
                     .change_context(IngestorEntityDraftError::Queue)?,
                 instances: self.instances()?,
-                mode: SqsIngestMode::AckSequential {
-                    timeout: self.ack_timeout()?,
-                    retry_policy: self.retry_policy()?,
-                },
+                mode: self.sqs_mode()?,
                 quiesce,
             }
             .into(),
@@ -624,6 +621,29 @@ impl IngestorEntityDraft {
                 })
             }
             Some(IngestDeliveryKind::AckRequest) | None => {
+                Err(Report::new(IngestorEntityDraftError::Mode))
+            }
+        }
+    }
+
+    fn sqs_mode(&self) -> error_stack::Result<SqsIngestMode, IngestorEntityDraftError> {
+        match self.delivery {
+            Some(IngestDeliveryKind::AckSequential) => Ok(SqsIngestMode::AckSequential {
+                timeout: self.ack_timeout()?,
+                retry_policy: self.retry_policy()?,
+            }),
+            Some(IngestDeliveryKind::AckParallel) => {
+                let max = SqsReceiveMax::try_from(self.ack_max()?.get())
+                    .change_context(IngestorEntityDraftError::AckMax)?;
+                Ok(SqsIngestMode::AckParallel {
+                    max,
+                    batch_timeout: self
+                        .required(&self.batch_timeout, IngestorEntityDraftError::BatchTimeout)?,
+                    timeout: self.ack_timeout()?,
+                    retry_policy: self.retry_policy()?,
+                })
+            }
+            Some(IngestDeliveryKind::NoAck | IngestDeliveryKind::AckRequest) | None => {
                 Err(Report::new(IngestorEntityDraftError::Mode))
             }
         }

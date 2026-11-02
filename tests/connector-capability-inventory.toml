@@ -1130,10 +1130,19 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "MODE ACK PARALLEL"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_ingestion.feature", scenario = "SQS ACK PARALLEL takes up to its MAX of messages into one batch and deletes them with batch requests" },
+  { feature = "tests/features/runtime/sqs_ingestion.feature", scenario = "An SQS message its ingestor rejects returns on its RETRY POLICY instead of the queue's visibility timeout" },
+]
+
+[[capability]]
 capability = "MODE ACK SEQUENTIAL"
 entity = "SQS QUEUE INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/sqs_ingestion.feature", scenario = "SQS ingestor delivers JSON payloads to a subscribed relay" },
+  { feature = "tests/features/runtime/sqs_ingestion.feature", scenario = "An SQS message its ingestor rejects returns on its RETRY POLICY instead of the queue's visibility timeout" },
 ]
 
 [[capability]]
