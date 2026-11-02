@@ -92,8 +92,12 @@ pub(in crate::registry) fn validate_ingestor_source(
     if let Some(nervix_models::IngestorEntity::Http(nervix_models::HttpIngestor::Request(source))) =
         ingestor.input.transport_entity()
     {
-        HttpMethod::parse(&source.method, HttpBodyMode::WithoutBody)
-            .map_err(|report| invalid(report.current_context().to_string()))?;
+        HttpMethod::parse(&source.method, HttpBodyMode::WithoutBody).change_context_lazy(|| {
+            RegistryError::InvalidHttpRequestMethod {
+                domain: domain.clone(),
+                ingestor: identifier.clone(),
+            }
+        })?;
     }
     if let Some(unmet) = ingestor.input.unmet_delivery() {
         return Err(Report::new(RegistryError::InvalidConnectorDeclaration {
