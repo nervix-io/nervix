@@ -74,6 +74,13 @@ the group's row bound and the vocabulary's frame labels. An estimate that exceed
 is a typed error before allocation; the ingest group adds the opening operation's context and
 retains the cause for its general-error policy.
 
+An SQS received message validates its system-attribute numbers at construction. The receive count
+is an optional `U32`, and send and first-receive times are optional `Timestamp` values converted
+exactly from Unix milliseconds. Absence means the service omitted the attribute. A parse or range
+failure is a typed read error, never an absent value or a default. Borrowed message identifiers
+and FIFO sequence numbers keep their textual representation. The shared metadata visitor,
+retained row and Arrow projection preserve the count as `U32` throughout its in-memory lifetime.
+
 A Kafka record keeps an unavailable timestamp distinct from its create-time and log-append-time
 variants. A present variant carries a validated signed-nanosecond timestamp converted exactly from
 the driver's milliseconds. Kafka's external unavailable encoding is resolved at this boundary;
@@ -243,13 +250,16 @@ The Sentry event Model keeps an omitted `PLATFORM` as `None`, separately from an
 written string, including an empty string or `other`. Its serialized field is required and holds
 either that string or an explicit null. Planning resolves the declared default into a required
 platform string; connector preparation uses it only when the codec's event omits the field.
-The registry's `NERVIX REDIS SUB` archive signature identifies the current Model layout, including
-an owned Pulsar subscription's required start position, the required branch partition count, Sentry
-platform, an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND`
-request shape, the session and quality of service an MQTT TOPIC ingestor writes beside its delivery
-mode, and a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`.
-Consensus's `raft_redis_subscription_` keyspaces and current state metadata encoding identify its
-stored shapes. An unrecognized signature, namespace or
+A polled HTTP request's header holds a literal or names a client secret as two states of one enum,
+so a value cannot be both or neither, and the Model that names a secret holds its key and never its
+value.
+The registry's `NERVIX HDR VALUE` archive signature identifies the current Model layout, including
+an owned Pulsar subscription's required start position, the required branch partition count,
+Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's
+`SEND` request shape, the session and quality of service an MQTT TOPIC ingestor writes beside
+its delivery mode, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a
+`PATTERN`, and that header state. Consensus's `raft_header_value_` keyspaces and current state
+metadata encoding identify its stored shapes. An unrecognized signature, namespace or
 encoding fails with the owning storage error and requires the stored data to be recreated.
 
 ## Absence And Distinct States
