@@ -107,7 +107,10 @@ async fn publish(address: SocketAddr, topic: &str, producer: &str) -> CommandSen
     )
     .await;
     receive(&mut connection, CommandType::ProducerSuccess).await;
-    eprintln!("Pulsar batch fixture publishes envelope event_time=1767225600456 and member sequences 41/42/99");
+    eprintln!(
+        "Pulsar batch fixture publishes envelope event_time=1767225600456 and member sequences \
+         41/42/99"
+    );
     send(
         &mut connection,
         BaseCommand {
