@@ -181,8 +181,8 @@ fn connector_completion_does_not_escape_the_composed_grammar() {
 #[test]
 fn metadata_completion_reads_the_entity_declaration() {
     let input = "CREATE KAFKA TOPIC INGESTOR i FROM broker TOPIC 'events' OFFSET BY CONSUMER \
-                 GROUP 'g' MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec FILTER WHERE \
-                 metadata.";
+                 GROUP 'g' START AT EARLIEST MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec \
+                 FILTER WHERE metadata.";
     let expectations = suggest_client_expectations(input, input.len());
     let kind = IngestorEntityKind::Kafka(nervix_models::KafkaIngestorEntity::Topic);
     for field in kind.capabilities().metadata.fields() {
