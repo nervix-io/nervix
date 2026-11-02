@@ -132,7 +132,7 @@ Feature: Interconnect health coordination
     When the health response pause from node "node-1" to node "node-2" is released
     Then node "node-1" eventually observes a stable leader
 
-  @command_completion
+  @command_completion @slots_2
   Scenario: Gossip completes mutations while revision replies and a peer health response are held
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started

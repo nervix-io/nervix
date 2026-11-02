@@ -67,7 +67,7 @@ Feature: Web console backup and restore
       | 1            |
       | 3            |
 
-  @console_backup_reload
+  @console_backup_reload @slots_2
   Scenario: A console backup download interrupted by a page reload resumes after leadership moved under the backup
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -389,7 +389,7 @@ Feature: Web console backup and restore
       {{domain}}_typed pace=UNPACED status=STOPPED
       """
 
-  @console_backup_shared_session
+  @console_backup_shared_session @slots_2
   Scenario: The REPL's backup keeps one console session and its leader redirect when the session's connection is lost
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"

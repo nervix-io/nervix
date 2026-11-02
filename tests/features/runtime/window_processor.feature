@@ -930,6 +930,7 @@ Feature: Window processor runtime behavior
       | 3            | 0             |
       | 3            | 1             |
 
+  @slots_2
   Scenario Outline: Combined width conditions flush when either messages or duration expires
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -1117,6 +1118,7 @@ Feature: Window processor runtime behavior
       | 3            | 0             |
       | 3            | 1             |
 
+  @slots_2
   Scenario Outline: Window output routes read the aggregates their own route declared
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
