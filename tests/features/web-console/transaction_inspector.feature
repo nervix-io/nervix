@@ -277,6 +277,7 @@ Feature: Web console transaction inspector
     And selector ".transaction-inspector .inspector-relation-select[data-relation='Topology(MaterializedState)'][data-source='readings'][data-target='enrich_readings']" is pressed with "Enter"
     Then selector ".transaction-inspector .inspector-detail" contains "MaterializedState"
 
+  @slots_2
   Scenario: An open inspector follows the attached transaction across leader reconnection
     Given a 3 node nervix cluster is started
     Then the current leader node is saved as placeholder "old_leader"

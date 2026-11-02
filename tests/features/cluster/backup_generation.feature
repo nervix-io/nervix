@@ -177,7 +177,7 @@ Feature: Bounded complete restore generations
       | cluster_size | save_mib | branches | restored_inputs | replicas | reclaimed_mib |
       | 1            | 1        | 40       | 80              | 0        | 40            |
 
-    @order_generation_many_saves_cluster
+    @order_generation_many_saves_cluster @slots_2
     Examples:
       | cluster_size | save_mib | branches | restored_inputs | replicas | reclaimed_mib |
       | 3            | 1        | 40       | 80              | 1        | 80            |

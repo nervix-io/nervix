@@ -240,6 +240,24 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("compression-level: 0", upload)
         self.assertIn("retention: transfer", upload)
 
+    def test_the_build_publishes_the_checkout_its_archives_restore_at(self) -> None:
+        self.assertIn("checkout: ${{ github.workspace }}\n", self.job("scenarios-build"))
+
+    def test_the_jobs_on_another_provider_restore_and_run_at_the_builds_checkout(self) -> None:
+        directory = "working-directory: ${{ needs.scenarios-build.outputs.checkout }}\n"
+        for name, restore, run in (
+            ("tests", "just test-coverage-unpack", "just test-coverage-run"),
+            ("scenarios", "just test-scenarios-coverage-unpack", "just test-scenarios-coverage-shard"),
+        ):
+            with self.subTest(job=name):
+                job = self.job(name)
+                self.assertIn("needs: [scenarios-build]", job)
+                self.assertLess(job.index('sudo mount --bind "${GITHUB_WORKSPACE}" "${BUILD_CHECKOUT}"'), job.index(restore))
+                self.assertEqual(job.count(directory), 2)
+                for command in (restore, run):
+                    step = job[job.rindex("- name:", 0, job.index(command)):job.index(command)]
+                    self.assertIn(directory, step)
+
     def test_the_tests_job_restores_the_build_and_runs_it_without_compiling(self) -> None:
         tests = self.job("tests")
         self.assertIn("needs: [scenarios-build]", tests)

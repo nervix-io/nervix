@@ -8,7 +8,7 @@ Feature: Pipelined raft replication and bounded log retention
     When node "node-3" starts catching up through its paced interconnect
     Then node "node-3" eventually reports raft voters "node-1,node-2,node-3"
 
-  @long_running
+  @long_running @slots_2
   Scenario: A rate-limited follower catches up without restarting a moving append stream
     Given a 3 node nervix cluster is started
     When node "node-3" is stopped

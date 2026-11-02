@@ -336,7 +336,7 @@ Feature: Domain clock contract regressions
     When domain clock progress for domain "{{domain}}" on node "node-1" resumes
     Then within "20s" the clock session receives a tick with an id higher than before owner loss
 
-  @domain_bound_clock
+  @domain_bound_clock @slots_2
   Scenario: A joining or restarted node installs the current clock generation before execution
     Given the production sticky scheduler is configured
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
