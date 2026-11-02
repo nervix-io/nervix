@@ -630,10 +630,17 @@ retries: smaller attempts behind it cannot consume those slots one at a time and
 Declare weights from measured load per attempt, including CPU work or memory demand rather than
 elapsed time alone. Compare complete sharded runs on the same product source for run-slot
 utilization, runner stalls, retries and suite length against the suite watchdog's budget. Keep the
-measurements and the declaration decision on the owning ClickUp task. A weight accounts for load;
-timing assumptions still have to hold beside the rest of the suite, including on the first
-attempt. Passing only after a weight or retry share quiets the machine identifies a scenario defect
-to repair.
+measurements and the declaration decision on the owning ClickUp task. A weight accounts for load.
+
+Scenarios are timing sensitive, and under heavy contention on a host a scenario may not fit its
+bounds even when nothing is wrong with it. Weights and retries exist to absorb that. They do not
+explain a failure, and one they clear may be a masked bug, so the scenario's owner reasons out which
+it is and records why on the owning ClickUp task. Contention shows as a failure that follows the
+host's load, such as CPU steal, stalls and retries across unrelated scenarios, and does not repeat
+on a quiet host. Delay alone can make a wait late. It cannot lose an effect, duplicate one or
+produce a wrong value, so such a failure stays a defect however often a retry passes. A masked bug
+is repaired in its owner, and a timing assumption the scenario does not need is removed rather than
+weighed away.
 
 The active-scenario diagnostic names the feature limit or run slot a waiting scenario needs. Each
 `scenario started` line names the run slots the attempt holds. The suite summary counts scenario

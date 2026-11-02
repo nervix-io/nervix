@@ -1288,10 +1288,16 @@ build and the existing tests, and nothing in it changes behavior.
   examples. The largest inherited declaration applies. Each attempt holds the larger of that
   weight and its retry share, capped at a quarter of the pool and at least one slot, including in
   small local pools. Choose weights from measured load per attempt and compare complete sharded
-  runs for stalls, retries, utilization and suite length. A weight shapes admission capacity; it
-  never excuses a timing assumption. A scenario that passes only on an idle machine, or only
-  once a weight or retry share quiets the machine, is a defect in that scenario: fix its timing
-  assumption, and rely on the suite's retries for what load remains.
+  runs for stalls, retries, utilization and suite length. A weight shapes admission capacity.
+- Scenarios are timing sensitive, and under heavy contention on a host a scenario may not fit its
+  bounds even when nothing is wrong with it. Weights and retries exist to absorb that. They do not
+  explain a failure, and one they clear may be a masked bug, so reason out which it is before
+  calling it contention, and record why on the owning ClickUp task. Ask whether the failure follows
+  the host's load, such as CPU steal, stalls and retries across unrelated scenarios, whether it
+  repeats on a quiet host, and whether delay can produce it at all. A late wait can come from
+  contention. A lost effect, a duplicate or a wrong value cannot, and stays a defect however often
+  a retry passes. Repair a masked bug in its owner, and remove a timing assumption the scenario
+  does not need rather than weighing it away.
 - An assertion that something has **not** happened yet is the opposite, and no choice of window
   makes it reliable. Its window opens when the step starts, while the cadence it races started at
   the event before it, so the margin between them is consumed by whatever delayed the step
