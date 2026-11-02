@@ -933,7 +933,7 @@ remain in their owning work records until that delivery.
 | --- | --- |
 | Ingestor | Header reads, the typed metadata fields in their order, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits, and any alternative locators a body may write instead of it, each with its own keywords and name; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
 | Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which `KAFKA TOPIC` declares `TIMESTAMP`, `PULSAR TOPIC` declares `TIMESTAMP` and `DELIVER AFTER`, `SQS QUEUE` declares `DELAY` and `DEDUPLICATION ID`, the two RabbitMQ emitter entities declare `MANDATORY`, and no entity declares any other clause or key yet. |
-| Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Every client declares its CONFIG key names, required or optional presence, value type, confidentiality, file role and Nervix or driver ownership, and which of its entities read each key: every ingestor and emitter that references the client, or only its ingestors or only its emitters. Only a client both sides reference declares a key for one side; a SYSLOG client does, and its connector takes the side a deadline key bounds a wait on from that declaration. The declaration explicitly names delegated property namespaces and reserved keys, and the other names its driver reads for one property: each pair of names with the one the client accepts, and a prefix the driver strips from a key before reading it, with the driver's own properties that begin with it. Validation, composed-grammar completion, public inspection and the generated key reference read this one schema. |
+| Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Every client declares its CONFIG key names, required or optional presence, value type, confidentiality, file role and Nervix or driver ownership, and which of its entities read each key: every ingestor and emitter that references the client, or only its ingestors or only its emitters. Only a client both sides reference declares a key for one side; a SYSLOG client does, and its connector takes the side a deadline key bounds a wait on from that declaration. The declaration explicitly names delegated property namespaces and reserved keys, the statement clause that sets a reserved key a statement owns, which its refusal names, and the other names its driver reads for one property: each pair of names with the one the client accepts, and a prefix the driver strips from a key before reading it, with the driver's own properties that begin with it. Validation, composed-grammar completion, public inspection and the generated key reference read this one schema. |
 
 Plexus client definitions start with `CREATE [IF NOT EXISTS] <CONNECTOR> CLIENT <name>`. The
 composed head and canonical rendering use the vocabulary's connector kind; a console choice uses
@@ -2668,8 +2668,10 @@ sequenceDiagram
   watches observe an empty topology until provisioning, then publish the available partitions.
   The consumer settings Nervix owns are reserved in client `CONFIG`. They select the statement's
   `group.id`, disable partition EOF events and enable auto-commit only for consumer-group
-  `MODE NO ACK`. `auto.offset.reset` remains
-  the client's choice. Domain-offset consumers assign partitions directly and inspectors only
+  `MODE NO ACK`. `auto.offset.reset` follows the group's declared `START AT`, the client schema
+  refuses the key and names that clause, and a domain-offset consumer sets it to `earliest`, so a
+  position retention passes while it reads resumes at the next retained record rather than past
+  every record the partition still holds. Domain-offset consumers assign partitions directly and inspectors only
   fetch metadata, so their Nervix-generated group identifiers create no broker-managed group or
   stored group offsets. A user-named consumer group and its committed offsets remain on the broker
   after its ingestor is dropped; Nervix does not delete the operator's group.
@@ -2690,7 +2692,7 @@ sequenceDiagram
   suspend and resume after a failed rejection leaves and rejoins the group, and a broker outage
   that outlasts the group session takes it away. Each revocation loses the seek, and the next
   assignment resumes the partition from the group's committed offset, or, where the group
-  committed none, from where the client's `auto.offset.reset` starts it, which `latest` places
+  committed none, from where the group's `START AT` starts it, which `LATEST` places
   past the rejected record. The source therefore records each rejected partition's earliest
   rejected record in its consumer's context before it seeks, and the context starts the partition
   there whenever the group assigns it to this consumer again, until a commit that passes the
@@ -2722,9 +2724,8 @@ sequenceDiagram
   domain offset in a generation begun with plain `START` starts at a concrete offset the instance
   resolves when it takes the partition up:
   in a paced domain its first record at or after the domain's current logical time, or its end as
-  it stood before that lookup when it has no such record yet, and in an unpaced domain where the
-  client's `auto.offset.reset` places it, `earliest` at its earliest retained record and `latest`
-  at its end. The instance records that start before it reads, so a reconnect resumes there
+  it stood before that lookup when it has no such record yet, and in an unpaced domain its
+  earliest retained record. The instance records that start before it reads, so a reconnect resumes there
   instead of placing the partition again past records it has not acknowledged. Offset snapshots
   can lag a crash, so this mode remains at least once. Commits and start-point resets wait for the
   assigned state replicas within the native checkpoint bulk operation's thirty-second budget. A

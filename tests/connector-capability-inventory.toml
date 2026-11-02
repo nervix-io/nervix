@@ -323,10 +323,18 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "OFFSET BY CONSUMER GROUP"
+capability = "OFFSET BY CONSUMER GROUP START AT EARLIEST"
 entity = "KAFKA TOPIC INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/kafka_ingestion.feature", scenario = "Kafka NO ACK executes ingestor programs once for a collected ingest group" },
+  { feature = "tests/features/runtime/kafka_start_position.feature", scenario = "A new consumer group declared START AT EARLIEST replays the retained backlog on <cluster_size> nodes" },
+]
+
+[[capability]]
+capability = "OFFSET BY CONSUMER GROUP START AT LATEST"
+entity = "KAFKA TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/kafka_start_position.feature", scenario = "A new consumer group declared START AT LATEST skips the retained backlog and receives the next record in <mode_name> on <cluster_size> nodes" },
 ]
 
 [[capability]]

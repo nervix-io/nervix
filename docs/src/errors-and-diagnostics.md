@@ -1057,15 +1057,11 @@ ends that resume attempt with `KafkaTopicIngestorError::UnresolvedDomainStart` b
 `IngestorError::Resume`. Its typed fields retain the accepted and observed generations. The host
 retries on its existing cadence; the connector polls only after it has canonical resume positions.
 
-A domain-offset Kafka ingestor that must start a partition without a domain offset while its
-client's `auto.offset.reset` is `error` fails its resume with
-`KafkaTopicIngestorError::ResetRefused`, which names the topic and partition, beneath
-`IngestorError::Resume`; the host shows it as the ingestor's transient status and resumes again on
-its cadence. A timestamp lookup whose answer carries a partition error keeps that `KafkaError`
+A timestamp lookup whose answer carries a partition error keeps that `KafkaError`
 beneath `KafkaTopicIngestorError::ResolveTimestampOffsets`. A consumer-group rebalance runs in the consumer's context, which has no caller to return a failure
 to: a rejected partition's floor that cannot be set on the assignment, and an assignment or
 revocation librdkafka refuses, are logged at `warn` with the driver's error, and the partition then
-starts where the group's committed offset or the client's reset policy places it.
+starts where the group's committed offset or the ingestor's `START AT` places it.
 
 A Kafka consumer takes the commands charge of the job that will destroy it before it is created,
 and a refused charge keeps `AdmissionError` beneath `KafkaTopicIngestorError::RetirementAdmission`. It

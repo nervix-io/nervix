@@ -496,7 +496,7 @@ async fn open_with(
         broker,
         ack_receipts,
         PulsarSubscriptionOwnership::Ingestor {
-            start_at: nervix_models::PulsarStartPosition::Earliest,
+            start_at: nervix_models::IngestStartPosition::Earliest,
         },
     )
     .await;
@@ -552,7 +552,7 @@ fn removal_settings<'a>(
         config,
         topic,
         subscription: subscription(PulsarSubscriptionOwnership::Ingestor {
-            start_at: nervix_models::PulsarStartPosition::Earliest,
+            start_at: nervix_models::IngestStartPosition::Earliest,
         }),
         consumer_name: "orders".to_string(),
         ack_receipts: PulsarAckReceipts::Awaited,
@@ -946,7 +946,7 @@ async fn an_instance_joins_its_owned_subscription_at_open_under_its_indexed_cons
         &broker,
         PulsarAckReceipts::Awaited,
         PulsarSubscriptionOwnership::Ingestor {
-            start_at: nervix_models::PulsarStartPosition::Earliest,
+            start_at: nervix_models::IngestStartPosition::Earliest,
         },
     )
     .await;

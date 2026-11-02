@@ -266,9 +266,10 @@ async fn process_command_preserves_detached_deduplicator_and_emitter_modes() {
         "CREATE RELAY forwarded_notifications SCHEMA notification UNBRANCHED;",
         "CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };",
         "CREATE KAFKA TOPIC INGESTOR notifications_ingestor FROM kafka_main TOPIC 'notifications' \
-         OFFSET BY CONSUMER GROUP 'notifications_group' MODE NO ACK ON QUIESCE SUSPEND DECODE \
-         USING notification_codec TIMESTAMP NOW TO notifications INHERIT ALL UNBRANCHED FLUSH \
-         EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+         OFFSET BY CONSUMER GROUP 'notifications_group' START AT EARLIEST MODE NO ACK ON QUIESCE \
+         SUSPEND DECODE USING notification_codec TIMESTAMP NOW TO notifications INHERIT ALL \
+         UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR \
+         LOG;",
         "CREATE DETACHED DEDUPLICATOR passthrough FROM notifications DEDUPLICATE ON input.user_id \
          MAX TIME 10m UNBRANCHED TO forwarded_notifications INHERIT ALL FLUSH EACH 100ms MAX \
          BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
@@ -330,13 +331,13 @@ async fn process_command_creates_junction_model() {
         "CREATE RELAY notifications_all SCHEMA notification UNBRANCHED;",
         "CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };",
         "CREATE KAFKA TOPIC INGESTOR ingest_a FROM kafka_main TOPIC 'notifications_a' OFFSET BY \
-         CONSUMER GROUP 'notifications_a_group' MODE NO ACK ON QUIESCE SUSPEND DECODE USING \
-         notification_codec TIMESTAMP NOW TO notifications_a INHERIT ALL UNBRANCHED FLUSH EACH \
-         100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+         CONSUMER GROUP 'notifications_a_group' START AT EARLIEST MODE NO ACK ON QUIESCE SUSPEND \
+         DECODE USING notification_codec TIMESTAMP NOW TO notifications_a INHERIT ALL UNBRANCHED \
+         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
         "CREATE KAFKA TOPIC INGESTOR ingest_b FROM kafka_main TOPIC 'notifications_b' OFFSET BY \
-         CONSUMER GROUP 'notifications_b_group' MODE NO ACK ON QUIESCE SUSPEND DECODE USING \
-         notification_codec TIMESTAMP NOW TO notifications_b INHERIT ALL UNBRANCHED FLUSH EACH \
-         100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+         CONSUMER GROUP 'notifications_b_group' START AT EARLIEST MODE NO ACK ON QUIESCE SUSPEND \
+         DECODE USING notification_codec TIMESTAMP NOW TO notifications_b INHERIT ALL UNBRANCHED \
+         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
         "CREATE JUNCTION join_streams FROM notifications_a, notifications_b UNBRANCHED TO \
          notifications_all INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
     ] {
@@ -391,9 +392,9 @@ async fn process_command_creates_deduplicator_model() {
         "CREATE RELAY deduped SCHEMA transaction UNBRANCHED;",
         "CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };",
         "CREATE KAFKA TOPIC INGESTOR inbound_ingestor FROM kafka_main TOPIC 'inbound' OFFSET BY \
-         CONSUMER GROUP 'inbound_group' MODE NO ACK ON QUIESCE SUSPEND DECODE USING \
-         transaction_codec TIMESTAMP NOW TO inbound INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX \
-         BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+         CONSUMER GROUP 'inbound_group' START AT EARLIEST MODE NO ACK ON QUIESCE SUSPEND DECODE \
+         USING transaction_codec TIMESTAMP NOW TO inbound INHERIT ALL UNBRANCHED FLUSH EACH 100ms \
+         MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
         "CREATE DEDUPLICATOR dedup_txns FROM inbound DEDUPLICATE ON input.transaction_id MAX TIME \
          10m UNBRANCHED TO deduped INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
          ERROR LOG;",
