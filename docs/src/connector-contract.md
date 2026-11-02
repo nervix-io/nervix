@@ -932,7 +932,7 @@ remain in their owning work records until that delivery.
 | Side | What the entity declares |
 | --- | --- |
 | Ingestor | Header reads, the typed metadata fields in their order, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits, and any alternative locators a body may write instead of it, each with its own keywords and name; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
-| Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which `KAFKA TOPIC` declares `TIMESTAMP`, `SQS QUEUE` declares `DELAY` and `DEDUPLICATION ID`, the two RabbitMQ emitter entities declare `MANDATORY`, and no entity declares any other clause or key yet. |
+| Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which `KAFKA TOPIC` declares `TIMESTAMP`, `PULSAR TOPIC` declares `TIMESTAMP` and `DELIVER AFTER`, `SQS QUEUE` declares `DELAY` and `DEDUPLICATION ID`, the two RabbitMQ emitter entities declare `MANDATORY`, and no entity declares any other clause or key yet. |
 | Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Every client declares its CONFIG key names, required or optional presence, value type, confidentiality, file role and Nervix or driver ownership, and which of its entities read each key: every ingestor and emitter that references the client, or only its ingestors or only its emitters. Only a client both sides reference declares a key for one side; a SYSLOG client does, and its connector takes the side a deadline key bounds a wait on from that declaration. The declaration explicitly names delegated property namespaces and reserved keys, and the other names its driver reads for one property: each pair of names with the one the client accepts, and a prefix the driver strips from a key before reading it, with the driver's own properties that begin with it. Validation, composed-grammar completion, public inspection and the generated key reference read this one schema. |
 
 Plexus client definitions start with `CREATE [IF NOT EXISTS] <CONNECTOR> CLIENT <name>`. The
@@ -1144,8 +1144,9 @@ written; at most 1,024 bytes without whitespace, control characters or an empty 
 ingestor names a subscription of 1 to 255 bytes with its declared owner, declares `NO ACK`,
 `ACK SEQUENTIAL` and `ACK PARALLEL` in Pulsar's own delivery-mode type, and quiesces only by
 `SUSPEND`, since the durable subscription keeps its backlog. The emitter declares `NO ACK` and
-`ACK` publishing and optional batching under the `maxMessageSize` the broker announces. Message
-properties are headers in both directions, `ordered_repeats` on ingestion and `last_wins` on
+`ACK` publishing, optional batching under the `maxMessageSize` the broker announces, the `TIMESTAMP`
+and `DELIVER AFTER` envelope clauses it writes as each message's `event_time` and `deliver_at_time`,
+and no other envelope clause or properties. Message properties are headers in both directions, `ordered_repeats` on ingestion and `last_wins` on
 emission. A Pulsar client declares only the keys both directions read. `namespace` holds exactly a
 tenant and a namespace, with the default `public/default` written once in the declaration, and topic
 qualification reads that effective value, so a namespace that cannot qualify a topic is refused at
@@ -2045,7 +2046,14 @@ that declares nothing always receives the empty envelope. `KAFKA TOPIC` declares
 it writes as each record's Kafka `CreateTime`, in the millisecond that contains it; it rejects a
 record whose millisecond is not after the Unix epoch before its producer takes it, because
 librdkafka reads a zero timestamp as the time it takes the record, and a record without a timestamp
-gets that time from librdkafka. `SQS QUEUE` declares `DELAY`, which it sends as each message's
+gets that time from librdkafka. `PULSAR TOPIC` declares `TIMESTAMP` and `DELIVER AFTER`. It writes a
+record's timestamp as its message's `event_time`, in the millisecond that contains it, and the
+record's `occurred_at` plus its `deliver_after` as its `deliver_at_time`. `occurred_at` is the
+execution time of the batch the record's first source row came from, which the host retains with
+the record, so a retry writes the times of the first attempt and the connector reads no clock. It
+rejects a record before its producer takes it where the timestamp's millisecond is not after the
+Unix epoch, because Pulsar reads a zero event time as none, or where the delivery time leaves the
+range of a timestamp. `SQS QUEUE` declares `DELAY`, which it sends as each message's
 `DelaySeconds`, and `DEDUPLICATION ID`, which it sends as each message's `MessageDeduplicationId`;
 the registry refuses `DELAY` for a FIFO queue, outside whole seconds from `1s` to `900s`, and
 `DEDUPLICATION ID` for a standard queue. Only an entity whose body is a codec, whose records a
@@ -2795,11 +2803,19 @@ sequenceDiagram
   short string as a rejection of its record. Each checks its queue or exchange with a passive
   declaration when it opens, and a missing exchange is `EmitterOpenError::MissingExternalEntity`.
   A record whose envelope carries `MANDATORY` is published mandatory, and a message the broker
-  returns unrouted rejects its record in either mode: under `ACK` the return arrives with the
-  message's publisher confirm, and under `NO ACK` the emitter drains the channel's returns once the
-  round trip that ends the write is answered, attributing each to the first written message, in
-  order, with the same exchange, routing key, headers and body. A return never outlives the write
-  that published its message.
+  returns unrouted rejects its record in either mode. Under `ACK`, the driver can attach a return
+  to another message's confirm, so `publisher::confirmation_window` retains at most `MAX` messages,
+  collects their answers, and attributes all returns before refilling the window. It indexes borrowed
+  routing keys and bodies, then compares the actual AMQP properties through the message owner;
+  payloads are not cloned for attribution. Each return rejects the first matching mandatory message
+  in publication order, including when identical messages cannot be distinguished. A positive
+  mandatory answer in an interrupted window stays unresolved if another answer can still carry its
+  return; known rejections and safe nonmandatory answers are retained before retry. Every message
+  keeps its own handover deadline. Under `NO ACK` the emitter drains returns once the round trip
+  that ends the write is answered and attributes them by the same transport contents in written
+  order. A return is never attributed to a later window or write, and an unmatched return fails
+  the write. Size-refusal recovery cannot continue on a replacement channel while a positive
+  mandatory answer still has an undecidable return outcome; the host retries that unresolved prefix.
   The broker answers no `NO ACK` message itself, so the emitter ends a `NO ACK`
   write with one round trip on its channel, which the broker answers only after it has taken every
   message written before it, and the answer delivers the write; a write costs that one round trip,

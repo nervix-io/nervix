@@ -35,6 +35,7 @@ pub(crate) mod process_observation;
 pub(crate) mod process_program;
 pub(crate) mod process_report;
 pub(crate) mod producer_session;
+pub(crate) mod rabbitmq_confirm_order;
 pub(crate) mod rabbitmq_queue;
 pub(crate) mod raw_session;
 pub(crate) mod redis_client;

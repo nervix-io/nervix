@@ -1115,10 +1115,12 @@ does not declare is refused where it is written, with the entity and the clause 
 the registry refuses it again in a Model that reaches it another way. The
 [capability matrix](connector-capabilities.md) lists the clauses and properties each entity
 declares, and each entity's section below says what its transport does with them. `KAFKA TOPIC`
-declares `TIMESTAMP`, which [Kafka](#kafka) writes as each record's create time, `SQS QUEUE`
-declares `DELAY` and `DEDUPLICATION ID`, which [SQS](#sqs) sends with each message, and the two
-[RabbitMQ](#rabbitmq) entities declare `MANDATORY`. No entity declares another clause or a property
-yet, and every emitter refuses each clause its entity does not declare.
+declares `TIMESTAMP`, which [Kafka](#kafka) writes as each record's create time, `PULSAR TOPIC`
+declares `TIMESTAMP` and `DELIVER AFTER`, which [Pulsar](#pulsar) writes as each message's event
+time and delivery time, `SQS QUEUE` declares `DELAY` and `DEDUPLICATION ID`, which [SQS](#sqs)
+sends with each message, and the two [RabbitMQ](#rabbitmq) entities declare `MANDATORY`. No entity
+declares another clause or a property yet, and every emitter refuses each clause its entity does
+not declare.
 
 | Clause | Written with | Value every record carries |
 | --- | --- | --- |
@@ -1366,6 +1368,8 @@ CREATE PULSAR TOPIC EMITTER <name>
   TO <client> TOPIC 'orders'
     MODE <mode>
     ENCODE USING <codec>
+    [TIMESTAMP occurred_at]
+    [DELIVER AFTER 5s]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
@@ -1386,7 +1390,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
 | Batch transformation required | no |
-| Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
+| Envelope | TIMESTAMP occurred_at<br>DELIVER AFTER 5s |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | receipts held under NO ACK: at most 100 receipts; when full, holds back what fills it<br>messages the driver queues for its connection: driver default, 100 messages; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |
 | Network waits | name resolution: unbounded<br>connection: driver default, 10 s per address<br>topic lookup, producer creation and receipts: driver default, the operation timeout: ACK TIMEOUT under ACK, 30 s under NO ACK |
@@ -1414,6 +1418,50 @@ producer refuses it before writing it, because the broker would close the connec
 every message in flight on it. With `ACK`, a message the broker receives and refuses with
 `NotAllowedError`, such as one above the topic's own `maxMessageSize` policy, follows
 `ON MESSAGE ERROR` too, while any other broker error is retried.
+
+The emitter declares the `TIMESTAMP` and `DELIVER AFTER` envelope clauses, no other envelope clause
+and no `PROPERTIES` block: its header writes are a message's properties. A message's ordering key is
+a key rather than an envelope clause, and no statement writes one.
+
+`TIMESTAMP <expression>` sets the `event_time` each message carries. The expression's `DATETIME`
+counts nanoseconds and a Pulsar message counts whole milliseconds, so Nervix writes the millisecond
+that contains the value: `2001-02-03T04:05:06.789999999Z` becomes `2001-02-03T04:05:06.789Z`. Pulsar
+reads a zero event time as none, and a message carries no time before the Unix epoch, so a record
+whose millisecond is not after the epoch, any time before `1970-01-01T00:00:00.001Z`, is rejected
+through `ON MESSAGE ERROR` before the producer takes it, as an `external` error of the `publish`
+operation whose message names its timestamp, and the emitter's other records are still sent. Without
+`TIMESTAMP`, a message carries no event time and its `publish_time` is the only time it has.
+
+`DELIVER AFTER <duration>` sets the `deliver_at_time` each message carries to the execution time of
+its batch plus the duration, in the millisecond that contains it. The delay is measured from that
+execution time and not from the send, so time a record spends waiting for its flush or for a retry
+counts toward it, and a message sent after its delivery time is delivered at once. A batch payload
+is one message, which takes its delivery time from the batch of its first record. The broker stores
+a delayed message when it receives it, so `ACK` confirms the message then and neither `ACK` nor
+`ACK TIMEOUT` waits for the delay. A delivery time past `2262-04-11T23:47:16.854775807Z`, the last
+Nervix timestamp, is one only a paced domain's logical time reaches, and rejects its record as a
+`TIMESTAMP` before the epoch does.
+
+Each record keeps these times on every attempt, so a retry after a refused or unanswered publish
+writes the times the first attempt wrote.
+
+The broker holds a delayed message back, and what it holds depends on the broker and on who reads
+the topic:
+
+- Only a shared subscription is held back, which is how every `PULSAR TOPIC` ingestor reads. A
+  message reaches an exclusive or failover subscription as soon as it is stored, and every
+  subscription of a broker with `delayedDeliveryEnabled=false`.
+- A broker may hand a message over up to `delayedDeliveryTickTimeMillis` before its delivery time,
+  one second by default, unless `isDelayedDeliveryDeliverAtTimeStrict` is set, so a delay no longer
+  than that tick may not hold a message back at all.
+- A broker reads its own clock. On an unpaced domain the execution time is actual UTC, so the delay
+  is off by however far the node's clock and the broker's differ. On a paced domain the execution
+  time is the domain's logical time, so the delay holds only while logical time keeps to the
+  broker's clock: a message whose logical delivery time has passed by the broker's clock is delivered
+  at once, and one ahead of it waits for that time.
+- A broker's `delayedDeliveryMaxDelayInMillis` or a topic's delayed delivery policy may bound the
+  delay. The broker answers a message past that bound with `NotAllowedError`, so with `ACK` its
+  record follows `ON MESSAGE ERROR`.
 
 Pulsar emitters use the same client config surface as Pulsar ingestors:
 
@@ -1546,12 +1594,22 @@ its record delivered and the record is lost. With `MANDATORY`, on either entity,
 the message, and the emitter rejects its record through `ON MESSAGE ERROR` as an `external` error of
 the `publish` operation naming the broker's reply, such as `rabbitmq returned the message unrouted
 with reply code 312: NO_ROUTE`, in every mode, and keeps publishing the write's other records.
-Under `ACK` the broker returns the message ahead of its confirmation. Under `NO ACK` it returns the
-message ahead of its answer to the round trip that ends the write, so the emitter reads every return
-of the write once that answer arrives, and holds none of them beyond the write that published it.
-A return names the message's exchange, routing key, headers and body but not which record it was,
-so the emitter attributes it to the first message of the write, in written order, that carries all
-four; of messages identical in all four, the earlier one is rejected.
+Under `ACK` the broker returns the message ahead of its confirmation, but the driver can attach
+that return to another message's confirm. Nervix publishes up to `MAX` messages concurrently,
+collects that window's answers, and attributes every return before refilling the window or
+reporting a mandatory record delivered. Each message retains its original `ACK TIMEOUT`.
+Under `NO ACK` the return precedes the answer to the round trip that ends the write, so the emitter
+reads every return of the write once that answer arrives. A return names the message's exchange,
+routing key, properties and body, not its Nervix record. It rejects the first matching
+message in publication order: within the current confirmation window under `ACK`, or the write
+under `NO ACK`. Identical transport messages therefore take returns in that order. A return never
+changes a record settled by an earlier window.
+
+If a confirmation window is interrupted by a timeout or channel loss, a mandatory record's
+positive confirm alone may not establish delivery: another unresolved confirm can carry its
+return. Such records stay unresolved for retry, which can duplicate a message the broker accepted.
+Definitively attributed returns remain rejected, and positive nonmandatory answers remain delivered.
+An unmatched return fails the write instead of guessing which record to reject.
 
 Both entities publish the same way. `ACK` enables publisher confirms and waits for the confirm of
 each message. A broker nack is an infrastructure failure and is retried with backpressure. In `NO ACK` the broker confirms nothing,

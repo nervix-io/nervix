@@ -349,6 +349,7 @@ class InventoryTests(unittest.TestCase):
             "connector-row-request-division",
             "connector-confirmation-window",
             "pulsar-unconfirmed-receipts",
+            "pulsar-message-times",
             "emitter-batch-subdivision",
             "emitter-batch-packing",
             "codec-bounded-encodings",
