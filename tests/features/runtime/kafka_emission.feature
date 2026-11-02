@@ -882,3 +882,248 @@ Feature: Kafka emission
       | cluster_size |
       | 1            |
       | 3            |
+
+  # A record's TIMESTAMP is the CreateTime its Kafka record carries. Kafka counts whole milliseconds,
+  # so a finer DATETIME is written as the millisecond that contains it. librdkafka reads a zero
+  # timestamp as the time of sending, and a Kafka record has no time before the Unix epoch, so a
+  # TIMESTAMP whose millisecond is not after the epoch rejects its record and no other.
+  @kafka_emitter_record_timestamp
+  Scenario Outline: A Kafka emitter writes each record's TIMESTAMP as the time its record was created
+    Given Kafka is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "timestamped_{{test_id}}" exists with 1 partitions
+    And Kafka topic "timestamped_{{test_id}}" is observed
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( seq I64, event_at DATETIME );
+      CREATE SCHEMA rejected_event (
+        seq I64,
+        error_code STRING,
+        operation STRING,
+        error_message STRING
+      );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, event_at string );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event
+        ENCODE event_at AS RFC3339;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
+      CREATE VHOST edge timestamped-{{test_id}}.example.com;
+      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA TOPIC EMITTER timestamped FROM events
+        TO kafka_main TOPIC 'timestamped_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
+          ENCODE USING event_codec
+          TIMESTAMP input.event_at
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR SEND TO rejected_events
+          SET seq = input.seq,
+              error_code = error.code,
+              operation = error.operation,
+              error_message = error.message
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION rejected_events_subscription TO rejected_events;
+      START;
+      """
+    And http payload is posted to host "timestamped-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":1,"event_at":"2001-02-03T04:05:06.789+00:00"}
+      """
+    And http payload is posted to host "timestamped-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":2,"event_at":"2001-02-03T04:05:06.789999999+00:00"}
+      """
+    And http payload is posted to host "timestamped-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":3,"event_at":"1970-01-01T00:00:00.001+00:00"}
+      """
+    And http payload is posted to host "timestamped-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":4,"event_at":"1970-01-01T00:00:00.000999999+00:00"}
+      """
+    And http payload is posted to host "timestamped-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":5,"event_at":"1969-12-31T23:59:59.999+00:00"}
+      """
+    Then within "30s" the relay subscription receives exactly one payload for each fragment set
+      """
+      "seq":4 | "error_code":"external" | "operation":"publish" | "error_message":"kafka record timestamp 1970-01-01T00:00:00.000999999Z precedes 1970-01-01T00:00:00.001Z
+      "seq":5 | "error_code":"external" | "operation":"publish" | "error_message":"kafka record timestamp 1969-12-31T23:59:59.999Z precedes 1970-01-01T00:00:00.001Z
+      """
+    And within "30s" the observed broker receives exactly these timed messages
+      | payload                                                    | created at               |
+      | {"seq":1,"event_at":"2001-02-03T04:05:06.789+00:00"}       | 2001-02-03T04:05:06.789Z |
+      | {"seq":2,"event_at":"2001-02-03T04:05:06.789999999+00:00"} | 2001-02-03T04:05:06.789Z |
+      | {"seq":3,"event_at":"1970-01-01T00:00:00.001+00:00"}       | 1970-01-01T00:00:00.001Z |
+    When these Plexus commands are executed on the leader node
+      """
+      DESCRIBE EMITTER timestamped;
+      """
+    Then the last command output contains
+      """
+      envelope: TIMESTAMP input.event_at
+      """
+    And SHOW CREATE EMITTER on the leader node renders these clauses
+      | emitter     | clause                   |
+      | timestamped | ENCODE USING event_codec |
+      | timestamped | TIMESTAMP input.event_at |
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  # The broker refuses the record until the emitter stops waiting for it at ACK TIMEOUT, and the
+  # producer gives that copy up by its next timeout scan, as the stale-copy scenario above
+  # describes. The host keeps the envelope it evaluated when it admitted the record, so the attempt
+  # after the broker accepts writes again carries the same record time.
+  @kafka_emitter_record_timestamp
+  Scenario Outline: A Kafka record its broker refused keeps its TIMESTAMP when the emitter sends it again
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And a mock Kafka broker serves topic "timestamp_retry_{{test_id}}"
+    And the mock Kafka broker refuses every write
+    And mock Kafka topic "timestamp_retry_{{test_id}}" is observed
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( seq I64, event_at DATETIME );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, event_at string );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event
+        ENCODE event_at AS RFC3339;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE VHOST edge timestamp-retry-{{test_id}}.example.com;
+      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE KAFKA CLIENT kafka_sink CONFIG { 'bootstrap.servers' = '{{mock_kafka_addr}}' };
+      CREATE KAFKA TOPIC EMITTER timestamped FROM events
+        TO kafka_sink TOPIC 'timestamp_retry_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 10s MAX 10s
+          ENCODE USING event_codec
+          TIMESTAMP input.event_at
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "timestamp-retry-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":1,"event_at":"2001-02-03T04:05:06.789+00:00"}
+      """
+    Then within "60s" DESCRIBE EMITTER "timestamped" on the leader node reports a transient error with its next attempt at most "8s" away
+    When the mock Kafka broker accepts writes again
+    Then within "60s" DESCRIBE EMITTER "timestamped" on the leader node contains
+      """
+      transient error: -
+      """
+    And within "30s" the observed broker receives exactly these timed messages
+      | payload                                              | created at               |
+      | {"seq":1,"event_at":"2001-02-03T04:05:06.789+00:00"} | 2001-02-03T04:05:06.789Z |
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  # ALTER … SET TO replaces the whole destination body, so a body that writes no TIMESTAMP removes
+  # it, and the producer gives each later record the time it creates the record.
+  @kafka_emitter_record_timestamp
+  Scenario Outline: ALTER SET TO without TIMESTAMP returns a Kafka emitter's records to the time their producer creates them
+    Given Kafka is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "timestamp_altered_{{test_id}}" exists with 1 partitions
+    And Kafka topic "timestamp_altered_{{test_id}}" is observed
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( seq I64, event_at DATETIME );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, event_at string );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event
+        ENCODE event_at AS RFC3339;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE VHOST edge timestamp-altered-{{test_id}}.example.com;
+      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA TOPIC EMITTER timestamped FROM events
+        TO kafka_main TOPIC 'timestamp_altered_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
+          ENCODE USING event_codec
+          TIMESTAMP input.event_at
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "timestamp-altered-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":1,"event_at":"2001-02-03T04:05:06.789+00:00"}
+      """
+    Then within "30s" the observed broker receives exactly these timed messages
+      | payload                                              | created at               |
+      | {"seq":1,"event_at":"2001-02-03T04:05:06.789+00:00"} | 2001-02-03T04:05:06.789Z |
+    When these Plexus commands are executed on the leader node
+      """
+      ALTER KAFKA TOPIC EMITTER timestamped SET TO kafka_main TOPIC 'timestamp_altered_{{test_id}}'
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
+        ENCODE USING event_codec;
+      DESCRIBE EMITTER timestamped;
+      """
+    Then the last command output contains
+      """
+      envelope: none
+      """
+    When http payload is posted to host "timestamp-altered-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":2,"event_at":"2001-02-03T04:05:06.789+00:00"}
+      """
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"seq":2,"event_at":"2001-02-03T04:05:06.789+00:00"}
+      """
+    And the last observed broker message was created by its producer at most "5m" before the step observed it
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
