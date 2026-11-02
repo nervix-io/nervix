@@ -259,12 +259,12 @@ const SYSLOG_COLLECTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &[],
 };
 
-/// The peer a syslog message arrived from.
-const SYSLOG_LISTENER_METADATA: IngestorMetadataDeclaration =
-    IngestorMetadataDeclaration::new(&[IngestorMetadataField::new(
-        "peer_addr",
-        IngestorMetadataType::String,
-    )]);
+/// The peer, transport and verified TLS client subject of a received Syslog frame.
+const SYSLOG_LISTENER_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
+    IngestorMetadataField::new("peer_addr", IngestorMetadataType::String),
+    IngestorMetadataField::new("transport", IngestorMetadataType::String),
+    IngestorMetadataField::new("tls_peer", IngestorMetadataType::String),
+]);
 
 impl IngestorDeclaration for SyslogListenerIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {

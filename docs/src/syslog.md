@@ -215,15 +215,26 @@ starts one after receiving that graph. In Kubernetes, a Service can therefore ta
 port on every Nervix pod. Routes, branch construction, flush policy, and error policy follow the
 normal ingestor contract.
 
-Every received message exposes its remote socket address as optional `STRING`
-`metadata.peer_addr`. For UDP this is the datagram source; for TCP and TLS it is the connection
-peer. Transport metadata does not propagate through a relay unless a route assigns it to a
-schema-backed field:
+Every received frame exposes this transport metadata:
+
+| Field | Type | Value |
+| --- | --- | --- |
+| `metadata.peer_addr` | `STRING OPTIONAL` | The UDP datagram's source address or the TCP/TLS connection's peer address, including its port. |
+| `metadata.transport` | `STRING OPTIONAL` | `udp`, `tcp` or `tls`, according to the frame's transport. |
+| `metadata.tls_peer` | `STRING OPTIONAL` | The distinguished subject name of the verified TLS client certificate, such as `CN=collector.example.com`. Null for UDP, TCP and TLS without client-certificate verification. |
+
+The TLS peer is established after a successful handshake and stays with every frame of that
+connection. A client identity configured only on the sender supplies no verified peer when the
+listener does not request client authentication. Quiesce buffering retains all three fields after
+the transport message is gone. Transport metadata does not propagate through a relay unless a route
+assigns it to a schema-backed field:
 
 ```plexus,ignore
 TO received_syslog
   INHERIT ALL
-  SET peer_addr = metadata.peer_addr
+  SET peer_addr = metadata.peer_addr,
+      transport = metadata.transport,
+      tls_peer = metadata.tls_peer
   UNBRANCHED
   FLUSH IMMEDIATE
   ON MESSAGE ERROR LOG
