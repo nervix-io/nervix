@@ -47,7 +47,9 @@ Ingestors section for the exact clause order, host admission and recovery limits
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and
-completion status messages.
+completion status messages. For connector expression completion, including filters, HTTP request
+expressions, ALTER constructions, metadata fields and entity-specific header functions, follow
+the CLI's Completion section.
 Read the Ingestors and Emitters chapters for `SHOW INGESTORS`, `SHOW EMITTERS`, and `DESCRIBE`;
 their inspection contracts distinguish effective options from canonical `SHOW CREATE` configuration.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire

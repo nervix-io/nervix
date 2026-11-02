@@ -468,10 +468,13 @@ cannot begin at all, the diagnostic expects the placeholder the clause names, su
 the expression grammar's first diagnostic at the tokens of the statement where it failed, with the
 message the standalone reader gives the same text. Where a complete expression is followed by a token
 no clause of the statement expects, the statement reports that token with its own expectations. An
-expression's diagnostic carries no expectations of the expression grammar, so completion inside an
-unfinished expression offers nothing rather than guessing at expression syntax. A caller that owns
-a larger operation adds its own context above the
-language's report instead of copying the diagnostics into its error: splitting a client batch reports
+unfinished expression retains the expression grammar's semantic expectations for function names,
+invocations, qualified fields and assignment targets. These expectations keep the statement's
+token positions and participate in its composed grammar. Completion resolves functions in the
+selected connector scope and metadata fields from that entity's declaration; the diagnostic keeps
+the expression reader's expected tokens and found token. Ordinary clause continuations still
+belong to the surrounding statement grammar. A caller that owns a larger operation adds its own
+context above the language's report instead of copying the diagnostics into its error: splitting a client batch reports
 that the batch could not be split, and the formatter reports a source that did not parse, the line
 of a statement the vocabulary could not render, or a rendering defect whose output changed meaning
 or no longer parses. The formatter's command line reads the language's report beneath its context
