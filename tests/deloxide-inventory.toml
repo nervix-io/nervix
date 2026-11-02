@@ -170,6 +170,7 @@ package = "nervix-scenarios"
 selections = ["deloxide", "deloxide-order"]
 tags = [
   "@kafka_record_metadata",
+  "@rabbitmq_metadata",
   "@restore_client_inspection",
   "@runtime_installation_retry",
   "@execution_class_drain",
@@ -338,6 +339,86 @@ package = "nervix-scenarios"
 selections = ["deloxide-stress-restore"]
 tags = ["@deloxide_stress_restore"]
 target = "test:scenarios"
+
+[[workload]]
+coverage = "RabbitMQ deliveries through the real broker and the source host's tracked ingestion and ACK state, with every declared metadata field read under ACK SEQUENTIAL and NO ACK on one and three nodes. The AMQP client's reader and borrowed metadata visits are untracked."
+examples = 4
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "scenario.rabbitmq-delivery-metadata"
+invariant = "Every admitted delivery reads its own envelope and each AMQP basic property as its field's exact type, and a property its publisher left unset reads as null."
+invocation = "scenarios"
+scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A delivery rejected through an emitter fault returns through the real broker and the source host's tracked ACK state on one and three nodes, read on each delivery. Broker redelivery and the emitter's fault timing are untracked."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "scenario.rabbitmq-redelivered-metadata"
+invariant = "A delivery the ingestor rejected reads metadata.redelivered as false on its first delivery and true when the broker delivers it again, and reaches its emitter once the fault ends."
+invocation = "scenarios"
+scenario = "A RabbitMQ delivery the ingestor rejected reads metadata.redelivered as true when the broker delivers it again"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A producer's AMQP timestamp drives a paced window through tracked source and processor lifecycle state on one and three nodes. Logical timer waits and borrowed metadata conversion are untracked."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "scenario.rabbitmq-timestamp-event-time"
+invariant = "TIMESTAMP AT metadata.timestamp admits a delivery at the instant its producer wrote, and the window aggregates every row it decoded at that instant."
+invocation = "scenarios"
+scenario = "TIMESTAMP AT metadata.timestamp windows RabbitMQ messages at the instant their producer wrote"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "One delivery reaches two ingestors on one and three nodes, and the one that reads a timestamp no DATETIME holds refuses it through the message-error path and tracked ACK state. The ingest group's async refusal step and borrowed metadata conversion are untracked."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "scenario.rabbitmq-timestamp-refusal"
+invariant = "A timestamp no DATETIME holds refuses its message with a validation admit error naming metadata.timestamp only where the field is read, and the next representable delivery passes both ingestors."
+invocation = "scenarios"
+scenario = "A RabbitMQ timestamp no DATETIME holds refuses its message only where metadata.timestamp is read"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: real-broker RabbitMQ ingestion and ACK state in both modes with every declared metadata field read. The AMQP client's reader and borrowed metadata visits remain untracked."
+examples = 4
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "stress.rabbitmq-delivery-metadata"
+invariant = "Every admitted delivery reads its own envelope and each AMQP basic property as its field's exact type, and a property its publisher left unset reads as null."
+invocation = "stress-scenarios"
+scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a delivery rejected through an emitter fault returns through the real broker and the source host's tracked ACK state. Broker redelivery and the emitter's fault timing remain untracked."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "stress.rabbitmq-redelivered-metadata"
+invariant = "A delivery the ingestor rejected reads metadata.redelivered as false on its first delivery and true when the broker delivers it again, and reaches its emitter once the fault ends."
+invocation = "stress-scenarios"
+scenario = "A RabbitMQ delivery the ingestor rejected reads metadata.redelivered as true when the broker delivers it again"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a producer's AMQP timestamp drives a paced window beside tracked source and processor lifecycle state. Logical timer waits and borrowed metadata conversion remain untracked."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "stress.rabbitmq-timestamp-event-time"
+invariant = "TIMESTAMP AT metadata.timestamp admits a delivery at the instant its producer wrote, and the window aggregates every row it decoded at that instant."
+invocation = "stress-scenarios"
+scenario = "TIMESTAMP AT metadata.timestamp windows RabbitMQ messages at the instant their producer wrote"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: one delivery reaches two ingestors, and the one that reads a timestamp no DATETIME holds refuses it through the message-error path and tracked ACK state. The ingest group's async refusal step and borrowed metadata conversion remain untracked."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "stress.rabbitmq-timestamp-refusal"
+invariant = "A timestamp no DATETIME holds refuses its message with a validation admit error naming metadata.timestamp only where the field is read, and the next representable delivery passes both ingestors."
+invocation = "stress-scenarios"
+scenario = "A RabbitMQ timestamp no DATETIME holds refuses its message only where metadata.timestamp is read"
+selections = ["deloxide-stress"]
 
 [[workload]]
 coverage = "Actual outer and nested snapshot decoders, their execution worker FIFO admission and callback destruction, and native checkpoint readers. The independent input charge uses untracked semaphore permits; explicit queued cancellation is covered by the production-owner Shuttle check."

@@ -709,6 +709,17 @@ from empty values, and drive event time through two branch windows beside tracke
 lifecycle locks. Driver polling and metadata conversion remain outside Deloxide's lock detector;
 the ingestor-host Shuttle checks retain their existing intake and settlement scope.
 
+RabbitMQ delivery metadata stays with its delivery in the same way. The visit borrows the envelope
+and every basic property, adds no lock or shared state, and hands a timestamp no `DATETIME` holds
+over as unrepresentable, which the ingest group refuses through the message-error path its other
+admission refusals use. The `ingest-metadata-projection` Bolero property holds the projected values
+and refusals to their messages. The registered `scenario.rabbitmq-delivery-metadata`,
+`rabbitmq-redelivered-metadata`, `rabbitmq-timestamp-event-time` and `rabbitmq-timestamp-refusal`
+workloads, and their `stress.` forms, read every field in both ACK modes, observe a redelivery,
+drive a paced window from the producer's timestamp and refuse a timestamp beside tracked ingestion,
+acknowledgement and lifecycle locks. The AMQP client's reader, metadata visits and the async
+refusal step remain outside Deloxide's lock detector.
+
 ### Kafka source rejection floors
 
 A Kafka source under `OFFSET BY CONSUMER GROUP` records the earliest rejected record of every
