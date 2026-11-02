@@ -34,11 +34,11 @@ use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
     EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
-    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
-    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataDeclaration,
-    IngestorMetadataField, IngestorMetadataType, IngestorReference, IngestorReferenceKind,
-    LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
-    OptionValue, PositionClass, RetryPolicy,
+    EnvelopeClauseKind, HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode,
+    IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
+    IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType, IngestorReference,
+    IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
+    OptionForm, OptionPresence, OptionValue, PositionClass, RetryPolicy,
 };
 
 configured_client!(Kafka: unpooled, config CLIENT_CONFIG, CreateClientKafka => KafkaConfigEntry);
@@ -221,6 +221,16 @@ pub struct KafkaTopicIngestor {
 const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
+            holds: "a record conversion report after a gathered prefix",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Items {
+                    count: 1,
+                    unit: "report per ingestor instance",
+                },
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
             holds: "messages librdkafka prefetches",
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::Driver(
@@ -344,11 +354,15 @@ const KAFKA_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     ],
 };
 
-/// Where a Kafka record sits in its topic.
+/// A Kafka record's position, key, timestamp and null-value state.
 const KAFKA_TOPIC_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
     IngestorMetadataField::new("topic", IngestorMetadataType::String),
     IngestorMetadataField::new("partition", IngestorMetadataType::I32),
     IngestorMetadataField::new("offset", IngestorMetadataType::I64),
+    IngestorMetadataField::new("key", IngestorMetadataType::Bytes),
+    IngestorMetadataField::new("timestamp", IngestorMetadataType::Datetime),
+    IngestorMetadataField::new("timestamp_type", IngestorMetadataType::String),
+    IngestorMetadataField::new("tombstone", IngestorMetadataType::Bool),
 ]);
 
 impl IngestorDeclaration for KafkaTopicIngestor {
@@ -498,7 +512,11 @@ impl EmitterDeclaration for KafkaTopicEmitter {
             name: LocatorName::External(KafkaTopicName::DECLARATION),
         }),
         options: &[],
-        envelope: &[],
+        // A Kafka record carries its create time beside its key, headers and payload. It has no
+        // persistence, routing or retention flag, no delayed delivery, no reply target and no
+        // per-record message or deduplication identity, and its headers carry what properties
+        // would.
+        envelope: &[EnvelopeClauseKind::Timestamp],
         properties: &[],
         bounds: KAFKA_EMITTER_BOUNDS,
     };

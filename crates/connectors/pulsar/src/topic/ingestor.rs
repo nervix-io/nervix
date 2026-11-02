@@ -422,14 +422,14 @@ impl PulsarTopicIngestorPlan {
         instance_index: u64,
     ) -> PulsarTopicIngestorResult<PulsarConsumer<Vec<u8>, TokioExecutor>> {
         let consumer_name = format!("{}-{instance_index}", self.consumer_name);
-        match self.subscription.ownership {
-            PulsarSubscriptionOwnership::Ingestor => {}
-            PulsarSubscriptionOwnership::Provisioned => {
-                self.verify_provisioned(&consumer_name).await?;
-            }
+        if matches!(
+            self.subscription.ownership,
+            PulsarSubscriptionOwnership::Provisioned
+        ) {
+            self.verify_provisioned(&consumer_name).await?;
         }
         let options = PulsarConsumerOptions::default()
-            .with_initial_position(PulsarInitialPosition::Earliest)
+            .with_initial_position(self.initial_position())
             .with_ack_receipt_enabled(self.ack_receipts.enabled());
         self.consumer_builder(consumer_name, options)
             .build()
@@ -440,6 +440,19 @@ impl PulsarTopicIngestorPlan {
                 })
                 .attach_printable(source.to_string())
             })
+    }
+
+    /// The creation position shared by data consumers and the durable removal consumer.
+    fn initial_position(&self) -> PulsarInitialPosition {
+        match self.subscription.ownership {
+            PulsarSubscriptionOwnership::Ingestor { start_at } => match start_at {
+                nervix_models::PulsarStartPosition::Earliest => PulsarInitialPosition::Earliest,
+                nervix_models::PulsarStartPosition::Latest => PulsarInitialPosition::Latest,
+            },
+            // The existing cursor controls a provisioned join. If it disappeared after the
+            // existence check, retain the documented earliest position of that broker race.
+            PulsarSubscriptionOwnership::Provisioned => PulsarInitialPosition::Earliest,
+        }
     }
 
     /// A consumer of this ingestor's topic on its shared subscription, registered under
@@ -553,8 +566,10 @@ impl PulsarTopicIngestorPlan {
     /// Joins the subscription with a durable consumer and unsubscribes it.
     async fn unsubscribe(&self) -> PulsarTopicIngestorResult<()> {
         let consumer_name = format!("{}-removal", self.consumer_name);
+        let options =
+            PulsarConsumerOptions::default().with_initial_position(self.initial_position());
         let mut consumer = self
-            .consumer_builder(consumer_name, PulsarConsumerOptions::default())
+            .consumer_builder(consumer_name, options)
             .build::<Vec<u8>>()
             .await
             .map_err(|error| {
@@ -663,7 +678,7 @@ impl IngestorConnector for PulsarTopicIngestor {
     /// the ingestor's transient status rather than a failure that keeps the ingestor from starting.
     async fn open(plan: &Self::Plan, instance_index: u64) -> IngestorResult<Self> {
         let consumer = match plan.subscription.ownership {
-            PulsarSubscriptionOwnership::Ingestor => {
+            PulsarSubscriptionOwnership::Ingestor { .. } => {
                 let consumer = plan
                     .consumer(instance_index)
                     .await

@@ -242,6 +242,7 @@ fn a_clause_holds_an_expression_exactly_where_its_form_is_one() {
 
 #[test]
 fn targeted_edits_require_their_entity_declaration_even_when_dropping() {
+    let entity = EmitterEntityKind::Sqs(crate::SqsEmitterEntity::Queue);
     let original = EmitterEnvelope::default();
     for alteration in [
         EmitterEnvelopeAlteration::SetPersistent,
@@ -257,13 +258,13 @@ fn targeted_edits_require_their_entity_declaration_even_when_dropping() {
     ] {
         let mut envelope = original.clone();
         let error = envelope
-            .apply_alteration(ENTITY, &alteration)
-            .expect_err("Kafka declares none of these edits");
+            .apply_alteration(entity, &alteration)
+            .expect_err("the entity declares none of these targeted edits");
         assert!(matches!(
             error.current_context(),
-            EnvelopeDeclarationError::UndeclaredClause { entity, .. }
-                | EnvelopeDeclarationError::UndeclaredProperties { entity }
-                if *entity == ENTITY
+            EnvelopeDeclarationError::UndeclaredClause { entity: actual, .. }
+                | EnvelopeDeclarationError::UndeclaredProperties { entity: actual }
+                if *actual == entity
         ));
         assert_eq!(envelope, original);
     }

@@ -249,9 +249,10 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
         EmitterEntityKind::Http(HttpEmitterEntity::Request) => {
             unlocated(ConnectorKind::Http, &[("METHOD", true), ("PATH", true)])
         }
-        EmitterEntityKind::Kafka(KafkaEmitterEntity::Topic) => {
-            located(ConnectorKind::Kafka, "TOPIC", "kafka_topic", &[])
-        }
+        EmitterEntityKind::Kafka(KafkaEmitterEntity::Topic) => EmitterSurface {
+            envelope: &[EnvelopeClauseKind::Timestamp],
+            ..located(ConnectorKind::Kafka, "TOPIC", "kafka_topic", &[])
+        },
         EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic) => {
             located(ConnectorKind::Pulsar, "TOPIC", "pulsar_topic", &[])
         }
@@ -411,6 +412,9 @@ fn every_external_name_declares_its_label_and_an_example_its_rule_admits() {
     assert_declares_an_admitted_example::<RabbitMqExchangeName>("rabbitmq_exchange");
     assert_declares_an_admitted_example::<SqsQueueName>("sqs_queue");
     assert_declares_an_admitted_example::<RedisChannelName>("redis_channel");
+    assert_declares_an_admitted_example::<nervix_models::RedisChannelPattern>(
+        "redis_channel_pattern",
+    );
     assert_declares_an_admitted_example::<NatsSubjectName>("nats_subject");
     assert_declares_an_admitted_example::<NatsQueueGroupName>("nats_queue_group");
     assert_declares_an_admitted_example::<MqttTopicFilter>("mqtt_topic_filter");
@@ -646,6 +650,10 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_an
             "metadata.topic",
             "metadata.partition",
             "metadata.offset",
+            "metadata.key",
+            "metadata.timestamp",
+            "metadata.timestamp_type",
+            "metadata.tombstone",
         ]
     );
     assert_eq!(

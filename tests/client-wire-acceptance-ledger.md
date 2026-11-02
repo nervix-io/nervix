@@ -1,37 +1,25 @@
-# Client wire failure and protobuf baseline ledger
+# Client wire acceptance map
 
-This is the executable acceptance ledger for [Client Wire
-01](https://app.clickup.com/t/86bc1ahkw). The source audit began at
-`2aa7ee71a2416ef4ef723d3a4355ec66f540fe2f` on 15 September 2026. It records the failures that
-later Client Wire tasks own, the deterministic seams that reproduce them, and the end-to-end
-protobuf baseline that task 16 will compare with FlatBuffers.
+This map records current session guarantees, their owners and the deterministic controls that
+exercise them. Historical run results and audit findings are retained on [Client Wire 01](https://app.clickup.com/t/86bc1ahkw).
+Integrated recovery evidence is mapped in [Client Wire qualification](client-wire-15-qualification.md).
+Comparative measurements and raw reports belong to [Client Wire 16](https://app.clickup.com/t/86bc1ahz3).
 
-The public scenarios use native gRPC sessions and Plexus commands. The console probe and graph
-baseline use the console WebSocket session. Process recovery starts the actual `nervix-server`
-binary, sends `SIGKILL`, and reopens the same database and ports. Focused unit probes are used only
-where a public client cannot observe the dispatcher's waiter identity or the server's internal
-subscription-interest balance.
+## Contract ownership
 
-Expected failures carried `@client_wire_expected_failure` or Rust's `#[ignore]`, named their owning
-delivery task, and were excluded from the ordinary suite until the owning behavior passed. The
-integrated qualification and its validation commands are recorded in
-[Client Wire 15 qualification](client-wire-15-qualification.md).
-
-## Findings and ownership
-
-| Finding | Audited failure | Owning delivery task | Executable regression |
-| --- | --- | --- | --- |
-| CW-F01 | A pending append that another session omitted before committing can be reported as successful from aggregate `Committed` state. | [03](https://app.clickup.com/t/86bc1ahmh) | `A command missing from a committed transaction cannot report aggregate success` (`@client_wire_missing_command`, one and three nodes) |
-| CW-F02 | Replaying an admitted transaction append can preflight and append it a second time because the request has no durable position identity. | [03](https://app.clickup.com/t/86bc1ahmh) | `Replaying an admitted append does not preflight or append it again` (`@client_wire_duplicate_append`, one and three nodes) |
-| CW-F03 | Retrying `BEGIN` after its response is lost creates a second transaction instead of recovering the original outcome. | [03](https://app.clickup.com/t/86bc1ahmh) | `Replaying a BEGIN whose response was lost returns the original transaction` (`@client_wire_lost_begin`, one and three nodes) |
-| CW-F04 | The global transaction reconciler awaits one applying commit inline, preventing an unrelated orphan from reaching expiry and blocking cleanup/recovery behind it. | [06](https://app.clickup.com/t/86bc1ahnh) | `A stalled commit cannot block expiry, another domain, or tombstone cleanup` (`@client_wire_stalled_commit`) |
-| CW-F05 | `RELOCATE` plans from schedule S1, rereads S2 as its expected compare-and-swap value, and can publish the candidate derived from S1 over S2. | [05](https://app.clickup.com/t/86bc1ahn6) | `A relocation planned before a schedule revision cannot overwrite that revision` (`@client_wire_stale_relocation`) |
-| CW-F06 | Native client replies consume a FIFO waiter. Concurrent registration and send order can differ, so one response can complete another request. | [11](https://app.clickup.com/t/86bc1ahw3); resolved by request-identity correlation in [09](https://app.clickup.com/t/86bc1ahv3) | `nervix_client_core::tests::response_reordering_cannot_take_another_requests_waiter` |
-| CW-F07 | The native session response reader awaits bounded event queues inline. An unread subscription/server event can prevent an unrelated command reply from being routed. | [11](https://app.clickup.com/t/86bc1ahw3), with server lifecycle separation in [10](https://app.clickup.com/t/86bapbpt3) | `nervix_client_core::tests::saturated_event_consumer_cannot_block_a_command_reply` |
-| CW-F08 | Every same-relay subscription increments interest, but deletion unregisters only when the final local subscription disappears, leaving the count positive. | [10](https://app.clickup.com/t/86bapbpt3) | `application::subscription::tests::deleting_two_same_relay_subscriptions_withdraws_the_interest_exactly`; `A node's interest in a relay follows every subscription of every session exactly` in `session_subscription_lifecycle.feature`, one and three nodes |
-| CW-F09 | The native client does not own acknowledged desired subscriptions as generation-fenced state, so reconnect/leader movement loses the subscription. | [12](https://app.clickup.com/t/86bc1ahwj) | `A reconnected native client restores acknowledged subscriptions` (`@client_wire_subscription_restore`, three nodes and concrete `acme`/`beta` branches) |
-| CW-F10 | The console dispatcher lets an unsolicited domain-list response take the first pending user request. | [13](https://app.clickup.com/t/86bc1ahym); resolved by request-identity correlation in [09](https://app.clickup.com/t/86bc1ahv3) | `tests::untracked_domain_push_cannot_discard_a_pending_websocket_request` in the `nervix-web-console` binary |
-| CW-F11 | A transaction batch whose commit applied but whose outcome was not recorded before leadership moved is resumed against its finished transaction, which no longer holds the batch's appends, and records the failure "transaction is not open (state COMMITTED)" as the batch's one outcome. | [Return a committed transaction batch's recorded outcome](https://app.clickup.com/t/86bckvkt6) | `A committed transaction batch keeps its one outcome when leadership moves while each attempt records it` (`@client_wire_transaction_batch_finalization_recovery`, three nodes); `transaction::tests::a_finished_transaction_answers_each_accepted_append_with_its_recorded_admission` in `nervix-consensus` |
+| Contract | Owning delivery | Executable regression |
+| --- | --- | --- |
+| A command reports only its own committed outcome | [03](https://app.clickup.com/t/86bc1ahmh) | `A command missing from a committed transaction cannot report aggregate success` (`@client_wire_missing_command`, one and three nodes) |
+| An admitted append has one durable position | [03](https://app.clickup.com/t/86bc1ahmh) | `Replaying an admitted append does not preflight or append it again` (`@client_wire_duplicate_append`, one and three nodes) |
+| A retried BEGIN recovers its original transaction | [03](https://app.clickup.com/t/86bc1ahmh) | `Replaying a BEGIN whose response was lost returns the original transaction` (`@client_wire_lost_begin`, one and three nodes) |
+| A stalled commit leaves unrelated domains and expiry runnable | [06](https://app.clickup.com/t/86bc1ahnh) | `A stalled commit cannot block expiry, another domain, or tombstone cleanup` (`@client_wire_stalled_commit`) |
+| A relocation is fenced to the schedule it planned from | [05](https://app.clickup.com/t/86bc1ahn6) | `A relocation planned before a schedule revision cannot overwrite that revision` (`@client_wire_stale_relocation`) |
+| Replies correlate with the request identity they name | [11](https://app.clickup.com/t/86bc1ahw3); resolved by request-identity correlation in [09](https://app.clickup.com/t/86bc1ahv3) | `nervix_client_core::tests::response_reordering_cannot_take_another_requests_waiter` |
+| Undrained events cannot block command replies | [11](https://app.clickup.com/t/86bc1ahw3), with server lifecycle separation in [10](https://app.clickup.com/t/86bapbpt3) | `nervix_client_core::tests::saturated_event_consumer_cannot_block_a_command_reply` |
+| Every subscription releases its exact interest lease | [10](https://app.clickup.com/t/86bapbpt3) | `application::subscription::tests::deleting_two_same_relay_subscriptions_withdraws_the_interest_exactly`; `A node's interest in a relay follows every subscription of every session exactly` in `session_subscription_lifecycle.feature`, one and three nodes |
+| Acknowledged subscriptions restore across reconnect | [12](https://app.clickup.com/t/86bc1ahwj) | `A reconnected native client restores acknowledged subscriptions` (`@client_wire_subscription_restore`, three nodes and concrete `acme`/`beta` branches) |
+| Unsolicited console events cannot consume a request waiter | [13](https://app.clickup.com/t/86bc1ahym); resolved by request-identity correlation in [09](https://app.clickup.com/t/86bc1ahv3) | `tests::untracked_domain_push_cannot_discard_a_pending_websocket_request` in the `nervix-web-console` binary |
+| A committed batch keeps its one outcome across leader movement | [Return a committed transaction batch's recorded outcome](https://app.clickup.com/t/86bckvkt6) | `A committed transaction batch keeps its one outcome when leadership moves while each attempt records it` (`@client_wire_transaction_batch_finalization_recovery`, three nodes); `transaction::tests::a_finished_transaction_answers_each_accepted_append_with_its_recorded_admission` in `nervix-consensus` |
 
 The schema and verified codec belong to [02](https://app.clickup.com/t/86bc1ahm4); persisted domain
 mutation ownership to [04](https://app.clickup.com/t/86bc1ahmy); retained request-history bounds to
@@ -47,17 +35,17 @@ mutation ownership to [04](https://app.clickup.com/t/86bc1ahmy); retained reques
 
 | Boundary | Control and observable barrier | Evidence |
 | --- | --- | --- |
-| Before admission | Arm a node's command admission pause before proposal, wait until the request reaches it, then transfer leadership, commit from another session, cancel, or release. | CW-F01 and existing leader-loss scheduling coverage |
+| Before admission | Arm a node's command admission pause before proposal, wait until the request reaches it, then transfer leadership, commit from another session, cancel, or release. | a command reports only its own committed outcome and existing leader-loss scheduling coverage |
 | After durable admission | Arm the persistent-command pause after its applying record commits but before effects begin. The passing control drops the public stream and retries with the same reference. | `A command lost after durable admission is recovered by its request identity` (`@client_wire_durable_admission`) |
-| After execution, before response | Arm response delivery after a `CommandResult` exists, wait for the barrier, drop the gRPC stream, then release. The same seam is above both public session transports. | CW-F02 and CW-F03 |
-| After effects, before outcome recording | Arm a node's finalization pause, which holds the next persistent command whose effects returned a terminal result before the node proposes that outcome. It holds a request's own attempt and a leader's resumption of an applying execution alike, so a leadership transfer while it is held leaves the execution applying with its effects in place. | CW-F11 |
-| Transaction progress | Pause a named node/domain commit after an exact number of applied statements. | CW-F04 |
-| Planned schedule publication | Pause `RELOCATE` after it produces its target schedule and before it reads the publication base. | CW-F05 |
-| Leader movement | Select the old and new node explicitly, request transfer, and wait until the destination reports itself leader. | CW-F09 and existing admission tests |
+| After execution, before response | Arm response delivery after a `CommandResult` exists, wait for the barrier, drop the gRPC stream, then release. The same seam is above both public session transports. | an admitted append has one durable position and a retried begin recovers its original transaction |
+| After effects, before outcome recording | Arm a node's finalization pause, which holds the next persistent command whose effects returned a terminal result before the node proposes that outcome. It holds a request's own attempt and a leader's resumption of an applying execution alike, so a leadership transfer while it is held leaves the execution applying with its effects in place. | a committed batch keeps its one outcome across leader movement |
+| Transaction progress | Pause a named node/domain commit after an exact number of applied statements. | a stalled commit leaves unrelated domains and expiry runnable |
+| Planned schedule publication | Pause `RELOCATE` after it produces its target schedule and before it reads the publication base. | a relocation is fenced to the schedule it planned from |
+| Leader movement | Select the old and new node explicitly, request transfer, and wait until the destination reports itself leader. | acknowledged subscriptions restore across reconnect and existing admission tests |
 | Full process crash/restart | Signal the actual child PID, assert termination by `SIGKILL`, restart the same executable with the same database, TLS identity, credentials and ports, then query through gRPC. | `A SIGKILL restart preserves a command admitted before the crash` in `client_wire_process_restart.feature` |
 | Full cluster restart | Stop and rebuild every node against its existing durable state. | Existing `Persisted rules are reapplied after a full cluster restart` matrix in `persistence.feature`, covering one node, three nodes, and a replicated three-node graph |
-| Undrained consumers | Fill the bounded event sender and hold its receiver while routing a command result under a short monotonic deadline. | CW-F07 |
-| Subscription create/delete/rebuild | Announce two same-relay subscriptions, delete both in order, and read the node's lease count and `nervix_session_subscriptions`. `relay_rebuilds_end_subscribers_only_when_the_relay_rows_change` rebuilds a relay under a live subscriber with the same, a sensitive, and no definition. | CW-F08; CW-F09 adds public reconnect/restoration |
+| Undrained consumers | Fill the bounded event sender and hold its receiver while routing a command result under a short monotonic deadline. | undrained events cannot block command replies |
+| Subscription create/delete/rebuild | Announce two same-relay subscriptions, delete both in order, and read the node's lease count and `nervix_session_subscriptions`. `relay_rebuilds_end_subscribers_only_when_the_relay_rows_change` rebuilds a relay under a live subscriber with the same, a sensitive, and no definition. | Exact interest release and acknowledged subscription restoration |
 
 Scenario teardown releases every armed command pause. Fault controls are compiled only with the
 `testing` feature and do not create a product protocol or compatibility surface.
@@ -71,33 +59,7 @@ Scenario teardown releases every armed command pause. Fault controls are compile
 | Subscription restoration | Native Rust client over gRPC, three nodes; leader transfer; interleaved `acme` and `beta` concrete branch records |
 | Console dispatch | Console WebSocket dispatcher, direct desired-behavior probe |
 | Crash/restart | One real `nervix-server` process; `SIGKILL`; same durable store and listening addresses |
-| Baseline | One release `nervix-server` process; native gRPC command/subscription/upload traffic, HTTP record admission, and console WebSocket graph snapshots |
 
-The public expected-failure scenarios live in
-`tests/features/runtime/client_wire_failures.feature`. The real-process control lives in
-`tests/features/runtime/client_wire_process_restart.feature`. Explicit tag selection is required
-to run a quarantined regression, for example:
-
-```console
-just test-scenarios --input tests/features/runtime/client_wire_failures.feature --tags @client_wire_missing_command --concurrency 1
-just test-scenarios --input tests/features/runtime/client_wire_failures.feature --tags @client_wire_duplicate_append --concurrency 1
-just test-scenarios --input tests/features/runtime/client_wire_failures.feature --tags @client_wire_lost_begin --concurrency 1
-just test-scenarios --input tests/features/runtime/client_wire_failures.feature --tags @client_wire_stale_relocation --concurrency 1
-just test-scenarios --input tests/features/runtime/client_wire_failures.feature --tags @client_wire_subscription_restore --concurrency 1
-```
-
-The ignored dispatch probe runs independently:
-
-```console
-cargo test -p nervix-client-core --lib tests::saturated_event_consumer_cannot_block_a_command_reply -- --ignored --exact
-```
-
-The session transport cutover in [09](https://app.clickup.com/t/86bc1ahv3) correlates every reply
-with the request identity it names, on both transports, so the CW-F06 and CW-F10 probes pass and
-run with the ordinary suite. The subscription lifecycle in [10](https://app.clickup.com/t/86bapbpt3)
-gives every subscription one interest lease that it releases exactly once, so the CW-F08 probe
-passes and runs with the ordinary suite, beside the public lifecycle scenarios in
-`tests/features/runtime/session_subscription_lifecycle.feature`.
 
 ## Performance baseline
 
@@ -132,55 +94,3 @@ workload parameters, queue limits, git revision and worktree state, release/debu
 `rustc -Vv`, kernel, architecture, CPU model/count, physical memory, and clock-tick rate. The raw
 final Prometheus scrape is retained as `metrics.prom` beside it. Raw frame and WebSocket access
 exist only in this benchmark harness.
-
-Since the transport cutover in [09](https://app.clickup.com/t/86bc1ahv3) the recipe measures the
-FlatBuffers session protocol with the same workload. The recorded protobuf run below is the fixed
-reference: task 16 must compare identical semantic work and bounds with it. A debug smoke run is a
-harness check, not a performance result.
-
-### Recorded protobuf run
-
-The default workload completed on 16 September 2026 UTC at source revision
-`2aa7ee71a2416ef4ef723d3a4355ec66f540fe2f`. The server used the release profile; the measurement
-harness used the debug profile because the repository deliberately prohibits combining the
-`testing` feature with a release-like profile. Future comparisons must use the same recipe so the
-client-side profile remains constant.
-
-| Operation | Samples | Latency p50 / p90 / p99 / max (µs) | Request p50 (bytes) | Response p50 (bytes) |
-| --- | ---: | ---: | ---: | ---: |
-| Native command | 100 | 782 / 1,541 / 4,355 / 12,559 | 93 | 1,508 |
-| Typed JSON subscription delivery | 100 | 29,103 / 38,687 / 59,967 / 69,951 | 1,067 | 1,142 |
-| Console graph snapshot | 100 | 119 / 309 / 2,387 / 260,479 | 37 | 3,647 |
-| Resource upload | 5 | 41,471 / 47,263 / 47,263 / 47,263 | 2,663 | 73 |
-
-The release server consumed 36 user and 18 system CPU ticks at 100 ticks/second. Its observed peak
-RSS was 94,089,216 bytes, and its final jemalloc resident measurement was 60,960,768 bytes. The
-final relay occupancy histogram contains 200 observations with a summed queue length of 100; every
-observation was at most one item. The JSON report retains the complete raw samples, phase counters,
-histogram series, environment, and configured limits rather than only these summaries.
-
-## Task 01 validation record
-
-Recorded on 15 September 2026. Expected-red means the regression reached its named assertion and
-failed for the audited behavior; it does not mean the harness crashed or timed out before the
-barrier.
-
-| Probe | Result |
-| --- | --- |
-| Cucumber test target with `testing` enabled | Pass |
-| Durable-admission loss/retry control | Pass; retry recovered the admitted command by execution reference |
-| Missing-command false-success, one/three nodes | Expected red; the absent command reported success after another session committed |
-| Duplicate admitted append replay, one/three nodes | Expected red; replay reached append preflight and rejected the reused reference |
-| Lost `BEGIN` response replay, one/three nodes | Expected red; retry created a different transaction ID |
-| Stalled commit versus orphan expiry | Expected red; the unrelated transaction remained `OPEN` beyond expiry |
-| Stale relocation publication after schedule revision | Expected red; stale relocation succeeded and overwrote the newer schedule |
-| Native subscription restoration after leader transfer and two branches | Expected red; the `beta` delivery timed out after reconnecting away from the old leader |
-| Native response waiter miscorrelation | Expected red; the command result was consumed by the domain-list waiter |
-| Native saturated-event command routing | Expected red; the command result stalled behind the full event queue |
-| Server subscription-interest cleanup | Expected red; deleting the final subscription left relay interest behind |
-| Console unsolicited-response dispatch | Expected red; the domain response discarded the pending attach request |
-| Real-process `SIGKILL` restart | Pass |
-| Debug baseline smoke (`2` operation samples, `1` upload, `128` payload bytes) | Pass; JSON and raw metrics artifacts written |
-| Release-server protobuf baseline (default workload) | Pass; JSON report and raw Prometheus scrape written |
-
-No complete Cucumber suite or Client Wire 15 qualification is claimed by this task.

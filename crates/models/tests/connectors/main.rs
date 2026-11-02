@@ -285,6 +285,10 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
                 ("topic", IngestorMetadataType::String),
                 ("partition", IngestorMetadataType::I32),
                 ("offset", IngestorMetadataType::I64),
+                ("key", IngestorMetadataType::Bytes),
+                ("timestamp", IngestorMetadataType::Datetime),
+                ("timestamp_type", IngestorMetadataType::String),
+                ("tombstone", IngestorMetadataType::Bool),
             ],
             every_node: false,
             reference: IngestorReferenceKind::Client(ConnectorKind::Kafka),
@@ -304,12 +308,24 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
             Some(HeaderModel::exact(HeaderLayout::SortedByName)),
             ConnectorKind::RabbitMq,
         ),
-        IngestorEntityKind::Redis(RedisIngestorEntity::PubSub) => {
-            headers_only(None, ConnectorKind::Redis)
-        }
-        IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query) => {
-            headers_only(None, ConnectorKind::Prometheus)
-        }
+        IngestorEntityKind::Redis(RedisIngestorEntity::PubSub) => IngestorDeclaration {
+            headers: None,
+            metadata: &[
+                ("channel", IngestorMetadataType::String),
+                ("pattern", IngestorMetadataType::String),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Redis),
+        },
+        IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query) => IngestorDeclaration {
+            headers: None,
+            metadata: &[
+                ("query", IngestorMetadataType::String),
+                ("evaluated_at", IngestorMetadataType::Datetime),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Prometheus),
+        },
         IngestorEntityKind::ZeroMq(ZeroMqIngestorEntity::Pull) => {
             headers_only(None, ConnectorKind::ZeroMq)
         }
@@ -1301,7 +1317,7 @@ fn a_source_acknowledges_as_its_delivery_mode_states() {
 fn an_entity_model_converts_into_every_enum_that_holds_it() {
     let source = RedisPubSubIngestor {
         client: named("cache"),
-        channel: named("orders"),
+        subscription: nervix_models::RedisSubscriptionTarget::Channel(named("orders")),
         mode: RedisPubSubIngestMode::NoAck,
         quiesce: IngestQuiesceMode::Drop,
     };

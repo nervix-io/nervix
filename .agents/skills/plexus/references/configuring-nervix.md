@@ -41,6 +41,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Emitter envelope clauses and `PROPERTIES`: timestamps, flags, delays, reply targets and message identities a transport carries beside each payload | `Emitters` → `Envelope clauses`, then `Connector Capabilities` |
 | MongoDB collection names and the lookup before each write, BSON field-name admission, native widths/date precision, conflict filters and upserts, write-concern outcomes, client URL configuration, the client database, paired TLS identity files, pool waits and driver deadlines | `Emitters` → `MongoDB`, `Database Client Connection Pools`, then `Connector Capabilities` |
 | MySQL table path parts, exact value bindings, duplicate-key actions, placeholder and packet limits, operation deadlines, TLS verification and identity file formats, URL lifetime settings and maintained pool minimums | `Emitters` → `MySQL`, `Database Client Connection Pools`, then `Connector Capabilities` → `MYSQL client` |
+| Postgres table path parts, conflict rules, the `sslmode` policy, TLS identity files, the checkout deadline, connection lifetimes and the borrow test | `Emitters` → `Postgres`, and `Database Client Connection Pools` |
 | Sentry platform options, event defaults and limit, batch transformations, strict DSN/timeout configuration, the inherited HTTP transport, rejected versus retried statuses and retry hints | `Emitters` → `Sentry`, then `Connector Capabilities` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
@@ -228,6 +229,9 @@ current connection, retry and deadline limits.
 - Write an envelope clause or `PROPERTIES` key only where the emitter's entity declares it, after
   the payload and before the construction, in the documented order; see
   [Emitters → Envelope clauses](../../../../docs/src/emitters.md#envelope-clauses).
+- For Pulsar subscription ownership and the required creation position of an owned subscription,
+  read [Ingestors → Pulsar](../../../../docs/src/ingestors.md#pulsar). Distinguish creation policy
+  from the existing broker cursor when explaining `ALTER` or recovery.
 - For Pulsar receipt deadlines and the final wait after `NO ACK` acceptance, read
   [Emitters → Pulsar](../../../../docs/src/emitters.md#pulsar) and
   [Finishing an emitter](../../../../docs/src/connector-contract.md#finishing-an-emitter).
@@ -368,6 +372,8 @@ current connection, retry and deadline limits.
   Treat `TOPIC` as a literal, case-preserving Kafka topic name in both directions, and give every
   `KAFKA TOPIC` ingestor `OFFSET BY DOMAIN` or `OFFSET BY CONSUMER GROUP '<group>'` and
   `ON QUIESCE SUSPEND`.
+- For Kafka record metadata, nullable keys, tombstones and `TIMESTAMP AT metadata.timestamp`,
+  follow `Ingestors` → `Kafka`; convert a binary key explicitly before using it as text.
 - Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
   group may need records that already exist; Nervix passes the setting through and does not supply
   a hidden default. Under `OFFSET BY DOMAIN` in an unpaced domain the same policy places a
@@ -412,6 +418,9 @@ current connection, retry and deadline limits.
   And WEBSOCKETS ENDPOINT` for the explicit response window and deadline, reject-only quiesce,
   shared client outcome labels, and sender retry semantics. Check that a WebSocket endpoint's
   declared signaling format can encode its acknowledgements, including during `ACCEPT DATA`.
+  That response deadline is absolute on the physical clock, so keepalive cannot extend it and
+  retry can duplicate admitted effects. Use `BUFFER MAX SIZE <bytes>` only with `MODE NO ACK`,
+  without an overflow clause; an endpoint refuses new input when that buffer is full.
 - To route endpoint requests by their method, path, query, peer address or host, or WebSocket
   frames by their kind, read the metadata tables in that same section before writing a
   `metadata.<field>`. An endpoint admits only `POST` at its exact `PATH`, so route on
@@ -441,7 +450,10 @@ current connection, retry and deadline limits.
   required capacity and idle-probe keys against `Ingestors` → `Redis Pub/Sub`; retain the source's explicit
   `BUFFER` or `DROP` policy in generated Plexus.
 - Redis Pub/Sub uses `NO ACK` in both directions. Treat `CHANNEL` as a literal, case-preserving
-  name and consult the Redis manual sections for its byte bound and unavailable header operations.
+  name. An ingestor writes exactly one of `CHANNEL` and `PATTERN`; use `PATTERN` only for a Redis
+  glob over channel names, and read `metadata.channel` and `metadata.pattern` to tell deliveries
+  apart. Consult the Redis manual sections for the byte bounds, how a pattern matches, the
+  metadata's nulls and unavailable header operations.
 - An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL` with `ON QUIESCE SUSPEND`. An emitter writes
   its request shape, `SEND SINGLE` or `SEND BATCH`, before `MODE ACK RETRY POLICY ...`. Treat
   `QUEUE` as a literal, case-preserving SQS name, and check `SQS CLIENT` keys against `Ingestors` →
@@ -455,7 +467,7 @@ current connection, retry and deadline limits.
   tokens with `>` last; an emitter's `SUBJECT` is one literal subject. Check both against the NATS
   sections of `Ingestors` and `Emitters`.
 - Every `PULSAR TOPIC` ingestor states who owns its subscription after the subscription's name:
-  `OWNED BY INGESTOR` when Nervix may create it and should remove it when the ingestor or its
+  `OWNED BY INGESTOR START AT EARLIEST` when Nervix may create it and should remove it when the ingestor or its
   domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and
   the operator must create before the ingestor reads. Consumers register as
   `<domain>~<ingestor>-<instance>`. Read `Ingestors` → `Pulsar` for missing subscriptions, removal
@@ -498,11 +510,22 @@ current connection, retry and deadline limits.
   between `QUERY` and `EVERY` and `16MiB` when left out. A larger response fails the poll as the
   ingestor's transient error rather than delivering part of it; raise the bound for a query that
   legitimately returns more. Samples enter the graph in batches of at most 1024.
+- A `PROMETHEUS QUERY` ingestor delivers one object per sample in the API's own shape,
+  `{"metric":{...},"value":...,"timestamp":"..."}`, with `NaN`, `+Inf` and `-Inf` as strings. Labels
+  sit under `metric`, which `WIRE JSON` cannot read, so write a JAQ codec such as
+  `'{job: .metric.job, value, timestamp}'`, or a `MODE LOOSE` wire schema when no label is needed.
+  Use `metadata.query`, `metadata.evaluated_at` and `TIMESTAMP AT metadata.evaluated_at` for the
+  query and its evaluation instant. A `matrix`, `scalar` or `string` result or a native histogram
+  fails the poll; ask for an instant vector.
 - Treat Kafka `NO ACK` emitter success as local librdkafka producer-queue admission. Even in
   `ATTACHED` mode, Nervix does not wait for a broker delivery receipt before completing its ACK
   share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces the
   client's `delivery.timeout.ms` as the producer's delivery bound. The producer always reports every record, so `delivery.report.only.error` in a client's
   `CONFIG` has no effect.
+- A `KAFKA TOPIC` emitter's `TIMESTAMP <expression>` is each record's Kafka create time: an exact,
+  non-null, non-sensitive `DATETIME`, written as the millisecond that contains it. A time before
+  `1970-01-01T00:00:00.001Z` rejects its record through `ON MESSAGE ERROR`. Read `Emitters` →
+  `Kafka`.
 - Every Sentry emitter references a `SENTRY CLIENT` with a project DSN and a positive `timeout_ms`,
   encodes one event JSON object per record, or per batch through `ON EMITTING BATCH`, and has no
   `write_header` invocation.

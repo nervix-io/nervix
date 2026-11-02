@@ -1113,10 +1113,16 @@ the entity's closed property set, each at most once and in any order. A clause o
 does not declare is refused where it is written, with the entity and the clause or key named, and
 the registry refuses it again in a Model that reaches it another way. The
 [capability matrix](connector-capabilities.md) lists the clauses and properties each entity
-declares, and each entity's section below says what its transport does with them. Today only
-[SQS](#sqs) QUEUE, with the `DELAY` and `DEDUPLICATION ID` clauses, and the two
-[RabbitMQ](#rabbitmq) entities, with `PERSISTENT`, `MANDATORY`, `TIMESTAMP` and the AMQP
-`PROPERTIES` below, declare envelopes. Every other emitter refuses clauses it does not declare.
+declares, and each entity's section below says what its transport does with them. `KAFKA TOPIC`
+declares `TIMESTAMP`, which [Kafka](#kafka) writes as each record's create time, `SQS QUEUE`
+declares `DELAY` and `DEDUPLICATION ID`, which [SQS](#sqs) sends with each message, and the two
+[RabbitMQ](#rabbitmq) entities declare `PERSISTENT`, `MANDATORY`, `TIMESTAMP` and their AMQP
+`PROPERTIES` below. Every emitter refuses clauses and keys its entity does not declare.
+
+For the forms its entity declares, `ALTER` offers `SET PERSISTENT` and `DROP PERSISTENT`,
+`SET TIMESTAMP <expression>` and `DROP TIMESTAMP`, and `SET PROPERTIES { … }` and `DROP PROPERTIES`.
+`SET PROPERTIES` replaces the complete nonempty property set. Each targeted operation preserves
+the envelope fields it does not name.
 
 | Clause | Written with | Value every record carries |
 | --- | --- | --- |
@@ -1249,6 +1255,7 @@ CREATE KAFKA TOPIC EMITTER <name>
   TO <client> TOPIC 'orders'
     MODE <mode>
     ENCODE USING <codec>
+    [TIMESTAMP occurred_at]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
@@ -1269,7 +1276,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
 | Batch transformation required | no |
-| Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
+| Envelope | TIMESTAMP occurred_at |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | records the producer queues under ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, holds back what fills it<br>records the producer queues under NO ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |
 | Network waits | a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, delivery.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT`<br>destroying a producer, for its polling thread and the reports of the records its purge failed: driver default, 100 ms poll, then a 500 ms flush |
@@ -1281,9 +1288,27 @@ See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#
 
 `TOPIC` uses the same rule as [Kafka ingestion](ingestors.md#kafka): 1 to 249 ASCII letters,
 digits, `.`, `_` and `-`, other than `.` and `..`, produced to exactly as written. `write_header`
-writes the record's headers in the order the program writes them, and the emitter declares no
-envelope clause or `PROPERTIES` block. The `KAFKA CLIENT` it names requires `bootstrap.servers` and
-refuses the Nervix-owned keys the [Kafka ingestion section](ingestors.md#kafka) lists.
+writes the record's headers in the order the program writes them. The emitter declares the
+`TIMESTAMP` envelope clause, no other envelope clause and no `PROPERTIES` block. The `KAFKA CLIENT`
+it names requires `bootstrap.servers` and refuses the Nervix-owned keys the
+[Kafka ingestion section](ingestors.md#kafka) lists.
+
+`TIMESTAMP <expression>` sets the time each record carries as its Kafka `CreateTime`. The
+expression's `DATETIME` counts nanoseconds and a Kafka record time counts whole milliseconds, so
+Nervix writes the millisecond that contains the value: `2001-02-03T04:05:06.789999999Z` becomes
+`2001-02-03T04:05:06.789Z`. A record keeps that time on every attempt, so a retry after a refused
+or unanswered publish writes the time the first attempt wrote. librdkafka reads a zero timestamp as
+the time it takes the record, and a Kafka record carries no time before the Unix epoch, so a record
+whose millisecond is not after the epoch, any time before `1970-01-01T00:00:00.001Z`, is rejected
+through `ON MESSAGE ERROR` before the producer takes it, as an `external` error of the `publish`
+operation whose message names its timestamp, and the emitter's other records are still sent.
+Without `TIMESTAMP`, librdkafka gives each record the time the producer takes it. A topic whose
+`message.timestamp.type` is `LogAppendTime` replaces either time with the time the broker appends
+the record. A broker whose `log.message.timestamp.before.max.ms` or
+`log.message.timestamp.after.max.ms` refuses a record's time answers `INVALID_TIMESTAMP`; under
+`ACK` that answer rejects the record through `ON MESSAGE ERROR`. Under `NO ACK` the record counts
+as delivered once the producer takes it, so it is lost, like any other record its broker refuses
+after that.
 
 `ACK` waits for every record's delivery report through the shared confirmation window. If a publish
 attempt fails, the window first settles the answers already received and returns only unresolved
@@ -1640,7 +1665,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | CHANNEL 'orders' (redis_channel) |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
-| Headers | Not offered: Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names. |
+| Headers | Not offered: Redis Pub/Sub carries a channel and a payload, and for a pattern subscription the pattern that matched, but no headers. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. An ingestor subscribes to a quoted channel or channel pattern and an emitter publishes to a quoted channel, each case-preserving. |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -2823,9 +2848,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
-| Network waits | a pool acquire: name resolution, connection, TLS and authentication: fixed 30s<br>an insert and its metadata query: unbounded |
+| Network waits | a pool checkout: the wait for the pool, name resolution, connection, TLS, authentication and the borrow test: `pool_acquire_timeout_ms`; 30s when omitted<br>an insert and its metadata query: unbounded |
 | Driver limits | None declared. |
-| Stalled-peer checks | None: no client deadline key bounds a wait. |
+| Stalled-peer checks | `STALLED PEER pool_acquire_timeout_ms` |
 
 See the [POSTGRES TABLE capability and mirror reference](connector-capabilities.md#postgres-table-emit).
 <!-- connector-matrix:emit-postgres-table:end -->
@@ -2858,6 +2883,13 @@ CREATE POSTGRES CLIENT pg
 ```
 
 For TLS connections, use `sslmode=verify-full`, mount a TLS resource, and set `'tls_ca_file'` to the mounted CA path. `'tls_cert_file'` and `'tls_key_file'` supply a client identity and must be given together. TLS files require `sslmode=verify-full`.
+
+Four more Nervix-owned keys set how the client's pool treats a connection.
+`pool_acquire_timeout_ms`, 30 seconds by default, bounds each checkout, independent of how long an
+accepted query then runs. `pool_idle_timeout_ms` and `pool_max_lifetime_ms`, 10 and 30 minutes by
+default, retire a connection, and `pool_test_before_acquire`, `true` by default, has each checkout
+test an idle connection before handing it over. `DESCRIBE CLIENT` reports all four, and
+[Connection lifetimes](database-client-pools.md#connection-lifetimes) states what each one does.
 
 ### MySQL
 
