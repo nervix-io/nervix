@@ -469,6 +469,12 @@ current connection, retry and deadline limits.
   `BUFFER` or `DROP` quiesce. Write NATS wildcards only in an ingestor's `SUBJECT`, as whole
   tokens with `>` last; an emitter's `SUBJECT` is one literal subject. Check both against the NATS
   sections of `Ingestors` and `Emitters`.
+- A `PULSAR TOPIC` emitter's `TIMESTAMP <expression>` is each message's event time: an exact,
+  non-null, non-sensitive `DATETIME`, written as the millisecond that contains it, and a time before
+  `1970-01-01T00:00:00.001Z` rejects its record through `ON MESSAGE ERROR`. Its `DELIVER AFTER
+  <duration>` delays each message from its batch's execution time, not from the send, for shared
+  subscriptions only, and the broker may deliver up to its tick, one second by default, early. Read
+  `Emitters` → `Pulsar`.
 - Every `PULSAR TOPIC` ingestor states who owns its subscription after the subscription's name:
   `OWNED BY INGESTOR START AT EARLIEST` when Nervix may create it and should remove it when the ingestor or its
   domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and

@@ -36,10 +36,11 @@ use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
     EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
-    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
-    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorReference,
-    IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
-    OptionForm, OptionPresence, OptionValue, PositionClass, RetryPolicy,
+    EnvelopeClauseKind, HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode,
+    IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
+    IngestorMetadataDeclaration, IngestorReference, IngestorReferenceKind, LocatorDeclaration,
+    LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
+    PositionClass, RetryPolicy,
 };
 
 configured_client!(Pulsar: unpooled, config CLIENT_CONFIG, CreateClientPulsar => PulsarConfigEntry);
@@ -528,7 +529,14 @@ impl EmitterDeclaration for PulsarTopicEmitter {
             name: LocatorName::External(PulsarTopicName::DECLARATION),
         }),
         options: &[],
-        envelope: &[],
+        // A Pulsar message carries its event time and the time it is due beside its key,
+        // properties and payload. Its topic decides how it is stored, and it has no routing or
+        // retention flag, no reply target and no per-message identity a producer chooses. Its
+        // properties carry what a PROPERTIES block would, and its ordering key is a key.
+        envelope: &[
+            EnvelopeClauseKind::Timestamp,
+            EnvelopeClauseKind::DeliverAfter,
+        ],
         properties: &[],
         bounds: PULSAR_EMITTER_BOUNDS,
     };
