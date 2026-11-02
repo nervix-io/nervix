@@ -1715,7 +1715,8 @@ Delivery constraints:
 - `ACK` modes require `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. CREATE and ALTER refuse any other
   pairing, naming the session and quality of service the statement writes and underlining the
   mode, such as `MQTT TOPIC ingestors name MODE ACK SEQUENTIAL only with SESSION PERSISTENT and
-  QOS 1 or 2; the statement writes SESSION CLEAN and QOS 1`
+  QOS 1 or 2; the statement writes SESSION CLEAN and QOS 1`. Completion after `MODE` offers only the
+  modes the written session and quality of service keep, so any other pairing offers `NO ACK` alone
 - `ACK PARALLEL MAX <n>` is the in-flight ACK window and `BATCH TIMEOUT` is the maximum partial-batch wait;
   a quiesce change or a stop that meets a partial batch takes in the publishes it gathered at once
   rather than after its batch timeout

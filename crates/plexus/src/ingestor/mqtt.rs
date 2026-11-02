@@ -14,9 +14,9 @@
 
 use chumsky::prelude::*;
 use nervix_models::{
-    ChoiceRequirement, IngestQuiesceKind, IngestQuiesceMode, IngestorDeclaration as _,
-    IngestorEntityModel as _, MqttIngestMode, MqttQos, MqttSession, MqttTopicFilter,
-    MqttTopicIngestor,
+    ChoiceRequirement, IngestDeliveryKind, IngestQuiesceKind, IngestQuiesceMode,
+    IngestorDeclaration as _, IngestorEntityModel as _, MqttIngestMode, MqttQos, MqttSession,
+    MqttTopicFilter, MqttTopicIngestor, UnmetDeliveryRequirement,
 };
 
 use super::delivery::{
@@ -39,6 +39,16 @@ impl MqttSubscriptionChoices {
     /// The choice these make for the declared option opened by `option`.
     fn chosen(&self, option: &str) -> Option<&'static str> {
         MqttTopicIngestor::subscription_choice(self.session, self.qos, option)
+    }
+
+    /// The requirement the `MQTT TOPIC` declaration states for `delivery` that these choices leave
+    /// unmet.
+    fn unmet_delivery(&self, delivery: IngestDeliveryKind) -> Option<UnmetDeliveryRequirement> {
+        MqttTopicIngestor::CAPABILITIES.unmet_delivery(
+            MqttTopicIngestor::KIND,
+            delivery,
+            &|option| self.chosen(option),
+        )
     }
 }
 
@@ -82,33 +92,48 @@ fn session_clause<'src>()
     )))
 }
 
-/// `MODE NO ACK | ACK SEQUENTIAL … | ACK PARALLEL …` after its keyword.
+fn parallel_delivery<'src>()
+-> impl Parser<'src, &'src [Token], MqttIngestMode, extra::Err<ParseError<'src>>> + Clone {
+    ack_parallel().map(
+        |ParallelAck {
+             max,
+             batch_timeout,
+             timeout,
+             retry_policy,
+         }| MqttIngestMode::AckParallel {
+            max,
+            batch_timeout,
+            timeout,
+            retry_policy,
+        },
+    )
+}
+
+fn sequential_delivery<'src>()
+-> impl Parser<'src, &'src [Token], MqttIngestMode, extra::Err<ParseError<'src>>> + Clone {
+    ack_sequential().map(
+        |SequentialAck {
+             timeout,
+             retry_policy,
+         }| MqttIngestMode::AckSequential {
+            timeout,
+            retry_policy,
+        },
+    )
+}
+
+fn unacknowledged_delivery<'src>()
+-> impl Parser<'src, &'src [Token], MqttIngestMode, extra::Err<ParseError<'src>>> + Clone {
+    no_ack().to(MqttIngestMode::NoAck)
+}
+
+/// `NO ACK | ACK SEQUENTIAL … | ACK PARALLEL …` after `MODE`.
 fn delivery<'src>()
 -> impl Parser<'src, &'src [Token], MqttIngestMode, extra::Err<ParseError<'src>>> + Clone {
     choice((
-        ack_parallel().map(
-            |ParallelAck {
-                 max,
-                 batch_timeout,
-                 timeout,
-                 retry_policy,
-             }| MqttIngestMode::AckParallel {
-                max,
-                batch_timeout,
-                timeout,
-                retry_policy,
-            },
-        ),
-        ack_sequential().map(
-            |SequentialAck {
-                 timeout,
-                 retry_policy,
-             }| MqttIngestMode::AckSequential {
-                timeout,
-                retry_policy,
-            },
-        ),
-        no_ack().to(MqttIngestMode::NoAck),
+        parallel_delivery(),
+        sequential_delivery(),
+        unacknowledged_delivery(),
     ))
 }
 
@@ -123,25 +148,69 @@ where
     map_ctx::<_, _, _, MqttModeExtra<'src>, extra::Err<ParseError<'src>>, _>(|_| (), parser)
 }
 
+/// `parser`, which offers `delivery` only beside choices that keep it.
+fn offered_where_kept<'src, P>(
+    delivery: IngestDeliveryKind,
+    parser: P,
+) -> impl Parser<'src, &'src [Token], MqttIngestMode, MqttModeExtra<'src>> + Clone
+where
+    P: Parser<'src, &'src [Token], MqttIngestMode, extra::Err<ParseError<'src>>> + Clone + 'src,
+{
+    with_choices_context(parser).contextual().configure(
+        move |_, choices: &MqttSubscriptionChoices| choices.unmet_delivery(delivery).is_none(),
+    )
+}
+
+/// Whether `token` opens a delivery mode, `ACK` or `NO`.
+fn opens_delivery(token: Option<&Token>) -> bool {
+    matches!(
+        token,
+        Some(Token::Word(Word::KnownWord {
+            iden: Identifier::Ack | Identifier::No,
+            ..
+        }))
+    )
+}
+
+/// The delivery mode after `MODE`. A mode the statement writes is read through the shared parser
+/// beside any choices, so that [`checked_delivery`] can refuse it by name. Anywhere else the
+/// contextual gates fail with only the modes these choices keep as expected, which is what
+/// completion offers, so a statement that follows completion never reaches that refusal.
+///
+/// `NO ACK` comes first because no choice closes it. The first alternative to fail gives the merged
+/// error its found word and span, and a closed gate has neither.
+fn written_delivery<'src>()
+-> impl Parser<'src, &'src [Token], MqttIngestMode, MqttModeExtra<'src>> + Clone {
+    let written = with_choices_context(delivery());
+    let offered = choice((
+        offered_where_kept(IngestDeliveryKind::NoAck, unacknowledged_delivery()),
+        offered_where_kept(IngestDeliveryKind::AckParallel, parallel_delivery()),
+        offered_where_kept(IngestDeliveryKind::AckSequential, sequential_delivery()),
+    ));
+    custom::<_, _, _, MqttModeExtra<'src>>(move |input| {
+        if opens_delivery(input.peek_ref()) {
+            return input.parse(written.clone());
+        }
+        input.parse(offered.clone())
+    })
+}
+
 /// `MODE …` after the session and quality of service the context holds: a mode the `MQTT TOPIC`
 /// declaration requires other choices beside is refused there, naming what the statement writes.
+/// `try_map_with` makes this the refusal: it replaces the alternatives the shared parser read past,
+/// which would otherwise outrank an error raised from inside the mode.
 fn checked_delivery<'src>()
 -> impl Parser<'src, &'src [Token], MqttIngestMode, MqttModeExtra<'src>> + Clone {
-    with_choices_context(kw(Identifier::Mode).ignore_then(delivery())).try_map_with(
-        |mode, extra| {
+    with_choices_context(kw(Identifier::Mode))
+        .ignore_then(written_delivery())
+        .try_map_with(|mode: MqttIngestMode, extra| {
             let choices: MqttSubscriptionChoices = *extra.ctx();
-            let delivery = mode.acknowledgement().kind();
-            let unmet = MqttTopicIngestor::CAPABILITIES.unmet_delivery(
-                MqttTopicIngestor::KIND,
-                delivery,
-                &|option| choices.chosen(option),
-            );
+            let unmet = choices.unmet_delivery(mode.acknowledgement().kind());
             if let Some(unmet) = unmet {
                 return Err(Rich::custom(extra.span(), unmet.to_string()));
             }
             Ok(mode)
-        },
-    )
+        })
 }
 
 /// `SESSION CLEAN|PERSISTENT QOS 0|1|2 MODE …`: every statement writes the session and the quality
@@ -250,11 +319,35 @@ mod tests {
 
     use crate::{
         conformance_support::{assert_offers_exactly, created_model, refused},
+        ingestor::suggest_create_ingestor,
         parser_support::ParseFromSourceError,
-        statement::parse_statement,
+        statement::{parse_statement, suggest_statement},
     };
 
     const NO_ACK: &str = "SESSION CLEAN QOS 0 MODE NO ACK";
+
+    /// An acknowledged mode written in full, and how a refusal names it.
+    #[derive(Debug, Clone, Copy)]
+    struct AcknowledgedMode {
+        written: &'static str,
+        phrase: &'static str,
+    }
+
+    const ACK_SEQUENTIAL: AcknowledgedMode = AcknowledgedMode {
+        written: "ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s",
+        phrase: "ACK SEQUENTIAL",
+    };
+
+    const ACK_PARALLEL: AcknowledgedMode = AcknowledgedMode {
+        written: "ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s \
+                  MAX 30s",
+        phrase: "ACK PARALLEL",
+    };
+
+    /// A statement up to the delivery mode `MODE` introduces, after the written `choices`.
+    fn through_mode(choices: &str) -> String {
+        format!("CREATE MQTT TOPIC INGESTOR incoming FROM broker TOPIC 'events' {choices} MODE ")
+    }
 
     /// A complete `MQTT TOPIC` ingestor statement that subscribes to `filter`, writing
     /// `subscription` (its session, quality of service and delivery mode) before `quiesce`.
@@ -474,39 +567,129 @@ mod tests {
     }
 
     #[rstest]
-    #[case(
-        "CLEAN",
-        "0",
-        "ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s",
-        "ACK SEQUENTIAL"
-    )]
-    #[case(
-        "CLEAN",
-        "2",
-        "ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s",
-        "ACK SEQUENTIAL"
-    )]
-    #[case(
-        "PERSISTENT",
-        "0",
-        "ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s",
-        "ACK PARALLEL"
-    )]
     fn an_unkept_acknowledged_pairing_names_both_written_values_and_underlines_its_mode(
-        #[case] session: &str,
-        #[case] qos: &str,
-        #[case] mode: &str,
-        #[case] phrase: &str,
+        #[values(("CLEAN", "0"), ("CLEAN", "1"), ("CLEAN", "2"), ("PERSISTENT", "0"))] unkept: (
+            &str,
+            &str,
+        ),
+        #[values(ACK_SEQUENTIAL, ACK_PARALLEL)] mode: AcknowledgedMode,
     ) {
-        let subscription = format!("SESSION {session} QOS {qos} MODE {mode}");
+        let (session, qos) = unkept;
+        let subscription = format!("SESSION {session} QOS {qos} MODE {}", mode.written);
         let source = clauses_statement(&format!("{subscription} ON QUIESCE DROP"));
-        let refused_mode = format!("MODE {mode}");
+        let refused_mode = format!("MODE {}", mode.written);
         let expected = format!(
-            "MQTT TOPIC ingestors name MODE {phrase} only with SESSION PERSISTENT and QOS 1 or 2; \
-             the statement writes SESSION {session} and QOS {qos}"
+            "MQTT TOPIC ingestors name MODE {} only with SESSION PERSISTENT and QOS 1 or 2; the \
+             statement writes SESSION {session} and QOS {qos}",
+            mode.phrase
         );
         let refusals = refusal(&source);
         assert!(refusals.contains(&(expected, refused_mode)), "{refusals:?}");
+    }
+
+    #[test]
+    fn an_unkept_pairing_in_lower_case_is_refused_like_its_upper_case_spelling() {
+        let mode = "mode ack sequential ack timeout 5s retry policy backoff 1s max 30s";
+        let source = clauses_statement(&format!("session clean qos 1 {mode} on quiesce drop"));
+        let expected = "MQTT TOPIC ingestors name MODE ACK SEQUENTIAL only with SESSION \
+                        PERSISTENT and QOS 1 or 2; the statement writes SESSION CLEAN and QOS 1";
+        let refusals = refusal(&source);
+        assert!(
+            refusals.contains(&(expected.to_owned(), mode.to_owned())),
+            "{refusals:?}"
+        );
+    }
+
+    #[rstest]
+    #[case("SESSION CLEAN QOS 0", &["NO ACK"])]
+    #[case("SESSION CLEAN QOS 1", &["NO ACK"])]
+    #[case("SESSION CLEAN QOS 2", &["NO ACK"])]
+    #[case("SESSION PERSISTENT QOS 0", &["NO ACK"])]
+    #[case("SESSION PERSISTENT QOS 1", &["ACK", "NO ACK"])]
+    #[case("SESSION PERSISTENT QOS 2", &["ACK", "NO ACK"])]
+    fn completion_after_mode_offers_only_the_modes_the_written_choices_keep(
+        #[case] choices: &str,
+        #[case] modes: &[&str],
+    ) {
+        assert_offers_exactly(&through_mode(choices), modes);
+    }
+
+    #[test]
+    fn a_partial_word_filters_the_kept_modes_without_reopening_an_unkept_one() {
+        let prefix = through_mode("SESSION CLEAN QOS 1");
+        assert_offers_exactly(&format!("{prefix}N"), &["NO ACK"]);
+        assert_offers_exactly(&format!("{prefix}A"), &[]);
+    }
+
+    /// The statement grammar asks again with a partial word in place when it finds no match for
+    /// it, so a word that only an unkept mode opens stays unoffered on that path too.
+    #[test]
+    fn the_ingestor_grammar_keeps_an_unkept_mode_from_a_partial_word_it_reads_again() {
+        let partial = format!("{}A", through_mode("SESSION CLEAN QOS 1"));
+        assert_eq!(
+            suggest_create_ingestor(&partial, partial.len()),
+            Vec::<String>::new()
+        );
+    }
+
+    #[rstest]
+    #[case("SESSION CLEAN QOS 1", &["NO ACK"])]
+    #[case("SESSION PERSISTENT QOS 0", &["NO ACK"])]
+    #[case("SESSION PERSISTENT QOS 1", &["ACK", "NO ACK"])]
+    fn a_word_that_opens_no_mode_leaves_completion_to_the_kept_modes(
+        #[case] choices: &str,
+        #[case] modes: &[&str],
+    ) {
+        assert_offers_exactly(&format!("{}SOMEDAY ", through_mode(choices)), modes);
+    }
+
+    #[rstest]
+    #[case("SESSION CLEAN QOS 1", "expected NO ACK, found SOMEDAY")]
+    #[case("SESSION PERSISTENT QOS 0", "expected NO ACK, found SOMEDAY")]
+    #[case("SESSION PERSISTENT QOS 1", "expected NO ACK | ACK, found SOMEDAY")]
+    fn a_word_that_opens_no_mode_is_refused_where_it_stands(
+        #[case] choices: &str,
+        #[case] expected: &str,
+    ) {
+        let source = clauses_statement(&format!("{choices} MODE SOMEDAY ON QUIESCE DROP"));
+        let refusals = refusal(&source);
+        assert!(
+            refusals.contains(&(expected.to_owned(), "SOMEDAY".to_owned())),
+            "{refusals:?}"
+        );
+    }
+
+    #[rstest]
+    #[case("SESSION CLEAN QOS 1", "expected NO ACK, found end of input")]
+    #[case("SESSION PERSISTENT QOS 0", "expected NO ACK, found end of input")]
+    #[case(
+        "SESSION PERSISTENT QOS 1",
+        "expected NO ACK | ACK, found end of input"
+    )]
+    fn a_statement_that_ends_at_mode_expects_the_modes_its_choices_keep(
+        #[case] choices: &str,
+        #[case] expected: &str,
+    ) {
+        let source = through_mode(choices);
+        let refusals = refusal(source.trim_end());
+        assert!(
+            refusals.contains(&(expected.to_owned(), String::new())),
+            "{refusals:?}"
+        );
+    }
+
+    #[rstest]
+    #[case("SESSION CLEAN QOS 0", "NO ACK")]
+    #[case("SESSION PERSISTENT QOS 0", "NO ACK")]
+    #[case("SESSION PERSISTENT QOS 1", "NO ACK")]
+    #[case("SESSION PERSISTENT QOS 2", ACK_SEQUENTIAL.written)]
+    #[case("SESSION PERSISTENT QOS 2", ACK_PARALLEL.written)]
+    fn a_kept_mode_goes_on_to_the_quiesce_clause(#[case] choices: &str, #[case] mode: &str) {
+        let written = format!("{}{mode} ", through_mode(choices));
+        assert!(
+            suggest_statement(&written, written.len()).contains(&"ON QUIESCE".to_owned()),
+            "completion of `{written}` reaches the quiesce clause"
+        );
     }
 
     #[test]

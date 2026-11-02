@@ -447,11 +447,14 @@ MQTT QoS refusals identify the supplied number, its source span, and the levels 
 through the one `QOS` clause the two statement families share. An MQTT ingestor `ACK` mode outside a
 persistent session at QoS 1 or 2 is refused with the mode underlined and the session and QoS the
 statement writes named beside the required pairing. An MQTT emitter's mode beside a quality of
-service it does not pair with is refused the same way, and completion offers only the modes the
-written quality of service pairs with. A refused `ON QUIESCE SUSPEND` identifies
-`SUSPEND` and its required
-`SESSION PERSISTENT` pairing at `QOS 1` or `QOS 2`. Completion offers the quiesce modes the
-written session can use; a clean session or QoS 0 offers `BUFFER` and `DROP`.
+service it does not pair with is refused the same way. A refused `ON QUIESCE SUSPEND` identifies
+`SUSPEND` and its required `SESSION PERSISTENT` pairing at `QOS 1` or `QOS 2`. Completion offers the
+delivery and quiesce modes the written session and QoS keep, so a statement that follows completion
+reaches none of these refusals: a clean session or QoS 0 offers `NO ACK` after an ingestor's `MODE`,
+and `BUFFER` and `DROP` after `ON QUIESCE`, and an emitter's `MODE` offers only the modes its written
+quality of service pairs with. A grammar branch those choices close names nothing a statement could
+write, so a diagnostic lists only what the open branches expect, and says `something else` only where
+none names an item.
 
 The language layer reports rejected source the same way. Lexing and parsing each create the report
 at the stage that failed, and its context names that stage and holds the rejected text with every
