@@ -243,11 +243,11 @@ The Sentry event Model keeps an omitted `PLATFORM` as `None`, separately from an
 written string, including an empty string or `other`. Its serialized field is required and holds
 either that string or an explicit null. Planning resolves the declared default into a required
 platform string; connector preparation uses it only when the codec's event omits the field.
-The registry's `NERVIX PART INGS` archive signature identifies the current Model layout, including
+The registry's `NERVIX UNIT SRCS` archive signature identifies the current Model layout, including
 an owned Pulsar subscription's required start position, the required 16-bit branch partition count,
 Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's
 `SEND` request shape, and the session and quality of service an MQTT TOPIC ingestor writes beside
-its delivery mode. Consensus's `raft_partition_ingestor_` keyspaces and current state metadata
+its delivery mode, and a `REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription. Consensus's `raft_unit_ingestor_` keyspaces and current state metadata
 encoding identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule. The runtime state store's
 `unit-labelled-metric-checkpoint-segments` format identifies the checkpoints it keeps, including the

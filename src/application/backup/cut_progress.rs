@@ -1,7 +1,8 @@
 //! Administrative phase measurements for one domain cut or one owner's capture.
 //!
 //! Layer: control plane.
-//! - **Owns.** The active capture phase, ordered completed durations and their timeout diagnostics.
+//! - **Owns.** The active capture phase, ordered completed durations and their timeout diagnostics,
+//!   including lifecycle failures combined with failed cleanup.
 //! - **Depends on.** Typed domain, execution and coordination identities, the monotonic clock and
 //!   the lifecycle's typed drain failure.
 //! - **Must not know.** Checkpoint contents, transport internals or archive encoding.
@@ -179,14 +180,23 @@ impl CutProgress {
     /// Preserve the typed report of a pause application or drain the cut's deadline ended, such as
     /// the drain's outstanding work, beneath this cut's attribution.
     pub(super) fn drain_failure(&self, error: Report<DomainAlterError>) -> Report<BackupError> {
-        match error.current_context() {
-            DomainAlterError::BackupPauseTimeout { .. }
-            | DomainAlterError::BackupQuiesceTimeout { .. }
-            | DomainAlterError::QuiesceTimeout { .. } => error.change_context(self.timeout()),
-            _ => error.change_context(BackupError::CaptureDomain {
+        let timed_out = error.frames().any(|frame| {
+            matches!(
+                frame.downcast_ref::<DomainAlterError>(),
+                Some(
+                    DomainAlterError::BackupPauseTimeout { .. }
+                        | DomainAlterError::BackupQuiesceTimeout { .. }
+                        | DomainAlterError::QuiesceTimeout { .. }
+                )
+            )
+        });
+        if timed_out {
+            error.change_context(self.timeout())
+        } else {
+            error.change_context(BackupError::CaptureDomain {
                 domain: self.domain.clone(),
                 reason: "domain pause or drain failed".to_string(),
-            }),
+            })
         }
     }
 

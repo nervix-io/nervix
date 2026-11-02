@@ -252,6 +252,7 @@ pub const KEYWORDS: [&str; 384] = [
     "subject",
     "queue",
     "channel",
+    "pattern",
     "request",
     "connection",
     "listener",

@@ -456,13 +456,14 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The dedicated database owns exactly four current keyspaces: `raft_partition_ingestor_logs`,
-`raft_partition_ingestor_meta`, `raft_partition_ingestor_state`, and
-`raft_partition_ingestor_snapshots`. Opening it validates the complete keyspace namespace before
+The dedicated database owns exactly four current keyspaces: `raft_unit_ingestor_logs`,
+`raft_unit_ingestor_meta`, `raft_unit_ingestor_state`, and
+`raft_unit_ingestor_snapshots`. Opening it validates the complete keyspace namespace before
 reading any records. This namespace identifies the current Model shape, including an owned Pulsar
 subscription's required start position, the serialized Sentry platform field, an ingestor's
 `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the session and
-quality of service an MQTT TOPIC ingestor writes beside its delivery mode, `ALTER BRANCH` among the
+quality of service an MQTT TOPIC ingestor writes beside its delivery mode, a `REDIS PUBSUB`
+ingestor's `CHANNEL` or `PATTERN` subscription, `ALTER BRANCH` among the
 archived statements and the branch partition count every resolved branch declaration of the
 committed schedule carries. Its state metadata requires the current `RestoredLifecycle` encoding,
 including the durable restore installation gate and the unit-keyed committed schedule in which a

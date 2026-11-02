@@ -522,7 +522,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/names__bolero_names_round_trip_through_every_representation/corpus"
-domain_version = 8
+domain_version = 9
 features = []
 id = "models-names"
 invariant = "Every name type keeps valid text through parsing, display, conversions, JSON, the archive and model-name widening."
@@ -537,7 +537,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/names__bolero_name_text_is_validated_or_rejected/corpus"
-domain_version = 8
+domain_version = 9
 features = []
 id = "models-name-validation"
 invariant = "Name parsing matches the name rule on arbitrary text, and the JSON and archive decoders accept only canonical name text."
@@ -552,7 +552,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/external_names__bolero_external_names_round_trip_through_every_representation/corpus"
-domain_version = 9
+domain_version = 10
 features = []
 id = "models-external-names"
 invariant = "Every external name type keeps its exact text, case and punctuation through parsing, display, conversions, JSON and the archive."
@@ -567,7 +567,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/external_names__bolero_external_name_text_is_validated_or_rejected/corpus"
-domain_version = 8
+domain_version = 9
 features = []
 id = "models-external-name-validation"
 invariant = "On arbitrary text every external name type's parser, conversion, JSON decoder and archive decoder accept exactly the same text and keep it as written."
@@ -582,7 +582,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/connectors/__fuzz__/surface__bolero_generated_entities_state_only_what_their_entity_declares/corpus"
-domain_version = 20
+domain_version = 21
 features = []
 id = "models-connector-declarations"
 invariant = "A generated ingestor and emitter of every entity state only what their entity declares: a declared delivery or publishing mode whose required option choices they make, a quiesce mode their entity honors, a body of the declared form, batching the declared legality admits, a type contract exactly for direct-value bodies and a client of a declared connector."
@@ -1332,7 +1332,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__requests__bolero_client_requests_keep_complete_values/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "client-requests"
 invariant = "Every current typed client request decodes to its complete original value, including identities, positions, schemas and opaque payloads."
@@ -2966,6 +2966,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/redis/src/pubsub/__fuzz__/pubsub__ingestor__tests__bolero_delivered_messages_keep_their_exact_bytes_and_metadata/corpus"
+domain_version = 1
+features = []
+id = "redis-delivered-messages"
+invariant = "Every RESP2 or RESP3 channel or pattern delivery of arbitrary channel, pattern and payload bytes becomes one delivered message holding exactly those bytes, and its metadata hands over the channel and then the pattern, each as text where it is UTF-8 and as null where it is not or where a channel subscription matched no pattern."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-connector-redis"
+random_iterations = 256
+source = "crates/connectors/redis/src/pubsub/ingestor.rs"
+test = "pubsub::ingestor::tests::bolero_delivered_messages_keep_their_exact_bytes_and_metadata"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/connectors/pulsar/src/topic/__fuzz__/topic__receipt_tests__bolero_receipts_keep_exact_unanswered_counts_and_the_first_failure/corpus"
 domain_version = 1
 features = []
@@ -3522,7 +3537,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_entity_presentations_keep_declared_rows_and_complete_configuration/corpus"
-domain_version = 15
+domain_version = 16
 features = []
 id = "connector-entity-presentation"
 invariant = "Every generated source and sink entity uses its declared phrase and ordered inspection rows, while the canonical Plexus built from that shared presentation reparses to its complete Model including all options, modes, payload mappings, flush and error policies."
@@ -3537,7 +3552,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/web-console/src/create_dialog/__fuzz__/create_dialog__ingestor_source_draft__tests__bolero_ingestor_source_drafts_preserve_every_declared_entity_configuration/corpus"
-domain_version = 6
+domain_version = 7
 features = []
 id = "console-ingestor-source-drafts"
 invariant = "Every current transport entity's draft filled from a generated source builds that complete source unchanged, preserving reference, external names, declared option choices, acknowledgement windows and deadlines, quiesce settings, instances, a required query with arbitrary interior text and an omitted or written Prometheus body limit."

@@ -29,6 +29,7 @@ enum IngestorField {
     Topic,
     Queue,
     Channel,
+    Pattern,
     Subject,
     QueueGroup,
     Subscription,
@@ -53,6 +54,7 @@ impl IngestorField {
             Self::Topic => "Topic or topic filter",
             Self::Queue => "Queue",
             Self::Channel => "Channel",
+            Self::Pattern => "Channel pattern",
             Self::Subject => "Subject",
             Self::QueueGroup => "Queue group",
             Self::Subscription => "Subscription",
@@ -77,6 +79,7 @@ impl IngestorField {
             Self::Topic => "create-ingestor-topic",
             Self::Queue => "create-ingestor-queue",
             Self::Channel => "create-ingestor-channel",
+            Self::Pattern => "create-ingestor-pattern",
             Self::Subject => "create-ingestor-subject",
             Self::QueueGroup => "create-ingestor-queue-group",
             Self::Subscription => "create-ingestor-subscription",
@@ -101,6 +104,7 @@ impl IngestorField {
             Self::Topic => &source.topic,
             Self::Queue => &source.queue,
             Self::Channel => &source.channel,
+            Self::Pattern => &source.pattern,
             Self::Subject => &source.subject,
             Self::QueueGroup => &source.queue_group,
             Self::Subscription => &source.subscription,
@@ -125,6 +129,7 @@ impl IngestorField {
             Self::Topic => &mut source.topic,
             Self::Queue => &mut source.queue,
             Self::Channel => &mut source.channel,
+            Self::Pattern => &mut source.pattern,
             Self::Subject => &mut source.subject,
             Self::QueueGroup => &mut source.queue_group,
             Self::Subscription => &mut source.subscription,
@@ -186,6 +191,7 @@ impl EntityOptionField {
             "TOPIC" => IngestorField::Topic,
             "QUEUE" => IngestorField::Queue,
             "CHANNEL" => IngestorField::Channel,
+            "PATTERN" => IngestorField::Pattern,
             "SUBJECT" => IngestorField::Subject,
             "QUEUE GROUP" => IngestorField::QueueGroup,
             "SUBSCRIPTION" => IngestorField::Subscription,
@@ -440,7 +446,10 @@ pub(super) fn IngestorEditor(
                 control=ChoiceControl::IngestSourceRef signals=signals request_tx=request_tx
                 session_generation=session_generation show_detail=true />
         </Show>
-        <For each={move || entity_kind().and_then(|kind| kind.capabilities().locator).into_iter().collect::<Vec<_>>()}
+        <For each={move || match entity_kind() {
+                Some(kind) => kind.locators(),
+                None => Vec::new(),
+            }}
             key={move |locator| (entity_kind(), locator.keywords)}
             children=move |locator| view! {
                 <EntityValueEditor signals=signals keywords=locator.keywords default=None />
@@ -579,7 +588,7 @@ mod tests {
     fn every_declared_transport_value_has_an_editor_binding() {
         for kind in IngestorEntityKind::modeled() {
             let declaration = kind.capabilities();
-            if let Some(locator) = declaration.locator {
+            for locator in kind.locators() {
                 assert!(
                     EntityOptionField::from_keywords(Some(kind), locator.keywords).is_some(),
                     "{} {}",
