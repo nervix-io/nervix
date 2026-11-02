@@ -404,6 +404,11 @@ one contract:
   names through the node resolver, never reads `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
   `NO_PROXY` or their lowercase forms, follows no redirect by itself, bounds each request by the
   client's `timeout_ms` where the client sets it, and presents the client's TLS trust and identity.
+  Reqwest's `gzip`, `deflate` and `brotli` features, which the OTEL connector selects and Cargo
+  unifies across the server's build, make such a client ask for those encodings with
+  `accept-encoding: gzip,deflate,br` unless its request writes that field, and decompress a
+  response whose `content-encoding` is exactly one of them, removing that field and
+  `content-length`; a connector crate built on its own, as its unit tests are, does neither.
   It also reads the one proxy a client declares with its `proxy` key, as a `DeclaredProxy`: a
   Reqwest client sends every request through it, and the HTTP request emitter's own transport reads
   the same declaration. Prometheus, Sentry and OTEL HTTP declare neither `proxy` nor
