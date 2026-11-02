@@ -32,6 +32,10 @@ Feature: Bounded execution and transient memory
     Examples:
       | cluster_size | node_id |
       | 1            | node-1  |
+
+    @slots_12
+    Examples:
+      | cluster_size | node_id |
       | 3            | node-2  |
 
   Scenario Outline: Credentials a node cannot verify now are answered as unavailable

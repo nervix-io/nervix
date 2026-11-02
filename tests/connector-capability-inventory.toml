@@ -152,21 +152,22 @@ scenarios = [
 capability = "METHOD"
 entity = "HTTP REQUEST INGESTOR"
 scenarios = [
-  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling declares its request and client transport contract on <cluster_size> nodes" },
+  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling sends the method and headers its statement declares on <cluster_size> nodes" },
 ]
 
 [[capability]]
 capability = "HEADERS"
 entity = "HTTP REQUEST INGESTOR"
 scenarios = [
-  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling declares its request and client transport contract on <cluster_size> nodes" },
+  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling sends the method and headers its statement declares on <cluster_size> nodes" },
+  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "A polling header sends a client secret that no inspection prints on <cluster_size> nodes" },
 ]
 
 [[capability]]
 capability = "MAX BODY SIZE"
 entity = "HTTP REQUEST INGESTOR"
 scenarios = [
-  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling declares its request and client transport contract on <cluster_size> nodes" },
+  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "A response above MAX BODY SIZE fails its poll until ALTER raises the bound on <cluster_size> nodes" },
 ]
 
 [[capability]]
@@ -810,6 +811,21 @@ capability = "QUERY"
 entity = "PROMETHEUS QUERY INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/prometheus_ingestion.feature", scenario = "Prometheus ingestor follows paced domain logical time and cadence" },
+]
+
+[[capability]]
+capability = "metadata.evaluated_at"
+entity = "PROMETHEUS QUERY INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/prometheus_samples.feature", scenario = "A route reads the query a sample answers and the instant its poll evaluated it at" },
+  { feature = "tests/features/runtime/prometheus_samples.feature", scenario = "A window takes each sample's event time from metadata.evaluated_at" },
+]
+
+[[capability]]
+capability = "metadata.query"
+entity = "PROMETHEUS QUERY INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/prometheus_samples.feature", scenario = "A route reads the query a sample answers and the instant its poll evaluated it at" },
 ]
 
 [[capability]]
