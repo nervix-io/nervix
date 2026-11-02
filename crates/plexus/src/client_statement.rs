@@ -1,3 +1,5 @@
+mod expression_completion;
+
 use std::ops::Range;
 
 use chumsky::prelude::*;
@@ -293,132 +295,20 @@ impl CompletionExpectation {
 pub fn suggest_client_expectations(input: &str, cursor: usize) -> Vec<CompletionExpectation> {
     let (labels, tokens) = client_completion(input, cursor);
     let schema = alter_schema_context(&tokens);
-    let route_references = route_expression_references(&tokens);
-    if !route_references.is_empty() {
-        return route_references
-            .into_iter()
-            .map(CompletionExpectation::Semantic)
-            .collect();
-    }
-    let source = ingestor_source_kind(&tokens).map(|kind| kind.capabilities().reference);
+    let expression = expression_completion::ExpressionCompletion::new(&tokens);
+    let source = expression.ingestor_reference();
     let mut expectations = Vec::new();
     for label in labels {
+        if let Some(offers) = expression.expectations(&label) {
+            expectations.extend(offers);
+            continue;
+        }
         if let Some(expectation) = CompletionExpectation::from_label(label, schema.as_ref(), source)
         {
             expectations.push(expectation);
         }
     }
     expectations
-}
-
-fn route_expression_references(tokens: &[Token]) -> Vec<SemanticReference> {
-    let output_route_start = tokens.iter().rposition(|token| {
-        matches!(
-            token,
-            Token::Word(Word::KnownWord {
-                iden: Keyword::To,
-                ..
-            })
-        )
-    });
-    let Some(output_route_start) = output_route_start else {
-        return Vec::new();
-    };
-    let has_construction = tokens[output_route_start..].iter().any(|token| {
-        matches!(
-            token,
-            Token::Word(Word::KnownWord {
-                iden: Keyword::Set | Keyword::Where | Keyword::Invoke | Keyword::Inherit,
-                ..
-            })
-        )
-    });
-    if !has_construction {
-        return Vec::new();
-    }
-    match tokens.last() {
-        Some(Token::Word(Word::KnownWord {
-            iden: Keyword::Set, ..
-        })) if junction_input_relay(tokens).is_some() => junction_output_relay(tokens)
-            .map(SemanticReference::RelayField)
-            .into_iter()
-            .collect(),
-        Some(Token::Dot) => {
-            let Some(previous_index) = tokens.len().checked_sub(2) else {
-                return Vec::new();
-            };
-            if matches!(
-                tokens.get(previous_index),
-                Some(Token::Word(crate::lexer::Word::KnownWord {
-                    iden: Keyword::Input,
-                    ..
-                }))
-            ) {
-                junction_input_relay(tokens)
-                    .map(SemanticReference::RelayField)
-                    .into_iter()
-                    .collect()
-            } else {
-                Vec::new()
-            }
-        }
-        Some(Token::DoubleColon) => {
-            let Some(previous_index) = tokens.len().checked_sub(2) else {
-                return Vec::new();
-            };
-            if matches!(
-                tokens.get(previous_index),
-                Some(Token::Word(crate::lexer::Word::KnownWord {
-                    iden: Keyword::Udf,
-                    ..
-                }))
-            ) {
-                vec![SemanticReference::Model(ModelKind::Udf)]
-            } else {
-                Vec::new()
-            }
-        }
-        Some(Token::Word(Word::KnownWord {
-            iden: Keyword::Invoke,
-            ..
-        })) => {
-            let scope = match emitter_connector_kind(tokens) {
-                Some(kind) => BuiltinFunctionScope::EmitterInvocation(kind),
-                None => BuiltinFunctionScope::Ordinary,
-            };
-            vec![SemanticReference::BuiltinFunction(scope)]
-        }
-        Some(Token::Eq | Token::LParen | Token::Comma | Token::Plus | Token::Star) => {
-            let invocation =
-                tokens[output_route_start..]
-                    .iter()
-                    .rev()
-                    .find_map(|token| match token {
-                        Token::Word(Word::KnownWord {
-                            iden: Keyword::Set | Keyword::Where,
-                            ..
-                        }) => Some(false),
-                        Token::Word(Word::KnownWord {
-                            iden: Keyword::Invoke,
-                            ..
-                        }) => Some(true),
-                        _ => None,
-                    });
-            let scope = if invocation == Some(true) {
-                match emitter_connector_kind(tokens) {
-                    Some(kind) => BuiltinFunctionScope::EmitterInvocation(kind),
-                    None => BuiltinFunctionScope::Ordinary,
-                }
-            } else {
-                match ingestor_source_kind(tokens) {
-                    Some(kind) => BuiltinFunctionScope::IngestorEntity(kind),
-                    None => BuiltinFunctionScope::Ordinary,
-                }
-            };
-            vec![SemanticReference::BuiltinFunction(scope)]
-        }
-        _ => Vec::new(),
-    }
 }
 
 fn junction_input_relay(tokens: &[Token]) -> Option<RelayName> {
@@ -777,6 +667,9 @@ fn expects_local_path(head: &str) -> bool {
 }
 
 #[cfg(test)]
+mod connector_completion_tests;
+
+#[cfg(test)]
 mod tests {
     use nervix_arbitrary::{Arbitrary, Domain};
     use nervix_models::{
@@ -871,7 +764,7 @@ mod tests {
     #[test]
     fn header_function_expectations_carry_the_transport_kind() {
         let endpoint = "CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK ON QUIESCE \
-                        SUSPEND DECODE USING codec TO outgoing SET value = read_";
+                        BUFFER MAX SIZE 1MiB DECODE USING codec TO outgoing SET value = read_";
         assert!(
             suggest_client_expectations(endpoint, endpoint.len()).contains(
                 &CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(
