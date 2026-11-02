@@ -513,9 +513,14 @@ address-attempt expiry.
 ### DNS for Redis
 
 Composition gives the node resolver to the shared Redis command pool and to each Pub/Sub source
-plan. Redis 1.7.1 exposes `AsyncConnectionConfig::set_dns_resolver` for command connections. The
+plan. Redis 1.8.0 exposes `AsyncConnectionConfig::set_dns_resolver` for command connections. The
 connector's `bb8` manager installs that hook whenever it opens a physical pooled connection;
-pool bounds, health checks and lease ownership remain with the existing pool and host. A pooled
+pool bounds, health checks and lease ownership remain with the existing pool and host. `bb8` tests
+every connection it hands to a checkout with the manager's `PING`, its `test_on_check_out` default,
+inside the checkout's `connect_timeout_ms`, and closes one that fails it. The manager sets only the
+connection timeout, so every command on a command connection, that `PING` and each `PUBLISH`, keeps
+the driver's default 500 ms response timeout; a late `PUBLISH` answer fails the publish as
+transient, and its retry can deliver a message Redis already published a second time. A pooled
 socket may remain open past an answer's TTL until the pool retires it. The pool reads the client's
 `pool_idle_timeout_ms` and `pool_max_lifetime_ms` from the vocabulary's client schema, whose
 defaults are 10 and 30 minutes: it closes a connection idle that long, the ones it keeps for
@@ -551,7 +556,13 @@ For `rediss://`, the configured hostname remains the TLS server name after an ad
 The source's TLS configuration keeps the same optional client certificate and key as the command
 client. Without a CA file both paths use native roots; a configured `tls_ca_file` replaces those
 roots in both paths. The shared TLS configuration helper exposes that replacement policy
-explicitly because other connectors add a configured CA to their default roots.
+explicitly because other connectors add a configured CA to their default roots. The two paths
+differ when part of the native store cannot be read: the source's helper logs each failure and
+keeps the certificates it read, while the driver fails every command connection it opens, with or
+without a CA file. Neither path connects with the driver's `#insecure` address fragment, which the
+network-free address check accepts: the source refuses it before dialling, and the driver, built
+without its `tls-rustls-insecure` feature, refuses it when it connects. A plaintext `redis://`
+address reads no TLS file on either path.
 
 The Redis hook gives a lookup at most 30 seconds, inside the connection timeout the pool sets on
 the driver for the whole connection, which is the client's `connect_timeout_ms`, 30 seconds by
@@ -1065,7 +1076,10 @@ channel it was published to, and `metadata.pattern`, the pattern that matched it
 `metadata.channel`. Its declaration permits `NO ACK` in both directions and `BUFFER`/`DROP` for
 intake, since Redis retains no Pub/Sub backlog. Pub/Sub carries no transport headers or emitter
 envelope. Redis's own bulk-length refusal stays a record outcome; the emitter declares optional
-batching without a learned size ceiling. The Redis-specific declaration tests, generated grammar
+batching without a learned size ceiling. The emitter's declared driver limits state that refusal,
+after which Redis closes the connection that sent it, and the ingestor's state the server's
+`client-output-buffer-limit` for Pub/Sub clients, at which Redis closes a subscription whose
+unsent messages it holds and loses them. The Redis-specific declaration tests, generated grammar
 conformance and one-/three-node public declaration scenarios qualify these facts together, and
 the pattern subscription's runtime scenario observes both metadata fields.
 
