@@ -58,6 +58,14 @@ impl EntityBoundary {
         }
     }
 
+    /// Every locator the entity declares, its alternatives included.
+    fn locators(self) -> Vec<LocatorDeclaration> {
+        match self {
+            Self::Ingestor(kind) => kind.locators(),
+            Self::Emitter(kind) => kind.capabilities().locator.into_iter().collect(),
+        }
+    }
+
     fn options(self) -> &'static [OptionDeclaration] {
         match self {
             Self::Ingestor(kind) => kind.capabilities().options,
@@ -164,6 +172,20 @@ impl EntityPresentation {
         self.locator = Some(format!("{} {}", declaration.keywords, string_literal(name)));
     }
 
+    /// Writes `name` after the keywords of `locator`, the one of its entity's declared locators the
+    /// concrete Model holds.
+    fn declared_locator(&mut self, locator: LocatorDeclaration, name: &str) {
+        // An entity declares one locator and at most a handful of alternatives in its constant
+        // declaration, so the scan is bounded by that declaration.
+        let declared = self
+            .boundary
+            .locators()
+            .into_iter()
+            .find(|candidate| *candidate == locator)
+            .assured("the concrete Model names a locator its entity declares");
+        self.locator = Some(format!("{} {}", declared.keywords, string_literal(name)));
+    }
+
     fn written_option(&mut self, keywords: &str, value: String) {
         let declaration = self.declaration(keywords);
         self.options
@@ -203,24 +225,6 @@ impl EntityPresentation {
         let declaration = self.declaration(keywords);
         self.options
             .insert(declaration.keywords, PresentedOption::Payload(value));
-    }
-
-    /// MQTT's current body writes SESSION and QOS together when either differs from its default.
-    fn write_choices_together(&mut self, keywords: &[&str]) {
-        // Both bounds come from one MQTT declaration: two named choices among three options.
-        let written = keywords.iter().any(|keyword| {
-            matches!(
-                self.options.get(*keyword),
-                Some(PresentedOption::Written(_))
-            )
-        });
-        if written {
-            for keyword in keywords {
-                if let Some(option @ PresentedOption::Default(_)) = self.options.get_mut(*keyword) {
-                    *option = PresentedOption::Written(option.value());
-                }
-            }
-        }
     }
 
     /// The connector and entity phrase, from the vocabulary's kind.
@@ -472,9 +476,8 @@ impl IngestorPresentationModel for MqttTopicIngestor {
         let mut presentation = EntityPresentation::ingestor(self);
         presentation.external_locator(self.topic.as_str());
         presentation.defaulted_option("INSTANCES", self.instances.to_string());
-        presentation.defaulted_option("SESSION", self.mode.session().keyword().to_owned());
-        presentation.defaulted_option("QOS", self.mode.qos().spelling().to_owned());
-        presentation.write_choices_together(&["SESSION", "QOS"]);
+        presentation.written_option("SESSION", self.session.keyword().to_owned());
+        presentation.written_option("QOS", self.qos.spelling().to_owned());
         presentation
     }
 }
@@ -516,7 +519,7 @@ queue_ingestor_presentations!(RabbitMqQueueIngestor, SqsQueueIngestor);
 impl IngestorPresentationModel for RedisPubSubIngestor {
     fn entity_presentation(&self) -> EntityPresentation {
         let mut presentation = EntityPresentation::ingestor(self);
-        presentation.external_locator(self.channel.as_str());
+        presentation.declared_locator(self.subscription.locator(), self.subscription.as_str());
         presentation
     }
 }

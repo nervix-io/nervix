@@ -41,6 +41,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Emitter envelope clauses and `PROPERTIES`: timestamps, flags, delays, reply targets and message identities a transport carries beside each payload | `Emitters` → `Envelope clauses`, then `Connector Capabilities` |
 | MongoDB collection names and the lookup before each write, BSON field-name admission, native widths/date precision, conflict filters and upserts, write-concern outcomes, client URL configuration, the client database, paired TLS identity files, pool waits and driver deadlines | `Emitters` → `MongoDB`, `Database Client Connection Pools`, then `Connector Capabilities` |
 | MySQL table path parts, exact value bindings, duplicate-key actions, placeholder and packet limits, operation deadlines, TLS verification and identity file formats, URL lifetime settings and maintained pool minimums | `Emitters` → `MySQL`, `Database Client Connection Pools`, then `Connector Capabilities` → `MYSQL client` |
+| Postgres table path parts, conflict rules, the `sslmode` policy, TLS identity files, the checkout deadline, connection lifetimes and the borrow test | `Emitters` → `Postgres`, and `Database Client Connection Pools` |
 | Sentry platform options, event defaults and limit, batch transformations, strict DSN/timeout configuration, the inherited HTTP transport, rejected versus retried statuses and retry hints | `Emitters` → `Sentry`, then `Connector Capabilities` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
@@ -194,8 +195,8 @@ current connection, retry and deadline limits.
   `WEBSOCKETS CONNECTION` included, keeps its existing live primary and replicas through ordinary
   schedule recomputation.
 - For `WEBSOCKETS CONNECTION` literal upgrade headers, subprotocol offers, frame metadata, strict client CONFIG,
-  handshake capacity, message/frame limits, inbound idle bounds, recovery and graceful close, read `Ingestors` →
-  `WEBSOCKETS CONNECTION` in the selected documentation index.
+  TLS trust roots, handshake capacity, message/frame limits, inbound idle bounds, recovery and graceful close,
+  read `Ingestors` → `WEBSOCKETS CONNECTION` in the selected documentation index.
   A successful upgrade does not establish data delivery or reset repeated-failure backoff.
   Check the effective idle bound together with the ping cadence and the peer's inbound activity.
 - Every internal schema and every declared JSON, CBOR, or AVRO wire schema is non-empty; types and
@@ -228,6 +229,9 @@ current connection, retry and deadline limits.
 - Write an envelope clause or `PROPERTIES` key only where the emitter's entity declares it, after
   the payload and before the construction, in the documented order; see
   [Emitters → Envelope clauses](../../../../docs/src/emitters.md#envelope-clauses).
+- For Pulsar subscription ownership and the required creation position of an owned subscription,
+  read [Ingestors → Pulsar](../../../../docs/src/ingestors.md#pulsar). Distinguish creation policy
+  from the existing broker cursor when explaining `ALTER` or recovery.
 - For Pulsar receipt deadlines and the final wait after `NO ACK` acceptance, read
   [Emitters → Pulsar](../../../../docs/src/emitters.md#pulsar) and
   [Finishing an emitter](../../../../docs/src/connector-contract.md#finishing-an-emitter).
@@ -368,6 +372,8 @@ current connection, retry and deadline limits.
   Treat `TOPIC` as a literal, case-preserving Kafka topic name in both directions, and give every
   `KAFKA TOPIC` ingestor `OFFSET BY DOMAIN` or `OFFSET BY CONSUMER GROUP '<group>'` and
   `ON QUIESCE SUSPEND`.
+- For Kafka record metadata, nullable keys, tombstones and `TIMESTAMP AT metadata.timestamp`,
+  follow `Ingestors` → `Kafka`; convert a binary key explicitly before using it as text.
 - Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
   group may need records that already exist; Nervix passes the setting through and does not supply
   a hidden default. Under `OFFSET BY DOMAIN` in an unpaced domain the same policy places a
@@ -412,13 +418,24 @@ current connection, retry and deadline limits.
   And WEBSOCKETS ENDPOINT` for the explicit response window and deadline, reject-only quiesce,
   shared client outcome labels, and sender retry semantics. Check that a WebSocket endpoint's
   declared signaling format can encode its acknowledgements, including during `ACCEPT DATA`.
+  That response deadline is absolute on the physical clock, so keepalive cannot extend it and
+  retry can duplicate admitted effects. Use `BUFFER MAX SIZE <bytes>` only with `MODE NO ACK`,
+  without an overflow clause; an endpoint refuses new input when that buffer is full.
+- To route endpoint requests by their method, path, query, peer address or host, or WebSocket
+  frames by their kind, read the metadata tables in that same section before writing a
+  `metadata.<field>`. An endpoint admits only `POST` at its exact `PATH`, so route on
+  `metadata.query`, `metadata.host` or `metadata.remote_addr` rather than expecting the method or
+  path to vary, and read a forwarding header such as `X-Forwarded-For` with `read_header`, because
+  `metadata.remote_addr` is the TCP peer.
 - Every external name an ingestor reads, such as a topic, consumer group, subscription, queue,
   channel, subject, queue group, or MQTT topic filter, is a string literal spelled exactly as the
   external system names it and within the rules of `Ingestors` → `External Names`.
 - Every transport ingestor source ends with its documented `ON QUIESCE` body immediately before
   `DECODE USING`, with a positive `MAX SIZE`, explicit non-endpoint overflow policy, or endpoint
-  `RETRY AFTER` wherever that mode requires it. `MQTT TOPIC` `SUSPEND` also declares `SESSION
-  PERSISTENT QOS 1`. Do not mix mode bodies between entities or infer a default.
+  `RETRY AFTER` wherever that mode requires it. An `MQTT TOPIC` ingestor writes its `SESSION` and
+  then its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`; its `ACK` modes and `SUSPEND` also declare
+  `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. Do not mix mode bodies between entities or infer a
+  default.
 - MQTT source client identities default to the domain and ingestor, with an instance suffix for
   multiple instances. Account for the broker state that input replacement and `DROP INGESTOR`
   retire; ordinary stop retains a persistent session. Read `Ingestors` → `MQTT` for identities,
@@ -433,7 +450,10 @@ current connection, retry and deadline limits.
   required capacity and idle-probe keys against `Ingestors` → `Redis Pub/Sub`; retain the source's explicit
   `BUFFER` or `DROP` policy in generated Plexus.
 - Redis Pub/Sub uses `NO ACK` in both directions. Treat `CHANNEL` as a literal, case-preserving
-  name and consult the Redis manual sections for its byte bound and unavailable header operations.
+  name. An ingestor writes exactly one of `CHANNEL` and `PATTERN`; use `PATTERN` only for a Redis
+  glob over channel names, and read `metadata.channel` and `metadata.pattern` to tell deliveries
+  apart. Consult the Redis manual sections for the byte bounds, how a pattern matches, the
+  metadata's nulls and unavailable header operations.
 - An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL` with `ON QUIESCE SUSPEND`. An emitter writes
   its request shape, `SEND SINGLE` or `SEND BATCH`, before `MODE ACK RETRY POLICY ...`. Treat
   `QUEUE` as a literal, case-preserving SQS name, and check `SQS CLIENT` keys against `Ingestors` →
@@ -462,7 +482,7 @@ current connection, retry and deadline limits.
   writes `Nats-Msg-Id` so a retry after a lost PubAck can be deduplicated by JetStream. Read
   `Emitters` → `NATS` for the full declaration and guarantee boundary.
 - Every `PULSAR TOPIC` ingestor states who owns its subscription after the subscription's name:
-  `OWNED BY INGESTOR` when Nervix may create it and should remove it when the ingestor or its
+  `OWNED BY INGESTOR START AT EARLIEST` when Nervix may create it and should remove it when the ingestor or its
   domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and
   the operator must create before the ingestor reads. Consumers register as
   `<domain>~<ingestor>-<instance>`. Read `Ingestors` → `Pulsar` for missing subscriptions, removal

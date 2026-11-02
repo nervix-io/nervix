@@ -74,10 +74,24 @@ the group's row bound and the vocabulary's frame labels. An estimate that exceed
 is a typed error before allocation; the ingest group adds the opening operation's context and
 retains the cause for its general-error policy.
 
+A Kafka record keeps an unavailable timestamp distinct from its create-time and log-append-time
+variants. A present variant carries a validated signed-nanosecond timestamp converted exactly from
+the driver's milliseconds. Kafka's external unavailable encoding is resolved at this boundary;
+an out-of-range present timestamp is a typed conversion failure. Missing binary keys are `None`,
+empty keys remain present empty bytes, and the null-payload tombstone flag preserves the distinction
+from a present empty payload when both lend an empty slice to a codec.
+
 A paced poll message carries a typed metadata variant. HTTP polling supplies its response status
 and scheduled poll instant in that variant, while sources with no integration fields carry the
 headers-only variant. The host copies the variant into a matching quiesce buffer and Arrow builder;
 neither a missing status nor a default timestamp can be mistaken for a valid HTTP response.
+
+A Pulsar subscription's ownership is a typed choice. Its owned variant carries the required
+`START AT` position and its provisioned variant carries none, so a Model cannot give an externally
+owned cursor a creation policy or omit the position of a subscription Nervix creates. Parsing and
+the visual draft establish that choice before planning; the plan and connector retain it without
+defaulting a missing position. The [connector contract](./connector-contract.md#pulsar-subscription-ownership)
+owns creation and cursor retention.
 
 The Pulsar emitter's running publishing choice keeps related state together: the `NO ACK` variant
 owns its pending receipt futures and an optional first driver failure; the `ACK` variant owns its
@@ -232,11 +246,13 @@ platform string; connector preparation uses it only when the codec's event omits
 
 A NATS ingestor or emitter Model is one of two entities, `NATS SUBJECT` or `NATS STREAM`, so a stored
 declaration holds the archived union of both. The registry's `NERVIX MODEL NSE` archive signature
-identifies the current Model layout, including those unions, the required branch partition count,
-Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source and an SQS QUEUE emitter's
-`SEND` request shape. Consensus's `raft_stream_emit_` keyspaces and current state metadata encoding
-identify its stored shapes. An unrecognized signature, namespace or encoding fails with the owning
-storage error and requires the stored data to be recreated.
+identifies the current Model layout, including those unions, an owned Pulsar subscription's required
+start position, the required branch partition count, Sentry platform, an ingestor's
+`TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the session
+and quality of service an MQTT TOPIC ingestor writes beside its delivery mode, and a `REDIS PUBSUB`
+ingestor's `CHANNEL` or `PATTERN` subscription. Consensus's `raft_stream_emit_` keyspaces and current
+state metadata encoding identify its stored shapes. An unrecognized signature, namespace or encoding
+fails with the owning storage error and requires the stored data to be recreated.
 
 ## Absence And Distinct States
 

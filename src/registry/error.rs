@@ -151,6 +151,8 @@ pub(crate) enum ConnectorDeclarationIssue {
         ConnectorKind::Nats
     )]
     NatsReplySubject,
+    #[error("{0}")]
+    Delivery(nervix_models::UnmetDeliveryRequirement),
     #[error("{site} requires an exact, non-null, non-sensitive {expected} value")]
     EnvelopeValue {
         site: EnvelopeValueSite,

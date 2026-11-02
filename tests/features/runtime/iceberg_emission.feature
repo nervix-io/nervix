@@ -24,7 +24,7 @@ Feature: Iceberg emission
         'client_id' = 'nervix-cucumber-iceberg-dns-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_notifications
-      FROM mqtt_ingress TOPIC 'iceberg_dns_in_{{test_id}}' MODE NO ACK
+      FROM mqtt_ingress TOPIC 'iceberg_dns_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -217,7 +217,7 @@ Feature: Iceberg emission
         'client_id' = 'nervix-cucumber-iceberg-values-error-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_notifications
-      FROM mqtt_ingress TOPIC 'iceberg_values_error_in_{{test_id}}' MODE NO ACK
+      FROM mqtt_ingress TOPIC 'iceberg_values_error_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TIMESTAMP NOW
       TO notifications
@@ -375,7 +375,7 @@ Feature: Iceberg emission
           'client_id' = 'nervix-cucumber-iceberg-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_ingress TOPIC 'iceberg_notifications_in_{{test_id}}' MODE NO ACK
+        FROM mqtt_ingress TOPIC 'iceberg_notifications_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -667,7 +667,7 @@ Feature: Iceberg emission
         'client_id' = 'nervix-cucumber-iceberg-nested-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_notifications
-      FROM mqtt_ingress TOPIC 'iceberg_nested_in_{{test_id}}' MODE NO ACK
+      FROM mqtt_ingress TOPIC 'iceberg_nested_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications INHERIT ALL UNBRANCHED
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
@@ -871,7 +871,7 @@ Feature: Iceberg emission
         'client_id' = 'nervix-cucumber-iceberg-by-name-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_notifications
-      FROM mqtt_ingress TOPIC 'iceberg_by_name_in_{{test_id}}' MODE NO ACK
+      FROM mqtt_ingress TOPIC 'iceberg_by_name_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications INHERIT ALL UNBRANCHED
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
@@ -1010,7 +1010,7 @@ Feature: Iceberg emission
           'client_id' = 'nervix-cucumber-iceberg-namespace-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_ingress TOPIC 'iceberg_namespace_notifications_in_{{test_id}}' MODE NO ACK
+        FROM mqtt_ingress TOPIC 'iceberg_namespace_notifications_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -1109,7 +1109,7 @@ Feature: Iceberg emission
           'client_id' = 'nervix-cucumber-iceberg-temp-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_ingress TOPIC 'iceberg_temp_notifications_in_{{test_id}}' MODE NO ACK
+        FROM mqtt_ingress TOPIC 'iceberg_temp_notifications_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -1195,7 +1195,7 @@ Feature: Iceberg emission
           'client_id' = 'nervix-cucumber-iceberg-shutdown-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_ingress TOPIC 'iceberg_shutdown_notifications_in_{{test_id}}' MODE NO ACK
+        FROM mqtt_ingress TOPIC 'iceberg_shutdown_notifications_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -1275,7 +1275,7 @@ Feature: Iceberg emission
           'client_id' = 'nervix-cucumber-iceberg-init-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_ingress TOPIC 'iceberg_init_notifications_in_{{test_id}}' MODE NO ACK
+        FROM mqtt_ingress TOPIC 'iceberg_init_notifications_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL

@@ -17,6 +17,66 @@
 # the compiler's catalog: a new owner of tracked locks needs a record, and a record whose file no
 # longer acquires one is removed.
 
+[[workload]]
+coverage = "Kafka records through the real broker and the source host's tracked ingestion and ACK state, with every new metadata field read in NO ACK, ACK SEQUENTIAL and ACK PARALLEL on one and three nodes. Driver polling and borrowed metadata visits are untracked."
+examples = 6
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "scenario.kafka-record-metadata"
+invariant = "Every admitted record retains its own binary key, exact broker timestamp, timestamp kind and tombstone flag across ingestion and acknowledgement."
+invocation = "scenarios"
+scenario = "A Kafka <mode_name> ingestor projects each record's key, timestamp and type"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Real Kafka null and empty values decoded through TOML and JAQ, then projected beside tracked ingestion and acknowledgement state on one and three nodes. Driver data and metadata conversion are untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "scenario.kafka-record-tombstones"
+invariant = "A null Kafka value has tombstone=true and an empty non-null value has tombstone=false for every row its codec produces."
+invocation = "scenarios"
+scenario = "A Kafka ingestor distinguishes a tombstone from an empty value"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Real Kafka metadata timestamps drive two branch-local historical windows through tracked source and processor lifecycle state on one and three nodes. Logical timer waits and borrowed metadata conversion are untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "scenario.kafka-record-event-time"
+invariant = "TIMESTAMP AT metadata.timestamp uses the broker instant for each branch's duration window and preserves the row's fields."
+invocation = "scenarios"
+scenario = "Kafka broker event time makes historical windows due independently in two branches"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: real-broker Kafka ingestion and ACK state in all three modes with every record metadata field read. Driver polling and borrowed metadata visits remain untracked."
+examples = 6
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "stress.kafka-record-metadata"
+invariant = "Every admitted record retains its own binary key, exact broker timestamp, timestamp kind and tombstone flag across ingestion and acknowledgement."
+invocation = "stress-scenarios"
+scenario = "A Kafka <mode_name> ingestor projects each record's key, timestamp and type"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: real Kafka null and empty values decoded through TOML and JAQ beside tracked ingestion and acknowledgement state. Driver data and metadata conversion remain untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "stress.kafka-record-tombstones"
+invariant = "A null Kafka value has tombstone=true and an empty non-null value has tombstone=false for every row its codec produces."
+invocation = "stress-scenarios"
+scenario = "A Kafka ingestor distinguishes a tombstone from an empty value"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: metadata timestamps drive two historical branch windows beside tracked source and processor lifecycle state. Logical timer waits and borrowed metadata conversion remain untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "stress.kafka-record-event-time"
+invariant = "TIMESTAMP AT metadata.timestamp uses the broker instant for each branch's duration window and preserves the row's fields."
+invocation = "stress-scenarios"
+scenario = "Kafka broker event time makes historical windows due independently in two branches"
+selections = ["deloxide-stress"]
+
 [lane]
 # All diagnostic test and driver executables build before any workload starts, under their own
 # real-time budget. The measured cold stressed scenario build took 1988s on a loaded host; 80
@@ -109,6 +169,7 @@ kind = "cucumber"
 package = "nervix-scenarios"
 selections = ["deloxide", "deloxide-order"]
 tags = [
+  "@kafka_record_metadata",
   "@restore_client_inspection",
   "@runtime_installation_retry",
   "@execution_class_drain",
@@ -164,6 +225,7 @@ tags = [
   "@forced_recovery_schedule",
   "@websocket_source_lifecycle",
   "@websocket_declaration_lifecycle",
+  "@endpoint_metadata_buffer",
   "@mqtt_source_retirement",
   "@pulsar_source_retirement",
   "@forced_failover_delivery",
@@ -268,8 +330,8 @@ target = "test:scenarios"
 # a time in the restore selection's lane.
 # Check 41311131846 ran 78 of 80 examples within the former 3840s suite budget after the two
 # NATS STREAM lost-PubAck examples joined this serial selection. Both passed in 30.6s total;
-# the last window example finished its body at 3835s and another remained queued. The 72-minute
-# process bound gives all 80 examples 3960s while retaining the 360s suite teardown reserve.
+# the last window example finished its body at 3835s and another remained queued. The current
+# 84-example inventory has a 3960s suite budget and a 360s teardown reserve in this bound.
 [[invocation]]
 bound_seconds = 4320
 concurrency = 1
@@ -1447,6 +1509,16 @@ scenario = "A second-domain quiesce expiry returns its failure and resumes both 
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Native-client command recovery and archive download after the first domain's mutation lease release meets a one-shot lapsed-leader-lease refusal. Existing client, storage and cluster lifecycle locks are tracked; consensus refusal and command-retry asynchronous waits are untracked."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "scenario.backup-lease-release-recovery"
+invariant = "A refused first-domain mutation lease release leaves the admitted backup recoverable under its original reference, and the recovered archive contains both quiesced domain cuts on one and three nodes."
+invocation = "scenarios"
+scenario = "A cluster backup recovers a first-domain lease release refused by a lapsed leader lease on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Diagnostic cut timeout and domain resumption through the public CLI, retaining the active capture phase and elapsed completed drain."
 examples = 2
 feature = "tests/features/cluster/backup_cut_diagnostics.feature"
@@ -1464,6 +1536,16 @@ id = "scenario.backup-pause-application-deadline"
 invariant = "A cut whose pause application is held beyond its budget is refused within its deadline and the resume that follows, creates no archive and leaves the domain running and delivering on one and three nodes."
 invocation = "scenarios"
 scenario = "A pause the cluster applies slowly ends at its cut's deadline"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A committed-pause gate holds the coordinator past its cut deadline while reconciliation may install the pause; the public CLI verifies the installation refusal and resumed domain."
+examples = 2
+feature = "tests/features/cluster/backup_cut_diagnostics.feature"
+id = "scenario.backup-committed-pause-deadline"
+invariant = "An elapsed cut refuses at its installation wait even when the pause is already installed, creates no archive and resumes its domain on one and three nodes."
+invocation = "scenarios"
+scenario = "A backup whose pause commits after its deadline refuses before installation"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -2177,6 +2259,16 @@ scenario = "A pause the cluster applies slowly ends at its cut's deadline"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
+coverage = "Under scheduling stress: a committed-pause gate holds the coordinator past its cut deadline while reconciliation may install the pause; the public CLI verifies the installation refusal and resumed domain."
+examples = 2
+feature = "tests/features/cluster/backup_cut_diagnostics.feature"
+id = "stress.backup-committed-pause-deadline"
+invariant = "An elapsed cut refuses at its installation wait even when the pause is already installed, creates no archive and resumes its domain on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "A backup whose pause commits after its deadline refuses before installation"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
 coverage = "Under scheduling stress: diagnostic node capture and retained-result recovery through a raw session, followed by ordinary CLI archive download to stdout."
 examples = 2
 feature = "tests/features/cluster/backup_wait.feature"
@@ -2224,6 +2316,16 @@ id = "stress.backup-native-recovery"
 invariant = "A bounded native wait preserves the original multi-domain execution for recovery by a fresh client on one and three nodes, including expiry before the second cut."
 invocation = "stress-restore-scenarios"
 scenario = "A bounded native wait recovers the original multi-domain backup after a <first_cut_seconds> second first cut"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: native-client command recovery and archive download after the first domain's mutation lease release meets a one-shot lapsed-leader-lease refusal. Consensus refusal and command-retry asynchronous waits remain untracked."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "stress.backup-lease-release-recovery"
+invariant = "A refused first-domain mutation lease release leaves the admitted backup recoverable under its original reference, and the recovered archive contains both quiesced domain cuts on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "A cluster backup recovers a first-domain lease release refused by a lapsed leader lease on <cluster_size> nodes"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
@@ -2907,10 +3009,12 @@ path = "crates/client-core/src/client.rs"
 workloads = [
   "paced.reopen-generation",
   "paced.delayed-refusal",
+  "scenario.backup-lease-release-recovery",
   "scenario.backup-native-recovery",
   "scenario.backup-multi-domain-wait",
   "stress.paced.reopen-generation",
   "stress.paced.delayed-refusal",
+  "stress.backup-lease-release-recovery",
   "stress.backup-native-recovery",
   "stress.backup-multi-domain-wait",
 ]
@@ -2947,10 +3051,12 @@ path = "crates/client-core/src/exchange.rs"
 workloads = [
   "scenario.client-alter-drain",
   "paced.reopen-generation",
+  "scenario.backup-lease-release-recovery",
   "scenario.backup-native-recovery",
   "scenario.backup-multi-domain-wait",
   "stress.client-alter-drain",
   "stress.paced.reopen-generation",
+  "stress.backup-lease-release-recovery",
   "stress.backup-native-recovery",
   "stress.backup-multi-domain-wait",
 ]
@@ -3456,6 +3562,8 @@ workloads = [
   "stress.endpoint-ack-ending",
   "scenario.endpoint-ack-fanout",
   "stress.endpoint-ack-fanout",
+  "scenario.endpoint-metadata-buffer",
+  "stress.endpoint-metadata-buffer",
   "scenario.mqtt-parallel-gather-at-quiesce",
   "stress.mqtt-parallel-gather-at-quiesce",
   "scenario.sqs-receive-at-quiesce",
@@ -3827,6 +3935,26 @@ id = "stress.websocket-declaration-buffer"
 invariant = "Both text and binary frames retain their exact upgrade response headers through BUFFER and a codec change on one and three nodes."
 invocation = "stress-scenarios"
 scenario = "A buffered WebSockets connection preserves upgrade headers and frame types through a codec change"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "An HTTP endpoint request buffered under an entity hold keeps its declared metadata through the quiesce buffer's tracked ownership, the entity engagement and a codec change, and its replay reads the values it arrived with. The request's socket, its HTTP parsing and the endpoint's asynchronous dispatch remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/endpoint_metadata.feature"
+id = "scenario.endpoint-metadata-buffer"
+invariant = "A buffered HTTP endpoint request replays with its exact method, path, query, routed host and peer address after an entity-pause alteration on one and three nodes."
+invocation = "scenarios"
+scenario = "An HTTP endpoint replays a buffered request with the metadata it arrived with"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: An HTTP endpoint request buffered under an entity hold keeps its declared metadata through the quiesce buffer's tracked ownership, the entity engagement and a codec change, and its replay reads the values it arrived with. The request's socket, its HTTP parsing and the endpoint's asynchronous dispatch remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/endpoint_metadata.feature"
+id = "stress.endpoint-metadata-buffer"
+invariant = "A buffered HTTP endpoint request replays with its exact method, path, query, routed host and peer address after an entity-pause alteration on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "An HTTP endpoint replays a buffered request with the metadata it arrived with"
 selections = ["deloxide-stress"]
 
 [[workload]]

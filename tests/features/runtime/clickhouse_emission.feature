@@ -18,7 +18,7 @@ Feature: ClickHouse emission
         'addr' = '{{mqtt_addr}}', 'client_id' = 'clickhouse-idle-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR incoming FROM ingress TOPIC 'clickhouse_idle_{{test_id}}'
-        MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
+        SESSION CLEAN QOS 0 MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE CLICKHOUSE CLIENT outgoing CONFIG {
@@ -89,7 +89,7 @@ Feature: ClickHouse emission
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_ingress TOPIC 'notifications_in_{{test_id}}' MODE NO ACK
+        FROM mqtt_ingress TOPIC 'notifications_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -166,7 +166,7 @@ Feature: ClickHouse emission
         'client_id' = 'nervix-cucumber-clickhouse-batch-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_notifications
-      FROM mqtt_ingress TOPIC 'clickhouse_batch_in_{{test_id}}' MODE NO ACK
+      FROM mqtt_ingress TOPIC 'clickhouse_batch_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL

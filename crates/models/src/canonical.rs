@@ -24,16 +24,16 @@ use crate::{
     AlterGenerator, AlterGeneratorOperation, AlterIngestor, AlterIngestorOperation, AlterJunction,
     AlterPlacement, AlterPlacementOperation, AlterProcessorOperation, AlterReingestor, AlterRelay,
     AlterRelayOperation, AlterReorderer, AlterReordererOperation, AlterSchema,
-    AlterSchemaOperation, AlterTransportIngestorOperation, AlterWireSchema,
-    AlterWireSchemaOperation, AssignmentTarget, AssignmentTargetScope, AvroType, Backup,
-    BackupCapture, BackupResources, BackupScope, BinaryOperator, BranchEviction, BranchSelection,
-    ClickHouseValueMapping, ClientConfigEntry, ClientIngestMode, ClientResourceMount,
-    CodecEncoding, CodecEncodingRule, CodecJaqTransformations, CodecName, CodecWireFormat,
-    CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob, CreateClientClickHouse,
-    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
-    CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel,
-    CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
-    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AssignmentTarget,
+    AssignmentTargetScope, AvroType, Backup, BackupCapture, BackupResources, BackupScope,
+    BinaryOperator, BranchEviction, BranchSelection, ClickHouseValueMapping, ClientConfigEntry,
+    ClientIngestMode, ClientResourceMount, CodecEncoding, CodecEncodingRule,
+    CodecJaqTransformations, CodecName, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
+    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
+    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
+    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
+    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
+    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
     CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
     CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
@@ -2733,25 +2733,19 @@ pub(crate) fn alter_ingestor_operations_to_plexus<Source: IngestorBodyPlexus>(
 }
 
 /// The canonical Plexus of every operation of an alteration of a transport's ingestor, in order.
-pub(crate) fn alter_transport_ingestor_operations_to_plexus<Source: IngestorBodyPlexus>(
-    operations: &[AlterTransportIngestorOperation<Source>],
+pub(crate) fn alter_transport_ingestor_operations_to_plexus<
+    Operation: crate::connector::TransportIngestorOperation,
+>(
+    operations: &[Operation],
 ) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
     let mut rendered = Vec::with_capacity(operations.len());
     for operation in operations {
-        let operation = match operation {
-            AlterTransportIngestorOperation::Ingestor(operation) => {
-                alter_ingestor_operation_to_plexus(operation)?
-            }
-            AlterTransportIngestorOperation::SetDecodeUsing { codec } => {
-                format!("SET DECODE USING {}", codec.as_str())
-            }
-        };
-        rendered.push(operation);
+        rendered.push(operation.to_plexus()?);
     }
     Ok(rendered)
 }
 
-fn alter_ingestor_operation_to_plexus<Source: IngestorBodyPlexus>(
+pub(crate) fn alter_ingestor_operation_to_plexus<Source: IngestorBodyPlexus>(
     operation: &AlterIngestorOperation<Source>,
 ) -> error_stack::Result<String, CanonicalPlexusError> {
     match operation {
@@ -4933,15 +4927,14 @@ mod tests {
                         client: named("mqtt_main"),
                         topic: named("devices/+/Orders"),
                         instances: nonzero!(2u64),
-                        mode: MqttIngestMode::NoAck {
-                            session: MqttSession::Clean,
-                            qos: MqttQos::AtMostOnce,
-                        },
+                        session: MqttSession::Clean,
+                        qos: MqttQos::Qos0,
+                        mode: MqttIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Drop,
                     }),
                 ),
                 "CREATE MQTT TOPIC INGESTOR mqtt_ingestor\n  FROM mqtt_main TOPIC \
-                 'devices/+/Orders' INSTANCES 2 MODE NO ACK ON QUIESCE DROP",
+                 'devices/+/Orders' INSTANCES 2 SESSION CLEAN QOS 0 MODE NO ACK ON QUIESCE DROP",
             ),
             (
                 orders_ingestor(
@@ -4950,15 +4943,14 @@ mod tests {
                         client: named("mqtt_main"),
                         topic: named("devices/#"),
                         instances: nonzero!(1u64),
-                        mode: MqttIngestMode::NoAck {
-                            session: MqttSession::Persistent,
-                            qos: MqttQos::AtLeastOnce,
-                        },
+                        session: MqttSession::Persistent,
+                        qos: MqttQos::Qos2,
+                        mode: MqttIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
                 ),
                 "CREATE MQTT TOPIC INGESTOR mqtt_session_ingestor\n  FROM mqtt_main TOPIC \
-                 'devices/#' SESSION PERSISTENT QOS 1 MODE NO ACK ON QUIESCE SUSPEND",
+                 'devices/#' SESSION PERSISTENT QOS 2 MODE NO ACK ON QUIESCE SUSPEND",
             ),
             (
                 orders_ingestor(
@@ -4999,7 +4991,7 @@ mod tests {
                     "redis_ingestor",
                     decoded(RedisPubSubIngestor {
                         client: named("redis_main"),
-                        channel: named("orders:*"),
+                        subscription: crate::RedisSubscriptionTarget::Channel(named("orders:*")),
                         mode: RedisPubSubIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Drop,
                     }),

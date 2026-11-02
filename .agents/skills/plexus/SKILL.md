@@ -22,8 +22,9 @@ lowercase HTTP field names, and on an emitter that keeps one value per header na
 header name once: a repeated literal name is refused when the statement is validated.
 For outbound WebSockets, read the `WEBSOCKETS CONNECTION` section of Ingestors for literal upgrade
 headers, subprotocol offers, response-header reads, frame metadata and the closed client CONFIG key
-set. Offer subprotocols only through `HEADERS { 'sec-websocket-protocol' = '...' }`, and expect
-the peer to select one of them: any other answer fails the connection.
+set, including the trust roots `tls_ca_file` adds to and how inspection redacts an endpoint. Offer
+subprotocols only through `HEADERS { 'sec-websocket-protocol' = '...' }`, and expect the peer to
+select one of them: any other answer fails the connection.
 For ClickHouse HTTP connection tuning, client certificates, compression and which insert failures
 reject a row rather than retry, read the ClickHouse Emitters section and the generated client key
 reference. `DESCRIBE CLIENT <name>` shows effective defaults and configured values;
@@ -71,7 +72,8 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 - Payload: sample input, wire format, exact internal field types, optional fields, and sensitive
   fields.
 - Source and emitter: connector kinds, externally provisioned entity names, whether an operator
-  provisions a Pulsar subscription or its ingestor owns it, endpoints, delivery/ACK expectations,
+  provisions a Pulsar subscription or its ingestor owns it, the owned subscription's EARLIEST or
+  LATEST creation position, endpoints, delivery/ACK expectations,
   emitter publishing mode, confirmation window and timeout where applicable, retry pacing,
   ordering, and offsets.
 - Isolation: unbranched or a concrete branch key, branch TTL, and optional instance limit. A branch
@@ -87,9 +89,11 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 
 Read [references/configuring-nervix.md](references/configuring-nervix.md), then use its routing
 guidance to select the relevant Markdown entries from the public index.
-For Plexus endpoint ACK declarations, require the explicit response window and reject-only quiesce
-policy; WebSocket replies use the endpoint's declared signaling format. The configuring reference
-and the Ingestors endpoint section define status, outcome, timeout and retry behavior.
+For endpoint declarations, read `Ingestors` → `HTTP ENDPOINT And WEBSOCKETS ENDPOINT` for both
+delivery modes, their quiesce sets, request/frame metadata and upgrade-header reads. Require an
+explicit response window and reject-only quiesce with `MODE ACK`; its absolute response deadline
+does not restart on progress. The configuring reference routes the status, signaling and retry
+contracts.
 For Kafka domain offsets, retain the documented native checkpoint quorum budget and at-least-once
 retry boundary when explaining source recovery.
 
@@ -541,10 +545,12 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   node, so size it for the node's whole workload rather than per emitter, and expect one pool per
   node the client is placed on. Read the dedicated `Common` → `Database Client Connection Pools`
   documentation entry before choosing values.
-- A `REDIS` client's command pool takes `pool_idle_timeout_ms` and `pool_max_lifetime_ms`, 10 and
-  30 minutes by default, and never applies them to a Pub/Sub ingestor's subscription connection.
-  Read `Connection lifetimes` in that same pools entry before choosing values; `DESCRIBE CLIENT
-  <name>` shows both, marking an omitted one `(default)`.
+- A `REDIS` client's command pool and a `POSTGRES` client's pool take `pool_idle_timeout_ms` and
+  `pool_max_lifetime_ms`, 10 and 30 minutes by default; Redis never applies them to a Pub/Sub
+  ingestor's subscription connection. A `POSTGRES` client also takes `pool_acquire_timeout_ms`, 30
+  seconds by default, and `pool_test_before_acquire`, `true` by default. Read `Connection lifetimes`
+  in that same pools entry before choosing values; `DESCRIBE CLIENT <name>` shows them, marking an
+  omitted one `(default)`.
 - Give a `POSTGRES` client an absolute `postgres://` or `postgresql://` `addr` URL that sets
   `sslmode` once, to either `disable` or `verify-full`; no other mode is accepted and there is no
   opportunistic fallback. Mounted `tls_ca_file`, `tls_cert_file`, and `tls_key_file` are the
@@ -579,8 +585,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `FLUSH` values as latency and boundary-cost controls, not as a throughput lever: `MAX BATCH SIZE`
   only clamps a batch, and the flush tuning guidance in the docs records which emitters benefit from
   larger batches.
-- Use delivery-mode `MAX <n>` only with `ACK PARALLEL`; an ingestor's `NO ACK` and an emitter's
-  `NO ACK` have no in-flight ACK window and never accept `MAX`.
+- Use delivery-mode `MAX <n>` with `ACK PARALLEL` or an endpoint's `ACK`; an ingestor's `NO ACK`
+  and an emitter's `NO ACK` have no in-flight ACK window and never accept `MAX`.
 - Do not promise that an emitter's `NO ACK` survives a stop on every emitter. A `STOP`, a replacement
   or a node shutdown sends what a Kafka producer still queues, awaits the receipts of what a Pulsar
   producer accepted and waits for an MQTT QoS 0 client to send what it holds, all within its
@@ -618,8 +624,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - End every transport ingestor source body with an explicit source-supported `ON QUIESCE` body
   immediately before `DECODE USING`. Include positive `MAX SIZE` and, outside `HTTP ENDPOINT` and
   `WEBSOCKETS ENDPOINT`, an explicit `ON OVERFLOW DROP OLDEST|DROP NEWEST` for `BUFFER`; include
-  `RETRY AFTER` for endpoint `REJECT`. Use `MQTT TOPIC` `SUSPEND` only with
-  `SESSION PERSISTENT QOS 1`. Do not invent a default or use a mode offered by another entity.
+  `RETRY AFTER` for endpoint `REJECT`. Write every `MQTT TOPIC` ingestor's `SESSION CLEAN` or
+  `SESSION PERSISTENT` and its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, and use its `ACK` modes
+  and `SUSPEND` only with `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. Do not invent a default or
+  use a mode offered by another entity.
 - A server endpoint WebSocket keeps its route and signaling protocol for the connection. After
   its source stops or is replaced, reconnect to use the new source; after signaling, the next
   refused payload on the preceding connection closes with 1013. Configured routes without a live

@@ -216,6 +216,7 @@ mod generated_http_payloads;
 mod http_transport;
 mod iceberg_delivery;
 mod ingestion_time;
+mod kafka_metadata;
 mod mqtt_fixtures;
 mod mqtt_sessions;
 mod mysql_isolation;
@@ -6069,6 +6070,7 @@ impl IngestorLogicTransportFixture {
             Self::Mqtt => {
                 r#"FROM logic_mqtt
         TOPIC 'logic_notifications_{{test_id}}'
+        SESSION CLEAN QOS 0
         MODE NO ACK"#
             }
             Self::Nats => {
@@ -19458,7 +19460,8 @@ impl UnacknowledgedSourceFixture {
         ON QUIESCE SUSPEND"
             }
             Self::Mqtt => {
-                "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}' MODE NO ACK
+                "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}' SESSION CLEAN QOS 0
+          MODE NO ACK
         ON QUIESCE DROP"
             }
             Self::Nats => {
@@ -19468,7 +19471,8 @@ impl UnacknowledgedSourceFixture {
             }
             Self::Pulsar => {
                 "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}'
-          SUBSCRIPTION 'unacknowledged_{{test_id}}' OWNED BY INGESTOR INSTANCES 1 MODE NO ACK
+          SUBSCRIPTION 'unacknowledged_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST INSTANCES \
+                 1 MODE NO ACK
         ON QUIESCE SUSPEND"
             }
             Self::RedisPubSub => {
@@ -26668,20 +26672,27 @@ async fn when_these_mqtt_messages_are_rapidly_published(
     }
 }
 
-#[when(expr = "MQTT QoS 1 message is published to topic {string}")]
-async fn when_mqtt_qos1_message_is_published(
+/// Publishes the docstring at QoS 1 or 2 and returns once the broker answered it: its PUBACK at
+/// QoS 1, its PUBREC and then PUBCOMP at QoS 2.
+#[when(expr = "MQTT QoS {int} message is published to topic {string}")]
+async fn when_mqtt_message_is_published_at_qos(
     world: &mut ScenarioWorld,
+    qos: u8,
     topic: String,
     #[step] step: &Step,
 ) {
     let topic = expand_placeholders(world, &topic);
     let payload = expand_placeholders(world, docstring(step));
     wait_for_mqtt_ingestors_ready(world).await;
-    world
-        .cluster()
-        .publish_mqtt_qos1(&topic, &payload)
-        .await
-        .expect("failed to publish mqtt QoS 1 message");
+    let published = match qos {
+        1 => world.cluster().publish_mqtt_qos1(&topic, &payload).await,
+        2 => world.cluster().publish_mqtt_qos2(&topic, &payload).await,
+        other => {
+            panic!("the scenario publishes an answered MQTT message at QoS 1 or 2, not {other}")
+        }
+    };
+    published
+        .unwrap_or_else(|error| panic!("failed to publish the MQTT QoS {qos} message: {error}"));
 }
 
 /// Publishes `count` QoS 1 messages whose payloads are exactly `bytes` long: JSON objects whose
@@ -26758,6 +26769,27 @@ async fn when_redis_message_is_published(
         .expect("failed to publish redis message");
 }
 
+/// Publishes once without waiting for a subscriber, and requires that Redis delivered the message
+/// to none: no subscription, the scenario's own included, matches the channel.
+#[when(expr = "Redis message is published to channel {string} that no subscription receives")]
+async fn when_redis_message_is_published_to_no_subscription(
+    world: &mut ScenarioWorld,
+    channel: String,
+    #[step] step: &Step,
+) {
+    let channel = expand_placeholders(world, &channel);
+    let payload = expand_placeholders(world, docstring(step));
+    let receivers = world
+        .cluster()
+        .publish_redis_once(&channel, &payload)
+        .await
+        .expect("Redis accepts the publication");
+    assert_eq!(
+        receivers, 0,
+        "no subscription may receive the message published to Redis channel '{channel}'"
+    );
+}
+
 #[when(expr = "{int} Redis messages are published to channel {string}")]
 async fn when_redis_messages_are_published(
     world: &mut ScenarioWorld,
@@ -26810,7 +26842,7 @@ async fn when_json_messages_with_user_id_are_rapidly_published_to_input(
     let count = count
         .try_into()
         .expect("rapid publish count must fit into usize");
-    if entity_kind == "MQTT" || entity_kind == "MQTT_QOS1" {
+    if entity_kind == "MQTT" || entity_kind == "MQTT_QOS1" || entity_kind == "MQTT_QOS2" {
         wait_for_mqtt_ingestors_ready(world).await;
     }
     match entity_kind.as_str() {
@@ -26829,6 +26861,11 @@ async fn when_json_messages_with_user_id_are_rapidly_published_to_input(
             .publish_mqtt_qos1_burst(&input, &payload, count)
             .await
             .expect("failed to publish mqtt QoS 1 message burst"),
+        "MQTT_QOS2" => world
+            .cluster()
+            .publish_mqtt_qos2_burst(&input, &payload, count)
+            .await
+            .expect("failed to publish mqtt QoS 2 message burst"),
         "REDIS" => world
             .cluster()
             .publish_redis_burst(&input, &payload, count)
@@ -28618,6 +28655,44 @@ async fn when_http_payload_is_posted_to_node_with_header(
         )
         .await
         .expect("failed to post http payload with header");
+}
+
+#[when(
+    expr = "http payload is posted to node {string} with host {string} path {string} and header \
+            {string} with base64 bytes {string}"
+)]
+async fn when_http_payload_is_posted_to_node_with_header_bytes(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    host: String,
+    path: String,
+    header_name: String,
+    header_bytes: String,
+    #[step] step: &Step,
+) {
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    let header_bytes = BASE64_STANDARD
+        .decode(header_bytes.trim())
+        .unwrap_or_else(|error| panic!("invalid base64 header value '{header_bytes}': {error}"));
+    append_cucumber_log_line(&format!(
+        "http publish: node={node_id} host={host} path={path} header={header_name} \
+         header_bytes={header_bytes:02x?} payload={payload}"
+    ));
+    world.last_publish_at = Some(Instant::now());
+    world
+        .cluster()
+        .publish_http_with_header_bytes(
+            &node_id,
+            &host,
+            &path,
+            &payload,
+            &header_name,
+            &header_bytes,
+        )
+        .await
+        .expect("failed to post http payload with a header of raw bytes");
 }
 
 #[when(expr = "http payload is posted to node {string} with host {string} path {string} and fails")]
@@ -31428,6 +31503,107 @@ async fn postgres_application_connections(world: &ScenarioWorld, application: &s
         .await
         .expect("failed to count Postgres connections")
         .get(0)
+}
+
+/// One connection the database serves, as its connection list records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PostgresBackend {
+    pid: i32,
+    /// When the server started this backend, in milliseconds of the server's own clock.
+    started_at_ms: i64,
+}
+
+/// The connections one Nervix client holds on the database, the oldest first.
+async fn postgres_application_backends(
+    world: &ScenarioWorld,
+    application: &str,
+) -> Vec<PostgresBackend> {
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
+        .expect("failed to connect to Postgres");
+    let rows = sqlx::query(
+        "SELECT pid, (extract(epoch FROM backend_start) * 1000)::bigint FROM pg_stat_activity \
+         WHERE application_name = $1 ORDER BY backend_start",
+    )
+    .bind(application)
+    .fetch_all(&client)
+    .await
+    .expect("failed to list Postgres connections");
+    let mut backends = Vec::with_capacity(rows.len());
+    for row in rows {
+        backends.push(PostgresBackend {
+            pid: row.get(0),
+            started_at_ms: row.get(1),
+        });
+    }
+    backends
+}
+
+/// A pool retires a connection at a lifetime and opens its replacement to keep its minimum. The
+/// server's own start times measure the delay, so load moves both of them together.
+#[then(
+    expr = "Postgres eventually replaces the connection of application {string} at least {string} \
+            after it started"
+)]
+async fn then_postgres_replaces_connection_after(
+    world: &mut ScenarioWorld,
+    application: String,
+    minimum: String,
+) {
+    let application = expand_placeholders(world, &application);
+    let minimum = parse_duration_text(&minimum)
+        .unwrap_or_else(|error| panic!("the minimum delay '{minimum}' is invalid: {error}"));
+    let minimum_ms = i64::try_from(minimum.as_millis())
+        .unwrap_or_else(|error| panic!("the minimum delay fits in i64 milliseconds: {error}"));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut first = None;
+    loop {
+        let backends = postgres_application_backends(world, &application).await;
+        if first.is_none() {
+            first = backends.first().copied();
+        }
+        // A pool of one client holds a few connections, so this reads a short list.
+        if let Some(first) = first
+            && let Some(replacement) = backends.iter().find(|backend| backend.pid != first.pid)
+        {
+            let measured_ms = replacement.started_at_ms - first.started_at_ms;
+            append_cucumber_log_line(&format!(
+                "Postgres replaced connection {} with {} after {measured_ms}ms",
+                first.pid, replacement.pid
+            ));
+            assert!(
+                measured_ms >= minimum_ms,
+                "Postgres replaced a connection of {application} after {measured_ms}ms, expected \
+                 at least {minimum_ms}ms"
+            );
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for Postgres to replace a connection of {application}; observed \
+             {backends:?}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Ends every connection of one client from the server's side. Nothing reads an idle pooled
+/// connection, so its pool goes on holding it until something uses it.
+#[when(expr = "Postgres terminates the connections of application {string}")]
+async fn when_postgres_terminates_connections(world: &mut ScenarioWorld, application: String) {
+    let application = expand_placeholders(world, &application);
+    let client = world
+        .dependencies
+        .postgres_client(world.postgres_tls)
+        .expect("failed to connect to Postgres");
+    sqlx::query(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = $1",
+    )
+    .bind(&application)
+    .fetch_all(&client)
+    .await
+    .expect("failed to terminate Postgres connections");
 }
 
 #[then(expr = "Postgres never reports more than {int} connections for application {string}")]

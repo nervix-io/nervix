@@ -288,6 +288,10 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
                 ("topic", IngestorMetadataType::String),
                 ("partition", IngestorMetadataType::I32),
                 ("offset", IngestorMetadataType::I64),
+                ("key", IngestorMetadataType::Bytes),
+                ("timestamp", IngestorMetadataType::Datetime),
+                ("timestamp_type", IngestorMetadataType::String),
+                ("tombstone", IngestorMetadataType::Bool),
             ],
             every_node: false,
             reference: IngestorReferenceKind::Client(ConnectorKind::Kafka),
@@ -326,9 +330,15 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
             Some(HeaderModel::exact(HeaderLayout::SortedByName)),
             ConnectorKind::RabbitMq,
         ),
-        IngestorEntityKind::Redis(RedisIngestorEntity::PubSub) => {
-            headers_only(None, ConnectorKind::Redis)
-        }
+        IngestorEntityKind::Redis(RedisIngestorEntity::PubSub) => IngestorDeclaration {
+            headers: None,
+            metadata: &[
+                ("channel", IngestorMetadataType::String),
+                ("pattern", IngestorMetadataType::String),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Redis),
+        },
         IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query) => {
             headers_only(None, ConnectorKind::Prometheus)
         }
@@ -341,7 +351,13 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
         ),
         IngestorEntityKind::Http(HttpIngestorEntity::Endpoint) => IngestorDeclaration {
             headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-            metadata: &[],
+            metadata: &[
+                ("method", IngestorMetadataType::String),
+                ("path", IngestorMetadataType::String),
+                ("query", IngestorMetadataType::String),
+                ("remote_addr", IngestorMetadataType::String),
+                ("host", IngestorMetadataType::String),
+            ],
             every_node: true,
             reference: IngestorReferenceKind::Endpoint(EndpointType::Http),
         },
@@ -355,7 +371,11 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
         }
         IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint) => IngestorDeclaration {
             headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-            metadata: &[],
+            metadata: &[
+                ("frame_type", IngestorMetadataType::String),
+                ("remote_addr", IngestorMetadataType::String),
+                ("path", IngestorMetadataType::String),
+            ],
             every_node: true,
             reference: IngestorReferenceKind::Endpoint(EndpointType::Websockets),
         },
@@ -493,35 +513,64 @@ fn a_source_supports_the_quiesce_modes_its_entity_declares(
 
 #[test]
 fn an_mqtt_source_suspends_only_a_persistent_session_delivered_at_least_once() {
-    let source = |mode| {
+    let source = |session, qos, mode| {
         IngestorEntity::from(MqttTopicIngestor {
             client: named("broker"),
             topic: named("orders/#"),
             instances: std::num::NonZeroU64::MIN,
+            session,
+            qos,
             mode,
             quiesce: IngestQuiesceMode::Drop,
         })
     };
-    let persistent = source(MqttIngestMode::NoAck {
-        session: MqttSession::Persistent,
-        qos: MqttQos::AtLeastOnce,
-    });
-    let clean = source(MqttIngestMode::NoAck {
-        session: MqttSession::Clean,
-        qos: MqttQos::AtLeastOnce,
-    });
-    let at_most_once = source(MqttIngestMode::NoAck {
-        session: MqttSession::Persistent,
-        qos: MqttQos::AtMostOnce,
-    });
-    let acknowledged = source(MqttIngestMode::AckSequential {
-        timeout: "5s".to_owned(),
-        retry_policy: retry_policy(),
-    });
+    let persistent = source(
+        MqttSession::Persistent,
+        MqttQos::Qos1,
+        MqttIngestMode::NoAck,
+    );
+    let exactly_once = source(
+        MqttSession::Persistent,
+        MqttQos::Qos2,
+        MqttIngestMode::NoAck,
+    );
+    let clean = source(MqttSession::Clean, MqttQos::Qos1, MqttIngestMode::NoAck);
+    let at_most_once = source(
+        MqttSession::Persistent,
+        MqttQos::Qos0,
+        MqttIngestMode::NoAck,
+    );
+    let acknowledged = source(
+        MqttSession::Persistent,
+        MqttQos::Qos1,
+        MqttIngestMode::AckSequential {
+            timeout: "5s".to_owned(),
+            retry_policy: retry_policy(),
+        },
+    );
     assert!(persistent.supports_quiesce(&IngestQuiesceMode::Suspend));
+    assert!(exactly_once.supports_quiesce(&IngestQuiesceMode::Suspend));
     assert!(!clean.supports_quiesce(&IngestQuiesceMode::Suspend));
     assert!(!at_most_once.supports_quiesce(&IngestQuiesceMode::Suspend));
     assert!(acknowledged.supports_quiesce(&IngestQuiesceMode::Suspend));
+    assert_eq!(acknowledged.unmet_delivery(), None);
+    assert_eq!(
+        source(
+            MqttSession::Clean,
+            MqttQos::Qos1,
+            MqttIngestMode::AckSequential {
+                timeout: "5s".to_owned(),
+                retry_policy: retry_policy(),
+            },
+        )
+        .unmet_delivery()
+        .map(|unmet| unmet.to_string()),
+        Some(
+            "MQTT TOPIC ingestors name MODE ACK SEQUENTIAL only with SESSION PERSISTENT and QOS 1 \
+             or 2; the statement writes SESSION CLEAN and QOS 1"
+                .to_owned()
+        )
+    );
     assert!(clean.supports_quiesce(&IngestQuiesceMode::Drop));
     assert!(!clean.supports_quiesce(&IngestQuiesceMode::Reject {
         retry_after: "1s".to_owned(),
@@ -1252,14 +1301,7 @@ fn a_source_acknowledges_as_its_delivery_mode_states() {
     );
 
     let mqtt_modes = [
-        MqttIngestMode::NoAck {
-            session: MqttSession::Clean,
-            qos: MqttQos::AtMostOnce,
-        },
-        MqttIngestMode::NoAck {
-            session: MqttSession::Persistent,
-            qos: MqttQos::AtLeastOnce,
-        },
+        MqttIngestMode::NoAck,
         MqttIngestMode::AckSequential {
             timeout: "5s".to_owned(),
             retry_policy: retry.clone(),
@@ -1271,18 +1313,15 @@ fn a_source_acknowledges_as_its_delivery_mode_states() {
             retry_policy: retry.clone(),
         },
     ];
-    let expected = [
-        IngestAcknowledgement::Unacknowledged,
-        IngestAcknowledgement::Unacknowledged,
-        sequential,
-        parallel,
-    ];
+    let expected = [IngestAcknowledgement::Unacknowledged, sequential, parallel];
     for (mode, expected) in mqtt_modes.into_iter().zip(expected) {
         let acknowledges = mode.is_ack();
         let source = IngestorEntity::from(MqttTopicIngestor {
             client: named("broker"),
             topic: named("orders/#"),
             instances: std::num::NonZeroU64::MIN,
+            session: MqttSession::Persistent,
+            qos: MqttQos::Qos1,
             mode,
             quiesce: IngestQuiesceMode::Drop,
         });
@@ -1299,7 +1338,7 @@ fn a_source_acknowledges_as_its_delivery_mode_states() {
 fn an_entity_model_converts_into_every_enum_that_holds_it() {
     let source = RedisPubSubIngestor {
         client: named("cache"),
-        channel: named("orders"),
+        subscription: nervix_models::RedisSubscriptionTarget::Channel(named("orders")),
         mode: RedisPubSubIngestMode::NoAck,
         quiesce: IngestQuiesceMode::Drop,
     };

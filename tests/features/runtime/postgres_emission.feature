@@ -32,7 +32,7 @@ Feature: Postgres emission
           'client_id' = 'nervix-cucumber-postgres-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_ingress TOPIC 'postgres_notifications_in_{{test_id}}' MODE NO ACK
+        FROM mqtt_ingress TOPIC 'postgres_notifications_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -111,7 +111,7 @@ Feature: Postgres emission
           'client_id' = 'nervix-cucumber-postgres-conflict-{{test_id}}'
         };
         CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_ingress TOPIC 'postgres_conflict_notifications_in_{{test_id}}' MODE NO ACK
+        FROM mqtt_ingress TOPIC 'postgres_conflict_notifications_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -194,7 +194,7 @@ Feature: Postgres emission
         'client_id' = 'nervix-cucumber-postgres-poison-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_notifications
-      FROM mqtt_ingress TOPIC 'postgres_poison_in_{{test_id}}' MODE NO ACK
+      FROM mqtt_ingress TOPIC 'postgres_poison_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -432,7 +432,7 @@ Feature: Postgres emission
         'client_id' = 'nervix-cucumber-postgres-values-error-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_notifications
-      FROM mqtt_ingress TOPIC 'postgres_values_error_in_{{test_id}}' MODE NO ACK
+      FROM mqtt_ingress TOPIC 'postgres_values_error_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -512,7 +512,7 @@ Feature: Postgres emission
         'client_id' = 'nervix-cucumber-postgres-batch-{{test_id}}'
       };
       CREATE MQTT TOPIC INGESTOR mqtt_notifications
-      FROM mqtt_ingress TOPIC 'postgres_batch_in_{{test_id}}' MODE NO ACK
+      FROM mqtt_ingress TOPIC 'postgres_batch_in_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL

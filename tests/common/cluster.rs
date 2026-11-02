@@ -40,7 +40,7 @@ use nervix_connector_kafka::testing_rdkafka::{
     client::DefaultClientContext,
     config::ClientConfig,
     consumer::{BaseConsumer, Consumer, StreamConsumer},
-    error::RDKafkaErrorCode,
+    error::{KafkaError, RDKafkaErrorCode},
     message::{Header as KafkaHeader, Headers, Message, OwnedHeaders},
     producer::{FutureProducer, FutureRecord},
     topic_partition_list::{Offset, TopicPartitionList},
@@ -2380,6 +2380,11 @@ impl Cluster {
         publish_mqtt_with_qos(&self.dependencies, topic, payload, QoS::AtLeastOnce, true).await
     }
 
+    /// Publishes `payload` at QoS 2 and returns once the broker completed its PUBCOMP exchange.
+    pub(crate) async fn publish_mqtt_qos2(&self, topic: &str, payload: &str) -> io::Result<()> {
+        publish_mqtt_with_qos(&self.dependencies, topic, payload, QoS::ExactlyOnce, true).await
+    }
+
     pub(crate) async fn publish_mqtt_burst(
         &self,
         topic: &str,
@@ -2399,6 +2404,16 @@ impl Cluster {
             .await
     }
 
+    pub(crate) async fn publish_mqtt_qos2_burst(
+        &self,
+        topic: &str,
+        payload: &str,
+        count: usize,
+    ) -> io::Result<()> {
+        publish_mqtt_burst_with_qos(&self.dependencies, topic, payload, count, QoS::ExactlyOnce)
+            .await
+    }
+
     pub(crate) async fn ensure_rabbitmq_queue(&self, queue: &str) -> io::Result<()> {
         ensure_rabbitmq_queue(&self.dependencies, queue).await
     }
@@ -2409,6 +2424,16 @@ impl Cluster {
 
     pub(crate) async fn publish_redis(&self, channel: &str, payload: &str) -> io::Result<()> {
         publish_redis(&self.dependencies, channel, payload).await
+    }
+
+    /// Publishes `payload` to `channel` exactly once and returns how many subscriptions Redis
+    /// delivered it to, which may be none.
+    pub(crate) async fn publish_redis_once(
+        &self,
+        channel: &str,
+        payload: &str,
+    ) -> io::Result<usize> {
+        publish_redis_once(&self.dependencies, channel, payload).await
     }
 
     pub(crate) async fn publish_redis_burst(
@@ -2528,6 +2553,16 @@ impl Cluster {
         publish_kafka(&self.dependencies, topic, payload).await
     }
 
+    pub(crate) async fn publish_kafka_metadata_record(
+        &self,
+        topic: &str,
+        record: &crate::kafka_metadata::KafkaMetadataRecord,
+    ) -> io::Result<()> {
+        record
+            .publish(kafka_client_config(&self.dependencies)?, topic)
+            .await
+    }
+
     pub(crate) async fn publish_kafka_with_headers(
         &self,
         topic: &str,
@@ -2570,6 +2605,24 @@ impl Cluster {
         partitions: i32,
     ) -> io::Result<()> {
         ensure_kafka_topic_partitions(&self.dependencies, topic, partitions).await
+    }
+
+    /// Historical CreateTime records must survive the broker's retention scans.
+    pub(crate) async fn create_kafka_metadata_topic(&self, topic: &str) -> io::Result<()> {
+        let admin = kafka_admin_client(&self.dependencies)?;
+        let definition = NewTopic::new(topic, 1, TopicReplication::Fixed(1))
+            .set("message.timestamp.type", "CreateTime")
+            .set("retention.ms", "-1")
+            .set("retention.bytes", "-1");
+        let options = AdminOptions::new().request_timeout(Some(Duration::from_secs(5)));
+        let created = admin
+            .create_topics(&[definition], &options)
+            .await
+            .map_err(io::Error::other)?;
+        for result in created {
+            result.map_err(|(_, code)| io::Error::other(KafkaError::AdminOp(code)))?;
+        }
+        wait_for_kafka_topic_partitions(&self.dependencies, topic, 1).await
     }
 
     /// Subscribes a consumer group member that Nervix does not run to `topic` in `group`.
@@ -2940,6 +2993,40 @@ impl Cluster {
             .get(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
         publish_http_with_headers(&handle.spec, host, path, payload, headers).await
+    }
+
+    /// Posts `payload` to `node_id` with one header whose value is exactly `value`, including bytes
+    /// a text header value cannot hold, such as a sequence that is not UTF-8.
+    pub(crate) async fn publish_http_with_header_bytes(
+        &self,
+        node_id: &str,
+        host: &str,
+        path: &str,
+        payload: &str,
+        name: &str,
+        value: &[u8],
+    ) -> io::Result<()> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        let value = reqwest::header::HeaderValue::from_bytes(value).map_err(io::Error::other)?;
+        let response = reqwest::Client::new()
+            .post(handle.spec.http_uri(path))
+            .header("Host", host)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(name, value)
+            .body(payload.to_owned())
+            .send()
+            .await
+            .map_err(io::Error::other)?;
+        if response.status() != reqwest::StatusCode::ACCEPTED {
+            return Err(io::Error::other(format!(
+                "unexpected http status {}",
+                response.status()
+            )));
+        }
+        Ok(())
     }
 
     pub(crate) async fn publish_http_bytes(
@@ -5540,6 +5627,19 @@ async fn publish_redis(
     publish_redis_to_subscriber(&mut connection, channel, payload).await?;
     sleep(POLL_INTERVAL).await;
     Ok(())
+}
+
+async fn publish_redis_once(
+    dependencies: &DependencyEndpoints,
+    channel: &str,
+    payload: &str,
+) -> io::Result<usize> {
+    let client = TestRedisClient::open(dependencies.get(REDIS_ADDR)?)?;
+    let mut connection = client.connect().await?;
+    connection
+        .publish(channel, payload)
+        .await
+        .map_err(io::Error::other)
 }
 
 async fn publish_redis_burst(

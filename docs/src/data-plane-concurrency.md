@@ -704,6 +704,15 @@ its existing wait for a place. Native broker waits, the destruction's included, 
 and Deloxide's lock detector; the ordinary connector and retirement regressions and the
 one-/three-node stalled-broker and retirement scenarios own that evidence.
 
+Kafka record metadata stays with its owning message until the host has projected the fields its
+programs read. Keys are borrowed, timestamps are typed at the transport boundary, and metadata
+visits add no lock or shared state. The `kafka-record-metadata` Bolero property holds the complete
+row and its retained replay to the source record. The registered `scenario.kafka-record-*` and
+`stress.kafka-record-*` workloads read all new fields in every ACK mode, distinguish tombstones
+from empty values, and drive event time through two branch windows beside tracked ingestion and
+lifecycle locks. Driver polling and metadata conversion remain outside Deloxide's lock detector;
+the ingestor-host Shuttle checks retain their existing intake and settlement scope.
+
 ### Kafka source rejection floors
 
 A Kafka source under `OFFSET BY CONSUMER GROUP` records the earliest rejected record of every
@@ -1872,7 +1881,7 @@ no synchronization. The existing capture and cleanup paths retain their tracked-
 phase timing itself establishes no interleaving or memory-ordering guarantee. [Backup And Restore Architecture](backup-and-restore-architecture.md#observability)
 owns the diagnostic contract.
 
-The test-only backup cut registry releases its watch-held lease, pause-application, drain and
+The test-only backup cut registry releases its watch-held lease, committed-pause, pause-application, drain and
 capture gates before clearing the map during scenario cleanup. Existing borrowers observe release;
 later cuts encounter no gate. Gate-owner tests with a paused clock cover waiting cuts, timed holds
 and later arrivals, the pause-application gate holding only revisions that pause its domain, and
@@ -1881,6 +1890,14 @@ capture boundaries on one and three nodes and requires every node to stop while 
 its failure. These watch channels and concurrent-map accesses are outside Deloxide's tracked locks.
 This harness cleanup adds no data-plane synchronization or memory-ordering claim; [Integration Test Lifecycle](./integration-test-lifecycle.md#what-cleanup-releases)
 owns its supervision verdict.
+
+The committed-pause gate holds only the cut coordinator after the replicated pause completes;
+reconciliation remains free to install that revision. The elapsed-cut outline checks the
+installation refusal and resumed domain. Paused-clock owner tests exercise available and held
+installation slots, including a deadline expiring between polls before its rounded timer tick.
+These async waits add no tracked lock or memory-ordering protocol; Deloxide covers the surrounding
+lifecycle through the registered ordinary and stressed backup scenarios, not the timer's polling
+order itself.
 
 A diagnostic node selects the `deloxide` mode. The `deloxide-order` feature adds historical order
 instrumentation to that same mode, and the `deloxide-stress` feature adds Deloxide's bounded
@@ -2139,10 +2156,10 @@ offsets, deduplicator keys and windows, materialized relays and native metadata,
 generations, staging quota and reclamation, delayed restore coordinators, bounded multi-domain
 backup waits and their recovery, and the drain of a large-state WASM owner through bulk checkpoint
 streams. Its serial scenario process has a 4,320-second bound, including a 360-second teardown
-reserve, so its 80 registered examples have a 3,960-second suite budget. Check 41311131846
+reserve, so its 84 registered examples have a 3,960-second suite budget. Check 41311131846
 completed 78 examples at the former 3,840-second suite limit, including both added NATS STREAM
 lost-PubAck examples in 30.6 seconds; the final window example had passed its body and one was
-still queued. The revised bound accounts for those examples while preserving a fixed limit and
+still queued. The revised bound allocates time for those examples while preserving a fixed limit and
 the same teardown reserve. Every stressed scenario runs one at a time under its own `stress.`
 identity, with the scenario, examples and invariant of its active-only counterpart and the owners
 that counterpart reaches.
@@ -2388,6 +2405,12 @@ and three-node clusters, including expiry before the second cut, in the active a
 selections, with stress twins in the restore-stress selection, and name the
 client request and exchange owners in the inventory. The detector observes their blocking
 reply-registration and cancellation locks.
+The first-domain lease-release recovery workload reaches those same client and storage lifetimes
+after a consensus proposal is refused by an unconfirmed leader lease. Its active, order and
+stressed-restore records require recovery under the original execution reference and a downloaded
+archive with both quiesced domain cuts. The refusal owner's asynchronous mutex and the command's
+retry waits remain outside the detector; the public scenario and typed response-boundary tests
+establish their recovery and definitive-timeout outcomes without claiming an interleaving model.
 Async command and reconnect mutexes, physical deadlines and network scheduling remain outside
 its observation; the public scenarios and client-session regressions assert their wait, expiry,
 leader-change and recovery outcomes directly. The bounded native-client case runs inside the
