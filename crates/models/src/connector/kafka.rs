@@ -3,8 +3,8 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The Kafka client Model, the topic source and emitter Models with their offset and
-//!   delivery modes, the topic and consumer group names a source reads with the rules Kafka holds
-//!   them to, and what each entity declares.
+//!   delivery modes, a consumer group's start position and its alteration, the topic and consumer
+//!   group names a source reads with the rules Kafka holds them to, and what each entity declares.
 //!   Client declarations also own public configuration keys, types and confidentiality, and the
 //!   one name a client accepts for each librdkafka property.
 //! - **Depends on.** The shared source and emitter declarations and the names a body references.
@@ -18,6 +18,8 @@
 
 use std::{num::NonZeroU64, time::Duration};
 
+use error_stack::Report;
+use meticulous::OptionExt as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
@@ -35,7 +37,7 @@ use crate::{
     EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
     EnvelopeClauseKind, HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode,
-    IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
+    IngestStartPosition, IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
     IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType, IngestorReference,
     IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
     OptionForm, OptionPresence, OptionValue, PositionClass, RetryPolicy,
@@ -50,7 +52,6 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
     };
     ClientConfigSchema::new(
         &[
-            K::optional("auto.offset.reset", V::String).driver(),
             K::required("bootstrap.servers", V::String).driver(),
             K::optional("client.id", V::String).driver(),
             K::optional("delivery.timeout.ms", V::UnsignedInteger).driver(),
@@ -89,12 +90,17 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
         &[ClientConfigNamespace::All],
         &[
             "allow.auto.create.topics",
+            "auto.offset.reset",
             "delivery.report.only.error",
             "enable.auto.commit",
             "enable.partition.eof",
             "group.id",
         ],
     )
+    .with_statement_keys(&[crate::ClientConfigStatementKey {
+        key: "auto.offset.reset",
+        clause: "START AT on the consumer group of the KAFKA TOPIC ingestor",
+    }])
     .with_driver_aliases(LIBRDKAFKA_ALIASES, Some(LIBRDKAFKA_TOPIC_PREFIX))
 };
 
@@ -389,6 +395,8 @@ impl IngestorDeclaration for KafkaTopicIngestor {
             OptionDeclaration {
                 keywords: "OFFSET BY",
                 presence: OptionPresence::Required,
+                // A consumer group's name comes before its start position, as each example writes
+                // the option in full.
                 form: OptionForm::Choice(&[
                     OptionChoice {
                         name: "DOMAIN",
@@ -396,9 +404,14 @@ impl IngestorDeclaration for KafkaTopicIngestor {
                         example: "OFFSET BY DOMAIN",
                     },
                     OptionChoice {
-                        name: "CONSUMER GROUP",
+                        name: "CONSUMER GROUP START AT EARLIEST",
                         value: Some(OptionValue::Name(KafkaConsumerGroupName::DECLARATION)),
-                        example: "OFFSET BY CONSUMER GROUP 'readers'",
+                        example: "OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST",
+                    },
+                    OptionChoice {
+                        name: "CONSUMER GROUP START AT LATEST",
+                        value: Some(OptionValue::Name(KafkaConsumerGroupName::DECLARATION)),
+                        example: "OFFSET BY CONSUMER GROUP 'readers' START AT LATEST",
                     },
                 ]),
             },
@@ -434,8 +447,77 @@ impl IngestorEntityBody for KafkaTopicIngestor {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum KafkaOffsetMode {
-    ConsumerGroup(KafkaConsumerGroupName),
+    /// `CONSUMER GROUP '<group>' START AT EARLIEST|LATEST`: the group's offsets on the broker own
+    /// the positions, and a partition without a usable committed offset starts at `start_at`.
+    ConsumerGroup {
+        group: KafkaConsumerGroupName,
+        start_at: IngestStartPosition,
+    },
+    /// `DOMAIN`: the domain's offset records own the positions, and the domain's start point
+    /// places every partition, so this mode has no start position of its own.
     Domain,
+}
+
+impl KafkaOffsetMode {
+    fn set_start_at(
+        &mut self,
+        position: IngestStartPosition,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::ConsumerGroup { start_at, .. } => *start_at = position,
+            Self::Domain => {
+                return Err(Report::new(
+                    crate::AlterIngestorError::DomainKafkaStartPosition,
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Operations of a Kafka topic ingestor, retaining shared operations in their original order.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum KafkaTopicIngestorOperation {
+    Transport(crate::AlterTransportIngestorOperation<KafkaTopicIngestor>),
+    SetStartAt { position: IngestStartPosition },
+}
+
+impl From<crate::AlterTransportIngestorOperation<KafkaTopicIngestor>>
+    for KafkaTopicIngestorOperation
+{
+    fn from(operation: crate::AlterTransportIngestorOperation<KafkaTopicIngestor>) -> Self {
+        Self::Transport(operation)
+    }
+}
+
+impl super::ingestor::TransportIngestorOperation for KafkaTopicIngestorOperation {
+    fn apply_to(
+        &self,
+        ingestor: &mut crate::CreateIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Transport(operation) => operation.apply_to(ingestor),
+            Self::SetStartAt { position } => {
+                let source = ingestor
+                    .input
+                    .transport_source_mut()
+                    .verified(super::entity_union::ALTERED_PAIR_CHECKED);
+                let crate::IngestorEntity::Kafka(KafkaIngestor::Topic(source)) = source else {
+                    unreachable!("{}", super::entity_union::ALTERED_PAIR_CHECKED);
+                };
+                source.offset_mode.set_start_at(*position)
+            }
+        }
+    }
+
+    fn to_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        match self {
+            Self::Transport(operation) => operation.to_plexus(),
+            Self::SetStartAt { position } => Ok(format!("SET START AT {position}")),
+        }
+    }
 }
 
 #[derive(
@@ -489,7 +571,7 @@ connector_ingestors! {
     pub enum KafkaTopicIngestorAlteration;
     /// The entities a Kafka source reads.
     pub enum KafkaIngestorEntity {
-        Topic(KafkaTopicIngestor) = "TOPIC", "Kafka";
+        Topic(KafkaTopicIngestor => KafkaTopicIngestorOperation) = "TOPIC", "Kafka";
     }
 }
 

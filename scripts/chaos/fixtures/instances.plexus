@@ -28,12 +28,11 @@ CREATE RELAY chaos_records SCHEMA chaos_record BRANCHED BY chaos_branch CAPACITY
 
 CREATE KAFKA CLIENT chaos_kafka
   CONFIG {
-    'bootstrap.servers' = 'broker:9092',
-    'auto.offset.reset' = 'earliest'
+    'bootstrap.servers' = 'broker:9092'
   };
 
 CREATE KAFKA TOPIC INGESTOR chaos_ingestor
-  FROM chaos_kafka TOPIC 'chaos_input' OFFSET BY CONSUMER GROUP 'chaos_baseline' INSTANCES 3 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  FROM chaos_kafka TOPIC 'chaos_input' OFFSET BY CONSUMER GROUP 'chaos_baseline' START AT EARLIEST INSTANCES 3 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
   DECODE USING chaos_json
   TO chaos_records
     INHERIT ALL

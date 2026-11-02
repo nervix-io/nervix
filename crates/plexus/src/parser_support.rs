@@ -2159,15 +2159,20 @@ fn format_parse_error(err: &ParseError<'_>) -> String {
     match err.reason() {
         RichReason::Custom(msg) => msg.clone(),
         RichReason::ExpectedFound { expected, found } => {
-            let expected = expected
-                .iter()
-                .map(format_expected_pattern)
-                .collect::<Vec<_>>();
+            let mut named = Vec::with_capacity(expected.len());
+            for pattern in expected {
+                // A contextual gate that is closed expects `something else`, which adds nothing
+                // beside what the open alternatives name.
+                if let RichPattern::SomethingElse = pattern {
+                    continue;
+                }
+                named.push(format_expected_pattern(pattern));
+            }
 
-            let expected_text = if expected.is_empty() {
+            let expected_text = if named.is_empty() {
                 "something else".to_string()
             } else {
-                expected.join(" | ")
+                named.join(" | ")
             };
 
             let found_text = match found.as_deref() {

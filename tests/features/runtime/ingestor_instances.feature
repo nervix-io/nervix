@@ -24,12 +24,11 @@ Feature: Ingestor instances are independent placement units
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT broker
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
       CREATE KAFKA TOPIC INGESTOR spread_source
         FROM broker TOPIC 'instance_input_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'instance_group_{{test_id}}' INSTANCES 3
+        OFFSET BY CONSUMER GROUP 'instance_group_{{test_id}}' START AT EARLIEST INSTANCES 3
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
@@ -413,8 +412,7 @@ Feature: Ingestor instances are independent placement units
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT broker
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
       CREATE KAFKA TOPIC INGESTOR spread_source
         FROM broker TOPIC 'instance_input_{{test_id}}'
@@ -481,12 +479,11 @@ Feature: Ingestor instances are independent placement units
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT broker
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
       CREATE KAFKA TOPIC INGESTOR spread_source
         FROM broker TOPIC 'instance_input_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'instance_group_{{test_id}}' INSTANCES 3
+        OFFSET BY CONSUMER GROUP 'instance_group_{{test_id}}' START AT EARLIEST INSTANCES 3
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
@@ -549,12 +546,11 @@ Feature: Ingestor instances are independent placement units
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT broker
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
       CREATE KAFKA TOPIC INGESTOR spread_source
         FROM broker TOPIC 'instance_input_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'instance_group_{{test_id}}' INSTANCES 3
+        OFFSET BY CONSUMER GROUP 'instance_group_{{test_id}}' START AT EARLIEST INSTANCES 3
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
@@ -675,7 +671,7 @@ Feature: Ingestor instances are independent placement units
     When these Plexus statements fail with "KAFKA TOPIC INSTANCES PER PARTITION requires OFFSET BY DOMAIN"
       """
       CREATE KAFKA TOPIC INGESTOR bad_source FROM broker TOPIC 'events'
-        OFFSET BY CONSUMER GROUP 'readers' INSTANCES PER PARTITION
+        OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST INSTANCES PER PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant

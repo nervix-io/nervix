@@ -412,6 +412,32 @@ impl IngestAcknowledgement<'_> {
     }
 }
 
+/// Where a source starts when the position it keeps on its broker holds nothing it can use: an
+/// owned Pulsar subscription's new cursor, or a Kafka consumer group's partition without a usable
+/// committed offset. A usable position prevails.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    strum::EnumIter,
+    strum::Display,
+    strum::AsRefStr,
+)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+pub enum IngestStartPosition {
+    /// The earliest record the broker retains.
+    Earliest,
+    /// The broker's end, so only records produced after the start are read.
+    Latest,
+}
+
 /// Whether an endpoint answers on admission or after its request's downstream acknowledgement.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,

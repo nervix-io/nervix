@@ -445,12 +445,11 @@ Feature: NATS emission
       CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
         FROM kafka_ingress TOPIC 'jetstream_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'jetstream_boundary_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'jetstream_boundary_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec

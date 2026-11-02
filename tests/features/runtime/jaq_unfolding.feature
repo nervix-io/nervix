@@ -236,12 +236,11 @@ Feature: JAQ codec unfolding
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
       CREATE KAFKA TOPIC INGESTOR selected_event_source
         FROM kafka_main TOPIC 'selected_events_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'nervix_cucumber_selected_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_selected_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING selected_events_codec
         TO events
@@ -304,12 +303,11 @@ Feature: JAQ codec unfolding
       CREATE RELAY held_events SCHEMA split_event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
       CREATE KAFKA TOPIC INGESTOR split_event_source
         FROM kafka_main TOPIC 'split_events_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'nervix_cucumber_split_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_split_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING split_events_codec
         TO delivered_events
@@ -391,12 +389,11 @@ Feature: JAQ codec unfolding
       CREATE RELAY held_events SCHEMA split_event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
       CREATE KAFKA TOPIC INGESTOR split_event_source
         FROM kafka_main TOPIC 'split_events_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'nervix_cucumber_split_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_split_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING split_events_codec
         TO delivered_events
@@ -472,12 +469,11 @@ Feature: JAQ codec unfolding
       CREATE RELAY tenant_events SCHEMA sourced_tenant_event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
       CREATE KAFKA TOPIC INGESTOR tenant_batch_source
         FROM kafka_main TOPIC 'tenant_batches_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'nervix_cucumber_tenant_batches_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_tenant_batches_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING tenant_batch_codec
         TO tenant_events

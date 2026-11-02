@@ -407,7 +407,7 @@ fn EntityOptionEditor(signals: CreateSignals, option: OptionDeclaration) -> impl
                     } />
             </fieldset>
         </Show>
-        <Show when=move || keywords == "OFFSET BY" && signals.ingestor.get().source.offset == Some(super::ingestor_source_draft::OffsetChoice::ConsumerGroup) fallback=|| ()>
+        <Show when=move || keywords == "OFFSET BY" && matches!(signals.ingestor.get().source.offset, Some(offset) if offset.names_a_consumer_group()) fallback=|| ()>
             <SourceFieldEditor signals=signals field=IngestorField::ConsumerGroup />
         </Show>
     }

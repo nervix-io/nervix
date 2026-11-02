@@ -358,7 +358,7 @@ pub fn alter_ingestor_parser<'src>()
         .ignore_then(boxed_choice!(
             transport_alteration(http::request_body()),
             transport_alteration(http::endpoint_body()),
-            transport_alteration(kafka::topic_body()),
+            kafka::alteration(),
             pulsar::alteration(),
             transport_alteration(mqtt::topic_body()),
             transport_alteration(nats::subject_body()),
@@ -444,16 +444,17 @@ mod tests {
         ClientIngestMode, ClientIngestorAlteration, ClientProducerIngestor, CodecName,
         EndpointIngestMode, FlushPolicy, HttpEndpointIngestor, HttpIngestor, HttpRequestIngestMode,
         HttpRequestIngestor, HttpRequestIngestorAlteration, IngestQuiesceMode,
-        IngestQuiesceOverflow, KafkaIngestMode, KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor,
-        MqttIngestMode, MqttIngestor, MqttQos, MqttSession, MqttTopicIngestor,
-        MqttTopicIngestorAlteration, NatsIngestMode, NatsIngestor, NatsSubjectIngestor,
-        PrometheusIngestMode, PrometheusIngestor, PrometheusQueryIngestor, PulsarIngestMode,
-        PulsarIngestor, PulsarSubscription, PulsarSubscriptionOwnership, PulsarTopicIngestor,
-        RabbitMqIngestMode, RabbitMqIngestor, RabbitMqQueueIngestor, RedisIngestor,
-        RedisPubSubIngestMode, RedisPubSubIngestor, RetryPolicy, SchemaName, SqsIngestMode,
-        SqsIngestor, SqsQueueIngestor, SyslogIngestMode, SyslogIngestor, SyslogListenerIngestor,
-        WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
-        WebsocketsIngestor, ZeroMqIngestMode, ZeroMqIngestor, ZeroMqPullIngestor,
+        IngestQuiesceOverflow, IngestStartPosition, KafkaIngestMode, KafkaIngestor,
+        KafkaOffsetMode, KafkaTopicIngestor, MqttIngestMode, MqttIngestor, MqttQos, MqttSession,
+        MqttTopicIngestor, MqttTopicIngestorAlteration, NatsIngestMode, NatsIngestor,
+        NatsSubjectIngestor, PrometheusIngestMode, PrometheusIngestor, PrometheusQueryIngestor,
+        PulsarIngestMode, PulsarIngestor, PulsarSubscription, PulsarSubscriptionOwnership,
+        PulsarTopicIngestor, RabbitMqIngestMode, RabbitMqIngestor, RabbitMqQueueIngestor,
+        RedisIngestor, RedisPubSubIngestMode, RedisPubSubIngestor, RetryPolicy, SchemaName,
+        SqsIngestMode, SqsIngestor, SqsQueueIngestor, SyslogIngestMode, SyslogIngestor,
+        SyslogListenerIngestor, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
+        WebsocketsIngestMode, WebsocketsIngestor, ZeroMqIngestMode, ZeroMqIngestor,
+        ZeroMqPullIngestor,
     };
     use nonzero_ext::nonzero;
 
@@ -591,7 +592,7 @@ mod tests {
     fn keeps_an_external_name_exactly_as_written() {
         let parsed = parse_create_ingestor(&ingestor_with_source(
             "KAFKA TOPIC INGESTOR i FROM c TOPIC 'Orders.EU' OFFSET BY CONSUMER GROUP 'Readers of \
-             Orders' MODE NO ACK ON QUIESCE SUSPEND",
+             Orders' START AT LATEST MODE NO ACK ON QUIESCE SUSPEND",
         ))
         .expect("a case-preserving topic and group parse");
         let IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
@@ -603,7 +604,7 @@ mod tests {
             panic!("expected a Kafka topic source");
         };
         assert_eq!(topic.as_str(), "Orders.EU");
-        let KafkaOffsetMode::ConsumerGroup(group) = offset_mode else {
+        let KafkaOffsetMode::ConsumerGroup { group, .. } = offset_mode else {
             panic!("expected a consumer group");
         };
         assert_eq!(group.as_str(), "Readers of Orders");
@@ -869,7 +870,7 @@ mod tests {
                 FROM
                     kafka_main
                     TOPIC 'notifications'
-                    OFFSET BY CONSUMER GROUP 'nervix_consumer'
+                    OFFSET BY CONSUMER GROUP 'nervix_consumer' START AT LATEST
                     MODE ACK PARALLEL MAX 10 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
                 ON QUIESCE SUSPEND DECODE USING notification_kafka_message
                 TO notifications
@@ -911,10 +912,11 @@ mod tests {
                     .expect("valid client identifier"),
                 topic: nervix_models::KafkaTopicName::try_from("notifications")
                     .expect("valid topic identifier"),
-                offset_mode: KafkaOffsetMode::ConsumerGroup(
-                    nervix_models::KafkaConsumerGroupName::try_from("nervix_consumer")
+                offset_mode: KafkaOffsetMode::ConsumerGroup {
+                    group: nervix_models::KafkaConsumerGroupName::try_from("nervix_consumer")
                         .expect("valid consumer group identifier"),
-                ),
+                    start_at: IngestStartPosition::Latest,
+                },
                 instances: nervix_models::IngestorInstances::Count(nonzero!(1u16)),
                 mode: KafkaIngestMode::AckParallel {
                     max: nonzero!(10u64),
@@ -1025,7 +1027,7 @@ mod tests {
     fn parses_create_ingestor_ack_sequential() {
         let input = r#"
             CREATE KAFKA TOPIC INGESTOR i
-              FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s
+              FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' START AT LATEST MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s
               ON QUIESCE SUSPEND DECODE USING sch
               TO s BRANCHED BY u_branch SET u = message.u
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1060,7 +1062,7 @@ mod tests {
     fn parses_create_ingestor_kafka_no_ack() {
         let input = r#"
             CREATE KAFKA TOPIC INGESTOR i
-              FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' MODE NO ACK
+              FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' START AT LATEST MODE NO ACK
               ON QUIESCE SUSPEND DECODE USING sch
               TO s BRANCHED BY u_branch SET u = message.u
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1081,7 +1083,7 @@ mod tests {
     fn rejects_create_ingestor_kafka_no_ack_max() {
         let input = r#"
             CREATE KAFKA TOPIC INGESTOR i
-              FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' MODE NO ACK MAX 20
+              FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' START AT LATEST MODE NO ACK MAX 20
               ON QUIESCE SUSPEND DECODE USING sch
               TO s BRANCHED BY u_branch SET u = message.u
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1095,7 +1097,7 @@ mod tests {
     #[test]
     fn no_ack_completion_continues_to_quiesce_without_max() {
         let input = "CREATE KAFKA TOPIC INGESTOR i FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP \
-                     'g' MODE NO ACK ";
+                     'g' START AT LATEST MODE NO ACK ";
         let suggestions = suggest_create_ingestor(input, input.len());
 
         assert!(suggestions.contains(&"ON QUIESCE".to_string()));
@@ -1127,7 +1129,7 @@ mod tests {
                     name: nervix_models::PulsarSubscriptionName::try_from("nervix_subscription")
                         .expect("valid subscription identifier"),
                     ownership: PulsarSubscriptionOwnership::Ingestor {
-                        start_at: nervix_models::PulsarStartPosition::Earliest
+                        start_at: nervix_models::IngestStartPosition::Earliest
                     },
                 },
                 instances: nervix_models::IngestorInstances::Count(nonzero!(1u16)),
@@ -1249,8 +1251,8 @@ mod tests {
 
     #[test]
     fn suggests_mode_options() {
-        let input =
-            "CREATE KAFKA TOPIC INGESTOR i FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' MODE ";
+        let input = "CREATE KAFKA TOPIC INGESTOR i FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP \
+                     'g' START AT LATEST MODE ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"ACK".to_string()));
         assert!(suggestions.contains(&"NO ACK".to_string()));
@@ -1319,13 +1321,13 @@ mod tests {
             (
                 "OWNED BY INGESTOR START AT EARLIEST",
                 PulsarSubscriptionOwnership::Ingestor {
-                    start_at: nervix_models::PulsarStartPosition::Earliest,
+                    start_at: nervix_models::IngestStartPosition::Earliest,
                 },
             ),
             (
                 "owned by Ingestor start at earliest",
                 PulsarSubscriptionOwnership::Ingestor {
-                    start_at: nervix_models::PulsarStartPosition::Earliest,
+                    start_at: nervix_models::IngestStartPosition::Earliest,
                 },
             ),
             ("PROVISIONED", PulsarSubscriptionOwnership::Provisioned),
@@ -1432,7 +1434,7 @@ mod tests {
             CREATE KAFKA TOPIC INGESTOR kafka_notifications
                 FROM kafka_main
                     TOPIC 'notifications'
-                    OFFSET BY CONSUMER GROUP 'nervix_consumer'
+                    OFFSET BY CONSUMER GROUP 'nervix_consumer' START AT LATEST
                     MODE ACK PARALLEL MAX 10 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
                 ON QUIESCE SUSPEND DECODE USING notification_kafka_message
                 TO notifications BRANCHED BY user_id_kind_branch SET user_id = message.user_id
@@ -2369,7 +2371,7 @@ mod tests {
     fn parses_create_ingestor_kafka_instances() {
         let input = r#"
             CREATE KAFKA TOPIC INGESTOR i
-              FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' INSTANCES 3 MODE NO ACK
+              FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' START AT LATEST INSTANCES 3 MODE NO ACK
               ON QUIESCE SUSPEND DECODE USING sch
               TO s BRANCHED BY u_branch SET u = message.u
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -2443,7 +2445,7 @@ mod tests {
     fn rejects_zero_instances() {
         let input = r#"
             CREATE KAFKA TOPIC INGESTOR i
-              FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' INSTANCES 0 MODE NO ACK
+              FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' START AT LATEST INSTANCES 0 MODE NO ACK
               ON QUIESCE SUSPEND DECODE USING sch
               TO s BRANCHED BY u_branch SET u = message.u
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -2462,7 +2464,7 @@ mod tests {
     fn parses_ingestor_with_filter_where_and_output_routes() {
         let input = r#"
             CREATE KAFKA TOPIC INGESTOR kafka_notifications
-              FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'nervix_consumer' MODE NO ACK
+              FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'nervix_consumer' START AT LATEST MODE NO ACK
               ON QUIESCE SUSPEND DECODE USING notification_kafka_message
               FILTER WHERE message.active
               TO notifications
@@ -2515,7 +2517,7 @@ mod tests {
     fn rejects_invalid_ingestor_output_route_program() {
         let input = r#"
             CREATE KAFKA TOPIC INGESTOR kafka_notifications
-              FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'nervix_consumer'
+              FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'nervix_consumer' START AT LATEST
               MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_kafka_message
               TO notifications UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 SET notifications.normalized = ON MESSAGE ERROR LOG

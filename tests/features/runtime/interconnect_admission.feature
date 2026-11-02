@@ -434,12 +434,11 @@ Feature: Interconnect relay admission
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
         FROM kafka_main TOPIC 'held_admission_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'held_admission_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'held_admission_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE

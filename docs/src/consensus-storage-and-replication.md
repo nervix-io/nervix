@@ -456,11 +456,12 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The dedicated database owns exactly four current keyspaces: `raft_unit_ingestor_logs`,
-`raft_unit_ingestor_meta`, `raft_unit_ingestor_state`, and
-`raft_unit_ingestor_snapshots`. Opening it validates the complete keyspace namespace before
+The dedicated database owns exactly four current keyspaces: `raft_input_unit_logs`,
+`raft_input_unit_meta`, `raft_input_unit_state`, and
+`raft_input_unit_snapshots`. Opening it validates the complete keyspace namespace before
 reading any records. This namespace identifies the current Model shape, including an owned Pulsar
-subscription's required start position, the serialized Sentry platform field, an ingestor's
+subscription's required start position, a Kafka consumer group's required start position, the
+serialized Sentry platform field, an ingestor's
 `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the session and
 quality of service an MQTT TOPIC ingestor writes beside its delivery mode, a `REDIS PUBSUB`
 ingestor's `CHANNEL` or `PATTERN` subscription, whether a polled HTTP request's header holds a
@@ -469,7 +470,8 @@ partition count every resolved branch declaration of the committed schedule carr
 metadata requires the current `RestoredLifecycle` encoding, including the durable restore
 installation gate and the unit-keyed committed schedule in which a relay of a partitioned branch is
 scheduled as one unit per partition. The current shape also requires typed ingestor instancing,
-exact-unit placement-group members and entity-versus-unit transaction gate targets. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
+exact-unit placement-group members and entity-versus-unit transaction gate targets. Native counts
+in commands, queued transactions, progress, outcomes, and plan, report and topology headers
 are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery
 and snapshot installation therefore retain their complete magnitudes. See
 [Archived Counts](./typed-states.md#archived-counts).

@@ -54,8 +54,9 @@ def declarations():
                      "keys": [{"name": "sasl.password", "presence": "optional", "type": "string",
                                "owner": "driver; best effort", "confidential": True, "file": "none",
                                "readers": "every"}],
-                     "namespaces": ["all driver property names"], "reserved": ["group.id"], "secret_keys": None,
-                     "aliases": [], "stripped_prefix": None, "constraints": []}],
+                     "namespaces": ["all driver property names"], "reserved": ["group.id"],
+                     "statement_keys": [], "secret_keys": None, "aliases": [],
+                     "stripped_prefix": None, "constraints": []}],
     }
 
 
@@ -104,6 +105,15 @@ class ConnectorMatrixTests(unittest.TestCase):
             self.assertIn(value, text)
         surface["clients"][0]["stripped_prefix"]["properties"] = []
         self.assertIn("whose names begin with it: none.", matrix.render_matrix(surface, reasons()))
+
+    def test_a_reserved_key_a_statement_sets_names_its_clause(self):
+        surface = declarations()
+        self.assertNotIn("is set by a statement", matrix.render_matrix(surface, reasons()))
+        surface["clients"][0]["statement_keys"] = [
+            {"key": "group.id", "clause": "OFFSET BY CONSUMER GROUP on the ingestor"},
+        ]
+        self.assertIn("`group.id` is set by a statement: write OFFSET BY CONSUMER GROUP on the ingestor.",
+                      matrix.render_matrix(surface, reasons()))
 
     def test_keys_one_side_reads_name_the_entities_of_that_side(self):
         surface = declarations()

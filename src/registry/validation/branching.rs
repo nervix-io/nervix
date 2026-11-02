@@ -1536,7 +1536,10 @@ mod tests {
                                     KafkaTopicIngestor {
                                         client: named("broker_in_2"),
                                         topic: named("notifications"),
-                                        offset_mode: KafkaOffsetMode::ConsumerGroup(named("cg")),
+                                        offset_mode: KafkaOffsetMode::ConsumerGroup {
+                                            group: named("cg"),
+                                            start_at: nervix_models::IngestStartPosition::Earliest,
+                                        },
                                         instances: nervix_models::IngestorInstances::Count(
                                             nonzero!(1u16),
                                         ),

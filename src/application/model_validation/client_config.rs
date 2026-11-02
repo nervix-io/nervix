@@ -212,6 +212,9 @@ fn validate_driver(
         ConnectorKind::ZeroMq => nervix_connector_zeromq::validate_client_configuration(config),
         ConnectorKind::Sentry => nervix_connector_sentry::validate_client_configuration(config),
         ConnectorKind::Sqs => nervix_connector_sqs::validate_client_configuration(config),
+        ConnectorKind::Websockets => {
+            nervix_connector_websockets::validate_client_configuration(config)
+        }
         _ => Ok(()),
     }
 }
@@ -261,6 +264,8 @@ mod admission_tests;
 
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
+
     use super::*;
 
     #[test]
@@ -275,6 +280,68 @@ mod tests {
             refusal.current_context(),
             OfflineClientConfigError::InvalidKey { key } if key == "addr"
         ));
+    }
+
+    #[test]
+    fn a_websocket_ca_file_without_a_certificate_is_refused_by_its_key() {
+        let directory = tempfile::tempdir().assured("a temporary directory can be created");
+        let ca_file = directory.path().join("ca.pem");
+        std::fs::write(&ca_file, "no certificate is written here\n")
+            .assured("the fixture CA file can be written");
+        let config = [
+            ClientConfigEntry {
+                key: "endpoint".to_string(),
+                value: "wss://websocket.nervix.test/events".to_string(),
+            },
+            ClientConfigEntry {
+                key: "tls_ca_file".to_string(),
+                value: ca_file.display().to_string(),
+            },
+        ];
+        let report = validate_driver(ConnectorKind::Websockets, &config)
+            .err()
+            .assured("the file adds no trust root")
+            .change_context(ModelBindingValidationError::Client {
+                domain: DomainName::parse("sales").assured("sales is a valid domain name"),
+                node: nervix_models::ClientName::parse("socket")
+                    .assured("socket is a valid client name"),
+            });
+        assert_eq!(
+            client_validation_message(&report).as_deref(),
+            Some(
+                "invalid client 'socket' in domain 'sales': client config key 'tls_ca_file' holds \
+                 no certificate"
+            )
+        );
+    }
+
+    #[test]
+    fn a_rendered_websocket_endpoint_with_user_information_hides_its_value() {
+        let config = [ClientConfigEntry {
+            key: "endpoint".to_string(),
+            value: "wss://operator:private-password@websocket.nervix.test/events".to_string(),
+        }];
+        let report =
+            SessionServiceImpl::validate_rendered_client_values(ConnectorKind::Websockets, &config)
+                .err()
+                .assured("the upgrade never sends user information")
+                .change_context(ModelBindingValidationError::Client {
+                    domain: DomainName::parse("sales").assured("sales is a valid domain name"),
+                    node: nervix_models::ClientName::parse("socket")
+                        .assured("socket is a valid client name"),
+                });
+        assert_eq!(
+            report.downcast_ref::<WebsocketsClientConfigError>(),
+            Some(&WebsocketsClientConfigError::EndpointUserInformation)
+        );
+        assert_eq!(
+            client_validation_message(&report).as_deref(),
+            Some(
+                "invalid client 'socket' in domain 'sales': 'endpoint' must not carry user \
+                 information"
+            )
+        );
+        assert!(!format!("{report:#}").contains("private-password"));
     }
 
     #[test]

@@ -19,12 +19,11 @@ Feature: Remote relay delivery held back while the relay memory budget is full
         FROM WIRE JSON SCHEMA remote_hold_wire TO SCHEMA remote_hold_event;
       CREATE RELAY remote_hold_records SCHEMA remote_hold_event UNBRANCHED;
       CREATE KAFKA CLIENT remote_hold_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR remote_hold_source
         FROM remote_hold_kafka TOPIC 'remote_hold_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'remote_hold_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'remote_hold_group_{{test_id}}' START AT EARLIEST
           INSTANCES 1
           MODE NO ACK
           ON QUIESCE SUSPEND DECODE USING remote_hold_codec
@@ -114,12 +113,11 @@ Feature: Remote relay delivery held back while the relay memory budget is full
       CREATE RELAY full_hold_first SCHEMA full_hold_event UNBRANCHED;
       CREATE RELAY full_hold_second SCHEMA full_hold_event UNBRANCHED;
       CREATE KAFKA CLIENT full_hold_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR full_hold_first_source
         FROM full_hold_kafka TOPIC 'full_hold_first_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'full_hold_first_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'full_hold_first_group_{{test_id}}' START AT EARLIEST
           INSTANCES 1
           MODE NO ACK
           ON QUIESCE SUSPEND DECODE USING full_hold_codec
@@ -128,7 +126,7 @@ Feature: Remote relay delivery held back while the relay memory budget is full
         ON GENERAL ERROR LOG;
       CREATE KAFKA TOPIC INGESTOR full_hold_second_source
         FROM full_hold_kafka TOPIC 'full_hold_second_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'full_hold_second_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'full_hold_second_group_{{test_id}}' START AT EARLIEST
           INSTANCES 1
           MODE NO ACK
           ON QUIESCE SUSPEND DECODE USING full_hold_codec

@@ -521,9 +521,10 @@ pub(in crate::registry) fn ingestor_statement(
             source: IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
                 client: ClientName::parse(client).expect("valid identifier"),
                 topic: nervix_models::KafkaTopicName::parse("notifications").expect("valid topic"),
-                offset_mode: KafkaOffsetMode::ConsumerGroup(
-                    KafkaConsumerGroupName::parse("cg").expect("valid consumer group"),
-                ),
+                offset_mode: KafkaOffsetMode::ConsumerGroup {
+                    group: KafkaConsumerGroupName::parse("cg").expect("valid consumer group"),
+                    start_at: nervix_models::IngestStartPosition::Earliest,
+                },
                 instances: nervix_models::IngestorInstances::Count(nonzero!(1u16)),
                 mode: KafkaIngestMode::AckSequential {
                     timeout: "30s".to_string(),

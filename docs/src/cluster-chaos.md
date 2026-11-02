@@ -192,7 +192,8 @@ amd64 workers.
 The baseline graph has three parts:
 
 - the Kafka ingestor `chaos_ingestor`, which reads `chaos_input` with
-  `OFFSET BY CONSUMER GROUP 'chaos_baseline'`, `MODE ACK SEQUENTIAL` and `ACK TIMEOUT 30s`
+  `OFFSET BY CONSUMER GROUP 'chaos_baseline' START AT EARLIEST`, `MODE ACK SEQUENTIAL` and
+  `ACK TIMEOUT 30s`
 - the relay `chaos_records`, branched by `chaos_branch` with `TTL 5m MAX INSTANCES 16 EVICT LRU`
 - the attached Kafka emitter `chaos_emitter`, which writes `chaos_output` with
   `MODE ACK PARALLEL MAX 16`
@@ -896,8 +897,8 @@ just chaos run backup --image nervix:debian --nodes 1
 ```
 
 This scenario installs the baseline graph with the Kafka ingestor's
-`OFFSET BY CONSUMER GROUP 'chaos_baseline'` replaced by `OFFSET BY DOMAIN`. The run therefore uses
-domain-owned Kafka offsets, and the archive must hold those offsets as well as the branch lifecycle
+`OFFSET BY CONSUMER GROUP 'chaos_baseline' START AT EARLIEST` replaced by `OFFSET BY DOMAIN`. The
+run therefore uses domain-owned Kafka offsets, and the archive must hold those offsets as well as the branch lifecycle
 state. A fixture without exactly one such clause stops the run with a setup error before the graph
 is installed. Every verifier self-check derives the backup graph the same way, so a fixture change
 that breaks this run fails every scenario's self-check.
