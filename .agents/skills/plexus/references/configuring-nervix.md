@@ -484,6 +484,12 @@ current connection, retry and deadline limits.
   a subject the named stream does not capture is rejected per record. `MESSAGE ID <expression>`
   writes `Nats-Msg-Id` so a retry after a lost PubAck can be deduplicated by JetStream. Read
   `Emitters` → `NATS` for the full declaration and guarantee boundary.
+- A `PULSAR TOPIC` emitter's `TIMESTAMP <expression>` is each message's event time: an exact,
+  non-null, non-sensitive `DATETIME`, written as the millisecond that contains it, and a time before
+  `1970-01-01T00:00:00.001Z` rejects its record through `ON MESSAGE ERROR`. Its `DELIVER AFTER
+  <duration>` delays each message from its batch's execution time, not from the send, for shared
+  subscriptions only, and the broker may deliver up to its tick, one second by default, early. Read
+  `Emitters` → `Pulsar`.
 - Every `PULSAR TOPIC` ingestor states who owns its subscription after the subscription's name:
   `OWNED BY INGESTOR START AT EARLIEST` when Nervix may create it and should remove it when the ingestor or its
   domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and
@@ -522,8 +528,11 @@ current connection, retry and deadline limits.
   due instant, and use a fresh execution snapshot for returned data and generated routes.
 - Every `PROMETHEUS CLIENT` sets `addr` to the API root, an `http` or `https` URL without a
   query string or fragment, and a positive `timeout_ms`. It sets no key beyond `tls_ca_file` and
-  the paired `tls_cert_file` and `tls_key_file`; `CREATE PROMETHEUS CLIENT` refuses any other. Read
-  `Ingestors` → `Prometheus` for the keys.
+  the paired `tls_cert_file` and `tls_key_file`; `CREATE PROMETHEUS CLIENT` refuses any other. It
+  follows no redirect and uses no proxy, whatever the environment names, so `addr` names the root
+  that answers. It declares no bearer token: authenticate with a client certificate or with Basic
+  credentials in the user information of `addr`. Read `Ingestors` → `Prometheus` for the keys and
+  the transport.
 - A `PROMETHEUS QUERY` ingestor reads at most `MAX BODY SIZE` bytes of each response, written
   between `QUERY` and `EVERY` and `16MiB` when left out. A larger response fails the poll as the
   ingestor's transient error rather than delivering part of it; raise the bound for a query that
@@ -534,7 +543,8 @@ current connection, retry and deadline limits.
   `'{job: .metric.job, value, timestamp}'`, or a `MODE LOOSE` wire schema when no label is needed.
   Use `metadata.query`, `metadata.evaluated_at` and `TIMESTAMP AT metadata.evaluated_at` for the
   query and its evaluation instant. A `matrix`, `scalar` or `string` result or a native histogram
-  fails the poll; ask for an instant vector.
+  fails the poll; ask for an instant vector. A failed poll is not sent again, so its instant stays
+  a gap in the series.
 - Treat Kafka `NO ACK` emitter success as local librdkafka producer-queue admission. Even in
   `ATTACHED` mode, Nervix does not wait for a broker delivery receipt before completing its ACK
   share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces the

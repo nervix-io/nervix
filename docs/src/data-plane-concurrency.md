@@ -1209,6 +1209,20 @@ ordinary primitive and window tests deliver more answers than one budget permits
 every given answer is settled. [Execution Primitives](execution-primitives.md) owns the adapter's
 behavior in each mode, and [Connector Contract](connector-contract.md) owns the publish outcomes.
 
+RabbitMQ's confirmation owner in
+`crates/connectors/rabbitmq/src/publisher/confirmation_window.rs` holds one bounded set of driver
+futures and messages exclusively. A driver confirm can carry another message's return, so the
+owner collects the set before attributing returns and refilling it. An interrupted mandatory
+window retains positive answers whose return attribution remains unknown, rather than reporting
+delivery; known returns and safe nonmandatory answers are settled once. The lookup borrows payload
+contents and uses no shared map or tracked lock. The Shuttle checks
+`shuttle_a_return_followed_by_a_multiple_ack_rejects_only_its_message` and
+`shuttle_a_deadline_never_delivers_a_partially_attributed_mandatory_window` drive this production
+owner with selected callbacks and deadline events. They qualify the owner, not Lapin's opaque locks
+or network framing; the controlled one-/three-node real-broker scenarios cover the wire exchange.
+Deloxide does not observe these async waits or the driver's locks, and this path adds no tracked
+blocking synchronization.
+
 ### Client ingestor endpoints
 
 Each client ingestor a node executes has one endpoint task that owns every producer attached to it:
