@@ -108,6 +108,42 @@ async def handle_prometheus_vector(request: web.Request) -> web.StreamResponse:
     )
 
 
+async def handle_prometheus_answer(request: web.Request) -> web.StreamResponse:
+    """Answers an instant query with a shape a scenario cannot ask a real Prometheus for.
+
+    `native-histogram` answers one float sample beside one native histogram, in the shape the
+    pinned Prometheus image answers a scraped histogram in, and `proxy-page` answers as a proxy in
+    front of the API would, with a status and a page that is not the API's JSON.
+    """
+    answer = request.match_info["answer"]
+    if answer == "proxy-page":
+        return web.Response(
+            status=503,
+            text="<html><body>upstream unavailable</body></html>",
+            content_type="text/html",
+        )
+    if answer != "native-histogram":
+        return web.Response(status=404, text=f"unknown answer '{answer}'")
+    query_time = float(request.query["time"])
+    histogram = {
+        "count": "1",
+        "sum": "0.5",
+        "buckets": [[0, "0.25", "0.5", "1"]],
+    }
+    return web.json_response(
+        {
+            "status": "success",
+            "data": {
+                "resultType": "vector",
+                "result": [
+                    {"metric": {"source": "float"}, "value": [query_time, "1"]},
+                    {"metric": {"source": "histogram"}, "histogram": [query_time, histogram]},
+                ],
+            },
+        }
+    )
+
+
 async def clock_source_observations(request: web.Request) -> web.StreamResponse:
     name = request.match_info["name"]
     requests = clock_source_requests.get(name, [])
@@ -182,6 +218,10 @@ app.router.add_get(
 app.router.add_get(
     "/prometheus-vector/{name}/{count}/{repeat}/api/v1/query",
     handle_prometheus_vector,
+)
+app.router.add_get(
+    "/prometheus-answer/{name}/{answer}/api/v1/query",
+    handle_prometheus_answer,
 )
 app.router.add_get("/clock-source-observations/{name}", clock_source_observations)
 app.router.add_delete("/clock-source-observations/{name}", reset_clock_source)
