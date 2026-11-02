@@ -503,8 +503,9 @@ General notes:
   `metadata.status` and `metadata.polled_at`,
   `HTTP ENDPOINT` declares `metadata.method`, `metadata.path`, `metadata.query`,
   `metadata.remote_addr`, and `metadata.host`, `WEBSOCKETS CONNECTION` declares
-  `metadata.frame_type`, and `WEBSOCKETS ENDPOINT` declares `metadata.frame_type`,
-  `metadata.remote_addr`, and `metadata.path`; every field is optional and none is sensitive
+  `metadata.frame_type`, `WEBSOCKETS ENDPOINT` declares `metadata.frame_type`,
+  `metadata.remote_addr`, and `metadata.path`, and `REDIS PUBSUB` declares `metadata.channel` and
+  `metadata.pattern`; every field is optional and none is sensitive
 - a route expression may read any declared field; `CREATE` and `ALTER` refuse a route that reads a
   field its entity does not declare, naming the ingestor, the route's relay and the fields the
   entity does declare. `FILTER WHERE` reads headers but not `metadata.<field>`
@@ -1489,27 +1490,53 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Capability | Declaration |
 | --- | --- |
 | Reference | REDIS client |
-| Locator and validation rule | CHANNEL 'orders' (redis_channel) |
+| Locator and validation rule | CHANNEL 'orders' (redis_channel) \| PATTERN 'orders.*' (redis_channel_pattern) |
 | Modes (complete bodies after MODE) | NO ACK |
 | Options in statement order | No entity-specific options. |
-| Headers | Not offered: Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names. |
+| Headers | Not offered: Redis Pub/Sub carries a channel and a payload, and for a pattern subscription the pattern that matched, but no headers. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. An ingestor subscribes to a quoted channel or channel pattern and an emitter publishes to a quoted channel, each case-preserving. |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
-| Metadata | Not offered: The current Pub/Sub declaration delivers payloads without a typed channel metadata namespace. |
+| Metadata | metadata.channel: STRING OPTIONAL<br>metadata.pattern: STRING OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
 | Buffers | messages read ahead of intake: set by subscription_buffer_messages; when full, holds back what fills it |
-| Network waits | subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE: `connect_timeout_ms`; 30s when omitted<br>idle subscription activity, including its PING probe: `idle_timeout_ms`; required |
+| Network waits | subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE or PSUBSCRIBE: `connect_timeout_ms`; 30s when omitted<br>idle subscription activity, including its PING probe: `idle_timeout_ms`; required |
 | Driver limits | None declared. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |
 
 See the [REDIS PUBSUB capability and mirror reference](connector-capabilities.md#redis-pubsub-ingest).
 <!-- connector-matrix:ingest-redis-pubsub:end -->
 
+An ingestor names what it subscribes to with exactly one of `CHANNEL` and `PATTERN`.
+
 `CHANNEL` takes a nonempty string literal of at most 1,024 UTF-8 bytes. Nervix preserves its case,
 spaces and punctuation in both directions. For example, `CHANNEL 'Orders:EU/*'` subscribes to that
-exact channel: the star is a literal character. Redis Pub/Sub carries no transport headers, so
-`read_header` and `read_headers` are refused when the ingestor is created.
+exact channel: the star is a literal character.
+
+`PATTERN` subscribes to every channel a Redis glob pattern matches, through Redis's `PSUBSCRIBE`.
+It takes a nonempty string literal of at most 1,024 UTF-8 bytes, which Nervix sends exactly as
+written. Redis matches it byte by byte against the channel each message is published to: `*`
+matches any run of bytes, `?` any one byte, `[...]` one byte of a set or range, `[^...]` one byte
+outside it, and `\` makes the next byte literal. Redis accepts any text as a pattern, so a pattern
+without these characters matches only the channel of that exact name. For example,
+`PATTERN 'orders.*'` receives what is published to `orders.eu` and to `orders.us`, but not to
+`returns.eu`. An emitter always publishes to one `CHANNEL`.
+
+Every message exposes two typed metadata fields, both `STRING` and optional:
+
+| Field | Value |
+| --- | --- |
+| `metadata.channel` | The channel the message was published to. For a `CHANNEL` subscription it is the subscribed channel. A pattern can match a channel whose name is not UTF-8 text, published by another client; that message's `metadata.channel` is null. |
+| `metadata.pattern` | The pattern that matched the message. It is null for a `CHANNEL` subscription. |
+
+For example, `SET channel = metadata.channel` records which channel delivered each message of a
+`PATTERN 'orders.*'` subscription, and the same route's `WHERE channel = 'orders.eu'` then keeps
+only that channel's messages. `ALTER REDIS PUBSUB INGESTOR ... SET FROM` replaces the complete
+body, so it moves an ingestor from a channel to a pattern or back; the source then subscribes again
+with the new body.
+
+Redis Pub/Sub carries no transport headers, so `read_header` and `read_headers` are refused when
+the ingestor is created.
 
 Redis Pub/Sub has no retained backlog, so it cannot suspend honestly. Both `ON QUIESCE BUFFER`
 and `ON QUIESCE DROP` keep reading and keep the subscriber healthy. `BUFFER` retains payloads up

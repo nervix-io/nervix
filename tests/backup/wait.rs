@@ -462,6 +462,52 @@ async fn when_native_backup_wait_is_recovered(world: &mut ScenarioWorld, first_c
     world.last_backup = Some(recovered);
 }
 
+#[when("a cluster backup recovers its first cut's refused mutation lease release")]
+async fn when_backup_recovers_refused_mutation_release(world: &mut ScenarioWorld) {
+    let archive = archive_path(world, "lease-release-recovered.nvxb");
+    let leader = current_leader_node(world).await;
+    let uri = world
+        .cluster()
+        .grpc_uri(&leader)
+        .assured("the leader exists");
+    let options = client_connect_options(&uri).assured("the client is configured");
+    let client = Client::connect_with_options(&uri, client_domain(&world.domain), options)
+        .await
+        .assured("the backup client connects");
+    let query = format!("BACKUP CLUSTER TO '{}' TIMEOUT 30s;", archive.display());
+    let execution = client.prepare_execution(query).await;
+    let reference = execution.reference().clone();
+    world
+        .fault_injection
+        .refuse_command_write_as_lapsed_lease(
+            reference.clone(),
+            nervix_consensus::CommandWrite::DomainMutationRelease,
+        )
+        .await;
+    let outcome = client
+        .execute_prepared(&execution)
+        .await
+        .assured("the backup recovers the refused lease release under its original reference");
+    assert!(outcome.succeeded(), "{}", outcome.message);
+    assert_eq!(outcome.execution_reference.as_ref(), Some(&reference));
+    assert!(
+        world
+            .fault_injection
+            .command_write_refused_as_lapsed_lease(
+                &reference,
+                nervix_consensus::CommandWrite::DomainMutationRelease,
+            )
+            .await,
+        "the first cut's mutation lease release met the armed refusal"
+    );
+    world.last_backup = Some(TestBackup {
+        reference,
+        summary: *outcome
+            .backup
+            .assured("the recovered backup has its summary"),
+    });
+}
+
 #[then(
     expr = "backup archive {string} retains both native recovery cuts after a {int} second first \
             cut"
