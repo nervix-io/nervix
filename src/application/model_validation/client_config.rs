@@ -17,8 +17,9 @@ use nervix_connector::OfflineClientConfigError;
 use nervix_execution::{MemoryClass, QueueAdmission, StorageClass};
 use nervix_models::{
     ClientConfigEntry, ClientConfigOwner, ClientConfigSchemaError, ClientConfigValue,
-    ConfiguredClientRef, ConnectorKind, DomainName, PrometheusApiRoot, PrometheusClientConfigError,
-    WebsocketsClientConfig, WebsocketsClientConfigError, validate_clickhouse_client_config,
+    ConfiguredClientRef, ConnectorKind, DomainName, MqttClientConfig, MqttClientConfigError,
+    PrometheusApiRoot, PrometheusClientConfigError, WebsocketsClientConfig,
+    WebsocketsClientConfigError, validate_clickhouse_client_config,
 };
 
 use super::{ModelBindingValidationError, SessionServiceImpl};
@@ -104,9 +105,10 @@ impl SessionServiceImpl {
                 cancellation
                     .check()
                     .change_context(ClientValidationError::Cancelled)?;
-                // MQTT alone renders a branch instance into its client ID. Validate the first
-                // instance using the same renderer, leaving each actual instance to its host.
-                let resolved = if connector == ConnectorKind::Mqtt {
+                // A client whose templates name the instance that connects, MQTT's identity
+                // template, is validated as its first instance, which an emitter also connects
+                // as, using the same renderer; each ingestor instance renders its own on its host.
+                let resolved = if connector.renders_client_instance() {
                     execution_runtime.resolve_client_config_with_instance(
                         &worker_domain,
                         mount.as_ref(),
@@ -172,6 +174,9 @@ impl SessionServiceImpl {
             ConnectorKind::Prometheus => PrometheusApiRoot::of_client_config(config)
                 .map(|_| ())
                 .change_context(ClientValidationError::Schema),
+            ConnectorKind::Mqtt => MqttClientConfig::parse(config)
+                .map(|_| ())
+                .change_context(ClientValidationError::Schema),
             _ => Ok(()),
         }
     }
@@ -232,6 +237,8 @@ pub(in crate::application) fn client_validation_message<C: error_stack::Context>
     } else if let Some(config) = error.downcast_ref::<WebsocketsClientConfigError>() {
         config.to_string()
     } else if let Some(config) = error.downcast_ref::<PrometheusClientConfigError>() {
+        config.to_string()
+    } else if let Some(config) = error.downcast_ref::<MqttClientConfigError>() {
         config.to_string()
     } else if let Some(validation) = error.downcast_ref::<ClientValidationError>() {
         match validation {
@@ -300,6 +307,39 @@ mod tests {
                  'addr'"
             )
         );
+    }
+
+    #[test]
+    fn rendered_mqtt_refusal_retains_its_cause_and_names_its_key_without_a_value() {
+        let entry = |key: &str, value: &str| ClientConfigEntry {
+            key: key.to_string(),
+            value: value.to_string(),
+        };
+        let config = [
+            entry("addr", "mqtt://broker.example.com:1883"),
+            entry("keep_alive_ms", "1500"),
+            entry("password", "private-mqtt-password"),
+        ];
+        let report =
+            SessionServiceImpl::validate_rendered_client_values(ConnectorKind::Mqtt, &config)
+                .expect_err("a keep-alive of a second and a half is not whole seconds")
+                .change_context(ModelBindingValidationError::Client {
+                    domain: DomainName::parse("sales").expect("valid domain name"),
+                    node: nervix_models::ClientName::parse("sensors").expect("valid client name"),
+                });
+        assert_eq!(
+            report.downcast_ref::<MqttClientConfigError>(),
+            Some(&MqttClientConfigError::KeepAlive)
+        );
+        let message = client_validation_message(&report);
+        assert_eq!(
+            message.as_deref(),
+            Some(
+                "invalid client 'sensors' in domain 'sales': 'keep_alive_ms' must be whole \
+                 seconds from 1 s through 65535 s"
+            )
+        );
+        assert!(!format!("{report:?}").contains("private-mqtt-password"));
     }
 
     #[test]

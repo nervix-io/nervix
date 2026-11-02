@@ -426,11 +426,29 @@ impl Runtime {
             domain: domain.clone(),
             emitter: emitter.name.clone(),
         };
+        // A client whose templates name the instance that connects, an MQTT identity template,
+        // renders the emitter's one connection as instance 0, as CREATE CLIENT validated it.
+        let renders_instance = emitter
+            .connector
+            .connector
+            .kind()
+            .connector()
+            .renders_client_instance();
         let resolved = emitter.connector.clone().resolve_clients(|client| {
-            self.resolve_client_config(domain, client.config.mount.as_ref(), &client.config.entries)
-                .change_context_lazy(|| EmitterStartError::ResolveClient {
-                    client: client.name.clone(),
-                })
+            let config = &client.config;
+            let rendered = if renders_instance {
+                self.resolve_client_config_with_instance(
+                    domain,
+                    config.mount.as_ref(),
+                    &config.entries,
+                    0,
+                )
+            } else {
+                self.resolve_client_config(domain, config.mount.as_ref(), &config.entries)
+            };
+            rendered.change_context_lazy(|| EmitterStartError::ResolveClient {
+                client: client.name.clone(),
+            })
         });
         let plan = match resolved {
             Ok(plan) => plan,

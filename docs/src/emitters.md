@@ -1705,15 +1705,25 @@ client identity.
 ### MQTT
 
 The default client identity is `<domain>~<emitter>`. A `client_id` in the client configuration
-replaces the whole identity, including its domain prefix. Choose an explicit identity unique to
-this connection on the broker, including across domains and ingestors.
+replaces the whole identity, including its domain prefix. It is a template, and an emitter connects
+as instance 0 of it, so a `client_id` that names `{{instance}}` for a multi-instance ingestor
+renders the same identity for the emitter as for that ingestor's first instance. Choose an explicit
+identity unique to this connection on the broker, including across domains and ingestors.
 
-Connections use the driver's 60-second keep-alive unless the broker supplies a Server Keep Alive
-in `CONNACK`; a broker-supplied zero disables it. Plexus exposes no client setting for this
-interval. QoS 0 uses a clean session. QoS 1 and 2 request a persistent session with the maximum
-Session Expiry Interval (`0xFFFFFFFF`); the broker's accepted expiry and retention limits
-still apply. Plexus exposes no session-expiry setting, and `SESSION` is not an emitter option: an
-emitter without acknowledgement needs no session, and an acknowledged one always keeps it.
+The emitter authenticates with the client's `username` and `password` where it declares them. A
+broker that refuses the connection, such as for missing or wrong credentials, refuses every
+publish until it accepts one: `DESCRIBE EMITTER` shows the broker's reason, such as
+``Connection refused, return code: `BadUserNamePassword` ``, and the emitter connects again on its
+retry policy. The [MQTT client keys](ingestors.md#mqtt) describe every key a client declares.
+
+Every `CONNECT` asks the broker for the client's `keep_alive_ms`, 60 seconds when omitted, unless
+the broker supplies a Server Keep Alive in `CONNACK`; a broker-supplied zero disables it. The
+connection pings its broker after one interval without traffic and ends when the following interval
+passes without an answer. QoS 0 uses a clean session. QoS 1 and 2 request a persistent session with
+the maximum Session Expiry Interval (`0xFFFFFFFF`); the broker's accepted expiry and retention
+limits still apply. Plexus exposes no session-expiry setting, and `SESSION` is not an emitter
+option: an emitter without acknowledgement needs no session, and an acknowledged one always keeps
+it.
 
 Every statement writes its quality of service as `QOS 0`, `QOS 1` or `QOS 2` before `MODE`. Neither
 has a default, and the two pair by what can complete a publish: nothing answers QoS 0, so `QOS 0`
@@ -1751,7 +1761,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | publishes queued for the driver: set by 1 under NO ACK and ACK SEQUENTIAL, ACK PARALLEL MAX under ACK PARALLEL; when full, fails the publish for the host to retry |
-| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>answers to QOS 1 and 2 publishes: `ACK TIMEOUT`<br>writes to the connection: unbounded |
+| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>answers to QOS 1 and 2 publishes: `ACK TIMEOUT`<br>writes to the connection: unbounded<br>a silent connection: client key `keep_alive_ms`; two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 s when omitted |
 | Driver limits | Packets above the broker's maximum packet size are rejected.<br>QOS 0 connects a clean session; QOS 1 and 2 connect a persistent one with the maximum Session Expiry Interval, and SESSION is not an emitter option: a publisher without acknowledgement needs no session, and an acknowledged one always keeps it.<br>The client resumes its own session across reconnects, and a new client is refused while the broker keeps a session under its identity, since it holds no state to resume it with. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
