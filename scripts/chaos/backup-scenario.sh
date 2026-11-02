@@ -16,7 +16,7 @@ backup_fail() {
 backup_graph_fixture() {
     local baseline_graph="$1"
     # The baseline fixture quotes the group, as Plexus spells every consumer-group name.
-    local consumer_group_clause="OFFSET BY CONSUMER GROUP 'chaos_baseline'"
+    local consumer_group_clause="OFFSET BY CONSUMER GROUP 'chaos_baseline' START AT EARLIEST"
     local after_first_clause="${baseline_graph#*"${consumer_group_clause}"}"
     if [[ "${after_first_clause}" == "${baseline_graph}" ]]; then
         return 1

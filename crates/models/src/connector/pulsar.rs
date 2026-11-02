@@ -37,7 +37,7 @@ use crate::{
     EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
     EnvelopeClauseKind, HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode,
-    IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
+    IngestStartPosition, IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
     IngestorMetadataDeclaration, IngestorReference, IngestorReferenceKind, LocatorDeclaration,
     LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
     PositionClass, RetryPolicy,
@@ -179,7 +179,7 @@ pub struct PulsarSubscription {
 pub enum PulsarSubscriptionOwnership {
     /// `OWNED BY INGESTOR START AT EARLIEST|LATEST`: joining creates an absent subscription at
     /// the declared position, and dropping the ingestor or its domain removes it.
-    Ingestor { start_at: PulsarStartPosition },
+    Ingestor { start_at: IngestStartPosition },
     /// `PROVISIONED`: an operator provisioned the subscription. Every open verifies that it exists,
     /// and Nervix never creates or removes it.
     Provisioned,
@@ -189,10 +189,10 @@ impl PulsarSubscriptionOwnership {
     /// Every complete subscription choice the declaration and visual draft offer.
     pub const CHOICES: [Self; 3] = [
         Self::Ingestor {
-            start_at: PulsarStartPosition::Earliest,
+            start_at: IngestStartPosition::Earliest,
         },
         Self::Ingestor {
-            start_at: PulsarStartPosition::Latest,
+            start_at: IngestStartPosition::Latest,
         },
         Self::Provisioned,
     ];
@@ -205,42 +205,20 @@ impl PulsarSubscriptionOwnership {
     pub const fn keywords(self) -> &'static str {
         match self {
             Self::Ingestor {
-                start_at: PulsarStartPosition::Earliest,
+                start_at: IngestStartPosition::Earliest,
             } => "OWNED BY INGESTOR START AT EARLIEST",
             Self::Ingestor {
-                start_at: PulsarStartPosition::Latest,
+                start_at: IngestStartPosition::Latest,
             } => "OWNED BY INGESTOR START AT LATEST",
             Self::Provisioned => "PROVISIONED",
         }
     }
 }
 
-/// Where Pulsar places a newly created owned subscription's cursor. Existing cursors prevail.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-    strum::EnumIter,
-    strum::Display,
-    strum::AsRefStr,
-)]
-#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
-pub enum PulsarStartPosition {
-    Earliest,
-    Latest,
-}
-
 impl PulsarSubscription {
     fn set_start_at(
         &mut self,
-        position: PulsarStartPosition,
+        position: IngestStartPosition,
     ) -> error_stack::Result<(), crate::AlterIngestorError> {
         match &mut self.ownership {
             PulsarSubscriptionOwnership::Ingestor { start_at } => *start_at = position,
@@ -262,7 +240,7 @@ impl PulsarSubscription {
 )]
 pub enum PulsarTopicIngestorOperation {
     Transport(crate::AlterTransportIngestorOperation<PulsarTopicIngestor>),
-    SetStartAt { position: PulsarStartPosition },
+    SetStartAt { position: IngestStartPosition },
 }
 
 impl From<crate::AlterTransportIngestorOperation<PulsarTopicIngestor>>

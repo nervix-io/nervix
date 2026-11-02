@@ -33,7 +33,7 @@ backup_line="${backup_lines[changed_lines[0]]}"
 baseline_line="${baseline_lines[changed_lines[0]]}"
 [[ "${backup_line}" == *' OFFSET BY DOMAIN '* ]] \
     || fail "the changed line does not read domain-owned offsets: ${backup_line}"
-consumer_group_clause="OFFSET BY CONSUMER GROUP 'chaos_baseline'"
+consumer_group_clause="OFFSET BY CONSUMER GROUP 'chaos_baseline' START AT EARLIEST"
 restored_line="${backup_line/ OFFSET BY DOMAIN / ${consumer_group_clause} }"
 [[ "${restored_line}" == "${baseline_line}" ]] \
     || fail "the changed line differs from the baseline beyond its offset clause: ${backup_line}"

@@ -6990,7 +6990,6 @@ dependencies = [
  "nervix-recovery",
  "rdkafka",
  "shuttle",
- "strum 0.26.3",
  "thiserror 2.0.21",
  "tracing",
 ]
