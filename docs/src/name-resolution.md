@@ -432,7 +432,7 @@ Nervix selects each library's resolver deliberately. The locked versions and sel
 | Tonic | 0.13.1 | `connect_with_connector` over that `HttpConnector`, for native sessions |
 | Tonic, for OpenTelemetry | 0.14.6 | `connect_with_connector_lazy` over that `HttpConnector`, for OTEL gRPC emitters and the node's own trace exporter |
 | Lapin and `async-rs` | 4.12.0 and 0.8.12 | `hickory-dns` deliberately off: it resolves through one process-wide resolver built on first use from `/etc/resolv.conf`, which ignores the node's configuration and bounds and keeps name-server connections of the first Tokio runtime that used it. The connector hands Lapin an established transport through `Connection::connector` instead |
-| Redis | 1.7.1 | `AsyncConnectionConfig::set_dns_resolver` for pooled command connections; the Pub/Sub reader uses `parse_redis_value_async` on a stream the connector dialled itself |
+| Redis | 1.8.0 | `AsyncConnectionConfig::set_dns_resolver` for pooled command connections; the Pub/Sub reader uses `parse_redis_value_async` on a stream the connector dialled itself |
 | `rumqttc-next` | 0.34.0 | `MqttOptions::set_socket_connector` in place of the driver's `lookup_host` connector; its proxy and WebSocket transports are not selected |
 | MongoDB | 3.9.1 | The driver's `dns-resolver` feature is selected; Nervix admits explicit-seed `mongodb://` addresses and its pre-commit native parser performs no DNS lookup. Socket resolution remains under [Residual Resolution](#residual-resolution) |
 

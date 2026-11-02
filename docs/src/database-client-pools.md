@@ -119,7 +119,11 @@ so neither key is a deadline for the entire flush or its retries. See the
 A Redis publish checks its connection out within the client's
 `connect_timeout_ms`, 30 seconds by default, the same deadline that bounds opening each new command
 connection: a checkout that runs out of it reports `checking out a Redis command connection did not
-finish within connect_timeout_ms` with the bound. A MongoDB write has only its driver's deadlines:
+finish within connect_timeout_ms` with the bound. Every Redis checkout tests the connection it
+hands over with a `PING`, which Redis must answer within the driver's 500 ms, as it must answer the
+`PUBLISH` that follows. A connection that fails the test is closed, and the checkout takes another
+idle connection or opens a new one within the same deadline. No key turns the test off, as a
+Postgres client's `pool_test_before_acquire` does. A MongoDB write has only its driver's deadlines:
 server selection ends after `serverSelectionTimeoutMS`, 30 seconds by default, and opening a
 connection's TCP and TLS session after `connectTimeoutMS`, 10 seconds by default, both set in
 `addr`. The wait for a pooled connection, the connection handshake and each command's answer have

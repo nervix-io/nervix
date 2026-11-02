@@ -14,6 +14,12 @@ errors; the public projection uses their value-free key contexts. Redis's capaci
 the ingestor plan's typed range error beneath `OfflineClientConfigError` for
 `subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
 
+Kafka's offline check retains `rdkafka::error::KafkaError` beneath `OfflineClientConfigError`.
+A native property with an invalid value and an unknown native property both project as
+`invalid client config key '<key>'`, beneath the client/domain context. The raw driver description
+stays internal because it can quote the configured value. An accepted delegated property without
+an explicit public declaration is also confidential in client inspection, which prints `********`.
+
 RabbitMQ's TLS file keys declare `amqps` as their permitted address scheme. The shared schema's
 `ClientConfigSchemaError::RequiresScheme` refuses TLS files with `amqp` before file inspection
 and commit, naming the key, `addr` and `amqps` without the configured values. The existing
