@@ -22,12 +22,11 @@ Feature: Attached record outcomes across independent branch deliveries
       CREATE BRANCH ack_owner_branch SCHEMA ack_owner_key TTL 5m;
       CREATE RELAY ack_owner_records SCHEMA ack_owner_event BRANCHED BY ack_owner_branch;
       CREATE KAFKA CLIENT ack_owner_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR ack_owner_source
         FROM ack_owner_kafka TOPIC 'ack_owners_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'ack_owners_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'ack_owners_group_{{test_id}}' START AT EARLIEST
           MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND DECODE USING ack_owner_codec
         TO ack_owner_records INHERIT ALL

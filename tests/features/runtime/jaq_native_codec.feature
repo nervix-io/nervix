@@ -123,8 +123,7 @@ Feature: JAQ native codec
         ON GENERAL ERROR LOG;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC EMITTER kafka_notifications FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING xml_notification_codec
         INHERIT ALL
@@ -224,8 +223,7 @@ Feature: JAQ native codec
 
       CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
 
       CREATE KAFKA TOPIC EMITTER kafka_notifications FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING json_notification_codec
@@ -270,8 +268,7 @@ Feature: JAQ native codec
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT kafka_main CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC EMITTER emitted_readings FROM readings
         TO kafka_main TOPIC 'readings_{{test_id}}'
@@ -281,7 +278,7 @@ Feature: JAQ native codec
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE KAFKA TOPIC INGESTOR kafka_readings
         FROM kafka_main TOPIC 'readings_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'nervix_cucumber_readings_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_readings_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING transforming_reading_codec
         TO echoed_readings
