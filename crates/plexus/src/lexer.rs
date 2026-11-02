@@ -278,6 +278,7 @@ pub enum Identifier {
     Subject,
     Queue,
     Channel,
+    Pattern,
     Request,
     Connection,
     Listener,
