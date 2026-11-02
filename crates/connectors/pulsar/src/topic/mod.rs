@@ -708,8 +708,8 @@ mod tests {
         );
         assert_eq!(
             attached_message(&refused),
-            "the PULSAR broker refused the connection with AuthenticationError: \
-             Unable to authenticate"
+            "the PULSAR broker refused the connection with AuthenticationError: Unable to \
+             authenticate"
         );
         assert_eq!(
             attached_message(&not_opened),

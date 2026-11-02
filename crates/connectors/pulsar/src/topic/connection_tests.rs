@@ -106,7 +106,7 @@ fn answer(command: BaseCommand) -> PulsarFrame {
 
 fn connected() -> PulsarFrame {
     answer(BaseCommand {
-        r#type: CommandType::Connected as i32,
+        r#type: i32::from(CommandType::Connected),
         connected: Some(CommandConnected {
             server_version: "scripted".to_string(),
             protocol_version: Some(12),
@@ -118,10 +118,10 @@ fn connected() -> PulsarFrame {
 
 fn refused(error: PulsarServerError, reason: &str) -> PulsarFrame {
     answer(BaseCommand {
-        r#type: CommandType::Error as i32,
+        r#type: i32::from(CommandType::Error),
         error: Some(CommandError {
             request_id: u64::MAX,
-            error: error as i32,
+            error: i32::from(error),
             message: reason.to_string(),
         }),
         ..Default::default()
@@ -357,20 +357,20 @@ async fn an_operation_the_broker_is_not_ready_for_is_attempted_once() {
                 let response = match earlier {
                     0 => CommandPartitionedTopicMetadataResponse {
                         request_id: lookup.request_id,
-                        response: Some(PartitionLookupType::Failed as i32),
-                        error: Some(PulsarServerError::ServiceNotReady as i32),
+                        response: Some(i32::from(PartitionLookupType::Failed)),
+                        error: Some(i32::from(PulsarServerError::ServiceNotReady)),
                         message: Some("the namespace is loading".to_string()),
                         ..Default::default()
                     },
                     _ => CommandPartitionedTopicMetadataResponse {
                         request_id: lookup.request_id,
-                        response: Some(PartitionLookupType::Success as i32),
+                        response: Some(i32::from(PartitionLookupType::Success)),
                         partitions: Some(0),
                         ..Default::default()
                     },
                 };
                 let answered = answer(BaseCommand {
-                    r#type: CommandType::PartitionedMetadataResponse as i32,
+                    r#type: i32::from(CommandType::PartitionedMetadataResponse),
                     partition_metadata_response: Some(response),
                     ..Default::default()
                 });
