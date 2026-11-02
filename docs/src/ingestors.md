@@ -1980,7 +1980,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
-| Metadata | Not offered: The current queue declaration exposes message attributes through headers but no separate typed receipt metadata namespace. |
+| Metadata | metadata.message_id: STRING OPTIONAL<br>metadata.sent_at: DATETIME OPTIONAL<br>metadata.receive_count: U32 OPTIONAL<br>metadata.first_received_at: DATETIME OPTIONAL<br>metadata.group_id: STRING OPTIONAL<br>metadata.deduplication_id: STRING OPTIONAL<br>metadata.sequence_number: STRING OPTIONAL<br>metadata.sender_id: STRING OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | answered |
@@ -2015,6 +2015,28 @@ answers. Without `timeout_ms` those waits are unbounded. `CREATE SQS CLIENT` rea
 before it commits the client, and refuses a file holding a section that is not a certificate, or no
 certificate at all, as `invalid client config key 'tls_ca_file'`: a client that trusted it alone
 could reach no service.
+
+Each receive requests SQS system attributes separately from the message attributes that
+`read_header` and `read_headers` read. Routes can read the following optional, non-sensitive
+metadata fields:
+
+| Field | Type | Value |
+| --- | --- | --- |
+| `metadata.message_id` | `STRING` | The service's message identifier, retained across redelivery; this is not the receipt handle used to delete a delivery. |
+| `metadata.sent_at` | `DATETIME` | SQS `SentTimestamp`, converted exactly from Unix milliseconds. |
+| `metadata.receive_count` | `U32` | SQS `ApproximateReceiveCount`: receives across queues before deletion, including this receive. |
+| `metadata.first_received_at` | `DATETIME` | SQS `ApproximateFirstReceiveTimestamp`, converted exactly from Unix milliseconds and retained across redelivery. |
+| `metadata.group_id` | `STRING` | `MessageGroupId`, when supplied by the service. |
+| `metadata.deduplication_id` | `STRING` | `MessageDeduplicationId`, when supplied by the service. |
+| `metadata.sequence_number` | `STRING` | SQS's FIFO sequence number, preserved as text without narrowing its range. |
+| `metadata.sender_id` | `STRING` | The service's sender identifier. |
+
+A field the service omits is null. Invalid numeric system attributes fail the read with a typed
+error naming the attribute; they never become zero or null. Timestamps must fit Nervix's signed
+Unix-nanosecond range. `TIMESTAMP AT metadata.sent_at` selects the service's send time for event
+admission and downstream windows. A route may use `WHERE metadata.receive_count >= (2 AS U32)`
+to direct redeliveries to a retry relay. The values remain attached to their exact message through
+ingest grouping and an in-flight receive completed during quiesce.
 
 Starting the ingestor sends no request to the service. Each source instance looks its queue up
 before its first poll and keeps the queue's URL from then on, suspensions included. The source
@@ -2059,9 +2081,9 @@ received again, as duplicates if the graph had already processed them. A visibil
 fails is a transient error too; the source does not repeat it, and such a message becomes visible
 again once its visibility timeout ends. A queue whose visibility timeout is shorter than the mode's
 `ACK TIMEOUT` can also hand a message that still awaits its acknowledgement to another receive. A
-message the service returns without the receipt handle that settles it stays out of the batch and
-fails the next poll with a typed error, after the batch's other messages reach the relay; it
-becomes visible again once its visibility timeout ends.
+message the service returns without the receipt handle that settles it, or with a system attribute
+that fails its check, stays out of the batch and fails the next poll with a typed error, after the
+batch's other messages reach the relay; it becomes visible again once its visibility timeout ends.
 
 Suspension stops polling. Messages wait in the queue only for its configured retention period, and
 the ingestor resumes by polling past anything the service expired. A poll still waiting when the

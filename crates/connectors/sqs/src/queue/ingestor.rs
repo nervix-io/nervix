@@ -5,8 +5,9 @@
 //! - **Owns.** The queue-URL lookup each instance makes when it resumes, long polling, gathering a
 //!   batch of up to the ten messages one receive returns, the deadline a receive keeps beyond its
 //!   long poll and how a receive in flight completes when the host cancels a read, message
-//!   attributes as ingest headers, deleting messages in batches once they are acknowledged, and
-//!   making rejected messages visible again at once.
+//!   attributes as ingest headers, checked system metadata and its borrowed projection, deleting
+//!   messages in batches once they are acknowledged, and making rejected messages visible again at
+//!   once.
 //! - **Depends on.** The connector contract, the SQS client both directions build, typed client
 //!   configuration entries, `error-stack`, Tokio, the node resolver, and the AWS SQS SDK.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
@@ -32,17 +33,18 @@ use aws_sdk_sqs::{
     types::{
         BatchResultErrorEntry, ChangeMessageVisibilityBatchRequestEntry,
         DeleteMessageBatchRequestEntry, Message as SqsMessage, MessageAttributeValue,
+        MessageSystemAttributeName,
     },
 };
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    BrokerIngestorConnector, IngestMessageHeaders, IngestMetadataRow, IngestorBatch,
-    IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
-    IngestorReadCancellation, IngestorResult, IngestorResume,
+    BrokerIngestorConnector, IngestMessageHeaders, IngestMessageMetadata, IngestMetadataRow,
+    IngestMetadataValues, IngestRowHeaders, IngestorBatch, IngestorBatchRequest, IngestorConnector,
+    IngestorError, IngestorMessage, IngestorReadCancellation, IngestorResult, IngestorResume,
 };
 use nervix_dns::DnsResolver;
-use nervix_models::{ClientConfigEntry, SqsQueueName, SqsReceiveMax};
+use nervix_models::{ClientConfigEntry, ConnectorKind, SqsQueueName, SqsReceiveMax, Timestamp};
 use nervix_primitives::time::{Instant, timeout};
 use thiserror::Error;
 
@@ -90,6 +92,10 @@ pub enum SqsQueueIngestorError {
     /// be neither deleted nor made visible again. It reappears once its visibility timeout ends.
     #[error("SQS returned a message without the receipt handle that settles it")]
     MissingReceiptHandle { message_id: Option<String> },
+    #[error("invalid {} system attribute '{attribute}'", ConnectorKind::Sqs)]
+    SystemAttribute {
+        attribute: MessageSystemAttributeName,
+    },
     #[error(
         "the SQS receive in flight did not answer within {budget:?} of its read's cancellation"
     )]
@@ -201,6 +207,9 @@ impl IngestMessageHeaders for SqsMessageAttributes {
 pub struct SqsQueueIngestorMessage {
     attributes: SqsMessageAttributes,
     position: SqsQueueIngestorPosition,
+    sent_at: Option<Timestamp>,
+    receive_count: Option<u32>,
+    first_received_at: Option<Timestamp>,
 }
 
 impl SqsQueueIngestorMessage {
@@ -211,10 +220,99 @@ impl SqsQueueIngestorMessage {
                 message_id: message.message_id().map(ToOwned::to_owned),
             }));
         };
+        let sent_at =
+            Self::timestamp_attribute(&message, MessageSystemAttributeName::SentTimestamp)?;
+        let receive_count = Self::receive_count(&message)?;
+        let first_received_at = Self::timestamp_attribute(
+            &message,
+            MessageSystemAttributeName::ApproximateFirstReceiveTimestamp,
+        )?;
         Ok(Self {
             attributes: SqsMessageAttributes { message },
             position: SqsQueueIngestorPosition { receipt_handle },
+            sent_at,
+            receive_count,
+            first_received_at,
         })
+    }
+
+    fn attribute<'message>(
+        message: &'message SqsMessage,
+        attribute: &MessageSystemAttributeName,
+    ) -> Option<&'message str> {
+        let attributes = message.attributes()?;
+        attributes.get(attribute).map(String::as_str)
+    }
+
+    fn receive_count(message: &SqsMessage) -> SqsQueueIngestorResult<Option<u32>> {
+        let attribute = MessageSystemAttributeName::ApproximateReceiveCount;
+        let Some(value) = Self::attribute(message, &attribute) else {
+            return Ok(None);
+        };
+        let count = value
+            .parse::<u32>()
+            .change_context(SqsQueueIngestorError::SystemAttribute { attribute })?;
+        Ok(Some(count))
+    }
+
+    fn timestamp_attribute(
+        message: &SqsMessage,
+        attribute: MessageSystemAttributeName,
+    ) -> SqsQueueIngestorResult<Option<Timestamp>> {
+        let Some(value) = Self::attribute(message, &attribute) else {
+            return Ok(None);
+        };
+        let milliseconds =
+            value
+                .parse::<i64>()
+                .change_context(SqsQueueIngestorError::SystemAttribute {
+                    attribute: attribute.clone(),
+                })?;
+        // SQS counts Unix milliseconds; the internal timestamp validates the complete signed
+        // nanosecond range before the value can reach a metadata visitor.
+        let distance = Duration::from_millis(milliseconds.unsigned_abs());
+        let epoch = Timestamp::from_unix_nanos(0);
+        let timestamp = if milliseconds.is_negative() {
+            epoch.checked_sub(distance)
+        } else {
+            epoch.checked_add(distance)
+        };
+        let timestamp =
+            timestamp.change_context(SqsQueueIngestorError::SystemAttribute { attribute })?;
+        Ok(Some(timestamp))
+    }
+}
+
+impl IngestMessageMetadata for SqsQueueIngestorMessage {
+    fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
+        let message = &self.attributes.message;
+        match message.message_id() {
+            Some(value) => values.string(value),
+            None => values.absent(),
+        }
+        match self.sent_at {
+            Some(value) => values.datetime(value),
+            None => values.absent(),
+        }
+        match self.receive_count {
+            Some(value) => values.u32(value),
+            None => values.absent(),
+        }
+        match self.first_received_at {
+            Some(value) => values.datetime(value),
+            None => values.absent(),
+        }
+        for attribute in [
+            MessageSystemAttributeName::MessageGroupId,
+            MessageSystemAttributeName::MessageDeduplicationId,
+            MessageSystemAttributeName::SequenceNumber,
+            MessageSystemAttributeName::SenderId,
+        ] {
+            match Self::attribute(message, &attribute) {
+                Some(value) => values.string(value),
+                None => values.absent(),
+            }
+        }
     }
 }
 
@@ -238,7 +336,11 @@ impl IngestorMessage for SqsQueueIngestorMessage {
     }
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::headers(&self.attributes)
+        IngestMetadataRow {
+            fields: self,
+            headers: IngestRowHeaders::Borrowed(&self.attributes),
+            position: None,
+        }
     }
 }
 
@@ -605,6 +707,15 @@ impl QueueReceive for SdkQueue<'_> {
             .queue_url(self.url)
             .max_number_of_messages(receive.count)
             .message_attribute_names("All")
+            .message_system_attribute_names(MessageSystemAttributeName::SentTimestamp)
+            .message_system_attribute_names(MessageSystemAttributeName::ApproximateReceiveCount)
+            .message_system_attribute_names(
+                MessageSystemAttributeName::ApproximateFirstReceiveTimestamp,
+            )
+            .message_system_attribute_names(MessageSystemAttributeName::MessageGroupId)
+            .message_system_attribute_names(MessageSystemAttributeName::MessageDeduplicationId)
+            .message_system_attribute_names(MessageSystemAttributeName::SequenceNumber)
+            .message_system_attribute_names(MessageSystemAttributeName::SenderId)
             .wait_time_seconds(receive.wait.seconds())
             .customize()
             .config_override(client.receive_override(receive.wait.duration()))
@@ -989,6 +1100,10 @@ mod read_tests;
 )]
 #[path = "ingestor_batch_tests.rs"]
 mod batch_tests;
+
+#[cfg(test)]
+#[path = "ingestor_metadata_tests.rs"]
+mod metadata_tests;
 
 #[cfg(all(test, feature = "shuttle"))]
 #[path = "ingestor_shuttle_tests.rs"]
