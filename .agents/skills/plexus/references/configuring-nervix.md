@@ -450,7 +450,10 @@ current connection, retry and deadline limits.
   required capacity and idle-probe keys against `Ingestors` → `Redis Pub/Sub`; retain the source's explicit
   `BUFFER` or `DROP` policy in generated Plexus.
 - Redis Pub/Sub uses `NO ACK` in both directions. Treat `CHANNEL` as a literal, case-preserving
-  name and consult the Redis manual sections for its byte bound and unavailable header operations.
+  name. An ingestor writes exactly one of `CHANNEL` and `PATTERN`; use `PATTERN` only for a Redis
+  glob over channel names, and read `metadata.channel` and `metadata.pattern` to tell deliveries
+  apart. Consult the Redis manual sections for the byte bounds, how a pattern matches, the
+  metadata's nulls and unavailable header operations.
 - An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL` with `ON QUIESCE SUSPEND`. An emitter writes
   its request shape, `SEND SINGLE` or `SEND BATCH`, before `MODE ACK RETRY POLICY ...`. Treat
   `QUEUE` as a literal, case-preserving SQS name, and check `SQS CLIENT` keys against `Ingestors` →
@@ -515,6 +518,10 @@ current connection, retry and deadline limits.
   share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces the
   client's `delivery.timeout.ms` as the producer's delivery bound. The producer always reports every record, so `delivery.report.only.error` in a client's
   `CONFIG` has no effect.
+- A `KAFKA TOPIC` emitter's `TIMESTAMP <expression>` is each record's Kafka create time: an exact,
+  non-null, non-sensitive `DATETIME`, written as the millisecond that contains it. A time before
+  `1970-01-01T00:00:00.001Z` rejects its record through `ON MESSAGE ERROR`. Read `Emitters` →
+  `Kafka`.
 - Every Sentry emitter references a `SENTRY CLIENT` with a project DSN and a positive `timeout_ms`,
   encodes one event JSON object per record, or per batch through `ON EMITTING BATCH`, and has no
   `write_header` invocation.

@@ -270,6 +270,14 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "TIMESTAMP"
+entity = "KAFKA TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/kafka_emission.feature", scenario = "A Kafka emitter writes each record's TIMESTAMP as the time its record was created" },
+  { feature = "tests/features/runtime/kafka_emission.feature", scenario = "A Kafka record its broker refused keeps its TIMESTAMP when the emitter sends it again" },
+]
+
+[[capability]]
 capability = "INSTANCES"
 entity = "KAFKA TOPIC INGESTOR"
 scenarios = [
@@ -1029,6 +1037,20 @@ capability = "MODE NO ACK"
 entity = "REDIS PUBSUB INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/redis_ingestion.feature", scenario = "Redis ingestor delivers JSON payloads to a subscribed relay" },
+]
+
+[[capability]]
+capability = "metadata.channel"
+entity = "REDIS PUBSUB INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/redis_ingestion.feature", scenario = "A Redis pattern subscription delivers every channel it matches with the delivering channel and pattern as metadata" },
+]
+
+[[capability]]
+capability = "metadata.pattern"
+entity = "REDIS PUBSUB INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/redis_ingestion.feature", scenario = "A Redis pattern subscription delivers every channel it matches with the delivering channel and pattern as metadata" },
 ]
 
 [[capability]]

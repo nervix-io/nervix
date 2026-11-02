@@ -252,8 +252,9 @@ The registry's `NERVIX SUB TYPES` archive signature identifies the current Model
 a Pulsar subscription's required type, an owned subscription's required start position, the required
 branch partition count,
 Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's
-`SEND` request shape, and the session and quality of service an MQTT TOPIC ingestor writes beside
-its delivery mode. Consensus's `raft_subscription_types_` keyspaces and current state metadata
+`SEND` request shape, the session and quality of service an MQTT TOPIC ingestor writes beside its
+delivery mode, and a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a
+`PATTERN`. Consensus's `raft_subscription_types_` keyspaces and current state metadata
 encoding identify its stored shapes. An unrecognized signature, namespace or
 encoding fails with the owning storage error and requires the stored data to be recreated.
 

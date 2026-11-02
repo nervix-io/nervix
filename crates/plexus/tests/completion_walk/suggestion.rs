@@ -87,6 +87,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("rabbitmq_exchange", "'nx.exchange'"),
     ("rabbitmq_queue", "'nx.queue'"),
     ("redis_channel", "'nx.channel'"),
+    ("redis_channel_pattern", "'nx.*'"),
     ("relay_capacity", "1024"),
     ("sqs_queue", "'nx-queue'"),
     ("string", "'nx_value'"),
@@ -114,6 +115,7 @@ const FREE_FORM_FILLERS: &[(&str, &str)] = &[
     ("routing_key_expression", "input.nx_field"),
     ("set_assignments", "nx_out = 1"),
     ("string_expression", "'nx_value'"),
+    ("timestamp_expression", "input.nx_field"),
     ("value_expression", "1"),
     ("where_expression", "1 = 1"),
 ];

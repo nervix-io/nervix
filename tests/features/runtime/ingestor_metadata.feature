@@ -87,7 +87,7 @@ Feature: Typed ingestor metadata
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'redis_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but REDIS PUBSUB ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'redis_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but REDIS PUBSUB ingestors declare only metadata.channel and metadata.pattern"
       """
       CREATE REDIS PUBSUB INGESTOR redis_source
         FROM redis_main CHANNEL 'Orders' MODE NO ACK ON QUIESCE DROP DECODE USING event_codec

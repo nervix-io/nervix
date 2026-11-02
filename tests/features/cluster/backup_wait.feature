@@ -256,7 +256,7 @@ Feature: Bounded multi-domain backup waits and exact recovery
   # receives is that run's. A cut that passed its gate unheld lasts a few seconds, whatever its
   # budget, so a 30-second cut budget leaves the 12- and 14-second holds room for the new
   # leader's first lease without hiding an unheld cut.
-  @long_running
+  @long_running @slots_6
   Scenario: A cluster backup that runs again under its reference holds each delayed cut again
     Given a 3 node nervix cluster is started
     And the active domain is saved as placeholder "backup_base"
