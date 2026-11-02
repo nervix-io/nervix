@@ -796,6 +796,12 @@ current representation, qualification policy and coverage limits.
 
 ## Validation And Failure Boundaries
 
+Parameter sizing projects only what a candidate already knows. A polling header contributes its
+name and any available literal or client-secret value; unresolved client or secret bindings and
+templates keep the value unknown. Graph validation owns binding validity and can retain an
+incomplete transaction candidate until later statements complete it. Publication requires the
+complete graph, and connector opening checks every resolved value against captured policy.
+
 Configuration-backup round-trip validation names an unpinned resource binding with its own typed
 refusal, rather than using a resource name itself as the error. Its exact outcome classification
 applies to that validity check. Generic resource-version mapping still forwards the callback's

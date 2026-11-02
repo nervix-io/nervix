@@ -209,9 +209,25 @@ impl HttpRequestIngestor {
 }
 
 impl HttpRequestHeader {
+    /// Projects the value available to size planning. Unresolved clients or secret bindings,
+    /// and values awaiting template rendering, have no known value yet. Graph validation owns
+    /// the complete declaration's validity before it can commit.
+    pub fn known_value_from<'a>(&'a self, client: Option<&'a CreateClientHttp>) -> Option<&'a str> {
+        match &self.value {
+            HttpRequestHeaderValue::Literal(value) => Some(value.as_str()),
+            HttpRequestHeaderValue::ClientSecret(key) => {
+                if !CLIENT_CONFIG.is_secret(key) {
+                    return None;
+                }
+                let value = &client?.config.iter().find(|entry| entry.key == *key)?.value;
+                (!value.contains("{{")).then_some(value.as_str())
+            }
+        }
+    }
+
     /// The value this header sends through `client`, or `None` for a client secret whose value
     /// keeps a template until the ingestor opens.
-    pub fn value_from(
+    fn value_from(
         &self,
         client: &CreateClientHttp,
     ) -> error_stack::Result<Option<HttpHeaderValue>, HttpRequestHeadersError> {

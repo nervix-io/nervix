@@ -62,30 +62,6 @@ pub(crate) fn validate_resource_parameters(
     Ok(())
 }
 
-fn polling_header_value_bytes(
-    domain: &DomainName,
-    ingestor: &nervix_models::CreateIngestor,
-    header: &nervix_models::HttpRequestHeader,
-    client: Option<&nervix_models::CreateClientHttp>,
-) -> error_stack::Result<usize, RegistryError> {
-    if let nervix_models::HttpRequestHeaderValue::Literal(value) = &header.value {
-        return Ok(value.len());
-    }
-    // An incomplete transaction may not hold its client yet. Graph validation owns that
-    // reference; this check still accounts for every known name and every resolved value.
-    let Some(client) = client else {
-        return Ok(0);
-    };
-    let value =
-        header
-            .value_from(client)
-            .change_context(RegistryError::InvalidHttpRequestHeaders {
-                domain: domain.clone(),
-                ingestor: ingestor.name.clone().into(),
-            })?;
-    Ok(value.map_or(0, |value| value.as_str().len()))
-}
-
 fn validate_ingestor_header_parameters(
     domain: &DomainName,
     ingestor: &nervix_models::CreateIngestor,
@@ -138,12 +114,9 @@ fn validate_ingestor_header_parameters(
     {
         let mut headers = std::collections::BTreeMap::<String, u64>::new();
         for header in &source.headers {
-            let value_bytes = polling_header_value_bytes(
-                domain,
-                ingestor,
-                header,
-                clients.get(&source.client).copied(),
-            )?;
+            let value_bytes = header
+                .known_value_from(clients.get(&source.client).copied())
+                .map_or(0, str::len);
             let bytes = header
                 .name
                 .len()
@@ -568,6 +541,38 @@ mod tests {
                 matches!(error.current_context(), RegistryError::ClusterParameterLimit {
                 parameter: ClusterParameterKey::HttpHeaderBytes, actual, maximum, ..
             } if *actual == minimum_bytes && *maximum == minimum_bytes - 1)
+            );
+        }
+    }
+
+    #[test]
+    fn polling_size_checks_leave_unresolved_client_secrets_to_graph_validation() {
+        use nervix_models::{
+            ClientConfigEntry, CreateClientHttp, HttpRequestHeader, HttpRequestHeaderValue,
+        };
+
+        let domain = DomainName::parse("scope").assured("the fixture domain is valid");
+        let model = polling_headers(vec![HttpRequestHeader {
+            name: "x-key".to_string(),
+            value: HttpRequestHeaderValue::ClientSecret("secret.future".to_string()),
+        }]);
+        let client = Model::ClientHttp(CreateClientHttp {
+            name: ClientName::parse("api").assured("the fixture client is valid"),
+            mount: None,
+            config: vec![
+                ClientConfigEntry {
+                    key: "endpoint".to_string(),
+                    value: "http://example.invalid".to_string(),
+                },
+                ClientConfigEntry {
+                    key: "timeout_ms".to_string(),
+                    value: "5000".to_string(),
+                },
+            ],
+        });
+        for models in [vec![&model], vec![&model, &client]] {
+            validate_model_parameters(&domain, models, &parameters(1, 5)).assured(
+                "sizing retains the known name while graph validation owns unresolved bindings",
             );
         }
     }

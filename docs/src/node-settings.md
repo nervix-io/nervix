@@ -385,6 +385,8 @@ at admission; the host captures the current caps when it composes the connector,
 complete resolved values before opening a request. A raised cap governs new requests and a lower
 cap cannot invalidate a polling request's known requirements. Syntax validation checks physical
 representation bounds separately from committed policy, and secret values remain redacted.
+Sizing keeps unresolved client or secret bindings available for the graph validator to resolve
+when a transaction candidate becomes complete; it preserves their known name requirements.
 
 WebSocket connection ingestors use the same committed caps for their literal upgrade headers.
 The subprotocol offer counts as one field, with its canonical comma-joined tokens contributing
