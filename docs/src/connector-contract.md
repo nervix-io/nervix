@@ -1131,8 +1131,20 @@ ingestor's metadata is the record's topic, partition, offset, binary key, timest
 and tombstone flag. A Kafka client
 requires `bootstrap.servers`, without which no consumer or producer reaches a broker. Every other
 property is librdkafka's, checked offline before commit, except the keys Nervix sets itself on the
-consumers and producers it runs, which the client refuses. librdkafka reads some properties under
-two names and applies the one it is handed last. The client declares each such pair, read from
+consumers and producers it runs, which the client refuses: `group.id`, `auto.offset.reset`,
+`enable.auto.commit`, `enable.partition.eof`, `allow.auto.create.topics` and
+`delivery.report.only.error`. The source's offset and delivery modes own its group and automatic
+commits. The consumer group's `START AT`
+sets `auto.offset.reset`, and domain-offset consumers set it to `earliest`; a client that writes
+that key is refused with the statement clause to use. Consumers disable EOF events and
+topic auto-creation; producers request every delivery report so retained records can be released.
+The producer keeps its topic auto-creation default, so an operator provisions output topics even
+when ingestion guarantees it will not create an input topic. Offline validation creates only a
+native configuration object; broker reachability, authentication and topic availability remain
+runtime checks.
+
+librdkafka reads some properties under two names and applies the one it is handed last. The client
+declares each such pair, read from
 the vendored librdkafka 2.12.1, and accepts only the Apache Kafka Java client's name. It also
 declares librdkafka's `topic.` prefix, under which librdkafka reads any default-topic property, and
 refuses a key written under it, except librdkafka's own global `topic.` properties. So every
