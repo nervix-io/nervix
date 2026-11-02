@@ -13,7 +13,7 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumIter, EnumString, IntoStaticStr};
@@ -281,6 +281,11 @@ impl CreateEmitter {
                 table.commit_each = commit_each.clone();
                 table.max_commit_size = *max_commit_size;
             }
+            AlterEmitterOperation::AlterEnvelope { alteration } => {
+                self.envelope
+                    .apply_alteration(self.connector.kind(), alteration)
+                    .change_context(AlterEmitterError::Envelope)?;
+            }
         }
         Ok(())
     }
@@ -371,6 +376,9 @@ pub enum AlterEmitterOperation {
         commit_each: String,
         max_commit_size: crate::PayloadSizeLimit,
     },
+    AlterEnvelope {
+        alteration: Box<crate::EmitterEnvelopeAlteration>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -410,6 +418,8 @@ pub enum AlterEmitterError {
     BatchNotConfigured,
     #[error(transparent)]
     Batch(EmitterBatchContractError),
+    #[error("invalid emitter envelope alteration")]
+    Envelope,
 }
 
 /// Why an emitter's batching clause does not fit the emitter it publishes to.

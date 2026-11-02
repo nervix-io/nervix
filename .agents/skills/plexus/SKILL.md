@@ -43,6 +43,9 @@ Parallel `MAX` is 1 through 65,535 and is the broker prefetch per instance. Each
 on its own graph outcome. Automatic consumption has no prefetch or transport acknowledgement;
 work already accepted by the broker can be lost before the graph completes. Read the RabbitMQ
 Ingestors section for the exact clause order, host admission and recovery limits.
+For RabbitMQ publication, read [Emitters → RabbitMQ](../../../docs/src/emitters.md#rabbitmq) for
+`PERSISTENT`, `TIMESTAMP`, exact AMQP `PROPERTIES` types, targeted envelope alterations and the
+durable-queue requirement; property writes and `write_header` have different contracts.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion

@@ -92,9 +92,13 @@ pub(super) fn envelope_section<'src>(
     if properties.is_empty() {
         return section;
     }
-    then_optional(section, properties_block(properties), |envelope, set| {
-        envelope.properties = set;
-    })
+    then_optional(
+        section,
+        kw(Identifier::Properties).ignore_then(properties_values(properties)),
+        |envelope, set| {
+            envelope.properties = set;
+        },
+    )
 }
 
 /// `section` followed by an optional `clause`, whose value `write` records in the envelope.
@@ -118,7 +122,7 @@ fn then_optional<'src, T: 'src>(
 ///
 /// The keys are a closed set, so each is offered as the exact literal that names it, and any other
 /// key is refused where it is written.
-fn properties_block<'src>(
+fn properties_values<'src>(
     declared: &'static [PropertyDeclaration],
 ) -> impl Parser<'src, &'src [Token], Vec<EnvelopeProperty>, extra::Err<ParseError<'src>>> + Clone {
     let mut keys = Vec::with_capacity(declared.len());
@@ -130,15 +134,12 @@ fn properties_block<'src>(
         .then_ignore(tok(Token::Eq))
         .then(embedded_expression("value_expression"))
         .map(|(name, expression)| EnvelopeProperty { name, expression });
-    kw(Identifier::Properties)
-        .ignore_then(
-            property
-                .separated_by(tok(Token::Comma))
-                .at_least(1)
-                .allow_trailing()
-                .collect::<Vec<_>>()
-                .delimited_by(tok(Token::LBrace), tok(Token::RBrace)),
-        )
+    property
+        .separated_by(tok(Token::Comma))
+        .at_least(1)
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(tok(Token::LBrace), tok(Token::RBrace))
         .try_map(|properties: Vec<EnvelopeProperty>, span| {
             let mut set = BTreeSet::new();
             for property in &properties {
@@ -152,6 +153,64 @@ fn properties_block<'src>(
             Ok(properties)
         })
         .boxed()
+}
+
+/// Targeted edits offered only where the entity declares their envelope surface.
+pub(super) fn alterations<'src>(
+    declared: &EmitterEntityCapabilities,
+) -> Vec<Boxed<'src, 'src, &'src [Token], AlterEmitterOperation, extra::Err<ParseError<'src>>>> {
+    let mut choices = Vec::new();
+    if declared.declares_envelope_clause(EnvelopeClauseKind::Persistent) {
+        choices.push(
+            kw_phrase2(Identifier::Set, Identifier::Persistent)
+                .to(EmitterEnvelopeAlteration::SetPersistent)
+                .map(operation)
+                .boxed(),
+        );
+        choices.push(
+            kw_phrase2(Identifier::Drop, Identifier::Persistent)
+                .to(EmitterEnvelopeAlteration::DropPersistent)
+                .map(operation)
+                .boxed(),
+        );
+    }
+    if declared.declares_envelope_clause(EnvelopeClauseKind::Timestamp) {
+        choices.push(
+            kw_phrase2(Identifier::Set, Identifier::Timestamp)
+                .ignore_then(embedded_expression("timestamp_expression"))
+                .map(|expression| EmitterEnvelopeAlteration::SetTimestamp { expression })
+                .map(operation)
+                .boxed(),
+        );
+        choices.push(
+            kw_phrase2(Identifier::Drop, Identifier::Timestamp)
+                .to(EmitterEnvelopeAlteration::DropTimestamp)
+                .map(operation)
+                .boxed(),
+        );
+    }
+    if !declared.properties.is_empty() {
+        choices.push(
+            kw_phrase2(Identifier::Set, Identifier::Properties)
+                .ignore_then(properties_values(declared.properties))
+                .map(|properties| EmitterEnvelopeAlteration::SetProperties { properties })
+                .map(operation)
+                .boxed(),
+        );
+        choices.push(
+            kw_phrase2(Identifier::Drop, Identifier::Properties)
+                .to(EmitterEnvelopeAlteration::DropProperties)
+                .map(operation)
+                .boxed(),
+        );
+    }
+    choices
+}
+
+fn operation(alteration: EmitterEnvelopeAlteration) -> AlterEmitterOperation {
+    AlterEmitterOperation::AlterEnvelope {
+        alteration: Box::new(alteration),
+    }
 }
 
 /// The envelope section of an emitter of the entity `S`, as its declaration states it.

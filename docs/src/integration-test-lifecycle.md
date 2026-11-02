@@ -3850,3 +3850,15 @@ After every run, no `nervix-server` process, scenario binary, or dependency cont
 ledger](https://github.com/nervix-io/nervix/blob/main/tests/harness-liveness-qualification-ledger.md)
 records each run in full, with its artifacts, the executable evidence for every item of the
 qualification matrix, and the comparison with the run the job limit cancelled.
+
+
+### Scenario-owned RabbitMQ restarts
+
+The RabbitMQ persistence scenario owns an ephemeral broker through the test environment. It
+provisions a durable queue explicitly, waits for the emitted message to be ready, stops the Nervix
+domain, restarts that broker with its data directory intact, waits for a fresh authenticated AMQP
+connection within thirty seconds, closes that readiness probe and reads the message through AMQP.
+Stopping the domain before restarting the broker rules out replay by
+Nervix as the explanation for the surviving message. This broker is separate from the suite's
+shared RabbitMQ service, so the restart cannot disrupt another scenario. The after hook removes it
+explicitly after node teardown, including when the scenario fails before its restart step.

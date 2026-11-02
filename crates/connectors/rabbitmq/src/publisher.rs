@@ -86,6 +86,10 @@ use crate::{
     connection::{OpeningStepFailure, RabbitMqBroker, RabbitMqConnectError},
 };
 
+mod properties;
+#[cfg(test)]
+mod properties_tests;
+
 const RABBITMQ: &str = "rabbitmq";
 
 /// Where a RabbitMQ emitter's messages go.
@@ -128,10 +132,17 @@ impl RabbitMqDestination {
         };
         let key_bytes = key.len();
         match ShortString::try_new(key) {
-            Ok(routing_key) => Ok(RabbitMqMessage {
-                record,
-                routing_key,
-            }),
+            Ok(routing_key) => match RabbitMqMessage::properties(&record) {
+                Ok(properties) => Ok(RabbitMqMessage {
+                    record,
+                    routing_key,
+                    properties,
+                }),
+                Err(error) => Err(Unaddressed::Rejected(record.rejected(format!(
+                    "{} rejected record: {error:#}",
+                    nervix_models::ConnectorKind::RabbitMq.to_string().to_ascii_lowercase()
+                )))),
+            },
             Err(source) => {
                 let error = RabbitMqRecordError::RoutingKeyTooLong { key_bytes, source };
                 Err(Unaddressed::Rejected(
@@ -192,6 +203,7 @@ struct RabbitMqMessage {
     /// The whole record, because the broker may discard the message and it is then written again.
     record: EmitterRecord,
     routing_key: ShortString,
+    properties: lapin::BasicProperties,
 }
 
 impl RabbitMqMessage {
@@ -202,7 +214,7 @@ impl RabbitMqMessage {
         delivery.exchange.as_str() == exchange
             && delivery.routing_key == self.routing_key
             && delivery.data == self.record.payload
-            && delivery.properties == RabbitMqPublisher::properties(&self.record.headers)
+            && delivery.properties == self.properties
     }
 }
 
@@ -419,7 +431,7 @@ impl RabbitMqPublisher {
                     ..Default::default()
                 },
                 &message.record.payload,
-                Self::properties(&message.record.headers),
+                message.properties.clone(),
             )
             .await
     }
@@ -1092,9 +1104,13 @@ mod tests {
     const QUEUE: &str = "notifications";
 
     fn message(index: usize, body_bytes: usize) -> RabbitMqMessage {
+        let record = record(index, body_bytes);
+        let properties =
+            RabbitMqMessage::properties(&record).assured("the fixture envelope is valid");
         RabbitMqMessage {
-            record: record(index, body_bytes),
+            record,
             routing_key: QUEUE.into(),
+            properties,
         }
     }
 
@@ -1102,22 +1118,27 @@ mod tests {
     fn keyed(index: usize, routing_key: &str, body: &[u8]) -> RabbitMqMessage {
         let mut record = record(index, 0);
         record.payload = body.to_vec();
+        let properties =
+            RabbitMqMessage::properties(&record).assured("the fixture envelope is valid");
         RabbitMqMessage {
             record,
             routing_key: routing_key.into(),
+            properties,
         }
     }
 
     /// `message` as the broker returns it unrouted from `exchange`.
     fn returned(exchange: &str, message: &RabbitMqMessage) -> BasicReturnMessage {
+        let mut delivery = Delivery::mock(
+            0,
+            exchange.into(),
+            message.routing_key.clone(),
+            false,
+            message.record.payload.clone(),
+        );
+        delivery.properties = message.properties.clone();
         BasicReturnMessage {
-            delivery: Delivery::mock(
-                0,
-                exchange.into(),
-                message.routing_key.clone(),
-                false,
-                message.record.payload.clone(),
-            ),
+            delivery,
             reply_code: 312,
             reply_text: "NO_ROUTE".into(),
         }
@@ -1394,6 +1415,35 @@ mod tests {
             settled(outcome),
             (vec![1], vec![(0, no_route()), (2, no_route())])
         );
+    }
+
+    #[test]
+    fn a_return_matches_the_complete_prepared_properties() {
+        let first = keyed(0, "order.created", b"same");
+        let mut second = keyed(1, "order.created", b"same");
+        second.record.envelope = RecordEnvelope {
+            persistent: true,
+            timestamp: Some(Timestamp::from_unix_nanos(0)),
+            properties: vec![nervix_connector::RecordProperty {
+                name: "message_id",
+                value: nervix_connector::PropertyValue::String("second".to_owned()),
+            }],
+            ..Default::default()
+        };
+        second.properties =
+            RabbitMqMessage::properties(&second.record).assured("the envelope is valid");
+        let returned = returned("events", &second);
+        assert!(!first.is_returned_by("events", &returned));
+        assert!(second.is_returned_by("events", &returned));
+        let mut outcome = PerRecordOutcome::empty();
+        RabbitMqPublisher::settle_taken(
+            "events",
+            vec![first, second],
+            vec![returned],
+            &mut outcome,
+        )
+        .assured("only the second message carries the returned properties");
+        assert_eq!(settled(outcome), (vec![0], vec![(1, no_route())]));
     }
 
     #[test]

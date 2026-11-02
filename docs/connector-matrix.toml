@@ -46,11 +46,9 @@ properties = "This entity declares no typed PROPERTIES block; any encoded record
 [entity."RABBITMQ QUEUE"]
 metadata = "The current queue declaration exposes transport headers but no typed AMQP delivery metadata namespace."
 mirror = "A queue consumer acknowledges delivery tags on its channel; publishing waits for a channel answer or publisher confirmation. Both directions use the same quoted, case-preserving RabbitMQ queue names."
-properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."RABBITMQ EXCHANGE"]
 mirror = "No ingestor consumes an exchange: the exchange routes each message by the key its record computes to the queues bound to it, and a RABBITMQ QUEUE ingestor consumes one of those queues. Publishing waits for a channel answer or publisher confirmation, as it does for a queue."
-properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."REDIS PUBSUB"]
 emit_headers = "Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names."

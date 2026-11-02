@@ -148,30 +148,3 @@ Feature: RabbitMQ exchange declarations
       | 3            |                                                                                                                                                                                                                                                                  | must not be empty |
       | 1            | XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX | is 256 bytes long |
       | 3            | éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé                                                                                                                                 | is 256 bytes long |
-
-  Scenario Outline: RabbitMQ emitters refuse the envelope clauses they do not declare
-    Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these Plexus statements
-      """
-      CREATE UNPACED DOMAIN {{domain}};
-      """
-    When these Plexus statements fail with "found PERSISTENT"
-      """
-      CREATE RABBITMQ EXCHANGE EMITTER outgoing FROM events TO broker EXCHANGE 'events'
-        ROUTING KEY input.category
-        MODE NO ACK RETRY POLICY BACKOFF 200ms MAX 3s ENCODE USING event_codec
-        PERSISTENT
-        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      """
-    And these Plexus statements fail with "found TIMESTAMP"
-      """
-      CREATE RABBITMQ QUEUE EMITTER outgoing FROM events TO broker QUEUE 'orders'
-        MODE NO ACK RETRY POLICY BACKOFF 200ms MAX 3s ENCODE USING event_codec
-        MANDATORY TIMESTAMP occurred_at
-        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      """
-
-    Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |

@@ -1080,3 +1080,12 @@ OTEL field rules carry their exact type with the constraint that requires it: a 
 cannot be declared with a floating-point descriptor. Required, optional and required-for-DELTA
 presence are distinct vocabulary states. Opening an OTEL client validates its required positive
 deadline before constructing settings; the installed settings hold a duration with no absent state.
+
+
+RabbitMQ emitter envelopes distinguish an absent timestamp from the Unix epoch: `None` omits the
+AMQP timestamp and `Some` of the epoch writes zero. Conversion accepts only nonnegative whole
+seconds representable by the transport; it never defaults, clamps or truncates a failed conversion.
+String properties retain their exact declared type and cross the AMQP short-string bound before a
+message is sent. Targeted emitter alterations represent setting and dropping persistence,
+timestamps and the whole property set as separate semantic operations, and preserve the envelope
+fields each operation does not address.
