@@ -2147,7 +2147,7 @@ offsets, deduplicator keys and windows, materialized relays and native metadata,
 generations, staging quota and reclamation, delayed restore coordinators, bounded multi-domain
 backup waits and their recovery, and the drain of a large-state WASM owner through bulk checkpoint
 streams. Its serial scenario process has a 4,320-second bound, including a 360-second teardown
-reserve, so its 82 registered examples have a 3,960-second suite budget. Check 41311131846
+reserve, so its 84 registered examples have a 3,960-second suite budget. Check 41311131846
 completed 78 examples at the former 3,840-second suite limit, including both added NATS STREAM
 lost-PubAck examples in 30.6 seconds; the final window example had passed its body and one was
 still queued. The revised bound allocates time for those examples while preserving a fixed limit and
