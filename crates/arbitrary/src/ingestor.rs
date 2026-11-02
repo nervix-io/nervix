@@ -197,6 +197,19 @@ impl Arbitrary<'_> {
         self.quiescing_as_supported(source)
     }
 
+    /// A small instancing declaration for generated graphs. Encoding boundary checks cover the
+    /// full count range without allocating its execution units.
+    pub fn ingestor_instances(&mut self) -> nervix_models::IngestorInstances {
+        if self.entropy.flag() {
+            nervix_models::IngestorInstances::PerPartition
+        } else {
+            let count = self.entropy.pick([1u16, 2, 3, 4]);
+            nervix_models::IngestorInstances::Count(
+                std::num::NonZeroU16::new(count).assured("every declared count choice is positive"),
+            )
+        }
+    }
+
     /// A Kafka topic, its offsets kept by a consumer group or by the domain.
     pub fn kafka_topic_source(&mut self) -> KafkaTopicIngestor {
         let offset_mode = if self.entropy.flag() {
@@ -204,11 +217,21 @@ impl Arbitrary<'_> {
         } else {
             KafkaOffsetMode::Domain
         };
+        let instances = match offset_mode {
+            KafkaOffsetMode::ConsumerGroup(_) => {
+                let count = self.entropy.pick([1u16, 2, 3, 4]);
+                nervix_models::IngestorInstances::Count(
+                    std::num::NonZeroU16::new(count)
+                        .assured("every declared count choice is positive"),
+                )
+            }
+            KafkaOffsetMode::Domain => self.ingestor_instances(),
+        };
         let source = KafkaTopicIngestor {
             client: self.name(),
             topic: self.kafka_topic_name(),
             offset_mode,
-            instances: self.positive_u64(),
+            instances,
             mode: self.kafka_mode(),
             quiesce: IngestQuiesceMode::Suspend,
         };
@@ -231,7 +254,7 @@ impl Arbitrary<'_> {
             client,
             topic,
             subscription: PulsarSubscription { name, ownership },
-            instances: self.positive_u64(),
+            instances: self.ingestor_instances(),
             mode: self.pulsar_mode(),
             quiesce: IngestQuiesceMode::Suspend,
         };
@@ -253,7 +276,7 @@ impl Arbitrary<'_> {
     pub fn mqtt_topic_source(&mut self) -> MqttTopicIngestor {
         let client = self.name();
         let topic = self.mqtt_topic_filter();
-        let instances = self.positive_u64();
+        let instances = self.ingestor_instances();
         let mode = self.mqtt_mode();
         let acknowledged = mode.is_ack();
         let session = if acknowledged {
@@ -286,7 +309,7 @@ impl Arbitrary<'_> {
             client: self.name(),
             subject: self.nats_subject_name(),
             queue_group: self.nats_queue_group_name(),
-            instances: self.positive_u64(),
+            instances: self.ingestor_instances(),
             mode: NatsIngestMode::NoAck,
             quiesce: IngestQuiesceMode::Suspend,
         };
@@ -298,7 +321,7 @@ impl Arbitrary<'_> {
         let source = RabbitMqQueueIngestor {
             client: self.name(),
             queue: self.rabbitmq_queue_name(),
-            instances: self.positive_u64(),
+            instances: self.ingestor_instances(),
             mode: self.rabbitmq_mode(),
             quiesce: IngestQuiesceMode::Suspend,
         };
@@ -360,7 +383,7 @@ impl Arbitrary<'_> {
         let source = SqsQueueIngestor {
             client: self.name(),
             queue: self.sqs_queue_name(),
-            instances: self.positive_u64(),
+            instances: self.ingestor_instances(),
             mode: SqsIngestMode::AckSequential {
                 timeout: self.duration(),
                 retry_policy: self.retry_policy(),

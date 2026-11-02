@@ -1617,6 +1617,7 @@ mod tests {
         runtime.install_domain_execution(
             &domain,
             DomainExecution {
+                mqtt_ingestor_clients: HashMap::default(),
                 revision: test_execution_revision(&domain, Vec::new()),
                 start_version: 0,
                 domain_clock: test_domain_clock(&domain),

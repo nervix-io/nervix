@@ -46,10 +46,11 @@ pub(in crate::runtime) mod zeromq;
 /// instance or domain cadence that failed.
 #[derive(Debug, Error)]
 pub(crate) enum IngestorStartError {
-    #[error("ingestor '{ingestor}' in domain '{domain}' is already running")]
+    #[error("ingestor '{ingestor}' in domain '{domain}'{suffix} is already running", suffix = .unit.label_suffix())]
     AlreadyRunning {
         domain: DomainName,
         ingestor: IngestorName,
+        unit: Unit,
     },
     #[error(
         "the execution of domain '{domain}' is not installed while starting ingestor '{ingestor}'"
@@ -142,7 +143,12 @@ impl Runtime {
                     Some(_) | None => None,
                 };
                 source
-                    .retire_before(self, &retirement.previous.ingestor, replacement)
+                    .retire_before(
+                        self,
+                        &retirement.previous.ingestor,
+                        &retirement.units,
+                        replacement,
+                    )
                     .await
             }
             IngestorConnectorPlan::Pulsar(PulsarIngestorStartPlan::Topic(source)) => {
@@ -163,7 +169,12 @@ impl Runtime {
                     Some(_) | None => None,
                 };
                 if let Err(error) = source
-                    .retire_before(self, &retirement.previous.ingestor, replacement)
+                    .retire_before(
+                        self,
+                        &retirement.previous.ingestor,
+                        &retirement.units,
+                        replacement,
+                    )
                     .await
                 {
                     self.events().report_error(format!("{error:#}"));
@@ -200,6 +211,7 @@ impl Runtime {
             return Err(Report::new(IngestorStartError::AlreadyRunning {
                 domain: ingestor.domain.clone(),
                 ingestor: ingestor.name.clone(),
+                unit: ingestor.unit,
             }));
         }
 
@@ -354,6 +366,60 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn a_broker_unit_opens_its_global_index_independently() {
+        use nervix_connector_fake::{FakeIngestor, FakeIngestorPlan, IngestorObservations};
+        use nervix_primitives::sync::blocking::Mutex;
+        let domain = named("instances");
+        let plans = planned_source_ingestor(
+            &domain,
+            IngestorEntity::Kafka(nervix_models::KafkaIngestor::Topic(
+                nervix_models::KafkaTopicIngestor {
+                    client: named("broker"),
+                    topic: named("events"),
+                    offset_mode: nervix_models::KafkaOffsetMode::Domain,
+                    instances: nervix_models::IngestorInstances::Count(nonzero_ext::nonzero!(3u16)),
+                    mode: nervix_models::KafkaIngestMode::NoAck,
+                    quiesce: IngestQuiesceMode::Suspend,
+                },
+            )),
+            Model::ClientKafka(nervix_models::CreateClientKafka {
+                name: named("broker"),
+                mount: None,
+                config: vec![],
+            }),
+        );
+        for index in [2, 0] {
+            let connector = FakeIngestorPlan::new(
+                [(
+                    u64::from(index),
+                    Ok(FakeIngestor::empty(Arc::new(Mutex::new(
+                        IngestorObservations::default(),
+                    )))),
+                )]
+                .into_iter()
+                .collect(),
+            );
+            let plan = plans
+                .ingestor(&named("source"), Unit::Instance(index))
+                .expect("each global unit has its plan");
+            let start = connector::BrokerIngestorStart {
+                connector,
+                instances: nonzero_ext::nonzero!(3u64),
+                acknowledgement: nervix_models::IngestAcknowledgement::Unacknowledged,
+                buffered_intake: true,
+                flush_each_intake: true,
+                unacknowledged_admission: QueueAdmission::WaitForPlace,
+                client_mounts: Vec::new(),
+            };
+            // Only the selected global slot exists, even when index 2 is the first local unit.
+            start
+                .open::<FakeIngestor>(&plan.ingestor)
+                .await
+                .expect("only the selected global index opens");
+        }
+    }
+
+    #[nervix_primitives::test]
     async fn an_ingestor_without_its_domain_execution_names_the_missing_execution() {
         let runtime = Runtime::default();
         let domain: DomainName = named("sales");
@@ -378,7 +444,8 @@ mod tests {
             }),
         );
         let plan = plans
-            .ingestor(&named("source"))
+            .ingestors()
+            .find(|plan| plan.ingestor.name == named::<IngestorName>("source"))
             .assured("the fixture schedules the ingestor named source");
 
         let report = runtime
@@ -412,8 +479,9 @@ mod tests {
                 Report::new(IngestorStartError::AlreadyRunning {
                     domain: domain.clone(),
                     ingestor: ingestor.clone(),
+                    unit: Unit::Instance(2),
                 }),
-                "ingestor 'source' in domain 'sales' is already running",
+                "ingestor 'source' in domain 'sales' instance 2 is already running",
             ),
             (
                 Report::new(IngestorStartError::CodecNotInstantiated {
@@ -500,7 +568,7 @@ mod tests {
                 IngestorEntity::RabbitMq(RabbitMqIngestor::Queue(RabbitMqQueueIngestor {
                     client: client_name.clone(),
                     queue: named("events"),
-                    instances: NonZeroU64::MIN,
+                    instances: nervix_models::IngestorInstances::ONE,
                     mode: RabbitMqIngestMode::AckSequential {
                         timeout: "5s".to_string(),
                         retry_policy: nervix_models::RetryPolicy {
@@ -520,7 +588,7 @@ mod tests {
                 IngestorEntity::Sqs(SqsIngestor::Queue(SqsQueueIngestor {
                     client: client_name.clone(),
                     queue: named("events"),
-                    instances: NonZeroU64::MIN,
+                    instances: nervix_models::IngestorInstances::ONE,
                     mode: SqsIngestMode::AckSequential {
                         timeout: "5s".to_string(),
                         retry_policy: nervix_models::RetryPolicy {
@@ -556,7 +624,7 @@ mod tests {
                     client: client_name.clone(),
                     topic: nervix_models::MqttTopicFilter::parse("events")
                         .expect("valid topic filter"),
-                    instances: NonZeroU64::MIN,
+                    instances: nervix_models::IngestorInstances::ONE,
                     session: MqttSession::Clean,
                     qos: MqttQos::Qos0,
                     mode: MqttIngestMode::NoAck,
@@ -571,7 +639,8 @@ mod tests {
         ] {
             let plans = planned_source_ingestor(&domain, source, client_model);
             let plan = plans
-                .ingestor(&named("source"))
+                .ingestors()
+                .find(|plan| plan.ingestor.name == named::<IngestorName>("source"))
                 .assured("the fixture schedules the ingestor named source");
             let IngestorInputPlan::Transport(transport) = &plan.input else {
                 panic!("the fixture ingestor reads a transport");
@@ -646,7 +715,8 @@ mod tests {
         }));
         let plans = planned_source_ingestor(&domain, pull, Model::ClientZeroMq(client));
         let plan = plans
-            .ingestor(&named("source"))
+            .ingestors()
+            .find(|plan| plan.ingestor.name == named::<IngestorName>("source"))
             .assured("the fixture schedules the ingestor named source");
         let IngestorInputPlan::Transport(transport) = &plan.input else {
             panic!("the fixture ingestor reads a transport");
@@ -737,7 +807,6 @@ mod tests {
             Ok(start) => start,
             Err(report) => panic!("a ZeroMQ source over an installed mount composes: {report:?}"),
         };
-        assert_eq!(start.instances.len(), 1);
         assert_eq!(
             start.client_mounts.len(),
             1,

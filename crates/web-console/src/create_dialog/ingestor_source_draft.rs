@@ -208,6 +208,13 @@ impl IngestorEntityDraft {
 
     pub(super) fn chosen_option(&self, keywords: &str) -> Option<&'static str> {
         let selected = match keywords {
+            "INSTANCES" => Some(
+                if self.instances.trim().eq_ignore_ascii_case("PER PARTITION") {
+                    "PER PARTITION"
+                } else {
+                    "<count>"
+                },
+            ),
             "SESSION" => self.mqtt_session.map(|session| session.keyword()),
             "QOS" => self.mqtt_qos.map(|qos| qos.spelling()),
             "SUBSCRIPTION" => self
@@ -224,6 +231,13 @@ impl IngestorEntityDraft {
 
     pub(super) fn choose_option(&mut self, keywords: &str, choice: &str) {
         match keywords {
+            "INSTANCES" => match choice {
+                "PER PARTITION" => self.instances = "PER PARTITION".to_owned(),
+                "<count>" if self.instances.trim().eq_ignore_ascii_case("PER PARTITION") => {
+                    self.instances.clear()
+                }
+                _ => {}
+            },
             "SESSION" => {
                 self.mqtt_session = MqttSession::iter().find(|value| value.keyword() == choice)
             }
@@ -504,15 +518,21 @@ impl IngestorEntityDraft {
         Ok(value.trim().to_string())
     }
 
-    fn instances(&self) -> error_stack::Result<NonZeroU64, IngestorEntityDraftError> {
+    fn instances(
+        &self,
+    ) -> error_stack::Result<nervix_models::IngestorInstances, IngestorEntityDraftError> {
         let value = if self.instances.trim().is_empty() {
             self.option_default("INSTANCES").unwrap_or("")
         } else {
             self.instances.trim()
         };
-        value
-            .parse::<NonZeroU64>()
-            .map_err(|cause| Report::new(cause).change_context(IngestorEntityDraftError::Instances))
+        if value.eq_ignore_ascii_case("PER PARTITION") {
+            return Ok(nervix_models::IngestorInstances::PerPartition);
+        }
+        let count = value.parse::<NonZeroU16>().map_err(|cause| {
+            Report::new(cause).change_context(IngestorEntityDraftError::Instances)
+        })?;
+        Ok(nervix_models::IngestorInstances::Count(count))
     }
 
     fn every(&self) -> error_stack::Result<DomainClockPeriod, IngestorEntityDraftError> {
@@ -777,7 +797,7 @@ pub(super) enum IngestorEntityDraftError {
     UpgradeHeaders,
     #[error("EVERY must be a positive domain-clock duration")]
     Every,
-    #[error("INSTANCES must be a positive integer")]
+    #[error("INSTANCES must be a count from 1 to 65535 or PER PARTITION")]
     Instances,
     #[error("Choose Kafka offset ownership")]
     Offset,

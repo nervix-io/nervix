@@ -403,10 +403,11 @@ pub(super) fn test_ingestor_quiesce_control(
     ingestor: &IngestorName,
     mode: IngestQuiesceMode,
 ) -> Arc<super::IngestorQuiesceControl> {
-    let metric_labels = runtime
-        .inner
-        .metrics
-        .register_ingestor_quiesce(domain, ingestor, None);
+    let metric_labels =
+        runtime
+            .inner
+            .metrics
+            .register_ingestor_quiesce(domain, ingestor, Unit::Single, None);
     Arc::new(super::IngestorQuiesceControl::new(
         mode,
         runtime.inner.metrics.clone(),
@@ -1205,6 +1206,7 @@ pub(super) fn install_test_domain_execution(
     runtime.install_domain_execution(
         domain,
         DomainExecution {
+            mqtt_ingestor_clients: HashMap::default(),
             revision,
             start_version: 0,
             domain_clock: test_domain_clock(domain),
@@ -1241,8 +1243,10 @@ pub(super) fn junction_branch_template(
     let input_relay = named::<RelayName>(input_relay);
     super::BranchInstanceTemplate {
         revision: super::ProcessorPlanRevision::new(),
-        entity_kind: ModelKind::Junction,
-        source: RelayName::from(&processor.clone()),
+        owner: NodeUnitRef::new(
+            NodeRef::new(ModelKind::Junction, RelayName::from(&processor.clone())),
+            Unit::Single,
+        ),
         root_relay: input_relay.clone(),
         branch: None,
         branch_ttl: None,

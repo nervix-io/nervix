@@ -133,10 +133,11 @@ pub use connector::{
     IcebergTablePublishingMode, IcebergValueMapping, IngestAcknowledgement, IngestDeliveryKind,
     IngestQuiesceKind, IngestQuiesceMode, IngestQuiesceOverflow, IngestorAlteration,
     IngestorDeclaration, IngestorEntity, IngestorEntityBody, IngestorEntityCapabilities,
-    IngestorEntityKind, IngestorEntityMetadata, IngestorEntityModel, IngestorMetadataDeclaration,
-    IngestorMetadataField, IngestorMetadataType, IngestorReference, IngestorReferenceKind,
-    KafkaConfigEntry, KafkaConsumerGroupName, KafkaEmitter, KafkaEmitterEntity, KafkaIngestMode,
-    KafkaIngestor, KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicEmitter, KafkaTopicEmitterMode,
+    IngestorEntityKind, IngestorEntityMetadata, IngestorEntityModel, IngestorInstances,
+    IngestorInstancingCapability, IngestorMetadataDeclaration, IngestorMetadataField,
+    IngestorMetadataType, IngestorReference, IngestorReferenceKind, KafkaConfigEntry,
+    KafkaConsumerGroupName, KafkaEmitter, KafkaEmitterEntity, KafkaIngestMode, KafkaIngestor,
+    KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicEmitter, KafkaTopicEmitterMode,
     KafkaTopicIngestor, KafkaTopicIngestorAlteration, KafkaTopicName, KafkaTopicPublishingMode,
     LiteralHeaderWrite, LocatorDeclaration, LocatorName, MONGODB_MAX_DOCUMENT_BYTES,
     MONGODB_NAMESPACE_MAX_BYTES, MQTT_MAXIMUM_PACKET_BYTES, MQTT_SHARED_SUBSCRIPTION_LEVEL,
@@ -315,8 +316,8 @@ pub use restore::{
     RestoreStepReport, RestoredDomain, RestoredUsers,
 };
 pub use schedule::{
-    ClusterSchedule, DomainNodeUnitRef, DomainSchedule, KafkaPartitionSchedule, NodeUnitRef,
-    OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
+    ClusterSchedule, DomainNodeUnitRef, DomainSchedule, EntityGateTargets, KafkaPartitionSchedule,
+    NodeUnitRef, OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
     OwnershipStateResetCause, OwnershipTransition, PlacementGroupSchedule, ScheduledModel,
     ScheduledNode, ScheduledNodes, ScheduledUnit, Unit,
 };

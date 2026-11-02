@@ -84,13 +84,10 @@ impl PlacedNodeState {
                 }
             }
             ModelKind::Ingestor => {
-                let plan = revision
-                    .entrypoints
-                    .ingestor(&IngestorName::from(&node.identifier))
-                    .assured(
-                        "the entrypoint plans hold every ingestor of the schedule they came from",
-                    );
-                if plan.keeps_domain_offsets() {
+                if revision.entrypoints.ingestors().any(|plan| {
+                    ModelName::from(&plan.ingestor.name) == node.identifier
+                        && plan.keeps_domain_offsets()
+                }) {
                     Some(Self::KafkaDomainOffsets)
                 } else {
                     None
@@ -107,7 +104,7 @@ impl PlacedNodeState {
 #[derive(Default)]
 pub(super) struct ScheduledNodePlacement {
     pub(super) tasks: PlacementTasks,
-    pub(super) kafka_offset_state: Option<KafkaOffsetStateOriginator>,
+    pub(super) kafka_offset_states: BTreeMap<Unit, KafkaOffsetStateOriginator>,
     /// The originator of the materialized state of each unit of a materialized relay this node
     /// owns, handed to that unit's state task.
     pub(super) materialized_states: BTreeMap<Unit, MaterializedRelayStateOriginator>,
@@ -254,7 +251,7 @@ mod tests {
                     client: named("kafka"),
                     topic: named("events"),
                     offset_mode,
-                    instances: nonzero!(1u64),
+                    instances: nervix_models::IngestorInstances::Count(nonzero!(1u16)),
                     mode: KafkaIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Suspend,
                 })),

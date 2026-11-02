@@ -27,10 +27,7 @@ use nervix_connector_kafka::{
 use super::{
     super::*,
     IngestorConnectorStartError, IngestorStartError,
-    connector::{
-        BrokerIngestorInstance, BrokerIngestorPolicy, IngestorCompanion, IngestorInstance,
-        IngestorStart,
-    },
+    connector::{BrokerIngestorInstance, BrokerIngestorPolicy, IngestorCompanion, IngestorStart},
 };
 
 struct RuntimeKafkaDomainOffsets {
@@ -96,7 +93,7 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
                 }
                 // A failed first initialization may have published the start in memory before
                 // its persistence or replica wait failed. Retry that durability boundary before
-                // any instance resumes, including when another instance applied the start.
+                // this unit resumes after its first attempt applied the start.
                 let checkpoint = state
                     .read()
                     .latest_snapshot()
@@ -194,12 +191,16 @@ impl Runtime {
         &self,
         domain: &DomainName,
         ingestor: &NodeRef,
+        unit: Unit,
         originator: KafkaOffsetStateOriginator,
     ) {
-        let key = DomainNodeRef {
-            domain: domain.clone(),
-            node: ingestor.clone(),
-        };
+        let key = DomainNodeUnitRef::new(
+            DomainNodeRef {
+                domain: domain.clone(),
+                node: ingestor.clone(),
+            },
+            unit,
+        );
         let Some(running) = self.inner.ingestors.get(&key) else {
             return;
         };
@@ -217,7 +218,7 @@ impl IngestorSpec {
             state: RuntimeState::KafkaOffset,
             kind: ModelKind::Ingestor,
             identifier: ModelName::from(&self.name),
-            unit: nervix_models::Unit::Single,
+            unit: self.unit,
             branch_key: None,
         }
     }
@@ -400,17 +401,12 @@ impl KafkaTopicIngestorStartPlan {
 
         let policy =
             BrokerIngestorPolicy::new(acknowledgement, source_plan.capabilities.position_class());
-        let mut opened: Vec<Box<dyn IngestorInstance>> =
-            Vec::with_capacity(source_plan.capabilities.instances().get().arch_into());
-        for instance_index in 0..source_plan.capabilities.instances().get() {
-            nervix_primitives::task::consume_budget().await;
-            let source = KafkaTopicIngestor::open(&source_plan.connector, instance_index)
-                .await
-                .change_context_lazy(|| ingestor.initialize_failure())?;
-            opened.push(Box::new(BrokerIngestorInstance { source, policy }));
-        }
+        let source = KafkaTopicIngestor::open(&source_plan.connector, ingestor.instance_index())
+            .await
+            .change_context_lazy(|| ingestor.initialize_failure())?;
+        let instance = Box::new(BrokerIngestorInstance { source, policy });
         Ok(IngestorStart {
-            instances: opened,
+            instance,
             companions,
             buffered_intake: false,
             flush_each_intake: false,

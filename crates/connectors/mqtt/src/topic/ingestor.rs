@@ -51,7 +51,10 @@ use nervix_models::{
     ClientConfigEntry, ConnectorKind, MQTT_MAXIMUM_PACKET_BYTES, MQTT_SOURCE_READ_AHEAD_HEADROOM,
     MqttQos, MqttSession,
 };
-use nervix_primitives::time::{Instant, timeout, timeout_at};
+use nervix_primitives::{
+    sync::Arc,
+    time::{Instant, timeout, timeout_at},
+};
 use rumqttc::{
     AckMode, AsyncClient, BrokerSessionResumePolicy, ConnectionError, DisconnectProperties,
     DisconnectReasonCode, Event, EventLoop, Incoming, ManualAck, MqttOptions, Outgoing, PubAck,
@@ -229,7 +232,7 @@ impl MqttTopicIngestorSessions<'_> {
 /// What one MQTT ingestor subscribes with.
 pub struct MqttTopicIngestorSettings {
     /// The client entries every instance connects with, rendered for that instance.
-    pub instances: Vec<Vec<ClientConfigEntry>>,
+    pub instances: Arc<[Vec<ClientConfigEntry>]>,
     /// Why the declared client identity cannot serve every instance, if it cannot.
     pub client_id_conflict: Option<MqttClientIdError>,
     /// The default identity for one instance; multiple instances append their instance index.
@@ -325,7 +328,7 @@ impl IngestorAcknowledgement {
 /// node resolver they connect through.
 #[derive(Clone)]
 pub struct MqttTopicIngestorPlan {
-    instances: Vec<Vec<ClientConfigEntry>>,
+    instances: Arc<[Vec<ClientConfigEntry>]>,
     default_client_id: String,
     subscribe_filter: String,
     session: MqttSession,
@@ -485,7 +488,7 @@ impl MqttTopicIngestorPlan {
         &self,
     ) -> error_stack::Result<MqttTopicIngestorSessions<'_>, MqttTopicIngestorError> {
         let mut identities = BTreeMap::new();
-        for (instance_index, _) in (0_u64..).zip(&self.instances) {
+        for (instance_index, _) in (0_u64..).zip(self.instances.iter()) {
             let identity = self.session_identity(instance_index)?;
             identities.entry(identity).or_insert(instance_index);
         }
@@ -1133,7 +1136,7 @@ mod tests {
     /// The settings of one ingestor instance subscribing to `events` through `addr` and `dns`.
     fn settings(addr: &str, session: MqttSession, dns: DnsResolver) -> MqttTopicIngestorSettings {
         MqttTopicIngestorSettings {
-            instances: vec![vec![entry("addr", addr)]],
+            instances: vec![vec![entry("addr", addr)]].into(),
             client_id_conflict: None,
             default_client_id: "client".to_string(),
             share_group: "default~ingestor".to_string(),
@@ -1327,7 +1330,7 @@ mod tests {
         assert!(retiring_instances(&singleton, Some(&singleton)).is_empty());
 
         let mut parallel = singleton.clone();
-        parallel.instances.push(parallel.instances[0].clone());
+        parallel.instances = vec![parallel.instances[0].clone(); 2].into();
         assert_eq!(
             parallel
                 .client(0)
@@ -1349,7 +1352,7 @@ mod tests {
         assert_eq!(retiring_instances(&singleton, Some(&parallel)), vec![0]);
 
         let mut expanded = parallel.clone();
-        expanded.instances.push(expanded.instances[0].clone());
+        expanded.instances = vec![expanded.instances[0].clone(); 3].into();
         assert!(retiring_instances(&parallel, Some(&expanded)).is_empty());
         assert_eq!(retiring_instances(&expanded, Some(&parallel)), vec![2]);
 
@@ -1361,21 +1364,23 @@ mod tests {
         );
 
         let mut explicit = singleton.clone();
-        explicit.instances[0].push(entry("client_id", "provided-0"));
+        let mut explicit_instances = explicit.instances.to_vec();
+        explicit_instances[0].push(entry("client_id", "provided-0"));
+        explicit.instances = explicit_instances.into();
         let mut explicit_expanded = explicit.clone();
-        explicit_expanded.instances.push(vec![
+        let mut expanded_instances = explicit_expanded.instances.to_vec();
+        expanded_instances.push(vec![
             entry("addr", "mqtt://127.0.0.1:1883"),
             entry("client_id", "provided-1"),
         ]);
+        explicit_expanded.instances = expanded_instances.into();
         assert!(retiring_instances(&explicit, Some(&explicit_expanded)).is_empty());
         assert_eq!(
             retiring_instances(&explicit_expanded, Some(&explicit)),
             vec![1]
         );
         let mut repeated_identity = explicit.clone();
-        repeated_identity
-            .instances
-            .push(repeated_identity.instances[0].clone());
+        repeated_identity.instances = vec![repeated_identity.instances[0].clone(); 2].into();
         assert_eq!(retiring_instances(&repeated_identity, None), vec![0]);
     }
 
@@ -1489,7 +1494,7 @@ mod tests {
     async fn a_shared_client_id_names_the_conflict_as_the_resume_failure() {
         let fixture = DnsFixture::start().await;
         let plan = MqttTopicIngestorPlan::new(MqttTopicIngestorSettings {
-            instances: vec![Vec::new(), Vec::new()],
+            instances: vec![Vec::new(), Vec::new()].into(),
             client_id_conflict: MqttTopicIngestorPlan::client_id_conflict(
                 &config_with_client_id("fixed-client"),
                 nonzero!(2u64),

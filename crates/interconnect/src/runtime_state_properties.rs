@@ -22,7 +22,8 @@ use nervix_models::{
 
 use super::*;
 use crate::{
-    CaptureOwnershipHandoffStateRequest, OwnershipHandoffFailure, OwnershipHandoffResponse,
+    CaptureOwnershipHandoffStateRequest, DescribeIngestorRequest, EntityDrainStatusRequest,
+    EntityGatePurpose, EntityGateRequest, OwnershipHandoffFailure, OwnershipHandoffResponse,
     PrepareOwnershipHandoffStateRequest, RemoteOperationSubject, TransportError,
     request::RkyvMessage,
 };
@@ -717,4 +718,58 @@ fn runtime_state_wire_variant_boundaries() {
         }
     });
     assert_no_charge(&executor);
+}
+
+#[test]
+fn bolero_intake_unit_requests_preserve_their_selection() {
+    let runtime = runtime();
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(128)
+        .for_each(|bytes: &[u8]| {
+            let mut messages = Messages::new(bytes);
+            let domain: nervix_models::DomainName = messages.arbitrary.rule_name();
+            let coordination = CoordinationIdentity::new(
+                messages.arbitrary.cluster_node(),
+                messages.number(),
+                messages.number(),
+            );
+            let plan = messages.arbitrary.transaction_entity_gate_plan();
+            let purpose = match &plan.targets {
+                nervix_models::EntityGateTargets::Entities(_) => EntityGatePurpose::ModelAlteration,
+                nervix_models::EntityGateTargets::Units(_) => EntityGatePurpose::OwnershipHandoff,
+            };
+            let gate = EntityGateRequest {
+                coordination: coordination.clone(),
+                domain: domain.clone(),
+                relays: plan.relays,
+                targets: plan.targets,
+                purpose,
+                deadline_millis: messages.number(),
+                reason: messages.arbitrary.string(),
+            };
+            let status = EntityDrainStatusRequest {
+                coordination,
+                domain: domain.clone(),
+                relays: gate.relays.clone(),
+                targets: gate.targets.clone(),
+                purpose,
+            };
+            let describe = DescribeIngestorRequest {
+                domain,
+                name: messages.arbitrary.rule_name(),
+                unit: if messages.arbitrary.entropy().flag() {
+                    nervix_models::Unit::Single
+                } else {
+                    nervix_models::Unit::Instance(u32::from(messages.arbitrary.entropy().byte()))
+                },
+            };
+            let executor = Executor::default();
+            runtime.block_on(async {
+                round_trip(&executor, EntityGateRequest::CLASS, &gate).await;
+                round_trip(&executor, EntityDrainStatusRequest::CLASS, &status).await;
+                round_trip(&executor, DescribeIngestorRequest::CLASS, &describe).await;
+            });
+            assert_no_charge(&executor);
+        });
 }

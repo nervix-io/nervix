@@ -716,7 +716,7 @@ pub struct EntityGateRequest {
     pub coordination: CoordinationIdentity,
     pub domain: DomainName,
     pub relays: Vec<RelayName>,
-    pub affected_entities: Vec<NodeRef>,
+    pub targets: nervix_models::EntityGateTargets,
     pub purpose: EntityGatePurpose,
     pub deadline_millis: u64,
     pub reason: String,
@@ -740,7 +740,7 @@ pub struct EntityDrainStatusRequest {
     pub coordination: CoordinationIdentity,
     pub domain: DomainName,
     pub relays: Vec<RelayName>,
-    pub affected_entities: Vec<NodeRef>,
+    pub targets: nervix_models::EntityGateTargets,
     pub purpose: EntityGatePurpose,
 }
 
@@ -782,6 +782,7 @@ pub struct DescribeMetricsEnvelope {
 pub struct DescribeIngestorRequest {
     pub domain: DomainName,
     pub name: IngestorName,
+    pub unit: Unit,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]

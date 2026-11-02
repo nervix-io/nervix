@@ -399,7 +399,7 @@ async fn relay_owner_buffer_remains_visible_in_entity_drain_status() {
     let status = runtime.entity_drain_status(
         &domain,
         std::slice::from_ref(&relay),
-        &[],
+        &nervix_models::EntityGateTargets::Entities(Vec::new()),
         EntityGatePurpose::ModelAlteration,
     );
 
@@ -1063,6 +1063,7 @@ async fn owner_ingress_publishes_branch_presence_to_the_relay_state_placement() 
     runtime.install_domain_execution(
         &domain,
         DomainExecution {
+            mqtt_ingestor_clients: HashMap::default(),
             revision: test_execution_revision(&domain, Vec::new()),
             start_version: 0,
             domain_clock: test_domain_clock(&domain),
@@ -1981,6 +1982,7 @@ async fn stop_domain_execution_leaves_relay_branch_presence_to_its_owner() {
         .stop_domain_execution(
             &domain,
             DomainExecution {
+                mqtt_ingestor_clients: HashMap::default(),
                 revision: test_execution_revision(&domain, Vec::new()),
                 start_version: 0,
                 domain_clock: test_domain_clock(&domain),

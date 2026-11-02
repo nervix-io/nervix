@@ -75,11 +75,11 @@ Feature: Remote acknowledgements across a producer restart
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=restart_ack_before_source owner=node-2
+      - domain={{domain}} kind=ingestor name=restart_ack_before_source unit=instance:0 owner=node-2
       """
     And the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=restart_ack_after_source owner=node-1
+      - domain={{domain}} kind=ingestor name=restart_ack_after_source unit=instance:0 owner=node-1
       """
     And the last command output contains
       """
@@ -119,7 +119,7 @@ Feature: Remote acknowledgements across a producer restart
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=restart_ack_after_source owner=node-2
+      - domain={{domain}} kind=ingestor name=restart_ack_after_source unit=instance:0 owner=node-2
       """
     Given remote relay admission for branch '{"branch_name":"b"}' in domain "{{domain}}" is paused
     When emitter "restart_ack_after_sink" enters stall mode

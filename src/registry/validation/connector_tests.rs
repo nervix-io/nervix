@@ -1266,7 +1266,7 @@ fn mqtt_instances_greater_than_one_are_valid() {
                             client: ClientName::parse("mqtt_main").expect("valid identifier"),
                             topic: nervix_models::MqttTopicFilter::parse("notifications")
                                 .expect("valid topic filter"),
-                            instances: nonzero!(2u64),
+                            instances: nervix_models::IngestorInstances::Count(nonzero!(2u16)),
                             session: MqttSession::Clean,
                             qos: MqttQos::Qos0,
                             mode: MqttIngestMode::NoAck,
@@ -1344,7 +1344,7 @@ fn ingestor_timestamp_field_must_use_rfc3339_schema_type() {
                             offset_mode: KafkaOffsetMode::ConsumerGroup(
                                 KafkaConsumerGroupName::parse("cg").expect("valid consumer group"),
                             ),
-                            instances: nonzero!(1u64),
+                            instances: nervix_models::IngestorInstances::Count(nonzero!(1u16)),
                             mode: KafkaIngestMode::NoAck,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
                         })),
@@ -1570,7 +1570,7 @@ fn mqtt_source(session: MqttSession, qos: MqttQos, mode: MqttIngestMode) -> Inge
     IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor {
         client: ClientName::parse("mqtt_main").expect("valid identifier"),
         topic: nervix_models::MqttTopicFilter::parse("notifications").expect("valid topic filter"),
-        instances: nonzero!(1u64),
+        instances: nervix_models::IngestorInstances::Count(nonzero!(1u16)),
         session,
         qos,
         mode,
@@ -1796,7 +1796,9 @@ fn ingestor_route_validation_accepts_explicit_projection() {
                                         KafkaConsumerGroupName::parse("cg")
                                             .expect("valid consumer group"),
                                     ),
-                                    instances: nonzero!(1u64),
+                                    instances: nervix_models::IngestorInstances::Count(nonzero!(
+                                        1u16
+                                    )),
                                     mode: KafkaIngestMode::NoAck,
                                     quiesce: nervix_models::IngestQuiesceMode::Suspend,
                                 },
@@ -1879,7 +1881,7 @@ fn ingestor_filter_map_compile_errors_are_reported_on_leader() {
                             offset_mode: KafkaOffsetMode::ConsumerGroup(
                                 KafkaConsumerGroupName::parse("cg").expect("valid consumer group"),
                             ),
-                            instances: nonzero!(1u64),
+                            instances: nervix_models::IngestorInstances::Count(nonzero!(1u16)),
                             mode: KafkaIngestMode::NoAck,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
                         })),
@@ -1973,7 +1975,7 @@ fn ingestor_inherit_all_except_rejects_required_uninitialized_field() {
                             offset_mode: KafkaOffsetMode::ConsumerGroup(
                                 KafkaConsumerGroupName::parse("cg").expect("valid consumer group"),
                             ),
-                            instances: nonzero!(1u64),
+                            instances: nervix_models::IngestorInstances::Count(nonzero!(1u16)),
                             mode: KafkaIngestMode::NoAck,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
                         })),

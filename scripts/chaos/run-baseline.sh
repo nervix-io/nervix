@@ -404,13 +404,17 @@ fi
 
 [[ -n "${image_ref}" ]] || setup_error '--image is required and must name an already-built Nervix image'
 case "${scenario}" in
-    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | lifetimes | domain-time | mixed-instability) ;;
+    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | ingestor-instances-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | lifetimes | domain-time | mixed-instability) ;;
     *) setup_error "unknown scenario: ${scenario}" ;;
 esac
 [[ "${node_count}" == "1" || "${node_count}" == "3" ]] \
     || setup_error '--nodes must be 1 or 3'
 # The restart, recovery, stateful, endpoints, lifetimes, domain-time, mixed-instability, backup
 # fault and restore scenarios share their traffic, findings and exit handling.
+if [[ "${scenario}" == ingestor-instances-owner-crash ]]; then
+    fixture_file="${script_dir}/fixtures/instances.plexus"
+fi
+
 recovery_scenario=false
 case "${scenario}" in
     stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | lifetimes | domain-time | mixed-instability | backup-fault | restore-fresh-cluster | restore-fault | restore-volume) recovery_scenario=true ;;

@@ -3240,3 +3240,14 @@ Connector terminology follows entity ownership: `IngestorError` and `EmitterOpen
 record. Renaming and grouping entity owners changes neither retry classification nor what is
 rendered at the boundary. The ingestor planner's input identity/kind errors cover client, endpoint
 and native schema references before composition.
+
+## Ingestor Instancing Boundaries
+
+The registry owns typed `IngestorInstancingError` causes for unsupported instancing, missing or
+different construction partition structures, Kafka's required domain-offset mode and an unsafe
+in-place domain-offset unit-count change. The surrounding report identifies the domain and
+ingestor. Correct the declaration before activation; explicit source recreation establishes a new
+offset lifetime. Start planning separately validates the complete resolved unit declaration.
+`AlreadyRunning` and `IngestorNotRunning` name the exact source unit, allowing a sibling instance
+to start or stop independently.
+Per-unit DESCRIBE requests and status records preserve the unit selected by their caller.

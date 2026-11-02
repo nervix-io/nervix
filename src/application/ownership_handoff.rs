@@ -59,7 +59,7 @@ use super::{
 use crate::{
     registry::{
         EntityGatePlan, ExecutionRevision, PlannedClusterRevision,
-        ownership_handoff_gate_participants, ownership_handoff_relays_for_schedule,
+        ownership_handoff_gate_participants,
     },
     runtime::{OwnershipHandoffError, OwnershipHandoffResult, Runtime},
 };
@@ -985,24 +985,25 @@ impl SessionServiceImpl {
                 ),
             }));
         }
-        let moved_entities = moves
-            .iter()
-            .map(|moved| moved.entity.clone())
-            .collect::<Vec<_>>();
-        let affected_entities = match gate {
-            Some(gate) => gate.affected_entities(),
-            None => moved_entities.as_slice(),
-        };
-        let computed_relays;
-        let relays = match gate {
-            Some(gate) => gate.relays(),
+        let computed_gate;
+        let gate_plan = match gate {
+            Some(gate) => gate,
             None => {
-                computed_relays = ownership_handoff_relays_for_schedule(current, affected_entities);
-                computed_relays.as_slice()
+                computed_gate = crate::registry::EntityGatePlan::for_ownership_handoff(
+                    Some(current),
+                    Some(planned),
+                    moves.iter().map(|moved| {
+                        nervix_models::NodeUnitRef::new(moved.entity.clone(), moved.unit)
+                    }),
+                );
+                &computed_gate
             }
         };
+        let affected_entities = gate_plan.affected_entities();
+        let targets = gate_plan.targets();
+        let relays = gate_plan.relays();
         let participants =
-            ownership_handoff_gate_participants(current, planned, affected_entities, relays);
+            ownership_handoff_gate_participants(current, planned, &affected_entities, relays);
         let former_owners = moves
             .iter()
             .map(|moved| moved.former_owner.clone())
@@ -1043,7 +1044,7 @@ impl SessionServiceImpl {
                 ClusterEntityGateScope {
                     domain,
                     relays,
-                    affected_entities,
+                    targets,
                     purpose: EntityGatePurpose::OwnershipHandoff,
                     participants: EntityGateParticipants::AvailableAmong(&participants),
                 },
@@ -1066,7 +1067,7 @@ impl SessionServiceImpl {
             .wait_for_cluster_entity_drain(
                 &gate,
                 relays,
-                affected_entities,
+                targets,
                 EntityGatePurpose::OwnershipHandoff,
                 &former_owners,
                 preparation_deadline,

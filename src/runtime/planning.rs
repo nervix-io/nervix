@@ -562,6 +562,7 @@ fn resolve_branch_relay_templates(
 pub(in crate::runtime) fn materialize_ingestor_route_template(
     kind: ModelKind,
     identifier: &ModelName,
+    unit: Unit,
     route: &PlannedEntryRoute,
     relay_services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
 ) -> error_stack::Result<IngestorRouteTemplate, PlanningError> {
@@ -581,8 +582,7 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
         parse_branch_flush_policy(kind, identifier, &route.relay, &route.flush_policy)?;
     let mut branch = BranchInstanceTemplate {
         revision: ProcessorPlanRevision::new(),
-        entity_kind: kind,
-        source: RelayName::from(identifier),
+        owner: NodeUnitRef::new(NodeRef::new(kind, identifier), unit),
         root_relay: route.relay.clone(),
         branch: None,
         branch_ttl: None,
@@ -630,8 +630,10 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
     processors.insert(spec.processor.clone(), template);
     Ok(BranchInstanceTemplate {
         revision: ProcessorPlanRevision::new(),
-        entity_kind: spec.kind,
-        source: RelayName::from(&spec.processor),
+        owner: NodeUnitRef::new(
+            NodeRef::new(spec.kind, RelayName::from(&spec.processor)),
+            Unit::Single,
+        ),
         root_relay,
         branch: node.branch.clone(),
         branch_ttl: parse_branch_ttl_setting(

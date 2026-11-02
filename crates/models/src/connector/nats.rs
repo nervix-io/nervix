@@ -15,8 +15,6 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::num::NonZeroU64;
-
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
@@ -120,7 +118,7 @@ pub struct NatsSubjectIngestor {
     pub client: ClientName,
     pub subject: NatsSubjectName,
     pub queue_group: NatsQueueGroupName,
-    pub instances: NonZeroU64,
+    pub instances: crate::IngestorInstances,
     pub mode: NatsIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
@@ -192,6 +190,7 @@ const NATS_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for NatsSubjectIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::PerPartition,
         // A NATS message's header map keeps every value of a name together under it, and its names
         // in no order.
         headers: Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
@@ -228,6 +227,10 @@ impl IngestorDeclaration for NatsSubjectIngestor {
 }
 
 impl IngestorEntityBody for NatsSubjectIngestor {
+    fn instances(&self) -> Option<crate::IngestorInstances> {
+        Some(self.instances)
+    }
+
     fn reference(&self) -> IngestorReference<'_> {
         IngestorReference::Client(&self.client)
     }

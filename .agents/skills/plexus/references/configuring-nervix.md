@@ -185,6 +185,13 @@ bound PULL ingestor with connecting PUSH peers when a peer can restart: a connec
 does not detect or recover a lost peer. Read the ZeroMQ sections of Ingestors and Emitters for the
 current connection, retry and deadline limits.
 
+- Choose fixed `INSTANCES <1..65535>` or `INSTANCES PER PARTITION` only for an entity whose
+  instancing capability permits it. Kafka, Pulsar, RabbitMQ, SQS, NATS and MQTT support both.
+  Each global index has its own primary, readiness, ACK roots and state. Partition-following
+  sources require at least one constructing route and the same ordered key fields and partition
+  count across all constructing destinations; Kafka additionally requires domain offsets.
+  Inspect each instance/node with `DESCRIBE INGESTOR`; metric labels retain the global `instance`.
+  Change a Kafka domain-offset unit count only by an explicit committed drop followed by recreation.
 - Every referenced name is declared in the active domain before use.
 - Every placement rule has non-empty `FROM` and `TO` sets whose members already exist and are
   schedulable runtime nodes. Every relay is eligible and participates in corridor coverage,

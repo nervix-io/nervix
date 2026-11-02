@@ -111,6 +111,7 @@ const ZEROMQ_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for ZeroMqPullIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::Single,
         headers: None,
         metadata: IngestorMetadataDeclaration::NONE,
         executes_on_every_cluster_node: false,

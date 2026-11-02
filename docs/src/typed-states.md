@@ -255,7 +255,8 @@ so a value cannot be both or neither, and the Model that names a secret holds it
 value.
 The registry's `NERVIX UNIT SRCS` archive signature identifies the current Model layout, including
 an owned Pulsar subscription's required start position, the required 16-bit branch partition count,
-Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's
+typed ingestor instancing, Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source,
+an SQS QUEUE emitter's
 `SEND` request shape, the session and quality of service an MQTT TOPIC ingestor writes beside its
 delivery mode, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a
 `PATTERN`, and that header state. Consensus's `raft_unit_ingestor_` keyspaces and current state
@@ -1109,3 +1110,20 @@ OTEL field rules carry their exact type with the constraint that requires it: a 
 cannot be declared with a floating-point descriptor. Required, optional and required-for-DELTA
 presence are distinct vocabulary states. Opening an OTEL client validates its required positive
 deadline before constructing settings; the installed settings hold a duration with no absent state.
+
+## Intake Unit And Gate Identity
+
+An instancing declaration is `Count(NonZeroU16)` or `PerPartition`; entity capabilities admit the
+forms before placement. A resolved source unit uses the shared `NodeUnitRef` and
+`DomainNodeUnitRef` identities throughout plans, runtime registrations and durable state placement.
+There is no node-local index conversion. A source's readiness is one scalar whose retirement ends
+that exact lifetime.
+Singleton placement inspection selects by cardinality: one `Instance(0)` has one owner just as one
+`Single` does. Several instances have separate placements and no entity-wide execution node.
+
+`EntityGateTargets` distinguishes whole `Entities(Vec<NodeRef>)` from exact
+`Units(Vec<NodeUnitRef>)`. Model operations select the former; ownership handoffs select the latter.
+Normalization sorts and deduplicates within the selected form. Persisted transaction gate plans,
+interconnect requests and runtime holds retain that choice. A held lease must contain the exact
+unit and its exact freeze before it authorizes a handoff checkpoint. Placement groups also carry
+exact unit members, allowing a source instance and a relay partition in the same component.

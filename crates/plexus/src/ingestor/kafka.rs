@@ -42,7 +42,7 @@ pub(super) fn topic_body<'src>()
         .then_ignore(kw(Identifier::Topic))
         .then(external_name::<KafkaTopicName>())
         .then(offset_mode)
-        .then(optional_instances())
+        .then(optional_instances::<KafkaTopicIngestor>())
         .then_ignore(kw(Identifier::Mode))
         .then(mode())
         .then(suspend_only_quiesce_clause())
@@ -138,7 +138,10 @@ mod tests {
         let source = created_source(&statement(topic, DOMAIN_OFFSETS, SEQUENTIAL));
 
         assert_eq!(source.topic.as_str(), topic);
-        assert_eq!(source.instances.get(), 2);
+        assert_eq!(
+            source.instances,
+            nervix_models::IngestorInstances::Count(nonzero_ext::nonzero!(2u16))
+        );
     }
 
     #[test]
@@ -185,6 +188,31 @@ mod tests {
         assert_eq!(max.get(), 8);
         assert_eq!(batch_timeout, "100ms");
         assert_eq!(timeout, "5s");
+    }
+
+    #[test]
+    fn instancing_accepts_a_bounded_count_or_the_complete_partition_phrase() {
+        let text = statement("orders", DOMAIN_OFFSETS, SEQUENTIAL);
+        let partitioned = text.replace("INSTANCES 2", "INSTANCES PER PARTITION");
+        assert_eq!(
+            created_source(&partitioned).instances,
+            nervix_models::IngestorInstances::PerPartition
+        );
+        let bounded = text.replace("INSTANCES 2", "INSTANCES 65535");
+        assert_eq!(
+            created_source(&bounded).instances,
+            nervix_models::IngestorInstances::Count(std::num::NonZeroU16::MAX)
+        );
+        for invalid in ["0", "65536", "PER"] {
+            assert!(
+                created_model(&text.replace("INSTANCES 2", &format!("INSTANCES {invalid}")))
+                    .is_none()
+            );
+        }
+        assert_offers_exactly(
+            &format!("{HEAD} 'orders' {DOMAIN_OFFSETS} INSTANCES "),
+            &["PER PARTITION", "instance_count"],
+        );
     }
 
     #[test]

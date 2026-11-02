@@ -9406,11 +9406,11 @@ mod tests {
             schedule: Some(Box::new(after.clone())),
             no_op_operations: Vec::new(),
             model_gate: nervix_models::TransactionEntityGatePlan {
-                affected_entities: Vec::new(),
+                targets: nervix_models::EntityGateTargets::default(),
                 relays: Vec::new(),
             },
             ownership_gate: nervix_models::TransactionEntityGatePlan {
-                affected_entities: Vec::new(),
+                targets: nervix_models::EntityGateTargets::default(),
                 relays: Vec::new(),
             },
         };

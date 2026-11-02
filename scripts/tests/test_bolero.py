@@ -143,6 +143,8 @@ class InventoryTests(unittest.TestCase):
     def test_inventory_has_current_targets_and_exact_corpus_paths(self) -> None:
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
+            "models-ingestor-instancing",
+            "interconnect-intake-units",
             "clickhouse-client-tls-pairing",
             "client-config-schema",
             "connector-entity-presentation",
@@ -611,7 +613,14 @@ class DiscoveryTests(unittest.TestCase):
                 found["bolero_new"] = manifest.parent / "src/lib.rs"
             return found
 
-        with mock.patch.object(bolero, "static_targets", side_effect=unregistered):
+        with (
+            mock.patch.object(bolero, "static_targets", side_effect=unregistered),
+            mock.patch.object(bolero, "listed_tests",
+                              side_effect=lambda package, test_target, ignored, features, manifest=None:
+                              [] if ignored else
+                              [item["test_name"] for item in self.compiled(package, test_target)]),
+            mock.patch.object(bolero, "compiled_targets", side_effect=self.compiled),
+        ):
             with self.assertRaisesRegex(bolero.BoleroError, "differ from inventory"):
                 bolero.discover(self.inventory)
 

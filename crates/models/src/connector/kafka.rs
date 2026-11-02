@@ -212,7 +212,7 @@ pub struct KafkaTopicIngestor {
     pub client: ClientName,
     pub topic: KafkaTopicName,
     pub offset_mode: KafkaOffsetMode,
-    pub instances: NonZeroU64,
+    pub instances: crate::IngestorInstances,
     pub mode: KafkaIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
@@ -367,6 +367,7 @@ const KAFKA_TOPIC_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclar
 
 impl IngestorDeclaration for KafkaTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::PerPartition,
         // A Kafka record carries its headers as a list, in the order written, repeats included.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         metadata: KAFKA_TOPIC_METADATA,
@@ -408,6 +409,10 @@ impl IngestorDeclaration for KafkaTopicIngestor {
 }
 
 impl IngestorEntityBody for KafkaTopicIngestor {
+    fn instances(&self) -> Option<crate::IngestorInstances> {
+        Some(self.instances)
+    }
+
     fn reference(&self) -> IngestorReference<'_> {
         IngestorReference::Client(&self.client)
     }

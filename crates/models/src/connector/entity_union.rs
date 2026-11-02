@@ -164,6 +164,12 @@ macro_rules! connector_ingestors {
         }
 
         impl $crate::IngestorEntityBody for $Source {
+            fn instances(&self) -> Option<$crate::IngestorInstances> {
+                match self {
+                    $(Self::$Variant(source) => $crate::IngestorEntityBody::instances(source),)+
+                }
+            }
+
             fn reference(&self) -> $crate::IngestorReference<'_> {
                 match self {
                     $(Self::$Variant(source) => $crate::IngestorEntityBody::reference(source),)+

@@ -37,7 +37,7 @@ use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_dataflow_graph::{DataflowBranchStatistics, DataflowMetricRef, DataflowStatistics};
 use nervix_models::{
     BranchKeyFingerprint, BranchName, ClusterNodeName, DomainName, EmitterName, IngestorName,
-    ModelKind, ModelName, RelayName, Timestamp, Unit,
+    ModelKind, ModelName, NodeUnitRef, RelayName, Timestamp, Unit,
 };
 use nervix_primitives::{
     collections::{DashMap, dash_map::Entry},
@@ -140,11 +140,13 @@ const PROMETHEUS_LABELS: &[&str] = &[
     "peer_kind",
     "peer",
     "partition",
+    "instance",
 ];
 const BRANCH_PROMETHEUS_LABELS: &[&str] = &["domain", "branch", "physical_node_id"];
 const BRANCH_EVICTION_PROMETHEUS_LABELS: &[&str] =
     &["domain", "branch", "physical_node_id", "reason"];
-const INGESTOR_QUIESCE_PROMETHEUS_LABELS: &[&str] = &["domain", "ingestor", "physical_node_id"];
+const INGESTOR_QUIESCE_PROMETHEUS_LABELS: &[&str] =
+    &["domain", "ingestor", "physical_node_id", "instance"];
 const SESSION_SUBSCRIPTION_PROMETHEUS_LABELS: &[&str] = &["domain", "relay"];
 const CLIENT_INGESTOR_PROMETHEUS_LABELS: &[&str] = &["domain", "ingestor"];
 const CLIENT_EMITTER_PROMETHEUS_LABELS: &[&str] = &["domain", "emitter"];
@@ -3019,6 +3021,7 @@ enum RecordingScope {
 }
 
 pub(crate) struct NodeBatchMetricsSpec<'a> {
+    pub(crate) unit: Unit,
     pub(crate) domain: &'a DomainName,
     pub(crate) kind: ModelKind,
     pub(crate) node: &'a ModelName,
@@ -3035,6 +3038,7 @@ impl RuntimeMetrics {
         spec: NodeBatchMetricsSpec<'_>,
     ) -> BatchMetricsHandle {
         let NodeBatchMetricsSpec {
+            unit,
             domain,
             kind,
             node,
@@ -3047,18 +3051,17 @@ impl RuntimeMetrics {
             Some(branch) => RecordingScope::GlobalAndBranch(branch),
             None => RecordingScope::Global,
         };
-        self.resolve_batch_metrics(
-            MetricKey::node(
-                domain,
-                kind,
-                node,
-                physical_node_id,
-                relay,
-                direction,
-                MESSAGES_TOTAL,
-            ),
-            scope,
-        )
+        let mut key = MetricKey::node(
+            domain,
+            kind,
+            node,
+            physical_node_id,
+            relay,
+            direction,
+            MESSAGES_TOTAL,
+        );
+        key.unit = unit;
+        self.resolve_batch_metrics(key, scope)
     }
 
     pub(crate) fn resolve_global_node_message_metrics(
@@ -3082,26 +3085,45 @@ impl RuntimeMetrics {
         )
     }
 
-    pub(crate) fn resolve_branch_node_message_metrics(
+    pub(crate) fn resolve_unit_node_message_metrics(
         &self,
         domain: &DomainName,
         kind: ModelKind,
         node: &ModelName,
+        unit: Unit,
+        physical_node_id: Option<&ClusterNodeName>,
+        direction: &'static str,
+    ) -> MessageMetricsHandle {
+        let mut key = MetricKey::node_without_stream(
+            domain,
+            kind,
+            node,
+            physical_node_id,
+            direction,
+            MESSAGES_TOTAL,
+        );
+        key.unit = unit;
+        self.resolve_message_metrics(key, RecordingScope::Global)
+    }
+
+    pub(crate) fn resolve_unit_branch_message_metrics(
+        &self,
+        domain: &DomainName,
+        owner: &NodeUnitRef,
         physical_node_id: Option<&ClusterNodeName>,
         direction: &'static str,
         branch: BranchKeyFingerprint,
     ) -> MessageMetricsHandle {
-        self.resolve_message_metrics(
-            MetricKey::node_without_stream(
-                domain,
-                kind,
-                node,
-                physical_node_id,
-                direction,
-                MESSAGES_TOTAL,
-            ),
-            RecordingScope::Branch(branch),
-        )
+        let mut key = MetricKey::node_without_stream(
+            domain,
+            owner.node.kind,
+            &owner.node.identifier,
+            physical_node_id,
+            direction,
+            MESSAGES_TOTAL,
+        );
+        key.unit = owner.unit;
+        self.resolve_message_metrics(key, RecordingScope::Branch(branch))
     }
 
     pub(crate) fn resolve_node_input_metrics(
@@ -3392,12 +3414,15 @@ impl RuntimeMetrics {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
+        unit: Unit,
         physical_node_id: Option<&ClusterNodeName>,
     ) -> IngestorQuiesceMetrics {
+        let instance = instance_label(unit);
         let values = [
             domain.as_str(),
             ingestor.as_str(),
             physical_node_label(physical_node_id),
+            instance.as_ref(),
         ];
         let prometheus = &self.series.prometheus;
         let series = IngestorQuiesceSeries {
@@ -3569,6 +3594,7 @@ impl RuntimeMetrics {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
+        unit: Unit,
         physical_node_id: Option<&ClusterNodeName>,
     ) -> IntCounter {
         self.series
@@ -3578,6 +3604,7 @@ impl RuntimeMetrics {
                 domain.as_str(),
                 ingestor.as_str(),
                 physical_node_label(physical_node_id),
+                instance_label(unit).as_ref(),
             ])
     }
 
@@ -3588,6 +3615,7 @@ impl RuntimeMetrics {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
+        unit: Unit,
         physical_node_id: Option<&ClusterNodeName>,
     ) -> IntCounter {
         self.series
@@ -3597,6 +3625,7 @@ impl RuntimeMetrics {
                 domain.as_str(),
                 ingestor.as_str(),
                 physical_node_label(physical_node_id),
+                instance_label(unit).as_ref(),
             ])
     }
 
@@ -3607,6 +3636,7 @@ impl RuntimeMetrics {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
+        unit: Unit,
         physical_node_id: Option<&ClusterNodeName>,
     ) -> IntCounter {
         self.series
@@ -3616,6 +3646,7 @@ impl RuntimeMetrics {
                 domain.as_str(),
                 ingestor.as_str(),
                 physical_node_label(physical_node_id),
+                instance_label(unit).as_ref(),
             ])
     }
 
@@ -3626,6 +3657,7 @@ impl RuntimeMetrics {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
+        unit: Unit,
         physical_node_id: Option<&ClusterNodeName>,
     ) -> IntCounter {
         self.series
@@ -3635,6 +3667,7 @@ impl RuntimeMetrics {
                 domain.as_str(),
                 ingestor.as_str(),
                 physical_node_label(physical_node_id),
+                instance_label(unit).as_ref(),
             ])
     }
 
@@ -3645,6 +3678,7 @@ impl RuntimeMetrics {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
+        unit: Unit,
         physical_node_id: Option<&ClusterNodeName>,
     ) -> IntCounter {
         self.series
@@ -3654,6 +3688,7 @@ impl RuntimeMetrics {
                 domain.as_str(),
                 ingestor.as_str(),
                 physical_node_label(physical_node_id),
+                instance_label(unit).as_ref(),
             ])
     }
 
@@ -3663,6 +3698,7 @@ impl RuntimeMetrics {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
+        unit: Unit,
         physical_node_id: Option<&ClusterNodeName>,
     ) -> IntCounter {
         self.series
@@ -3672,6 +3708,7 @@ impl RuntimeMetrics {
                 domain.as_str(),
                 ingestor.as_str(),
                 physical_node_label(physical_node_id),
+                instance_label(unit).as_ref(),
             ])
     }
 
@@ -3873,6 +3910,28 @@ impl RuntimeMetrics {
         ));
     }
 
+    pub fn register_global_node_unit(
+        &self,
+        domain: &DomainName,
+        kind: ModelKind,
+        node: &ModelName,
+        unit: Unit,
+        physical_node_id: Option<&ClusterNodeName>,
+    ) {
+        for direction in ["sent", "received"] {
+            let mut key = MetricKey::node_without_stream(
+                domain,
+                kind,
+                node,
+                physical_node_id,
+                direction,
+                MESSAGES_TOTAL,
+            );
+            key.unit = unit;
+            self.register_counter(key);
+        }
+    }
+
     /// Registers the received-messages series of one unit of a relay this node owns, so it is
     /// exposed at zero before the unit's owner records its first batch.
     pub fn register_global_stream(
@@ -3925,6 +3984,77 @@ impl RuntimeMetrics {
             .retain(|key, _| !key.key.belongs_to_relay_unit(domain, relay, unit));
     }
 
+    /// End one intake's metric lifetime after its final checkpoint has selected its bytes.
+    /// Siblings keep both their retained series and their pre-resolved handles.
+    pub(crate) fn remove_ingestor_unit(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        unit: Unit,
+        physical_node: Option<&ClusterNodeName>,
+    ) {
+        let target = ModelName::from(ingestor);
+        let belongs = |key: &MetricKey| key_matches_unit(key, domain, "INGESTOR", &target, unit);
+        let counters = self
+            .series
+            .counters
+            .iter()
+            .filter(|entry| belongs(entry.key()))
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for key in counters {
+            self.series.counters.remove(&key);
+            self.series.prometheus.remove(&key);
+        }
+        let histograms = self
+            .series
+            .histograms
+            .iter()
+            .filter(|entry| belongs(entry.key()))
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for key in histograms {
+            self.series.histograms.remove(&key);
+            self.series.prometheus.remove(&key);
+        }
+        self.series
+            .branch_counters
+            .retain(|key, _| !belongs(&key.key));
+        self.series
+            .branch_histograms
+            .retain(|key, _| !belongs(&key.key));
+        let instance = instance_label(unit);
+        let labels = [
+            domain.as_str(),
+            ingestor.as_str(),
+            physical_node_label(physical_node),
+            instance.as_ref(),
+        ];
+        let prometheus = &self.series.prometheus;
+        for gauge in [
+            &prometheus.ingestor_quiesce_buffered_records,
+            &prometheus.ingestor_quiesce_buffered_bytes,
+        ] {
+            gauge
+                .remove_label_values(&labels)
+                .discarded(WITHDRAWN_SERIES_MAY_NOT_EXIST);
+        }
+        for counter in [
+            &prometheus.ingestor_quiesce_dropped_total,
+            &prometheus.ingestor_quiesce_rejected_total,
+            &prometheus.ingestor_unfolding_refused_total,
+            &prometheus.ingestor_transport_redeliveries_total,
+            &prometheus.ingestor_decode_rejections_total,
+            &prometheus.ingestor_oversized_payloads_total,
+            &prometheus.ingestor_header_values_dropped_total,
+            &prometheus.ingestor_read_ahead_dropped_payloads_total,
+        ] {
+            counter
+                .remove_label_values(&labels)
+                .discarded(WITHDRAWN_SERIES_MAY_NOT_EXIST);
+        }
+    }
+
     pub fn prometheus_text(&self) -> String {
         self.series.prometheus.text()
     }
@@ -3947,21 +4077,19 @@ impl RuntimeMetrics {
                       an explicit lifetime boundary"
         )
     )]
-    pub fn snapshot_global_target(
+    pub fn snapshot_global_unit(
         &self,
         domain: &DomainName,
         kind: ModelKind,
         target: &ModelName,
-        physical_node_id: &ClusterNodeName,
+        unit: Unit,
     ) -> RuntimeMetricsSnapshot {
         let target_kind = kind.as_str().to_ascii_uppercase();
         let mut counters = self
             .series
             .counters
             .iter()
-            .filter(|entry| {
-                key_matches_target(entry.key(), domain, &target_kind, target, physical_node_id)
-            })
+            .filter(|entry| key_matches_unit(entry.key(), domain, &target_kind, target, unit))
             .map(|entry| entry.value().to_snapshot(entry.key().clone()))
             .collect::<Vec<_>>();
         counters.sort_by(|left, right| left.key.cmp(&right.key));
@@ -3970,7 +4098,7 @@ impl RuntimeMetrics {
             .histograms
             .iter()
             .filter(|entry| {
-                key_matches_target(entry.key(), domain, &target_kind, target, physical_node_id)
+                key_matches_unit(entry.key(), domain, &target_kind, target, unit)
                     && entry.value().was_observed()
             })
             .map(|entry| entry.value().to_snapshot(entry.key().clone()))
@@ -4040,12 +4168,12 @@ impl RuntimeMetrics {
                       an explicit lifetime boundary"
         )
     )]
-    pub fn apply_global_target_snapshot(
+    pub fn apply_global_unit_snapshot(
         &self,
         domain: &DomainName,
         kind: ModelKind,
         target: &ModelName,
-        physical_node_id: &ClusterNodeName,
+        unit: Unit,
         snapshot: RuntimeMetricsSnapshot,
     ) {
         let target_kind = kind.as_str().to_ascii_uppercase();
@@ -4053,9 +4181,7 @@ impl RuntimeMetrics {
             .series
             .counters
             .iter()
-            .filter(|entry| {
-                key_matches_target(entry.key(), domain, &target_kind, target, physical_node_id)
-            })
+            .filter(|entry| key_matches_unit(entry.key(), domain, &target_kind, target, unit))
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for key in counter_keys {
@@ -4065,9 +4191,7 @@ impl RuntimeMetrics {
             .series
             .histograms
             .iter()
-            .filter(|entry| {
-                key_matches_target(entry.key(), domain, &target_kind, target, physical_node_id)
-            })
+            .filter(|entry| key_matches_unit(entry.key(), domain, &target_kind, target, unit))
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for key in histogram_keys {
@@ -4100,11 +4224,12 @@ impl RuntimeMetrics {
                       an explicit lifetime boundary"
         )
     )]
-    pub fn has_global_target_measurements(
+    pub fn has_global_unit_measurements(
         &self,
         domain: &DomainName,
         kind: ModelKind,
         target: impl Into<ModelName>,
+        unit: Unit,
     ) -> bool {
         let target = target.into();
         let target_kind = kind.as_str().to_ascii_uppercase();
@@ -4113,6 +4238,7 @@ impl RuntimeMetrics {
             key.domain == domain.as_str()
                 && key.target_kind == target_kind
                 && key.target == target.as_str()
+                && key.unit == unit
                 && key.relay != "-"
                 && entry.value().value.load(AtomicOrdering::Relaxed) > 0
         }) || self.series.histograms.iter().any(|entry| {
@@ -4120,6 +4246,7 @@ impl RuntimeMetrics {
             key.domain == domain.as_str()
                 && key.target_kind == target_kind
                 && key.target == target.as_str()
+                && key.unit == unit
                 && key.relay != "-"
                 && entry.value().was_observed()
         })
@@ -4222,16 +4349,36 @@ impl RuntimeMetrics {
         target: impl Into<ModelName>,
     ) -> Vec<String> {
         let target = target.into();
+        self.describe_global_matching(kind, |key| {
+            key.domain == domain.as_str()
+                && key.target_kind == kind
+                && key.target == target.as_str()
+        })
+    }
+
+    pub(crate) fn describe_global_unit(
+        &self,
+        domain: &DomainName,
+        kind: &str,
+        target: &ModelName,
+        unit: Unit,
+    ) -> Vec<String> {
+        self.describe_global_matching(kind, |key| {
+            key_matches_unit(key, domain, kind, target, unit)
+        })
+    }
+
+    fn describe_global_matching(
+        &self,
+        kind: &str,
+        include: impl Fn(&MetricKey) -> bool,
+    ) -> Vec<String> {
         let mut lines = Vec::new();
         let mut counters = self
             .series
             .counters
             .iter()
-            .filter(|entry| {
-                entry.key().domain == domain.as_str()
-                    && entry.key().target_kind == kind
-                    && entry.key().target == target.as_str()
-            })
+            .filter(|entry| include(entry.key()))
             .map(|entry| (entry.key().clone(), entry.value().summary()))
             .collect::<Vec<_>>();
         counters.sort_by(|left, right| left.0.cmp(&right.0));
@@ -4239,12 +4386,7 @@ impl RuntimeMetrics {
             .series
             .histograms
             .iter()
-            .filter(|entry| {
-                entry.key().domain == domain.as_str()
-                    && entry.key().target_kind == kind
-                    && entry.key().target == target.as_str()
-                    && entry.value().was_observed()
-            })
+            .filter(|entry| include(entry.key()) && entry.value().was_observed())
             .map(|entry| (entry.key().clone(), entry.value().summary()))
             .collect::<Vec<_>>();
         histograms.sort_by(|left, right| left.0.cmp(&right.0));
@@ -4693,6 +4835,19 @@ fn with_metric(key: &MetricKey, metric: &'static str) -> MetricKey {
     let mut key = key.clone();
     key.metric = metric;
     key
+}
+
+fn key_matches_unit(
+    key: &MetricKey,
+    domain: &DomainName,
+    kind: &str,
+    target: &ModelName,
+    unit: Unit,
+) -> bool {
+    key.domain == domain.as_str()
+        && key.target_kind == kind
+        && key.target == target.as_str()
+        && key.unit == unit
 }
 
 fn key_matches_target(
@@ -5184,7 +5339,7 @@ fn format_histogram_metric_line(
     )
 }
 
-fn prometheus_label_values(key: &MetricKey) -> [Cow<'_, str>; 9] {
+fn prometheus_label_values(key: &MetricKey) -> [Cow<'_, str>; 10] {
     [
         Cow::Borrowed(key.domain.as_str()),
         Cow::Borrowed(key.target_kind.as_str()),
@@ -5195,6 +5350,7 @@ fn prometheus_label_values(key: &MetricKey) -> [Cow<'_, str>; 9] {
         Cow::Borrowed(empty_as_dash(&key.peer_kind)),
         Cow::Borrowed(empty_as_dash(&key.peer)),
         partition_label(key.unit),
+        instance_label(key.unit),
     ]
 }
 
@@ -5208,12 +5364,20 @@ fn partition_label(unit: Unit) -> Cow<'static, str> {
     }
 }
 
+fn instance_label(unit: Unit) -> Cow<'static, str> {
+    match unit {
+        Unit::Instance(index) => Cow::Owned(index.to_string()),
+        Unit::Single | Unit::Partition(_) => Cow::Borrowed("-"),
+    }
+}
+
 /// The ` partition=p` field a `DESCRIBE` metric line carries for a series of one relay partition,
 /// and nothing for a series of a target that is not divided into partitions.
 fn partition_field(unit: Unit) -> String {
     match unit {
         Unit::Partition(partition) => format!(" partition={partition}"),
-        Unit::Single | Unit::Instance(_) => String::new(),
+        Unit::Instance(index) => format!(" instance={index}"),
+        Unit::Single => String::new(),
     }
 }
 
@@ -5594,7 +5758,12 @@ mod tests {
         let metrics = RuntimeMetrics::default();
         let domain = DomainName::parse("retained").assured("the domain is valid");
         let ingestor = IngestorName::parse("source").assured("the ingestor is valid");
-        let children = metrics.register_ingestor_quiesce(&domain, &ingestor, None);
+        let children = metrics.register_ingestor_quiesce(
+            &domain,
+            &ingestor,
+            nervix_models::Unit::Single,
+            None,
+        );
         metrics.set_ingestor_quiesce_buffered(&children, 2, 13);
         metrics.increment_ingestor_quiesce_dropped(&children, 3);
         metrics.increment_ingestor_quiesce_rejected(&children, 5);
@@ -5786,10 +5955,12 @@ mod tests {
             )
             .observe(2, 34, None);
         metrics
-            .resolve_branch_node_message_metrics(
+            .resolve_unit_branch_message_metrics(
                 &domain,
-                ModelKind::Ingestor,
-                &ModelName::from(&ingestor),
+                &NodeUnitRef::new(
+                    nervix_models::NodeRef::new(ModelKind::Ingestor, &ingestor),
+                    Unit::Single,
+                ),
                 Some(&physical_node),
                 "received",
                 tenant_branch("alpha"),
@@ -6218,6 +6389,62 @@ mod tests {
     }
 
     #[test]
+    fn relinquishing_an_ingestor_instance_preserves_its_siblings_live_handles() {
+        let metrics = RuntimeMetrics::default();
+        let domain = DomainName::parse("instances").expect("valid domain");
+        let source = IngestorName::parse("source").expect("valid ingestor");
+        let target = ModelName::from(&source);
+        let relay = RelayName::parse("events").expect("valid relay");
+        let physical = ClusterNodeName::parse("node-1").expect("valid node");
+        let children = [Unit::Instance(0), Unit::Instance(1)].map(|unit| {
+            metrics.register_ingestor_quiesce(&domain, &source, unit, Some(&physical));
+            metrics.resolve_node_batch_metrics(NodeBatchMetricsSpec {
+                domain: &domain,
+                kind: ModelKind::Ingestor,
+                node: &target,
+                relay: &relay,
+                unit,
+                physical_node_id: Some(&physical),
+                direction: "sent",
+                branch: None,
+            })
+        });
+        children[0].observe(2, 20, None);
+        children[1].observe(3, 30, None);
+        for (index, expected) in [(0, 2), (1, 3)] {
+            let lines =
+                metrics.describe_global_unit(&domain, "INGESTOR", &target, Unit::Instance(index));
+            let messages = lines
+                .iter()
+                .filter(|line| line.trim_start().starts_with("messages_total "))
+                .collect::<Vec<_>>();
+            assert_eq!(messages.len(), 1, "one instance is inspected at a time");
+            assert!(messages[0].contains(&format!("instance={index}")));
+            assert!(messages[0].contains(&format!("total={expected}")));
+        }
+        metrics.remove_ingestor_unit(&domain, &source, Unit::Instance(1), Some(&physical));
+        children[0].observe(5, 50, None);
+        let retained =
+            metrics.snapshot_global_unit(&domain, ModelKind::Ingestor, &target, Unit::Instance(0));
+        assert_eq!(
+            retained
+                .counters
+                .iter()
+                .find(|counter| counter.key.metric == "messages_total")
+                .expect("the sibling remains published")
+                .value,
+            7
+        );
+        let text = metrics.prometheus_text();
+        let samples = text
+            .lines()
+            .filter(|line| line.starts_with("nervix_ingestor_quiesce_buffered_records{"))
+            .collect::<Vec<_>>();
+        assert_eq!(samples.len(), 1);
+        assert!(samples[0].contains("instance=\"0\""));
+    }
+
+    #[test]
     fn relinquishing_relay_ownership_removes_its_local_metrics() {
         let metrics = RuntimeMetrics::default();
         let domain = DomainName::parse("main").expect("valid domain");
@@ -6505,12 +6732,8 @@ mod tests {
         assert!(prometheus.contains("nervix_messages_per_batch_bucket"));
         assert!(prometheus.contains("nervix_messages_per_batch_count"));
 
-        let snapshot = metrics.snapshot_global_target(
-            &domain,
-            ModelKind::Deduplicator,
-            &node,
-            &ClusterNodeName::parse("node-1").expect("valid name"),
-        );
+        let snapshot =
+            metrics.snapshot_global_unit(&domain, ModelKind::Deduplicator, &node, Unit::Single);
         let histogram = snapshot
             .histograms
             .iter()
@@ -6522,11 +6745,11 @@ mod tests {
         assert_eq!(histogram.sum, 0.0);
 
         let restored = RuntimeMetrics::default();
-        restored.apply_global_target_snapshot(
+        restored.apply_global_unit_snapshot(
             &domain,
             ModelKind::Deduplicator,
             &node,
-            &ClusterNodeName::parse("node-1").expect("valid name"),
+            Unit::Single,
             snapshot,
         );
         assert!(
@@ -6607,11 +6830,11 @@ mod tests {
             )
             .observe_batch(2, 64, None);
 
-        let snapshot = metrics.snapshot_global_target(
+        let snapshot = metrics.snapshot_global_unit(
             &domain,
             ModelKind::Relay,
             &ModelName::from(&relay),
-            &ClusterNodeName::parse("node-1").expect("valid name"),
+            Unit::Single,
         );
         assert_eq!(snapshot.counters.len(), 3);
         assert!(
@@ -6810,7 +7033,7 @@ mod tests {
             &node_id,
         );
         let global =
-            metrics.snapshot_global_target(&domain, ModelKind::Deduplicator, &node, &node_id);
+            metrics.snapshot_global_unit(&domain, ModelKind::Deduplicator, &node, Unit::Single);
         for snapshot in [branch, global] {
             let latency = snapshot
                 .histograms
@@ -6869,11 +7092,11 @@ mod tests {
             ingested_at: &[15_000_000_000],
         });
 
-        let snapshot = metrics.snapshot_global_target(
+        let snapshot = metrics.snapshot_global_unit(
             &DomainName::parse("main").expect("valid domain"),
             ModelKind::Deduplicator,
             &ModelName::parse("dedupe").expect("valid identifier"),
-            &ClusterNodeName::parse("node-1").expect("valid name"),
+            Unit::Single,
         );
         let latency = snapshot
             .histograms

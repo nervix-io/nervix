@@ -411,6 +411,7 @@ impl Runtime {
             .iter()
             .filter(|entity| {
                 entity.kind != ModelKind::Relay
+                    && entity.kind != ModelKind::Ingestor
                     && entity.kind != ModelKind::Lookup
                     && Self::scheduled_node(&execution.revision, entity).is_some_and(|existing| {
                         Self::scheduled_node(desired, entity).is_some_and(|desired_node| {
@@ -467,10 +468,6 @@ impl Runtime {
                 })
                 .change_context(build()));
             };
-            let was_local = self.inner.executions.get(domain).is_some_and(|execution| {
-                Self::scheduled_node(&execution.revision, entity)
-                    .is_some_and(|existing| existing.executes_on(local_node_id))
-            });
             // A relay is rebound unit by unit: the units this node owned, the owner each unit had,
             // and the units it owns now decide which owner and state tasks stop and start.
             let (previous_local_units, previous_unit_owners) = if let Some(execution) =
@@ -485,7 +482,20 @@ impl Runtime {
                 (BTreeSet::new(), BTreeMap::new())
             };
             let desired_local_units = desired_node.units_executing_on(local_node_id);
-            let executes_locally = desired_node.executes_on(local_node_id);
+            if entity.kind == ModelKind::Ingestor {
+                for unit in previous_local_units.difference(&desired_local_units) {
+                    self.stop_ingestor_unit(domain, &IngestorName::from(&entity.identifier), *unit)
+                        .await
+                        .change_context_lazy(build)?;
+                    self.inner.metrics.remove_ingestor_unit(
+                        domain,
+                        &IngestorName::from(&entity.identifier),
+                        *unit,
+                        Some(local_node_id),
+                    );
+                }
+            }
+
             self.activate_prepared_forced_ownership_recovery_state(
                 domain,
                 desired_node,
@@ -675,11 +685,10 @@ impl Runtime {
             // A node that keeps executing here keeps its task, while its placement has just
             // rebound the replicated state it owns to a new assignment generation. A Kafka ingestor
             // kept this way commits through the originator that generation issued.
-            if was_local
-                && executes_locally
-                && let Some(originator) = placement.kafka_offset_state
-            {
-                self.reissue_kafka_offset_originator(domain, entity, originator);
+            for (unit, originator) in placement.kafka_offset_states {
+                if previous_local_units.contains(&unit) && desired_local_units.contains(&unit) {
+                    self.reissue_kafka_offset_originator(domain, entity, unit, originator);
+                }
             }
 
             if let Some(relay) = materialized_relay {
@@ -865,7 +874,7 @@ impl Runtime {
                 .collect::<Vec<_>>(),
         )
         .into_vec();
-        let mut relays = self.entity_pause_relays(domain, &gated);
+        let mut relays = self.entity_pause_relays(domain, &EntityGateTargets::Entities(gated));
         relays.extend(gate_relays.iter().cloned());
         relays.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         relays.dedup();
@@ -1037,31 +1046,26 @@ impl Runtime {
                 continue;
             }
             if entity.kind == ModelKind::Ingestor {
-                let ingestor = IngestorName::from(&entity.identifier);
-                let Some(desired_plan) = entrypoints.ingestor(&ingestor).cloned() else {
+                let Some(desired_node) = revision.nodes.get(entity) else {
                     return Err(Report::new(ExecutionBuildError::MissingDesiredNode {
                         node: entity.clone(),
                     })
                     .change_context(build()));
                 };
-                let desired_node = revision
-                    .nodes
-                    .get(entity)
-                    .assured("the entrypoint plans were decided from this same schedule");
-
-                let key = entity.in_domain(domain);
-                if self.inner.ingestors.contains_key(&key) {
-                    self.stop_ingestor(domain, &ingestor)
-                        .await
-                        .change_context_lazy(build)?;
-                }
+                let ingestor = IngestorName::from(&entity.identifier);
+                self.stop_ingestor(domain, &ingestor)
+                    .await
+                    .change_context_lazy(build)?;
                 if let Some(retirement) = retiring_ingestors.remove(&ingestor) {
                     Box::pin(self.retire_ingestor_input(retirement)).await?;
                 }
-                if Self::scheduled_node_executes_locally(desired_node, local_node_id) {
-                    self.start_ingestor(&desired_plan)
-                        .await
-                        .change_context_lazy(build)?;
+                for unit in desired_node.units.keys() {
+                    if Self::scheduled_unit_executes_locally(desired_node, *unit, local_node_id) {
+                        let plan = entrypoints
+                            .ingestor(&ingestor, *unit)
+                            .assured("each ingestor unit has its decided plan");
+                        self.start_ingestor(plan).await.change_context_lazy(build)?;
+                    }
                 }
                 continue;
             }
@@ -1543,6 +1547,9 @@ impl Runtime {
                     );
                 }
             }
+            execution
+                .mqtt_ingestor_clients
+                .retain(|name, prepared| prepared.agrees_with(name, &revision));
             execution.revision = revision;
             execution.routing.message_error_plans = message_error_plans;
             execution.routing.processor_plans = processor_plans;
@@ -1623,6 +1630,9 @@ impl Runtime {
                 .change_context(ExecutionBuildError::BindMessageErrorRoutes)
                 .change_context_lazy(build)?,
             );
+            execution
+                .mqtt_ingestor_clients
+                .retain(|name, prepared| prepared.agrees_with(name, &revision));
             execution.revision = revision;
             execution.routing.message_error_plans = message_error_plans;
             execution.routing.processor_plans = processor_plans;
@@ -1803,15 +1813,6 @@ impl Runtime {
         state: Option<PlacedNodeState>,
     ) -> error_stack::Result<ScheduledNodePlacement, ExecutionBuildError> {
         let mut placement = ScheduledNodePlacement::default();
-        let executes_locally = node.executes_on(local_node_id);
-        let assigned_locally = node.is_assigned_to(local_node_id);
-        // A partitioned relay has no one execution node; its units are placed one by one below and
-        // it exposes no node-wide series.
-        let execution_node = if node.is_partitioned() {
-            None
-        } else {
-            node.execution_node().cloned()
-        };
         if let Some(PlacedNodeState::MaterializedRelay(schema)) = state.as_ref() {
             self.place_materialized_relay_units(
                 domain,
@@ -1823,117 +1824,115 @@ impl Runtime {
             )?;
         }
 
-        if let Some(PlacedNodeState::KafkaDomainOffsets) = state.as_ref()
-            && assigned_locally
-        {
-            let ingestor = IngestorName::from(&node.identifier);
-            let replica_nodes = node
-                .replica_nodes()
-                .into_iter()
-                .cloned()
-                .collect::<Vec<_>>();
-            let required_replica_acks = replica_nodes.len();
-            let mut assignment = self
-                .replicated_kafka_offset_state(
-                    RuntimeStatePlacement {
-                        domain: domain.clone(),
-                        state: RuntimeState::KafkaOffset,
-                        kind: node.kind(),
-                        identifier: node.identifier.clone(),
-                        unit: nervix_models::Unit::Single,
-                        branch_key: None,
-                    },
-                    node.single_unit().primary_node.clone(),
-                    replica_nodes,
-                    required_replica_acks,
-                    Some(local_node_id),
-                )
-                .change_context_lazy(|| ExecutionBuildError::AssignState {
-                    node: node.identity(),
-                    state: RuntimeStateKind::KafkaOffset,
-                })?;
-            if let Some(writer) = self.spawn_kafka_offset_snapshot_task(assignment.persistence) {
-                placement.tasks.checkpoints.push(writer);
+        for (unit, scheduled) in &node.units {
+            if !scheduled.assigned_nodes.contains(local_node_id) {
+                continue;
             }
-            if node.is_primary_on(local_node_id) {
-                let Some(originator) = assignment.originator.take() else {
-                    return Err(Report::new(ExecutionBuildError::KafkaOffsetAuthority {
-                        ingestor,
-                    }));
-                };
-                placement.kafka_offset_state = Some(originator);
-            } else {
-                let Some(installer) = assignment.installer.take() else {
-                    return Err(Report::new(ExecutionBuildError::KafkaOffsetInstaller {
-                        ingestor,
-                    }));
-                };
-                if let Some(task) =
-                    self.spawn_kafka_offset_replica_poll_task(shutdown_tx, installer)
+            let executes_locally = node.unit_executes_on(*unit, local_node_id);
+            if matches!(state, Some(PlacedNodeState::KafkaDomainOffsets)) {
+                let replica_nodes = scheduled
+                    .replica_nodes()
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let required_acks = replica_nodes.len();
+                let mut assignment = self
+                    .replicated_kafka_offset_state(
+                        RuntimeStatePlacement {
+                            domain: domain.clone(),
+                            state: RuntimeState::KafkaOffset,
+                            kind: node.kind(),
+                            identifier: node.identifier.clone(),
+                            unit: *unit,
+                            branch_key: None,
+                        },
+                        scheduled.primary_node.clone(),
+                        replica_nodes,
+                        required_acks,
+                        Some(local_node_id),
+                    )
+                    .change_context_lazy(|| ExecutionBuildError::AssignState {
+                        node: node.identity(),
+                        state: RuntimeStateKind::KafkaOffset,
+                    })?;
+                if let Some(writer) = self.spawn_kafka_offset_snapshot_task(assignment.persistence)
+                {
+                    placement.tasks.checkpoints.push(writer);
+                }
+                if executes_locally {
+                    let originator = assignment.originator.take().ok_or_else(|| {
+                        Report::new(ExecutionBuildError::KafkaOffsetAuthority {
+                            ingestor: IngestorName::from(&node.identifier),
+                        })
+                    })?;
+                    placement.kafka_offset_states.insert(*unit, originator);
+                } else {
+                    let installer = assignment.installer.take().ok_or_else(|| {
+                        Report::new(ExecutionBuildError::KafkaOffsetInstaller {
+                            ingestor: IngestorName::from(&node.identifier),
+                        })
+                    })?;
+                    if let Some(task) =
+                        self.spawn_kafka_offset_replica_poll_task(shutdown_tx, installer)
+                    {
+                        placement.tasks.replication.push(task);
+                    }
+                }
+            }
+            if node.kind() != ModelKind::Relay
+                && let Some(primary) = node.unit_execution_node(*unit).cloned()
+            {
+                let aggregate = self
+                    .replicated_branch_aggregated_state(
+                        RuntimeStatePlacement {
+                            domain: domain.clone(),
+                            state: RuntimeState::BranchAggregated,
+                            kind: node.kind(),
+                            identifier: node.identifier.clone(),
+                            unit: *unit,
+                            branch_key: None,
+                        },
+                        Some(primary.clone()),
+                    )
+                    .change_context_lazy(|| ExecutionBuildError::AssignState {
+                        node: node.identity(),
+                        state: RuntimeStateKind::BranchAggregated,
+                    })?;
+                if executes_locally {
+                    if let Some(writer) = self.spawn_branch_aggregated_snapshot_task(aggregate) {
+                        placement.tasks.checkpoints.push(writer);
+                    }
+                } else if let Some(task) =
+                    self.spawn_branch_aggregated_replica_poll_task(shutdown_tx, aggregate)
                 {
                     placement.tasks.replication.push(task);
                 }
             }
-        }
-
-        let aggregate_primary_node = execution_node
-            .clone()
-            .or_else(|| executes_locally.then(|| local_node_id.clone()));
-        if node.kind() != ModelKind::Relay
-            && (executes_locally || (assigned_locally && aggregate_primary_node.is_some()))
-        {
-            let state = self
-                .replicated_branch_aggregated_state(
-                    RuntimeStatePlacement {
-                        domain: domain.clone(),
-                        state: RuntimeState::BranchAggregated,
-                        kind: node.kind(),
-                        identifier: node.identifier.clone(),
-                        unit: nervix_models::Unit::Single,
-                        branch_key: None,
-                    },
-                    aggregate_primary_node.clone(),
-                    aggregate_primary_node.unwrap_or_else(|| local_node_id.clone()),
-                )
-                .change_context_lazy(|| ExecutionBuildError::AssignState {
-                    node: node.identity(),
-                    state: RuntimeStateKind::BranchAggregated,
-                })?;
-            if executes_locally {
-                if let Some(writer) = self.spawn_branch_aggregated_snapshot_task(state) {
-                    placement.tasks.checkpoints.push(writer);
+            if !executes_locally {
+                if let Some(task) = self
+                    .spawn_branch_state_replica_poll_task(shutdown_tx, domain, node, *unit)
+                    .change_context_lazy(|| ExecutionBuildError::StartStateReplica {
+                        node: node.identity(),
+                    })?
+                {
+                    placement.tasks.replication.push(task);
                 }
-            } else if let Some(task) =
-                self.spawn_branch_aggregated_replica_poll_task(shutdown_tx, state)
-            {
-                placement.tasks.replication.push(task);
+            } else if node.kind() != ModelKind::Relay {
+                self.inner.metrics.register_global_node_unit(
+                    domain,
+                    node.kind(),
+                    &node.identifier,
+                    *unit,
+                    Some(local_node_id),
+                );
+            } else if *unit == Unit::Single {
+                self.inner.metrics.register_global_node(
+                    domain,
+                    node.kind(),
+                    &node.identifier,
+                    Some(local_node_id),
+                );
             }
-        }
-        if assigned_locally && !node.is_primary_on(local_node_id) {
-            let task = self
-                .spawn_branch_state_replica_poll_task(shutdown_tx, domain, node)
-                .change_context_lazy(|| ExecutionBuildError::StartStateReplica {
-                    node: node.identity(),
-                })?;
-            if let Some(task) = task {
-                placement.tasks.replication.push(task);
-            }
-        }
-        // A relay exposes its node-level series on the node its one owner runs on, and that
-        // owner withdraws them as it ends. A relay scheduled as partitions exposes only the
-        // series of each partition, which that partition's owner on this node withdraws as it
-        // ends, so no node-level series outlives the partitions this node stops owning.
-        let exposes_node_series = match node.kind() {
-            ModelKind::Relay => executes_locally && !node.is_partitioned(),
-            _ => true,
-        };
-        if exposes_node_series {
-            self.inner.metrics.register_global_node(
-                domain,
-                node.kind(),
-                &node.identifier,
-                execution_node.as_ref().or(Some(local_node_id)),
-            );
         }
 
         Ok(placement)
@@ -1947,6 +1946,20 @@ impl Runtime {
         revision: Option<Arc<ExecutionRevision>>,
     ) -> error_stack::Result<(), RuntimeError> {
         self.rebuild_domain_execution(domain, revision).await
+    }
+
+    pub(super) fn scheduled_unit_executes_locally(
+        node: &ExecutionNode,
+        unit: Unit,
+        local: Option<&ClusterNodeName>,
+    ) -> bool {
+        match local {
+            Some(local) => node.unit_executes_on(unit, local),
+            None => node
+                .units
+                .get(&unit)
+                .is_some_and(|unit| unit.primary_node.is_none() && unit.assigned_nodes.is_empty()),
+        }
     }
 
     pub(super) fn scheduled_node_executes_locally(
@@ -2557,7 +2570,12 @@ mod tests {
             identifier: ModelName::from(&processor),
         };
         assert_eq!(
-            runtime.entity_pause_relays(&domain, std::slice::from_ref(&entity)),
+            runtime.entity_pause_relays(
+                &domain,
+                &nervix_models::EntityGateTargets::Entities(
+                    (std::slice::from_ref(&entity)).to_vec()
+                )
+            ),
             vec![named("events")],
             "every scheduled processor swap must gate its input relays"
         );

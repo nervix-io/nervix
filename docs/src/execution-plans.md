@@ -49,7 +49,16 @@ Each scheduled node owns a map of `Unit::Single`, `Unit::Partition(p)`, or `Unit
 placements. The unit carries its primary, assigned nodes, ownership transition, and WASM guest
 generations. The revision and planned resource assignments preserve those unit keys, and schedule
 reassignments name the node and unit together. A relay branched by a branch of several partitions
-emits one `Partition` unit per partition, and every other node emits one `Single` unit.
+emits one `Partition` unit per partition. An instance-capable ingestor emits one `Instance` unit
+per resolved intake index; other nodes emit one `Single` unit.
+
+Ingestor entrypoints are keyed by `NodeUnitRef`. Planning lowers the common input declaration and
+routes once, then binds each unit's identity and Kafka primary into its start plan. Validation
+requires the complete declared unit set before a plan can run. The runtime registers sources,
+quiesce controls, ACK roots, readiness and status under `DomainNodeUnitRef`; `AlreadyRunning` names
+that exact unit. Each source owns its route runtimes and `BranchLru`/`BranchAggregated` placements.
+Schedule application stops lost units, rebinds retained state originators and starts gained units
+without rebuilding unaffected sibling intake tasks.
 
 The source digest identifies which schedule produced the installed revision. A planned change
 also carries its predecessor digest, so an incremental application is attempted only when the

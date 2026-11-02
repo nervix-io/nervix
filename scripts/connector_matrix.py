@@ -169,6 +169,7 @@ def entity_rows(row, side, notes):
             ("Options in statement order", option_text(row["options"])), ("Headers", headers)]
     if side == "ingest":
         rows.extend([
+            ("Instancing", row["instancing"]),
             ("Quiesce (complete bodies after ON QUIESCE)", "\n".join(row["quiesce"])),
             ("Metadata", "\n".join(row["metadata"]) or absent(notes, row, "metadata")),
             ("Every live node", "yes" if row["every_node"] else "no; scheduled owner"),
@@ -380,8 +381,8 @@ def documents(root, surface, notes, policy):
             for row in surface[side]:
                 for option in row["options"]:
                     if option["keywords"] == "INSTANCES":
-                        rows.append((row["entity"], option["presence"]))
-            text = region(text, "instancing", table(rows, ("Entity", "INSTANCES")))
+                        rows.append((row["entity"], row["instancing"], option["presence"]))
+            text = region(text, "instancing", table(rows, ("Entity", "Capability", "INSTANCES")))
         text = region(text, f"{side}-headers", side_headers(surface, side))
         output[path] = text
     path = "docs/src/connector-contract.md"

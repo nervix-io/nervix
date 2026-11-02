@@ -2592,7 +2592,7 @@ The `soak` suite runs every delivered scenario, topology, case, profile and faul
 | ---: | --- |
 | 1 | `mixed-seed-42` (seed 42, `preserve-quorum`, 30 minutes) 60; `baseline-1` 3; `baseline-3` 4; `cluster-restart-1` 6; `cluster-restart-3` 7 |
 | 2 | `mixed-seed-45` (seed 45, `temporary-quorum-loss`) 60; `leader-crash-1` 6; `leader-crash-3` 7; `follower-crash` 5 |
-| 3 | `mixed-seed-136` (seed 136, `temporary-quorum-loss`) 60; `ingestor-owner-crash` 6; `emitter-owner-crash` 5; `stale-follower` 4; `former-owner-restart` 10 |
+| 3 | `mixed-seed-136` (seed 136, `temporary-quorum-loss`) 60; `ingestor-owner-crash` 6; `ingestor-instances-owner-crash` 7; `emitter-owner-crash` 5; `stale-follower` 4; `former-owner-restart` 10 |
 | 4 | `mixed-rotating-preserve` 60; `rolling-restart-1` 5; `rolling-restart-3` 7; `backup-1` 4; `backup-3` 4 |
 | 5 | `mixed-rotating-temporary` 60; `mixed-burst-loss-leader-peer` 15; `pause-resume` 14 |
 | 6 | `partition-follower` 9; `partition-asymmetric` 7; `partition-leader` 7; `partition-quorum-loss` 8; `degraded-delay`, `degraded-jitter`, `degraded-random-loss`, `degraded-burst-loss`, `degraded-rate-limit`, `degraded-combined` 10 each |
@@ -3087,3 +3087,15 @@ stopped scheduling runs on 29 October 2026:
   `e69c0801`. Twelve combined runs lost 20.2% of 4,800 packets, at least 64 of 400 against the
   floor of 20, and four random-loss runs lost 30.3% of 1,600, at least 99 against 30. All 16 runs
   passed, and each sample took 5.0 seconds, against 4.9 for 40 lossy packets.
+
+## Spread Ingestor Owner Loss
+
+`just chaos run ingestor-instances-owner-crash --image <immutable-image>` installs the dedicated
+`fixtures/instances.plexus` graph with three globally indexed Kafka consumers on three nodes. The
+existing crash controller SIGKILLs the observed owner of instance 0, verifies the outage, checks
+continued source and sink progress, restarts the same container and checks recovery and the final
+delivery ledger. The public description must show all three units running and ready on distinct
+owners before the fault. During the outage every unit remains running and ready, only the failed
+owner's unit changes owner, and each sibling keeps its exact owner. The before/after index-to-owner
+JSON maps are retained beside the ordinary fault evidence. The case joins the soak inventory and
+runs locally against release and diagnostic images of the same source revision.

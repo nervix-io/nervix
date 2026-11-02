@@ -140,7 +140,7 @@ pub struct PulsarTopicIngestor {
     pub client: ClientName,
     pub topic: PulsarTopicName,
     pub subscription: PulsarSubscription,
-    pub instances: NonZeroU64,
+    pub instances: crate::IngestorInstances,
     pub mode: PulsarIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
@@ -426,6 +426,7 @@ const PULSAR_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for PulsarTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::PerPartition,
         // A Pulsar message carries its properties as a list, in the order the producer wrote them.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         metadata: IngestorMetadataDeclaration::NONE,
@@ -475,6 +476,10 @@ impl IngestorDeclaration for PulsarTopicIngestor {
 }
 
 impl IngestorEntityBody for PulsarTopicIngestor {
+    fn instances(&self) -> Option<crate::IngestorInstances> {
+        Some(self.instances)
+    }
+
     fn reference(&self) -> IngestorReference<'_> {
         IngestorReference::Client(&self.client)
     }

@@ -34,8 +34,7 @@ impl Runtime {
         if !self.entity_gate_operation_owns_unit(
             coordination,
             domain,
-            entity,
-            unit,
+            &NodeUnitRef::new(entity.clone(), unit),
             EntityGatePurpose::OwnershipHandoff,
         ) {
             return Err(OwnershipHandoffError::participant(format!(
@@ -103,7 +102,7 @@ impl Runtime {
                 None => None,
             }
         } else {
-            self.checkpoint_entrypoint_branch_lifecycle(domain, entity)
+            self.checkpoint_entrypoint_branch_lifecycle(domain, entity, unit)
                 .await?
         };
         let mut checkpoints = Vec::new();

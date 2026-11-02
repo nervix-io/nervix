@@ -279,7 +279,7 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "INSTANCES"
+capability = "INSTANCES <count>"
 entity = "KAFKA TOPIC INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/domain_kafka_pacing.feature", scenario = "Domain-owned Kafka offsets rebalance multiple instances when partitions change" },
@@ -427,7 +427,7 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "INSTANCES"
+capability = "INSTANCES <count>"
 entity = "MQTT TOPIC INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/mqtt_ingestion.feature", scenario = "MQTT instances use the non-duplicating subscription model" },
@@ -558,7 +558,7 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "INSTANCES"
+capability = "INSTANCES <count>"
 entity = "NATS SUBJECT INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/nats_ingestion.feature", scenario = "NATS ingestor delivers JSON payloads to a subscribed relay" },
@@ -835,7 +835,7 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "INSTANCES"
+capability = "INSTANCES <count>"
 entity = "PULSAR TOPIC INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/pulsar_ingestion.feature", scenario = "Pulsar ingestor delivers JSON payloads to a subscribed relay" },
@@ -978,7 +978,7 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "INSTANCES"
+capability = "INSTANCES <count>"
 entity = "RABBITMQ QUEUE INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ ingestor delivers JSON payloads to a subscribed relay" },
@@ -1147,7 +1147,7 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "INSTANCES"
+capability = "INSTANCES <count>"
 entity = "SQS QUEUE INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/sqs_ingestion.feature", scenario = "SQS ingestor delivers JSON payloads to a subscribed relay" },
@@ -1420,4 +1420,46 @@ capability = "metadata.frame_type"
 entity = "WEBSOCKETS CONNECTION INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/websocket_connection_declaration.feature", scenario = "A WebSockets connection sends literal upgrade headers and exposes response headers and frame types" },
+]
+
+[[capability]]
+capability = "INSTANCES PER PARTITION"
+entity = "KAFKA TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/ingestor_instances.feature", scenario = "Kafka domain-offset instances follow their constructed partitions on <nodes> nodes" },
+]
+
+[[capability]]
+capability = "INSTANCES PER PARTITION"
+entity = "MQTT TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/ingestor_instances.feature", scenario = "MQTT partition-following instances share their partition owners on <nodes> nodes" },
+]
+
+[[capability]]
+capability = "INSTANCES PER PARTITION"
+entity = "NATS SUBJECT INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/ingestor_instances.feature", scenario = "NATS partition-following instances share their partition owners on <nodes> nodes" },
+]
+
+[[capability]]
+capability = "INSTANCES PER PARTITION"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/ingestor_instances.feature", scenario = "Pulsar partition-following instances share their partition owners on <nodes> nodes" },
+]
+
+[[capability]]
+capability = "INSTANCES PER PARTITION"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/ingestor_instances.feature", scenario = "RabbitMQ partition-following instances share their partition owners on <nodes> nodes" },
+]
+
+[[capability]]
+capability = "INSTANCES PER PARTITION"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/ingestor_instances.feature", scenario = "SQS partition-following instances share their partition owners on <nodes> nodes" },
 ]

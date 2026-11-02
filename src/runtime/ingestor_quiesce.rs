@@ -683,7 +683,6 @@ enum RetentionOverflow {
 )]
 pub(in crate::runtime) struct RetainedDelivery<'control> {
     control: &'control IngestorQuiesceControl,
-    instance: u64,
     /// Present until [`Self::finish`] takes it or the drop returns it.
     payload: Option<BufferedIngestPayload>,
 }
@@ -721,7 +720,7 @@ impl RetainedDelivery<'_> {
             .payload
             .take()
             .verified("only finishing or dropping the delivery takes its payload");
-        self.control.end_delivery(self.instance, DeliveryEnd::Left);
+        self.control.end_delivery(DeliveryEnd::Left);
         payload
     }
 }
@@ -729,8 +728,7 @@ impl RetainedDelivery<'_> {
 impl Drop for RetainedDelivery<'_> {
     fn drop(&mut self) {
         if let Some(payload) = self.payload.take() {
-            self.control
-                .end_delivery(self.instance, DeliveryEnd::Returned(payload));
+            self.control.end_delivery(DeliveryEnd::Returned(payload));
         }
     }
 }
@@ -761,10 +759,9 @@ pub(in crate::runtime) struct IngestorQuiesceControl {
     published: ArcSwap<IngestorQuiescePublication>,
     /// Intake reaches the retained payloads only under a buffering decision, and replay only while
     /// `buffered_records` counts some.
-    pub(super) buffers:
-        nervix_primitives::sync::blocking::Mutex<HashMap<u64, IngestorQuiesceBuffer>>,
+    pub(super) buffer: nervix_primitives::sync::blocking::Mutex<IngestorQuiesceBuffer>,
     pub(super) changed: Notify,
-    /// Changes only while `buffers` is locked, so whenever that lock is free it counts exactly the
+    /// Changes only while `buffer` is locked, so whenever that lock is free it counts exactly the
     /// payloads retained.
     pub(super) buffered_records: AtomicUsize,
     pub(super) buffered_bytes: AtomicUsize,
@@ -814,7 +811,7 @@ impl IngestorQuiesceControl {
         let publication = IngestorQuiescePublication::new(IngestorQuiesceReasons::default(), modes);
         Self {
             published: ArcSwap::from_pointee(publication),
-            buffers: nervix_primitives::sync::blocking::Mutex::new(HashMap::default()),
+            buffer: nervix_primitives::sync::blocking::Mutex::new(IngestorQuiesceBuffer::default()),
             changed: Notify::new(),
             buffered_records: AtomicUsize::new(0),
             buffered_bytes: AtomicUsize::new(0),
@@ -934,7 +931,6 @@ impl IngestorQuiesceControl {
 
     pub(in crate::runtime) fn intake(
         &self,
-        instance: u64,
         payload: BufferedIngestPayload,
         endpoint: bool,
     ) -> IngestorQuiesceIntake {
@@ -962,32 +958,27 @@ impl IngestorQuiesceControl {
                 IngestorQuiesceIntake::Rejected { retry_after }
             }
             IngestorQuiesceHandling::EndpointBuffer { max_size } => {
-                self.retain(instance, payload, max_size, RetentionOverflow::Reject)
+                self.retain(payload, max_size, RetentionOverflow::Reject)
             }
-            IngestorQuiesceHandling::Buffer { max_size, overflow } => self.retain(
-                instance,
-                payload,
-                max_size,
-                RetentionOverflow::Declared(overflow),
-            ),
+            IngestorQuiesceHandling::Buffer { max_size, overflow } => {
+                self.retain(payload, max_size, RetentionOverflow::Declared(overflow))
+            }
         }
     }
 
-    /// Retains `payload` for `instance` within `max_size` bytes, applying `overflow` when it does
+    /// Retains `payload` for this unit within `max_size` bytes, applying `overflow` when it does
     /// not fit.
     ///
     /// A payload out for delivery keeps its bytes and cannot be evicted, so when evicting every
     /// other retained payload would still leave no room, the new payload is the one discarded.
     fn retain(
         &self,
-        instance: u64,
         payload: BufferedIngestPayload,
         max_size: usize,
         overflow: RetentionOverflow,
     ) -> IngestorQuiesceIntake {
         let payload_bytes = payload.byte_len();
-        let mut buffers = self.buffers.lock();
-        let buffer = buffers.entry(instance).or_default();
+        let mut buffer = self.buffer.lock();
         let fits = payload_bytes <= buffer.remaining_capacity(max_size);
         match overflow {
             RetentionOverflow::Reject => {
@@ -1090,9 +1081,9 @@ impl IngestorQuiesceControl {
         }
     }
 
-    /// Takes the oldest payload `instance` retained out for delivery, unless this ingestor is
+    /// Takes the oldest payload this unit retained out for delivery, unless this ingestor is
     /// quiesced or that payload is already out.
-    pub(in crate::runtime) fn take_buffered(&self, instance: u64) -> Option<RetainedDelivery<'_>> {
+    pub(in crate::runtime) fn take_buffered(&self) -> Option<RetainedDelivery<'_>> {
         if self.is_quiesced() {
             return None;
         }
@@ -1102,26 +1093,18 @@ impl IngestorQuiesceControl {
         if self.buffered_records.load(Ordering::SeqCst) == 0 {
             return None;
         }
-        let payload = {
-            let mut buffers = self.buffers.lock();
-            let buffer = buffers.get_mut(&instance)?;
-            buffer.take_oldest()?
-        };
+        let payload = { self.buffer.lock().take_oldest()? };
         Some(RetainedDelivery {
             control: self,
-            instance,
             payload: Some(payload),
         })
     }
 
-    /// Ends the delivery of the payload `instance` has out, as `end` says. A payload that leaves
+    /// Ends the delivery of the payload this unit has out, as `end` says. A payload that leaves
     /// stops being counted; one returned is counted as it was. A buffer that no longer counts the
     /// delivery, because the ingestor's termination discarded it, is left as it is.
-    fn end_delivery(&self, instance: u64, end: DeliveryEnd) {
-        let mut buffers = self.buffers.lock();
-        let Some(buffer) = buffers.get_mut(&instance) else {
-            return;
-        };
+    fn end_delivery(&self, end: DeliveryEnd) {
+        let mut buffer = self.buffer.lock();
         match end {
             DeliveryEnd::Left => {
                 let Some(bytes) = buffer.finish_delivery() else {
@@ -1146,12 +1129,9 @@ impl IngestorQuiesceControl {
 
     pub(super) fn terminate(&self) {
         let dropped = {
-            let mut buffers = self.buffers.lock();
-            let dropped = buffers
-                .values()
-                .map(IngestorQuiesceBuffer::retained_records)
-                .sum::<usize>();
-            buffers.clear();
+            let mut buffer = self.buffer.lock();
+            let dropped = buffer.retained_records();
+            *buffer = IngestorQuiesceBuffer::default();
             self.buffered_records.store(0, Ordering::SeqCst);
             self.buffered_bytes.store(0, Ordering::Relaxed);
             dropped
@@ -1178,33 +1158,6 @@ pub(crate) struct IngestorQuiesceCounters {
     pub(crate) buffered_bytes: usize,
     pub(crate) dropped_total: u64,
     pub(crate) rejected_total: u64,
-}
-
-#[derive(Debug)]
-pub(super) struct IngestorReadiness {
-    instances: Vec<IngestorInstanceReadiness>,
-}
-
-impl IngestorReadiness {
-    pub(super) fn new(expected_instances: NonZeroU64) -> Self {
-        let count: usize = expected_instances.get().arch_into();
-        let instances = (0..count)
-            .map(|_| IngestorInstanceReadiness::new())
-            .collect();
-        Self { instances }
-    }
-
-    pub(super) fn is_ready(&self) -> bool {
-        self.instances
-            .iter()
-            .all(IngestorInstanceReadiness::is_ready)
-    }
-
-    pub(super) fn retire(&self) {
-        for instance in &self.instances {
-            instance.retire();
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1235,7 +1188,7 @@ impl IngestorStatus {
 }
 
 impl Runtime {
-    pub(super) fn ingestor_status(&self, key: &DomainNodeRef) -> Arc<IngestorStatus> {
+    pub(super) fn ingestor_status(&self, key: &DomainNodeUnitRef) -> Arc<IngestorStatus> {
         if let Some(status) = self.inner.ingestor_statuses.get(key) {
             return status.clone();
         }
@@ -1251,9 +1204,13 @@ impl Runtime {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
+        unit: Unit,
         error: impl Into<String>,
     ) {
-        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        let key = DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
+            unit,
+        );
         self.ingestor_status(&key)
             .connection
             .record_error(error.into());
@@ -1263,8 +1220,12 @@ impl Runtime {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
+        unit: Unit,
     ) {
-        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        let key = DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
+            unit,
+        );
         if let Some(status) = self.inner.ingestor_statuses.get(&key) {
             status.connection.clear();
         }
@@ -1274,16 +1235,18 @@ impl Runtime {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
-        expected_instances: NonZeroU64,
-    ) -> Vec<IngestorInstanceReadiness> {
-        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        unit: Unit,
+    ) -> IngestorInstanceReadiness {
+        let key = DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
+            unit,
+        );
         if let Some(predecessor) = self.inner.ingestor_readiness.get(&key) {
             predecessor.retire();
         }
-        let readiness = IngestorReadiness::new(expected_instances);
-        let handles = readiness.instances.clone();
-        self.inner.ingestor_readiness.insert(key, readiness);
-        handles
+        let readiness = IngestorInstanceReadiness::new();
+        self.inner.ingestor_readiness.insert(key, readiness.clone());
+        readiness
     }
 
     pub(in crate::runtime) fn prepare_ingestor_quiescence(
@@ -1291,8 +1254,7 @@ impl Runtime {
         domain: &DomainName,
         ingestor: &IngestorSpec,
     ) -> Arc<IngestorQuiesceControl> {
-        let key =
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
+        let key = ingestor.runtime_key();
         if let Some(control) = self.inner.ingestor_quiescence.get(&key) {
             let active_supported_by_source =
                 ingestor.declared_input.supports_quiesce(&control.mode());
@@ -1306,6 +1268,7 @@ impl Runtime {
         let metric_labels = self.inner.metrics.register_ingestor_quiesce(
             domain,
             &ingestor.name,
+            ingestor.unit,
             dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
         );
         let control = Arc::new(IngestorQuiesceControl::new(
@@ -1329,13 +1292,13 @@ impl Runtime {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
+        unit: Unit,
     ) -> Option<Arc<IngestorQuiesceControl>> {
         self.inner
             .ingestor_quiescence
-            .get(&DomainNodeRef::node_in(
-                domain.clone(),
-                ModelKind::Ingestor,
-                ingestor.clone(),
+            .get(&DomainNodeUnitRef::new(
+                DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
+                unit,
             ))
             .map(|control| control.clone())
     }
@@ -1346,9 +1309,10 @@ impl Runtime {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
+        unit: Unit,
         cause: IngestorQuiesceCause,
     ) -> Option<Arc<IngestorQuiesceControl>> {
-        let control = self.ingestor_quiesce_control(domain, ingestor)?;
+        let control = self.ingestor_quiesce_control(domain, ingestor, unit)?;
         control.engage(cause);
         info!(
             domain = domain.as_str(),
@@ -1363,9 +1327,10 @@ impl Runtime {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
+        unit: Unit,
         cause: IngestorQuiesceCause,
     ) -> bool {
-        let Some(control) = self.ingestor_quiesce_control(domain, ingestor) else {
+        let Some(control) = self.ingestor_quiesce_control(domain, ingestor, unit) else {
             return false;
         };
         control.release(cause);
@@ -1383,13 +1348,14 @@ impl Runtime {
             .inner
             .ingestors
             .iter()
-            .filter(|entry| &entry.key().domain == domain)
-            .map(|entry| entry.key().identifier().clone())
+            .filter(|entry| &entry.key().entity.domain == domain)
+            .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for ingestor in ingestors {
             self.engage_ingestor_quiesce(
                 domain,
-                &IngestorName::from(&ingestor),
+                &IngestorName::from(ingestor.entity.identifier()),
+                ingestor.unit,
                 IngestorQuiesceCause::DomainPause,
             );
         }
@@ -1400,20 +1366,29 @@ impl Runtime {
             .inner
             .ingestor_quiescence
             .iter()
-            .filter(|entry| &entry.key().domain == domain)
-            .map(|entry| entry.key().identifier().clone())
+            .filter(|entry| &entry.key().entity.domain == domain)
+            .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for ingestor in ingestors {
             self.release_ingestor_quiesce(
                 domain,
-                &IngestorName::from(&ingestor),
+                &IngestorName::from(ingestor.entity.identifier()),
+                ingestor.unit,
                 IngestorQuiesceCause::DomainPause,
             );
         }
     }
 
-    pub(super) fn remove_ingestor_quiescence(&self, domain: &DomainName, ingestor: &IngestorName) {
-        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+    pub(super) fn remove_ingestor_quiescence(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        unit: Unit,
+    ) {
+        let key = DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
+            unit,
+        );
         if let Some((_, control)) = self.inner.ingestor_quiescence.remove(&key) {
             control.terminate();
         }
@@ -1424,11 +1399,15 @@ impl Runtime {
             .inner
             .ingestor_quiescence
             .iter()
-            .filter(|entry| &entry.key().domain == domain)
-            .map(|entry| entry.key().identifier().clone())
+            .filter(|entry| &entry.key().entity.domain == domain)
+            .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for ingestor in ingestors {
-            self.remove_ingestor_quiescence(domain, &IngestorName::from(&ingestor));
+            self.remove_ingestor_quiescence(
+                domain,
+                &IngestorName::from(ingestor.entity.identifier()),
+                ingestor.unit,
+            );
         }
     }
 
@@ -1436,21 +1415,29 @@ impl Runtime {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
+        unit: Unit,
     ) {
-        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        let key = DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
+            unit,
+        );
         if let Some(readiness) = self.inner.ingestor_readiness.get(&key) {
             readiness.retire();
         }
         self.inner.ingestor_readiness.remove(&key);
     }
 
-    pub(super) fn ingestor_ready(&self, domain: &DomainName, ingestor: &IngestorName) -> bool {
+    pub(super) fn ingestor_ready(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        unit: Unit,
+    ) -> bool {
         self.inner
             .ingestor_readiness
-            .get(&DomainNodeRef::node_in(
-                domain.clone(),
-                ModelKind::Ingestor,
-                ingestor.clone(),
+            .get(&DomainNodeUnitRef::new(
+                DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
+                unit,
             ))
             .is_none_or(|readiness| readiness.is_ready())
     }
@@ -1498,8 +1485,8 @@ impl Runtime {
             nervix_primitives::task::consume_budget().await;
             control.engage(IngestorQuiesceCause::MemoryPressure);
             info!(
-                domain = key.domain.as_str(),
-                ingestor = key.identifier().as_str(),
+                domain = key.entity.domain.as_str(),
+                ingestor = key.entity.identifier().as_str(),
                 cause = IngestorQuiesceCause::MemoryPressure.as_str(),
                 "ingestor entered quiesce"
             );
@@ -1521,13 +1508,14 @@ impl Runtime {
             return false;
         };
         self.release_ingestor_quiesce(
-            &key.domain,
-            &IngestorName::from(key.identifier()),
+            &key.entity.domain,
+            &IngestorName::from(key.entity.identifier()),
+            key.unit,
             IngestorQuiesceCause::MemoryPressure,
         );
         info!(
-            domain = key.domain.as_str(),
-            ingestor = key.identifier().as_str(),
+            domain = key.entity.domain.as_str(),
+            ingestor = key.entity.identifier().as_str(),
             "resumed ingestor after memory pressure"
         );
         true
@@ -1552,11 +1540,11 @@ pub(in crate::runtime) struct MemoryPressurePause {
 }
 
 /// The quiesce controls of a node's ingestors, as the runtime registers them.
-type IngestorQuiesceControls = DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>;
+type IngestorQuiesceControls = DashMap<DomainNodeUnitRef, Arc<IngestorQuiesceControl>, RandomState>;
 
 /// One registered quiesce control, and the ingestor it belongs to.
 struct RegisteredQuiesceControl {
-    key: DomainNodeRef,
+    key: DomainNodeUnitRef,
     control: Arc<IngestorQuiesceControl>,
 }
 
@@ -1590,9 +1578,9 @@ impl MemoryPressurePause {
 
     /// The registered ingestor to resume next, the first in key order that memory pressure still
     /// pauses, or `None` once it pauses none, which clears the pause.
-    fn next_to_resume(&self, controls: &IngestorQuiesceControls) -> Option<DomainNodeRef> {
+    fn next_to_resume(&self, controls: &IngestorQuiesceControls) -> Option<DomainNodeUnitRef> {
         let mut paused = self.paused.lock();
-        let mut next: Option<DomainNodeRef> = None;
+        let mut next: Option<DomainNodeUnitRef> = None;
         for entry in controls.iter() {
             if !entry.value().paused_by_memory_pressure() {
                 continue;
@@ -1641,7 +1629,6 @@ mod tests {
         assert_eq!(control.endpoint_admission(), Err(None));
         assert!(matches!(
             control.intake(
-                0,
                 BufferedIngestPayload::new(
                     b"admitted",
                     BufferedIngestMetadata::without_headers(),
@@ -1680,7 +1667,6 @@ mod tests {
         assert_eq!(control.endpoint_admission(), Err(None));
         assert!(matches!(
             control.intake(
-                0,
                 BufferedIngestPayload::new(
                     b"admitted",
                     BufferedIngestMetadata::without_headers(),
@@ -1714,7 +1700,6 @@ mod tests {
 
         assert!(matches!(
             control.intake(
-                0,
                 BufferedIngestPayload::new(
                     b"one",
                     BufferedIngestMetadata::without_headers(),
@@ -1726,7 +1711,6 @@ mod tests {
         ));
         assert!(matches!(
             control.intake(
-                0,
                 BufferedIngestPayload::new(
                     b"two",
                     BufferedIngestMetadata::without_headers(),
@@ -1742,7 +1726,7 @@ mod tests {
 
         control.release(IngestorQuiesceCause::EntityHold);
         let retained = control
-            .take_buffered(0)
+            .take_buffered()
             .assured("drop-oldest intake retains the newest payload")
             .finish();
         assert_eq!(retained.payload(), b"two");
@@ -1766,7 +1750,6 @@ mod tests {
 
         assert!(matches!(
             control.intake(
-                0,
                 BufferedIngestPayload::new(
                     b"kept",
                     BufferedIngestMetadata::without_headers(),
@@ -1778,7 +1761,6 @@ mod tests {
         ));
         assert!(matches!(
             control.intake(
-                0,
                 BufferedIngestPayload::new(
                     b"no",
                     BufferedIngestMetadata::without_headers(),
@@ -1795,7 +1777,7 @@ mod tests {
         control.release(IngestorQuiesceCause::EntityHold);
         assert_eq!(
             control
-                .take_buffered(0)
+                .take_buffered()
                 .expect("the acknowledged payload must remain buffered")
                 .finish()
                 .payload(),
@@ -1842,7 +1824,6 @@ mod tests {
         control.engage(IngestorQuiesceCause::EntityHold);
         assert!(matches!(
             control.intake(
-                0,
                 BufferedIngestPayload::new(
                     b"retained",
                     BufferedIngestMetadata::without_headers(),
@@ -1856,7 +1837,6 @@ mod tests {
         control.engage(IngestorQuiesceCause::MemoryPressure);
         assert!(matches!(
             control.intake(
-                0,
                 BufferedIngestPayload::new(
                     b"discarded",
                     BufferedIngestMetadata::without_headers(),
@@ -1873,7 +1853,7 @@ mod tests {
         control.release(IngestorQuiesceCause::EntityHold);
         assert_eq!(
             control
-                .take_buffered(0)
+                .take_buffered()
                 .expect("pre-pressure payload should remain")
                 .finish()
                 .payload(),
@@ -1886,7 +1866,6 @@ mod tests {
         control.engage(IngestorQuiesceCause::EntityHold);
         for (arrival, payload) in (1_i64..).zip(payloads) {
             let intake = control.intake(
-                0,
                 BufferedIngestPayload::new(
                     payload,
                     BufferedIngestMetadata::without_headers(),
@@ -1917,12 +1896,12 @@ mod tests {
         assert_eq!(retained.buffered_bytes, 6);
 
         let delivery = control
-            .take_buffered(0)
+            .take_buffered()
             .assured("a released control hands out its oldest retained payload");
         assert_eq!(delivery.payload().payload(), b"one");
         assert_eq!(control.counters(), retained);
         assert!(
-            control.take_buffered(0).is_none(),
+            control.take_buffered().is_none(),
             "nothing behind a payload out for delivery is handed out"
         );
 
@@ -1933,7 +1912,7 @@ mod tests {
             "a delivery that ends without the payload leaving returns it counted as it was"
         );
         let delivered = control
-            .take_buffered(0)
+            .take_buffered()
             .assured("a returned payload is back at the front")
             .finish();
         assert_eq!(delivered.payload(), b"one");
@@ -1941,7 +1920,7 @@ mod tests {
         assert_eq!(control.counters().buffered_bytes, 3);
 
         let delivered = control
-            .take_buffered(0)
+            .take_buffered()
             .assured("the next payload is handed out once the first left")
             .finish();
         assert_eq!(delivered.payload(), b"two");
@@ -1962,7 +1941,7 @@ mod tests {
         );
         retain_while_quiesced(&control, &[b"abc"]);
         let delivery = control
-            .take_buffered(0)
+            .take_buffered()
             .assured("a released control hands out its retained payload");
 
         // A quiesce that engages while the payload is out retains behind it, within the bytes it
@@ -1970,7 +1949,6 @@ mod tests {
         control.engage(IngestorQuiesceCause::EntityHold);
         let behind = |payload: &[u8]| {
             control.intake(
-                0,
                 BufferedIngestPayload::new(
                     payload,
                     BufferedIngestMetadata::without_headers(),
@@ -1997,16 +1975,16 @@ mod tests {
         drop(delivery);
         control.release(IngestorQuiesceCause::EntityHold);
         let first = control
-            .take_buffered(0)
+            .take_buffered()
             .assured("the returned payload is still the oldest")
             .finish();
         assert_eq!(first.payload(), b"abc");
         let second = control
-            .take_buffered(0)
+            .take_buffered()
             .assured("the payload retained behind it follows")
             .finish();
         assert_eq!(second.payload(), b"f");
-        assert!(control.take_buffered(0).is_none());
+        assert!(control.take_buffered().is_none());
         assert_eq!(control.counters().buffered_bytes, 0);
     }
 
@@ -2023,7 +2001,7 @@ mod tests {
         );
         retain_while_quiesced(&control, &[b"one", b"two"]);
         let delivery = control
-            .take_buffered(0)
+            .take_buffered()
             .assured("a released control hands out its oldest retained payload");
 
         control.terminate();
@@ -2042,7 +2020,7 @@ mod tests {
             2,
             "a delivery that ends after termination changes nothing the termination counted"
         );
-        assert!(control.take_buffered(0).is_none());
+        assert!(control.take_buffered().is_none());
     }
 
     #[nervix_primitives::test]
@@ -2060,7 +2038,7 @@ mod tests {
         let (shutdown_tx, shutdown) = watch::channel(false);
 
         let delivery = control
-            .take_buffered(0)
+            .take_buffered()
             .assured("a released control hands out its retained payload");
         assert_eq!(
             delivery.run_until_interrupted(&shutdown, async { 7 }).await,
@@ -2077,7 +2055,7 @@ mod tests {
         control.release(IngestorQuiesceCause::EntityHold);
 
         let delivery = control
-            .take_buffered(0)
+            .take_buffered()
             .assured("an interrupted delivery leaves its payload at the front");
         let stopped = delivery.run_until_interrupted(&shutdown, async {
             shutdown_tx.send_replace(true);
@@ -2120,9 +2098,7 @@ mod tests {
         assert!(!control.should_skip_poll());
         assert_eq!(control.endpoint_admission(), Err(Some(retry_after)));
         assert!(matches!(
-            control.intake(
-                0,
-                BufferedIngestPayload::new(
+            control.intake(BufferedIngestPayload::new(
                     b"paused",
                     BufferedIngestMetadata::without_headers(),
                     Timestamp::from_unix_nanos(1),
@@ -2137,9 +2113,7 @@ mod tests {
         assert!(control.should_skip_poll());
         assert_eq!(control.endpoint_admission(), Err(Some(retry_after)));
         assert!(matches!(
-            control.intake(
-                0,
-                BufferedIngestPayload::new(
+            control.intake(BufferedIngestPayload::new(
                     b"pressured",
                     BufferedIngestMetadata::without_headers(),
                     Timestamp::from_unix_nanos(2),
@@ -2166,7 +2140,6 @@ mod tests {
         assert_eq!(control.endpoint_admission(), Err(None));
         assert!(matches!(
             control.intake(
-                0,
                 BufferedIngestPayload::new(
                     b"pressured",
                     BufferedIngestMetadata::without_headers(),
@@ -2183,7 +2156,6 @@ mod tests {
         assert!(control.should_suspend_intake());
         assert!(matches!(
             control.intake(
-                0,
                 BufferedIngestPayload::new(
                     b"held",
                     BufferedIngestMetadata::without_headers(),
@@ -2203,7 +2175,10 @@ mod tests {
         let runtime = Runtime::default();
         let domain = domain("default");
         let ingestor = named::<IngestorName>("source");
-        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        let key = DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
+            Unit::Single,
+        );
         let control =
             test_ingestor_quiesce_control(&runtime, &domain, &ingestor, IngestQuiesceMode::Suspend);
         runtime
@@ -2225,7 +2200,10 @@ mod tests {
         let runtime = Runtime::default();
         let domain = domain("default");
         let ingestor = named::<IngestorName>("source");
-        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        let key = DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
+            Unit::Single,
+        );
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let stopped = Arc::new(AtomicBool::new(false));
         let task_stopped = stopped.clone();
@@ -2306,7 +2284,6 @@ mod tests {
                 let skips_poll = control.should_skip_poll();
                 let endpoint_admission = control.endpoint_admission();
                 let intake = control.intake(
-                    0,
                     BufferedIngestPayload::new(
                         b"live",
                         BufferedIngestMetadata::without_headers(),
@@ -2314,7 +2291,7 @@ mod tests {
                     ),
                     false,
                 );
-                let replays = control.take_buffered(0).is_some();
+                let replays = control.take_buffered().is_some();
                 Self {
                     suspends_intake,
                     skips_poll,
@@ -2331,8 +2308,12 @@ mod tests {
             // A whole runtime is far heavier than one execution of this model needs, so the control
             // takes the metrics it records into directly.
             let metrics = RuntimeMetrics::default();
-            let metric_labels =
-                metrics.register_ingestor_quiesce(&domain("default"), &named("source"), None);
+            let metric_labels = metrics.register_ingestor_quiesce(
+                &domain("default"),
+                &named("source"),
+                nervix_models::Unit::Single,
+                None,
+            );
             let control = Arc::new(IngestorQuiesceControl::new(
                 IngestQuiesceMode::Buffer {
                     max_size: "1MiB".to_string(),
@@ -2346,7 +2327,7 @@ mod tests {
             let retention = thread::spawn({
                 let control = control.clone();
                 move || {
-                    let retained = control.buffers.lock();
+                    let retained = control.buffer.lock();
                     held_tx
                         .send(())
                         .assured("the model keeps the receiver until retention is held");
@@ -2512,8 +2493,12 @@ mod tests {
         fn interrupted_delivery_keeps_its_payload(interruption: Interruption) {
             shuttle::future::block_on(async move {
                 let metrics = RuntimeMetrics::default();
-                let metric_labels =
-                    metrics.register_ingestor_quiesce(&domain("default"), &named("source"), None);
+                let metric_labels = metrics.register_ingestor_quiesce(
+                    &domain("default"),
+                    &named("source"),
+                    nervix_models::Unit::Single,
+                    None,
+                );
                 let control = Arc::new(IngestorQuiesceControl::new(
                     IngestQuiesceMode::EndpointBuffer {
                         max_size: "1MiB".to_string(),
@@ -2523,7 +2508,6 @@ mod tests {
                 ));
                 control.engage(IngestorQuiesceCause::EntityHold);
                 let intake = control.intake(
-                    0,
                     BufferedIngestPayload::new(
                         b"retained",
                         BufferedIngestMetadata::without_headers(),
@@ -2539,7 +2523,7 @@ mod tests {
                 let held = HeldExtensionQueue::hold(&executor).await;
                 let (shutdown_tx, shutdown) = watch::channel(false);
                 let delivery = control
-                    .take_buffered(0)
+                    .take_buffered()
                     .assured("a released control hands out its retained payload");
                 let interrupter = nervix_primitives::task::spawn({
                     let control = control.clone();
@@ -2591,7 +2575,7 @@ mod tests {
                     control.release(IngestorQuiesceCause::EntityHold);
                 }
                 let returned = control
-                    .take_buffered(0)
+                    .take_buffered()
                     .assured("the returned payload is back at the front of the buffer")
                     .finish();
                 assert_eq!(returned.payload(), b"retained");
@@ -2626,8 +2610,12 @@ mod tests {
         fn interrupted_live_delivery(interruption: LiveInterruption) {
             shuttle::future::block_on(async move {
                 let metrics = RuntimeMetrics::default();
-                let metric_labels =
-                    metrics.register_ingestor_quiesce(&domain("default"), &named("source"), None);
+                let metric_labels = metrics.register_ingestor_quiesce(
+                    &domain("default"),
+                    &named("source"),
+                    nervix_models::Unit::Single,
+                    None,
+                );
                 let control = Arc::new(IngestorQuiesceControl::new(
                     IngestQuiesceMode::Buffer {
                         max_size: "1MiB".to_string(),
@@ -2638,7 +2626,6 @@ mod tests {
                 ));
                 let mut decided = control.observation();
                 let intake = control.intake(
-                    0,
                     BufferedIngestPayload::new(
                         b"live",
                         BufferedIngestMetadata::without_headers(),
@@ -2698,7 +2685,7 @@ mod tests {
                             "the payload is decided next under the decision that ended its wait"
                         );
                         assert!(matches!(
-                            control.intake(0, live, false),
+                            control.intake(live, false),
                             IngestorQuiesceIntake::Buffered
                         ));
                         assert_eq!(control.counters().buffered_records, 1);

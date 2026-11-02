@@ -89,6 +89,7 @@ pub(super) struct IngestorRuntime {
 pub(super) struct RetiringIngestorInput {
     pub(super) previous: Arc<IngestorStartPlan>,
     pub(super) replacement: Option<Arc<IngestorStartPlan>>,
+    pub(super) units: Vec<Unit>,
 }
 
 impl Runtime {
@@ -110,31 +111,47 @@ impl Runtime {
         let Some(execution) = self.inner.executions.get(domain) else {
             return BTreeMap::new();
         };
-        let mut retiring = BTreeMap::new();
-        for previous in execution.revision.entrypoints.ingestors() {
-            let identity = NodeRef::new(
-                ModelKind::Ingestor,
-                ModelName::from(&previous.ingestor.name),
-            );
-            let node = execution.revision.nodes.get(&identity).assured(
-                "every installed execution retains the nodes that own its entrypoint plans",
-            );
-            if !Self::scheduled_node_executes_locally(node, local_node_id) {
+        let mut retiring = BTreeMap::<IngestorName, RetiringIngestorInput>::new();
+        for node in execution
+            .revision
+            .nodes
+            .values()
+            .filter(|node| node.kind() == ModelKind::Ingestor)
+        {
+            let units = node
+                .units
+                .keys()
+                .copied()
+                .filter(|unit| Self::scheduled_unit_executes_locally(node, *unit, local_node_id))
+                .collect::<Vec<_>>();
+            let Some(unit) = units.first() else {
                 continue;
-            }
-            let replacement = match desired {
-                Some(desired) => desired
-                    .entrypoints
-                    .ingestor(&previous.ingestor.name)
-                    .cloned(),
-                None => None,
             };
+            let name = IngestorName::from(&node.identifier);
+            // Retirement compares the common external input declaration once, after stopping the
+            // explicitly listed local units. These representative plans are never executed here.
+            let previous = execution
+                .revision
+                .entrypoints
+                .ingestor(&name, *unit)
+                .assured("each execution unit has its planned input");
+            let replacement = desired
+                .and_then(|revision| {
+                    revision.nodes.get(&node.identity()).and_then(|node| {
+                        node.units
+                            .keys()
+                            .next()
+                            .and_then(|unit| revision.entrypoints.ingestor(&name, *unit))
+                    })
+                })
+                .cloned();
             if previous.requires_entity_retirement(replacement.as_deref()) {
                 retiring.insert(
-                    previous.ingestor.name.clone(),
+                    name,
                     RetiringIngestorInput {
                         previous: previous.clone(),
                         replacement,
+                        units,
                     },
                 );
             }
@@ -229,7 +246,7 @@ impl Runtime {
                     "every domain execution is installed and updated with the entrypoint plans \
                      decided from its planned revision",
                 );
-                if Self::scheduled_node_executes_locally(node, local_node_id) {
+                if Self::scheduled_unit_executes_locally(node, plan.ingestor.unit, local_node_id) {
                     local_plans.push(plan.clone());
                 }
             }
@@ -249,16 +266,41 @@ impl Runtime {
         ScheduledIngestorStart::Complete
     }
 
+    /// Stops all locally running units of a logical ingestor for a model or domain operation.
     pub(in crate::runtime) async fn stop_ingestor(
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
     ) -> error_stack::Result<(), RuntimeError> {
-        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        let entity = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        let units = self
+            .inner
+            .ingestors
+            .iter()
+            .filter(|entry| entry.key().entity == entity)
+            .map(|entry| entry.key().unit)
+            .collect::<Vec<_>>();
+        for unit in units {
+            self.stop_ingestor_unit(domain, ingestor, unit).await?;
+        }
+        Ok(())
+    }
+
+    pub(in crate::runtime) async fn stop_ingestor_unit(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        unit: Unit,
+    ) -> error_stack::Result<(), RuntimeError> {
+        let key = DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
+            unit,
+        );
         let Some((_, runtime)) = self.inner.ingestors.remove(&key) else {
             return Err(Report::new(RuntimeError::IngestorNotRunning {
                 domain: domain.clone(),
                 ingestor: ingestor.clone(),
+                unit,
             }));
         };
 
@@ -285,16 +327,37 @@ impl Runtime {
             branched.shutdown().await;
         }
 
+        let placement = RuntimeStatePlacement {
+            domain: domain.clone(),
+            state: RuntimeState::BranchAggregated,
+            kind: ModelKind::Ingestor,
+            identifier: ModelName::from(ingestor),
+            unit,
+            branch_key: None,
+        };
+        if let Some(state) = self
+            .inner
+            .replicated_branch_aggregated_states
+            .get(&placement)
+        {
+            // The checkpoint writer's final write can run after intake teardown. Retain these
+            // exact final bytes before withdrawing the ended unit's live metric series.
+            state
+                .latest_snapshot(&self.inner.metrics)
+                .change_context_lazy(|| RuntimeError::build_domain_execution(domain))?;
+        }
         self.inner.ingestor_statuses.remove(&key);
-        self.clear_ingestor_readiness(domain, ingestor);
+        self.clear_ingestor_readiness(domain, ingestor, unit);
         // A client ingestor's producers outlive this execution until the endpoint learns whether a
         // restart keeps their contract.
-        self.uninstall_client_execution(domain, ingestor);
+        if unit == Unit::Single {
+            self.uninstall_client_execution(domain, ingestor);
+        }
         if self
-            .ingestor_quiesce_control(domain, ingestor)
+            .ingestor_quiesce_control(domain, ingestor, unit)
             .is_some_and(|control| !control.is_quiesced())
         {
-            self.remove_ingestor_quiescence(domain, ingestor);
+            self.remove_ingestor_quiescence(domain, ingestor, unit);
         }
         if self
             .inner
@@ -370,6 +433,7 @@ impl Runtime {
             .route_templates(
                 ModelKind::Ingestor,
                 &ModelName::from(&ingestor.name),
+                ingestor.unit,
                 &ingestor.routes,
             )
             .change_context_lazy(|| IngestorStartError::Bind {
@@ -377,10 +441,11 @@ impl Runtime {
             })?;
         let dispatcher = self.inner.remote_dispatcher.load();
         let physical_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
-        let metrics = self.inner.metrics.resolve_global_node_message_metrics(
+        let metrics = self.inner.metrics.resolve_unit_node_message_metrics(
             domain,
             ModelKind::Ingestor,
             &ModelName::from(&ingestor.name),
+            ingestor.unit,
             physical_node_id,
             "received",
         );
@@ -388,7 +453,7 @@ impl Runtime {
             input,
             dependencies: IngestorDependencies {
                 handles: self
-                    .ingest_task_handles(domain, &ingestor.name)
+                    .ingest_task_handles(domain, &ingestor.name, ingestor.unit)
                     .change_context_lazy(|| IngestorStartError::Bind {
                         domain: domain.clone(),
                     })?,
@@ -651,7 +716,9 @@ mod tests {
                                                 "notifications",
                                             )
                                             .expect("valid topic filter"),
-                                            instances: nonzero!(2u64),
+                                            instances: nervix_models::IngestorInstances::Count(
+                                                nonzero!(2u16),
+                                            ),
                                             session: MqttSession::Clean,
                                             qos: MqttQos::Qos0,
                                             mode: MqttIngestMode::NoAck,
@@ -678,7 +745,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let describe = runtime
-                .describe_local_ingestor(&domain, &ingestor)
+                .describe_local_ingestor(&domain, &ingestor, Unit::Instance(0))
                 .expect("describe should succeed for scheduled ingestor");
             assert!(describe.running);
             let reported = describe.transient_error.as_deref().is_some_and(|error| {
@@ -780,7 +847,7 @@ mod tests {
                                 client,
                                 topic: nervix_models::MqttTopicFilter::parse("notifications")
                                     .expect("valid topic filter"),
-                                instances: nonzero!(1u64),
+                                instances: nervix_models::IngestorInstances::Count(nonzero!(1u16)),
                                 session: MqttSession::Persistent,
                                 qos: MqttQos::Qos1,
                                 mode: MqttIngestMode::AckSequential {
@@ -821,15 +888,14 @@ mod tests {
             !runtime
                 .inner
                 .ingestors
-                .contains_key(&DomainNodeRef::node_in(
-                    domain.clone(),
-                    ModelKind::Ingestor,
-                    ingestor.clone()
+                .contains_key(&DomainNodeUnitRef::new(
+                    DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
+                    Unit::Instance(0)
                 )),
             "failed scheduled ingestor start must not leave an ingestor runtime"
         );
         let describe = runtime
-            .describe_local_ingestor(&domain, &ingestor)
+            .describe_local_ingestor(&domain, &ingestor, Unit::Instance(0))
             .expect("describe should represent the stopped ingestor");
         assert!(!describe.running);
         assert!(!describe.ready);
@@ -857,7 +923,7 @@ mod tests {
             "unexpected rebuild error: {clock_error}"
         );
         let describe = runtime
-            .describe_local_ingestor(&domain, &ingestor)
+            .describe_local_ingestor(&domain, &ingestor, Unit::Instance(0))
             .expect("describe should represent the stopped ingestor");
         assert_eq!(
             describe.transient_error.as_deref(),
@@ -868,20 +934,21 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn stopping_an_ingestor_that_is_not_running_names_it() {
+    async fn stopping_an_intake_unit_that_is_not_running_names_it() {
         let runtime = Runtime::default();
 
         let error = runtime
-            .stop_ingestor(
+            .stop_ingestor_unit(
                 &domain("default"),
                 &named::<IngestorName>("mqtt_notifications"),
+                Unit::Instance(2),
             )
             .await
             .expect_err("no ingestor runs before one starts");
 
         assert_eq!(
             format!("{error:#}"),
-            "ingestor 'mqtt_notifications' in domain 'default' is not running"
+            "ingestor 'mqtt_notifications' in domain 'default' instance 2 is not running"
         );
     }
 }

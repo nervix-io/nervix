@@ -2185,3 +2185,16 @@ undelivered batch and branch field values stay out of that diagnostic.
 Per-batch and payload-bearing logs use debug or trace levels and do not expose sensitive field
 values. See [Metrics And Observability](./metrics-and-observability.md) for the metric and logging
 contract.
+
+## Ingestor Instance Observation And Intake Gates
+
+An ingestor describe request carries its exact `Unit`. The receiver resolves the current owner
+for that unit and reports only its source lifetime, readiness and transient state. The control
+plane composes the logical description from all scheduled unit owners.
+
+Entity-gate engagement and drain-status requests carry `EntityGateTargets`: complete logical
+entities for model changes, or exact `NodeUnitRef` units for ownership transfer. Lease identity
+includes the normalized selection form. Handoff authorization checks both selection membership and
+the freeze of that same unit. A sibling instance's control or ACK count cannot authorize or hold
+back the selected handoff. The current wire fingerprint identifies this required request shape;
+peers must use the same current contract.

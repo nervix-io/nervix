@@ -17,8 +17,9 @@ use std::cmp::Reverse;
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use meticulous::OptionExt;
 use nervix_models::{
-    ClusterNodeName, DomainName, DomainSchedule, Model, NodeRef, PlacementGroupSchedule,
-    PlacementPolicy, ScheduledNode, ScheduledNodes, SchemaFingerprint, Unit,
+    ClusterNodeName, DomainName, DomainSchedule, Model, NodeRef, NodeUnitRef,
+    PlacementGroupSchedule, PlacementPolicy, ScheduledNode, ScheduledNodes, SchemaFingerprint,
+    Unit,
 };
 use petgraph::{Direction, graph::DiGraph, prelude::NodeIndex, visit::EdgeRef};
 use sorted_vec::SortedSet;
@@ -56,6 +57,7 @@ pub enum SchedulerMode {
 struct AssignmentCandidate {
     placement_order: isize,
     preferred_order: usize,
+    unit_primaries: Reverse<usize>,
     load: Reverse<usize>,
     round_robin_distance: Reverse<usize>,
     node_id: ClusterNodeName,
@@ -122,6 +124,7 @@ struct AssignmentPlanner<'a> {
     assigned_by_key: &'a HashMap<NodeRef, Vec<ClusterNodeName>>,
     placement_pairs: &'a HashMap<PlacementPair, ResolvedPlacementPair>,
     node_load: &'a HashMap<ClusterNodeName, usize>,
+    unit_primaries: &'a HashMap<ClusterNodeName, usize>,
     next_assignment: &'a mut usize,
     assignment_slots: usize,
 }
@@ -185,25 +188,17 @@ impl<'a> RandomAssignmentPlanner<'a> {
         nodes
     }
 
-    /// Deals the partition units of `relay` over one order of the cluster nodes, shuffled from the
-    /// relay's own seed: partition `p` takes the `p`-th node of that order as its primary and the
-    /// nodes after it as its replicas. The relay's partitions therefore span as many nodes as it
-    /// has partitions, up to the whole cluster, and the same inputs always deal the same units.
-    fn partition_assignments(&self, relay: &NodeRef, units: &[Unit]) -> Vec<UnitAssignment> {
-        let mut order = self.cluster_nodes.to_vec();
-        fastrand::Rng::with_seed(self.assignment_seed_for(std::slice::from_ref(relay)))
-            .shuffle(&mut order);
-        let mut assignments = Vec::with_capacity(units.len());
-        for (position, unit) in units.iter().enumerate() {
-            let mut nodes = order.clone();
-            if !nodes.is_empty() {
-                let shift = position % nodes.len();
-                nodes.rotate_left(shift);
-            }
-            nodes.truncate(self.assignment_slots);
-            assignments.push(UnitAssignment { unit: *unit, nodes });
+    /// Deals one stable global unit index over a deterministically shuffled node order.
+    fn unit_assignment(&self, entity: &NodeRef, position: usize) -> Vec<ClusterNodeName> {
+        let mut nodes = self.cluster_nodes.to_vec();
+        fastrand::Rng::with_seed(self.assignment_seed_for(std::slice::from_ref(entity)))
+            .shuffle(&mut nodes);
+        if !nodes.is_empty() {
+            let shift = position % nodes.len();
+            nodes.rotate_left(shift);
         }
-        assignments
+        nodes.truncate(self.assignment_slots);
+        nodes
     }
 
     fn for_model(&self, key: &NodeRef, model: &Model) -> Vec<ClusterNodeName> {
@@ -233,6 +228,7 @@ impl AssignmentPlanner<'_> {
             .map(|(position, node_id)| AssignmentCandidate {
                 placement_order: placement_order.get(node_id).copied().unwrap_or(0),
                 preferred_order: preferred_order.get(node_id).copied().unwrap_or(0),
+                unit_primaries: Reverse(self.unit_primaries.get(node_id).copied().unwrap_or(0)),
                 load: Reverse(self.node_load.get(node_id).copied().unwrap_or(0)),
                 round_robin_distance: Reverse(
                     (position + self.cluster_nodes.len()
@@ -362,19 +358,6 @@ struct UnitAssignment {
     nodes: Vec<ClusterNodeName>,
 }
 
-/// The partition units of a relay whose branch declares several partitions, which the scheduler
-/// places one by one. Every other node keeps its one `Single` unit and is placed whole.
-fn relay_partition_units(node: &ActiveNode) -> Option<Vec<Unit>> {
-    let Model::Relay(_) = node.config.as_ref() else {
-        return None;
-    };
-    let partitions = node.resolved_branching.as_ref()?.partitions()?;
-    if partitions.count().get() == 1 {
-        return None;
-    }
-    Some(partitions.units())
-}
-
 /// The number of cluster nodes one unit of `model` is limited to beyond what its assignment
 /// already chose: an ordinary relay keeps only its owner, because only materialized relay state is
 /// replicated. Every other node keeps its whole assignment, a listener that executes on every
@@ -384,64 +367,6 @@ fn unit_assignment_limit(model: &Model) -> Option<usize> {
         Model::Relay(relay) if relay.materialized_state.is_none() => Some(1),
         _ => None,
     }
-}
-
-/// Places each partition unit of a relay on its own, by load and then round-robin, counting the
-/// load of every partition placed before it, so a relay's partitions spread across the cluster.
-/// Upstream locality and soft placement policies do not move a partition unit.
-fn partition_unit_assignments(
-    planner: PartitionPlanner<'_>,
-    units: &[Unit],
-) -> Vec<UnitAssignment> {
-    let PartitionPlanner {
-        graph,
-        cluster_nodes,
-        assigned_by_key,
-        placement_pairs,
-        node_load,
-        next_assignment,
-        assignment_slots,
-        limit,
-    } = planner;
-    let mut load = node_load.clone();
-    let no_preference = HashMap::new();
-    let no_placement = HashMap::new();
-    let mut assignments = Vec::with_capacity(units.len());
-    for unit in units {
-        let mut assignment_planner = AssignmentPlanner {
-            graph,
-            cluster_nodes,
-            assigned_by_key,
-            placement_pairs,
-            node_load: &load,
-            next_assignment: &mut *next_assignment,
-            assignment_slots,
-        };
-        let mut nodes = assignment_planner.ranked_assignment(&no_preference, &no_placement);
-        if let Some(limit) = limit {
-            nodes.truncate(limit);
-        }
-        for node in &nodes {
-            let assigned = load.entry(node.clone()).or_insert(0);
-            *assigned = assigned
-                .checked_add(1)
-                .assured("a node's unit count stays below the number of units scheduled");
-        }
-        assignments.push(UnitAssignment { unit: *unit, nodes });
-    }
-    assignments
-}
-
-/// The inputs [`partition_unit_assignments`] ranks a relay's partition units with.
-struct PartitionPlanner<'a> {
-    graph: &'a DiGraph<ActiveNode, EdgeKind>,
-    cluster_nodes: &'a [ClusterNodeName],
-    assigned_by_key: &'a HashMap<NodeRef, Vec<ClusterNodeName>>,
-    placement_pairs: &'a HashMap<PlacementPair, ResolvedPlacementPair>,
-    node_load: &'a HashMap<ClusterNodeName, usize>,
-    next_assignment: &'a mut usize,
-    assignment_slots: usize,
-    limit: Option<usize>,
 }
 
 /// The scheduled node `node` becomes with every unit placed as `assignments` say, after counting
@@ -475,8 +400,13 @@ fn place_scheduled_node(
     if !all_nodes.is_empty() {
         assigned_by_key.insert(key, all_nodes);
     }
+    let declared_units = assignments
+        .iter()
+        .map(|assignment| assignment.unit)
+        .collect::<Vec<_>>();
     let mut scheduled_node = ScheduledNode::new((*node.config).clone(), schema_fingerprint)
-        .with_resolved_branching(node.resolved_branching);
+        .with_resolved_branching(node.resolved_branching)
+        .with_units(&declared_units);
     for assignment in assignments {
         let primary = assignment.nodes.first().cloned();
         scheduled_node
@@ -543,6 +473,8 @@ impl ActiveGraph {
     ) -> DomainSchedule {
         let cluster_nodes = SortedSet::from_unsorted(cluster_nodes.to_vec()).into_vec();
         let placement = self.placement.effective(default_policy);
+        let unit_groups =
+            super::unit_placement::UnitPlacementGroups::decide(self, &placement.require_groups);
         let assignment_slots = replica_count
             .min(cluster_nodes.len())
             .checked_add(1)
@@ -595,101 +527,90 @@ impl ActiveGraph {
         let mut scheduled_nodes = ScheduledNodes::with_capacity(nodes.len());
         for PlacementCandidate { index, node, .. } in nodes {
             let key = node.node_ref();
-            let group_index = placement.group_by_member.get(&key).copied();
-            let partition_units = relay_partition_units(&node);
-            if let (Some(units), None) = (&partition_units, group_index) {
-                let planner = PartitionPlanner {
-                    graph: &self.graph,
-                    cluster_nodes: &cluster_nodes,
-                    assigned_by_key: &assigned_by_key,
-                    placement_pairs: &placement.pairs,
-                    node_load: &node_load,
-                    next_assignment: &mut next_assignment,
-                    assignment_slots,
-                    limit: unit_assignment_limit(node.config.as_ref()),
-                };
+            let units = node.placement_units();
+            let mut working_load = node_load.clone();
+            let mut unit_primaries = HashMap::new();
+            let mut assignments = Vec::with_capacity(units.len());
+            for unit in units.iter().copied() {
                 #[cfg(feature = "testing")]
-                let assignments =
-                    if let Some(random_assignment_planner) = &random_assignment_planner {
-                        random_assignment_planner.partition_assignments(&key, units)
-                    } else {
-                        partition_unit_assignments(planner, units)
-                    };
-                #[cfg(not(feature = "testing"))]
-                let assignments = partition_unit_assignments(planner, units);
-                let scheduled_node = place_scheduled_node(
-                    node,
-                    self.schema_fingerprint_for_index(index),
-                    assignments,
-                    &mut node_load,
-                    &mut assigned_by_key,
-                );
-                scheduled_nodes.insert(scheduled_node.identity(), scheduled_node);
-                continue;
-            }
-            let assigned_nodes = if let Some(existing) =
-                group_index.and_then(|group_index| group_assignments.get(&group_index))
-            {
-                existing.clone()
-            } else {
-                let mut assignment_planner = AssignmentPlanner {
-                    graph: &self.graph,
-                    cluster_nodes: &cluster_nodes,
-                    assigned_by_key: &assigned_by_key,
-                    placement_pairs: &placement.pairs,
-                    node_load: &node_load,
-                    next_assignment: &mut next_assignment,
-                    assignment_slots,
-                };
-                let assignment = if let Some(group_index) = group_index {
-                    let members = &placement.require_groups[group_index];
-                    let member_indices = members
-                        .iter()
-                        .map(|member| {
-                            index_by_key
-                                .get(member)
-                                .copied()
-                                .verified("index_by_key was built from every node of this graph")
-                        })
-                        .collect::<Vec<_>>();
-                    #[cfg(feature = "testing")]
-                    if let Some(random_assignment_planner) = &random_assignment_planner {
-                        random_assignment_planner.assignment(members)
-                    } else {
-                        assignment_planner.for_group(members, &member_indices)
-                    }
-                    #[cfg(not(feature = "testing"))]
-                    assignment_planner.for_group(members, &member_indices)
+                let position = assignments.len();
+                let member = NodeUnitRef::new(key.clone(), unit);
+                let group_index = unit_groups.by_member.get(&member).copied();
+                let cached = group_index
+                    .and_then(|group| group_assignments.get(&group))
+                    .cloned();
+                let nodes = if let Some(cached) = cached {
+                    cached
                 } else {
-                    #[cfg(feature = "testing")]
-                    if let Some(random_assignment_planner) = &random_assignment_planner {
-                        random_assignment_planner.for_model(&key, node.config.as_ref())
+                    let mut planner = AssignmentPlanner {
+                        graph: &self.graph,
+                        cluster_nodes: &cluster_nodes,
+                        assigned_by_key: &assigned_by_key,
+                        placement_pairs: &placement.pairs,
+                        node_load: &working_load,
+                        unit_primaries: &unit_primaries,
+                        next_assignment: &mut next_assignment,
+                        assignment_slots,
+                    };
+                    let nodes = if let Some(group) = group_index {
+                        let members = unit_groups.groups[group]
+                            .iter()
+                            .map(|member| member.node.clone())
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .into_iter()
+                            .collect::<Vec<_>>();
+                        let indices = members
+                            .iter()
+                            .map(|member| index_by_key[member])
+                            .collect::<Vec<_>>();
+                        #[cfg(feature = "testing")]
+                        if let Some(random) = &random_assignment_planner {
+                            let mut order = random.cluster_nodes.to_vec();
+                            fastrand::Rng::with_seed(random.assignment_seed_for(&members))
+                                .shuffle(&mut order);
+                            if !order.is_empty() {
+                                let shift = position % order.len();
+                                order.rotate_left(shift);
+                            }
+                            order.truncate(assignment_slots);
+                            order
+                        } else {
+                            planner.for_group(&members, &indices)
+                        }
+                        #[cfg(not(feature = "testing"))]
+                        planner.for_group(&members, &indices)
+                    } else if units.len() > 1 {
+                        #[cfg(feature = "testing")]
+                        if let Some(random) = &random_assignment_planner {
+                            random.unit_assignment(&key, position)
+                        } else {
+                            planner.ranked_assignment(&HashMap::new(), &HashMap::new())
+                        }
+                        #[cfg(not(feature = "testing"))]
+                        planner.ranked_assignment(&HashMap::new(), &HashMap::new())
                     } else {
-                        assignment_for_model(
-                            &mut assignment_planner,
-                            index,
-                            &key,
-                            node.config.as_ref(),
-                        )
+                        #[cfg(feature = "testing")]
+                        if let Some(random) = &random_assignment_planner {
+                            random.for_model(&key, node.config.as_ref())
+                        } else {
+                            assignment_for_model(&mut planner, index, &key, node.config.as_ref())
+                        }
+                        #[cfg(not(feature = "testing"))]
+                        assignment_for_model(&mut planner, index, &key, node.config.as_ref())
+                    };
+                    if let Some(group) = group_index {
+                        group_assignments.insert(group, nodes.clone());
                     }
-                    #[cfg(not(feature = "testing"))]
-                    assignment_for_model(&mut assignment_planner, index, &key, node.config.as_ref())
+                    nodes
                 };
-                if let Some(group_index) = group_index {
-                    group_assignments.insert(group_index, assignment.clone());
+                if let Some(primary) = nodes.first() {
+                    *unit_primaries.entry(primary.clone()).or_insert(0) += 1;
                 }
-                assignment
-            };
-            // A node placed whole puts every unit on the same nodes: its one `Single` unit, or
-            // every partition of a relay a `REQUIRE COLOCATION` group keeps with the group.
-            let units = partition_units.unwrap_or_else(|| vec![Unit::Single]);
-            let assignments = units
-                .into_iter()
-                .map(|unit| UnitAssignment {
-                    unit,
-                    nodes: assigned_nodes.clone(),
-                })
-                .collect();
+                for assigned in &nodes {
+                    *working_load.entry(assigned.clone()).or_insert(0) += 1;
+                }
+                assignments.push(UnitAssignment { unit, nodes });
+            }
             let scheduled_node = place_scheduled_node(
                 node,
                 self.schema_fingerprint_for_index(index),
@@ -699,24 +620,21 @@ impl ActiveGraph {
             );
             scheduled_nodes.insert(scheduled_node.identity(), scheduled_node);
         }
-        let placement_groups = placement
-            .require_groups
-            .iter()
+        let placement_groups = unit_groups
+            .groups
+            .into_iter()
             .map(|members| {
-                let runtime_members = members.to_vec();
-                // Every unit of a group member shares the group's assignment, so the first unit
-                // of the first member names the group's primary.
-                let primary_node = if let Some(first) = members.first()
-                    && let Some(node) = scheduled_nodes.get(first)
-                    && let Some(unit) = node.units.values().next()
-                {
-                    unit.primary_node.clone()
-                } else {
-                    None
+                let primary_node = match members.first() {
+                    Some(member) => {
+                        let placement = scheduled_nodes
+                            .get(&member.node)
+                            .and_then(|node| node.unit(member.unit));
+                        placement.and_then(|unit| unit.primary_node.clone())
+                    }
+                    None => None,
                 };
                 PlacementGroupSchedule {
-                    unit: nervix_models::Unit::Single,
-                    members: runtime_members,
+                    members,
                     primary_node,
                 }
             })

@@ -26,10 +26,11 @@ pub enum RuntimeError {
         domain: DomainName,
         ingestor: IngestorName,
     },
-    #[error("ingestor '{ingestor}' in domain '{domain}' is not running")]
+    #[error("ingestor '{ingestor}' in domain '{domain}'{suffix} is not running", suffix = .unit.label_suffix())]
     IngestorNotRunning {
         domain: DomainName,
         ingestor: IngestorName,
+        unit: Unit,
     },
     #[error("relay '{relay}' in domain '{domain}' is not instantiated")]
     RelayNotInstantiated {

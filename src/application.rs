@@ -1817,7 +1817,7 @@ impl Application {
                                 &request.coordination,
                                 &request.domain,
                                 &request.relays,
-                                &request.affected_entities,
+                                &request.targets,
                                 request.purpose,
                                 EntityGateLease {
                                     deadline,
@@ -1858,7 +1858,7 @@ impl Application {
                         &request.coordination,
                         &request.domain,
                         &request.relays,
-                        &request.affected_entities,
+                        &request.targets,
                         request.purpose,
                     );
                     if let Ok(status) = &result

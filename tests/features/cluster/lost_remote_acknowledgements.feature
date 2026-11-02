@@ -53,7 +53,7 @@ Feature: Remote record acknowledgements lost between nodes
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=lost_ack_source owner=node-1
+      - domain={{domain}} kind=ingestor name=lost_ack_source unit=instance:0 owner=node-1
       """
     And the last command output contains
       """

@@ -62,6 +62,7 @@ struct ChannelHost {
     finish_dispatch: Option<oneshot::Receiver<()>>,
     engagement_observed: Option<oneshot::Sender<()>>,
     dispatched: StdArc<AtomicUsize>,
+    dispatch_completed: Option<mpsc::Sender<usize>>,
 }
 
 impl ChannelHost {
@@ -87,7 +88,7 @@ impl IngestorHostServices for ChannelHost {
                 BufferedIngestMetadata::without_headers(),
                 Timestamp::from_unix_nanos(1),
             );
-            let decision = self.quiesce.intake(0, payload, false);
+            let decision = self.quiesce.intake(payload, false);
             if let Some(started) = self.dispatch_started.take() {
                 started
                     .send(())
@@ -99,7 +100,12 @@ impl IngestorHostServices for ChannelHost {
                     .assured("the check releases dispatch after engagement returns");
             }
             if let IngestorQuiesceIntake::Dispatch(_) = decision {
-                self.dispatched.fetch_add(1, Ordering::SeqCst);
+                let dispatched = self.dispatched.fetch_add(1, Ordering::SeqCst) + 1;
+                if let Some(completed) = &self.dispatch_completed {
+                    completed
+                        .try_send(dispatched)
+                        .assured("the check retains room for every scripted dispatch");
+                }
             }
         }
         Ok(())
@@ -260,7 +266,7 @@ fn engagement_during_dispatch(family: IngestorFamily, cause: IngestorQuiesceCaus
             .assured("the check's domain is an identifier-shaped name");
         let ingestor = IngestorName::try_from("source")
             .assured("the check's ingestor is an identifier-shaped name");
-        let labels = metrics.register_ingestor_quiesce(&domain, &ingestor, None);
+        let labels = metrics.register_ingestor_quiesce(&domain, &ingestor, Unit::Single, None);
         let quiesce = Arc::new(IngestorQuiesceControl::new(
             IngestQuiesceMode::Drop,
             metrics,
@@ -284,6 +290,7 @@ fn engagement_during_dispatch(family: IngestorFamily, cause: IngestorQuiesceCaus
             finish_dispatch: Some(dispatch_release),
             engagement_observed: Some(engagement_observed),
             dispatched: dispatched.clone(),
+            dispatch_completed: None,
         };
         let (shutdown, shutdown_rx) = watch::channel(false);
         let source = ChannelIngestor::new(receiver);
@@ -1045,4 +1052,100 @@ fn shuttle_a_drain_waits_for_the_transport_to_confirm_a_batch_with_a_refused_pay
             3,
         );
     }
+}
+
+/// Sparse global indices share a logical source while each loop retains its own intake lifetime.
+fn instance_unit_handoff() {
+    shuttle::future::block_on(async {
+        let domain = DomainName::try_from("instances").assured("valid domain");
+        let source = IngestorName::try_from("source").assured("valid ingestor");
+        let metrics = RuntimeMetrics::default();
+        let make_control = |index| {
+            Arc::new(IngestorQuiesceControl::new(
+                IngestQuiesceMode::Suspend,
+                metrics.clone(),
+                metrics.register_ingestor_quiesce(&domain, &source, Unit::Instance(index), None),
+            ))
+        };
+        let start = |control: Arc<IngestorQuiesceControl>| {
+            let (messages, receiver) = mpsc::channel(4);
+            let (completed, dispatches) = mpsc::channel(4);
+            let (engaged, engagement) = oneshot::channel();
+            let (shutdown, shutdown_rx) = watch::channel(false);
+            let host = ChannelHost {
+                quiesce_observation: control.observation(),
+                quiesce: control,
+                replay_messages: None,
+                dispatch_started: None,
+                finish_dispatch: None,
+                engagement_observed: Some(engaged),
+                dispatched: StdArc::new(AtomicUsize::new(0)),
+                dispatch_completed: Some(completed),
+            };
+            let task = nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
+                ChannelIngestor::new(receiver),
+                IngestorHost::new(host),
+                BrokerIngestorPolicy {
+                    acknowledgement: IngestorAckPolicy::None,
+                    retry: INGESTOR_RECONNECT_POLICY,
+                    position_class: PositionClass::None,
+                },
+                shutdown_rx,
+            ));
+            (messages, dispatches, engagement, shutdown, task)
+        };
+        let ending = make_control(0);
+        let sibling = make_control(2);
+        let (messages, mut dispatches, engagement, stop, task) = start(ending.clone());
+        let (other_messages, mut other_dispatches, _other_engagement, other_stop, other_task) =
+            start(sibling.clone());
+        send_message(&messages, 1).await;
+        send_message(&other_messages, 1).await;
+        assert_eq!(dispatches.recv().await, Some(1));
+        assert_eq!(other_dispatches.recv().await, Some(1));
+        let handoff = nervix_primitives::task::spawn({
+            let ending = ending.clone();
+            async move {
+                ending.engage(IngestorQuiesceCause::OwnershipHandoff);
+            }
+        });
+        engagement
+            .await
+            .assured("the ending loop observes its own handoff");
+        send_message(&other_messages, 2).await;
+        assert_eq!(other_dispatches.recv().await, Some(2));
+        assert!(!sibling.is_quiesced());
+        stop.send_replace(true);
+        task.await.assured(JOIN);
+        handoff.await.assured(JOIN);
+        ending.terminate();
+
+        let replacement = make_control(0);
+        let (
+            replacement_messages,
+            mut replacement_dispatches,
+            _replacement_engagement,
+            replacement_stop,
+            replacement_task,
+        ) = start(replacement.clone());
+        let release = nervix_primitives::task::spawn(async move {
+            ending.release(IngestorQuiesceCause::OwnershipHandoff);
+        });
+        send_message(&replacement_messages, 3).await;
+        send_message(&other_messages, 3).await;
+        assert_eq!(replacement_dispatches.recv().await, Some(1));
+        assert_eq!(other_dispatches.recv().await, Some(3));
+        assert!(!replacement.is_quiesced());
+        release.await.assured(JOIN);
+        replacement_stop.send_replace(true);
+        other_stop.send_replace(true);
+        replacement_task.await.assured(JOIN);
+        other_task.await.assured(JOIN);
+    });
+}
+
+#[test]
+fn shuttle_an_instance_handoff_leaves_a_sibling_running_and_cannot_release_its_replacement() {
+    check_random(instance_unit_handoff, 500);
+    check_pct(instance_unit_handoff, 500, 3);
 }

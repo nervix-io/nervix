@@ -14,7 +14,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use error_stack::{Report, ResultExt as _};
 use indexmap::IndexMap;
-use meticulous::OptionExt as _;
 use nervix_models::{
     ClusterNodeName, ClusterSchedule, DomainName, DomainSchedule, DynamicModelUpdate, FlushPolicy,
     KafkaPartitionSchedule, ModelKind, ModelName, NodeRef, NodeUnitRef, OwnershipStateComponent,
@@ -153,19 +152,6 @@ impl ExecutionNode {
         self.sole_unit()?.wasm_state_generations.as_ref()
     }
 
-    pub(crate) fn single_unit(&self) -> &ExecutionUnit {
-        self.units
-            .get(&Unit::Single)
-            .assured("only relays of partitioned branches are revised without a Single unit")
-    }
-
-    /// Whether this node is revised as several partition units.
-    pub(crate) fn is_partitioned(&self) -> bool {
-        self.units
-            .keys()
-            .any(|unit| matches!(unit, Unit::Partition(_)))
-    }
-
     /// The cluster node `unit` executes on, or `None` for a node that runs on every cluster node
     /// and for a unit this node is not revised as.
     pub(crate) fn unit_execution_node(&self, unit: Unit) -> Option<&ClusterNodeName> {
@@ -234,17 +220,6 @@ impl ExecutionNode {
     /// The primary of a single-unit node. `None` for a node revised as several units.
     pub(crate) fn primary_node(&self) -> Option<&ClusterNodeName> {
         self.sole_unit()?.primary_node.as_ref()
-    }
-
-    /// The replicas of a single-unit node. Empty for a node revised as several units.
-    pub(crate) fn replica_nodes(&self) -> Vec<&ClusterNodeName> {
-        let Some(unit) = self.sole_unit() else {
-            return Vec::new();
-        };
-        unit.assigned_nodes
-            .iter()
-            .filter(|node| Some(*node) != unit.primary_node.as_ref())
-            .collect()
     }
 
     /// Whether any unit of this node is primary on `node`.
@@ -638,7 +613,7 @@ impl ExecutionDelta {
 
 #[cfg(test)]
 mod tests {
-    use meticulous::ResultExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_arbitrary::{Arbitrary, Domain};
     use nervix_models::{CreateRelay, CreateSchema, Model, RelayBranching, SchemaField};
     use nonzero_ext::nonzero;

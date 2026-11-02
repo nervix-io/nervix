@@ -524,7 +524,7 @@ pub(in crate::registry) fn ingestor_statement(
                 offset_mode: KafkaOffsetMode::ConsumerGroup(
                     KafkaConsumerGroupName::parse("cg").expect("valid consumer group"),
                 ),
-                instances: nonzero!(1u64),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u16)),
                 mode: KafkaIngestMode::AckSequential {
                     timeout: "30s".to_string(),
                     retry_policy: nervix_models::RetryPolicy {

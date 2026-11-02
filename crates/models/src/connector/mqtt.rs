@@ -131,7 +131,7 @@ const BROKER_KEPT_SESSION: &[ChoiceRequirement] = &[
 pub struct MqttTopicIngestor {
     pub client: ClientName,
     pub topic: MqttTopicFilter,
-    pub instances: NonZeroU64,
+    pub instances: crate::IngestorInstances,
     pub session: MqttSession,
     pub qos: MqttQos,
     pub mode: MqttIngestMode,
@@ -300,6 +300,7 @@ const MQTT_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for MqttTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::PerPartition,
         // An MQTT packet carries no transport header map, and the source reads no MQTT 5 user
         // property as one.
         headers: None,
@@ -389,6 +390,10 @@ impl MqttTopicIngestor {
 }
 
 impl IngestorEntityBody for MqttTopicIngestor {
+    fn instances(&self) -> Option<crate::IngestorInstances> {
+        Some(self.instances)
+    }
+
     fn reference(&self) -> IngestorReference<'_> {
         IngestorReference::Client(&self.client)
     }
@@ -408,7 +413,10 @@ impl IngestorEntityBody for MqttTopicIngestor {
     /// The session and the quality of service this source subscribes with, which suspending it
     /// and acknowledging its messages require.
     fn chosen(&self, option: &str) -> Option<&'static str> {
-        Self::subscription_choice(self.session, self.qos, option)
+        match option {
+            "INSTANCES" => Some(self.instances.choice()),
+            _ => Self::subscription_choice(self.session, self.qos, option),
+        }
     }
 }
 

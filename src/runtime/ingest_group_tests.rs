@@ -1190,11 +1190,12 @@ async fn branched_root_without_children_acks_success() {
         named("tenant"),
         RuntimeValue::String("acme".to_string()),
     )]));
-    let root_source = named("metric_ingestor");
+    let root_source: IngestorName = named("metric_ingestor");
     let root_metrics = runtime
         .inner
         .metrics
         .resolve_node_batch_metrics(NodeBatchMetricsSpec {
+            unit: Unit::Single,
             domain: &root_domain,
             kind: ModelKind::Ingestor,
             node: &ModelName::from(&root_source),
@@ -1210,8 +1211,7 @@ async fn branched_root_without_children_acks_success() {
         routing: None,
         routing_snapshot: None,
         domain_clock: test_domain_clock(&root_domain),
-        entity_kind: ModelKind::Ingestor,
-        source: root_source,
+        owner: NodeUnitRef::new(NodeRef::new(ModelKind::Ingestor, root_source), Unit::Single),
         root_relay: root_relay.clone(),
         error_policies: ErrorPolicies::handled_by_log(),
         relays: [(
@@ -1301,8 +1301,13 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
         named("notifications_ingestor"),
         BranchInstanceTemplate {
             revision: ProcessorPlanRevision::new(),
-            entity_kind: ModelKind::Ingestor,
-            source: named("notifications_ingestor"),
+            owner: NodeUnitRef::new(
+                NodeRef::new(
+                    ModelKind::Ingestor,
+                    named::<ModelName>("notifications_ingestor"),
+                ),
+                Unit::Single,
+            ),
             root_relay: root_relay.clone(),
             branch: None,
             branch_ttl: None,
@@ -1418,8 +1423,10 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
             IngestorRouteTemplate {
                 branch: BranchInstanceTemplate {
                     revision: ProcessorPlanRevision::new(),
-                    entity_kind,
-                    source: named(source),
+                    owner: NodeUnitRef::new(
+                        NodeRef::new(entity_kind, named::<ModelName>(source)),
+                        Unit::Single,
+                    ),
                     root_relay: root_relay.clone(),
                     branch: None,
                     branch_ttl: None,

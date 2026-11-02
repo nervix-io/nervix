@@ -105,7 +105,7 @@ A reader verifies an archive as a stream, without seeking:
 
 1. The first header must be the regular `manifest.rkyv` entry within the 64 MiB record limit;
    anything else is refused before the manifest is read.
-2. The manifest must hold archive format major version `2`, valid domain names, no duplicate path,
+2. The manifest must hold archive format major version `3`, valid domain names, no duplicate path,
    and a known record kind for every record section.
 3. Every following entry must be the next section the manifest names, with that exact length,
    within its content kind's bound, and with that digest once its bytes are drained. A missing,
@@ -1180,3 +1180,12 @@ leader crash, a partitioned coordinator, an owner restart and concurrent staging
 volume](https://app.clickup.com/t/86bckvq84): three concurrent restores of 40 MiB guest saves staged
 at most about 0.3 GB on a state owner, finished in under 20 seconds each on a GitHub-hosted worker,
 and left no unpublished staging five seconds after they ended.
+
+## Capturing Instance-Owned Intake
+
+A cut enumerates each locally owned `NodeUnitRef` of an ingestor, checks its readiness/drain
+summary, and captures its exact offset and branch-lifecycle placements. A logical ingestor can
+therefore contribute checkpoints from several owners. Restore retains the global instance index
+when staging and publishing those generations; final placement does not renumber it. The current
+archive major also identifies this interpretation of canonical fixed-count and per-partition
+Models. Manifest and individual state-record versions retain their own current contracts.

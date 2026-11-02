@@ -1087,6 +1087,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         entity: &NodeRef,
+        unit: Unit,
     ) -> OwnershipHandoffResult<Option<PersistedRuntimeStateEntry>> {
         if !matches!(entity.kind, ModelKind::Ingestor | ModelKind::Reingestor) {
             return Ok(None);
@@ -1105,11 +1106,7 @@ impl Runtime {
             }
             if entity.kind == ModelKind::Ingestor {
                 drop(execution);
-                let key = DomainNodeRef::node_in(
-                    domain.clone(),
-                    ModelKind::Ingestor,
-                    entity.identifier.clone(),
-                );
+                let key = DomainNodeUnitRef::new(entity.in_domain(domain), unit);
                 if let Some(ingestor) = self.inner.ingestors.get(&key) {
                     ingestor
                         .branched
@@ -1331,8 +1328,7 @@ impl Runtime {
         if !self.entity_gate_operation_owns_unit(
             &coordination,
             domain,
-            entity,
-            unit,
+            &NodeUnitRef::new(entity.clone(), unit),
             EntityGatePurpose::OwnershipHandoff,
         ) {
             return Err(OwnershipHandoffError::participant(format!(
@@ -1467,8 +1463,7 @@ impl Runtime {
                 let existing_gate_is_held = self.entity_gate_operation_owns_unit(
                     &existing.coordination,
                     domain,
-                    entity,
-                    existing.unit,
+                    &NodeUnitRef::new(entity.clone(), existing.unit),
                     EntityGatePurpose::OwnershipHandoff,
                 );
                 if existing_gate_is_held {
@@ -1907,8 +1902,7 @@ impl Runtime {
         if !self.entity_gate_operation_owns_unit(
             transition.coordination,
             transition.domain,
-            transition.entity,
-            transition.unit,
+            &NodeUnitRef::new(transition.entity.clone(), transition.unit),
             EntityGatePurpose::OwnershipHandoff,
         ) {
             return Err(OwnershipHandoffError::participant(format!(
@@ -2732,7 +2726,6 @@ impl Runtime {
         &self,
         placement: RuntimeStatePlacement,
         primary_node: Option<ClusterNodeName>,
-        physical_node_id: ClusterNodeName,
     ) -> error_stack::Result<Arc<ReplicatedBranchAggregatedState>, RuntimePersistenceError> {
         let transferred = self.take_transferred_runtime_state_snapshot(&placement);
         if transferred.is_none()
@@ -2761,7 +2754,6 @@ impl Runtime {
         let state = Arc::new(ReplicatedBranchAggregatedState::new(
             placement.clone(),
             primary_node,
-            physical_node_id,
             &self.inner.metrics,
             initial,
         )?);

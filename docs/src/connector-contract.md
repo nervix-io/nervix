@@ -1331,9 +1331,17 @@ domain offsets all read those same plans; none of them reads the ingestor's Mode
 ingestor binds its codec, node filter, routes and branched entrypoints against the installed domain
 surfaces and parses its declared acknowledgement before any connector instance opens, so a start
 that fails leaves nothing running.
-The current ingestor schedule places one `Single` execution unit; Kafka's transport partition
-assignments remain inside that unit. Its domain-offset plan reads the unit's primary, and the
-host keys its replicated offset checkpoint by that same unit.
+Instance-capable entities declare `Count(NonZeroU16)` or `PerPartition` in the vocabulary. The
+registry resolves that declaration into exact `Unit::Instance(i)` placements and per-unit start
+plans; `Single` entities retain `Unit::Single`. Each host opens only its plan's global index.
+Connector configuration still carries the total count where the transport needs it. A handoff
+changes one unit's primary and state originator without restarting its siblings.
+
+The vocabulary declares `Single | Instances | PerPartition` once per entity. Grammar, validation,
+console drafts, inspection and capability exports consume that declaration. Per-partition sources
+bind instance `p` to each constructing destination's partition `p`; Kafka requires domain offsets.
+All constructing routes agree on key fields and partition count. Registry validation refuses a
+Kafka domain-offset unit-count change in place: explicit recreation starts a new offset lifetime.
 
 A source plan combines connector-specific settings, validated capabilities, and the host's ACK
 policy. Capabilities state whether header reads are available, whether quiesce is supported, the
@@ -1479,8 +1487,10 @@ Each source host retains its exact instance readiness handle. Poll success and s
 publish through that scalar, without looking up the ingestor registry. Replacing an ingestor retires
 its preceding handles before installing the new instances; host drop also retires its own handle.
 Retirement is final, so late polling or teardown cannot mark a replacement ready or unready.
-Readiness observers aggregate the installed instance handles. Quiescence and ACK/commit ownership
-remain with the host's existing loop and controls.
+Readiness, transient status, ACK roots and quiesce controls are registered under `DomainNodeUnitRef`.
+Every host retains one scalar readiness handle and one intake buffer. Whole-entity operations
+select every current unit; ownership handoffs select only the units they transfer. Retiring a
+handle or buffer cannot modify a successor's lifetime.
 
 The host runs three source loop families, with a listener using the broker loop:
 
@@ -1692,7 +1702,7 @@ as an oversized outcome; no payload is counted twice.
 The host resolves `nervix_ingestor_read_ahead_dropped_payloads_total` once per ingestor and physical
 node and passes its counter handle to the connector. The driver increments it at each overflow,
 including while the host waits for downstream acknowledgement. Prometheus exposes the count with
-`domain`, `ingestor` and `physical_node_id` labels; a reconnect does not reset it. It is separate
+`domain`, `ingestor`, `physical_node_id` and `instance` labels; a reconnect does not reset it. It is separate
 from codec rejections, oversized payloads, quiesce drops and transport redeliveries.
 
 Under `NO ACK`, the client acknowledges every publish on receipt and the broker holds back none.
@@ -2983,8 +2993,9 @@ no MongoDB document can hold, fail the whole publish. Infrastructure and batch f
 contextual reports. [Errors And Diagnostics](errors-and-diagnostics.md) owns the compiler
 classification contract; these annotations do not change acknowledgement or retry policy.
 
-An ingestor opens all source instances before registration, so a failed source start leaves no
-running ingestor. An invalid emitter declaration or expression fails planning before its new
+Each ingestor unit opens its source before registration, so a failed unit start leaves no running
+intake for that unit; its sibling units retain their own lifecycles. An invalid emitter declaration
+or expression fails planning before its new
 execution plan is published. A emitter initialization failure is reported as an emitter initialization error;
 the emitter remains unavailable and retries opening on its configured backoff. Invalid settings
 and missing external topics, queues, tables, namespaces, or other required entities surface as
@@ -3157,3 +3168,12 @@ That evidence supports the current ingestor and emitter behavior; it does not cl
 Its Kafka A/B measurements found lower bounded-pressure rates and a separate 16-partition commit
 failure that require owner investigation. An integration must preserve its own transport and
 delivery semantics rather than assuming a generic envelope or exactly-once external outcome.
+
+### Shared instance configuration
+
+The host prepares MQTT's rendered client entries and resource mounts once per logical ingestor and
+installed declaration on each node. Unit plans share immutable entry arrays; an executing unit
+retains only its selected instance's mount. Input replacement compares external sessions once per
+local logical input and retires only the explicitly ending global indices. This keeps preparation
+and retirement proportional to the declared instance count. A declaration change invalidates the
+prepared entry; no mutable driver or source task is shared between units.

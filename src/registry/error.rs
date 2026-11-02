@@ -244,6 +244,11 @@ impl fmt::Display for OtelMappingIssue {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum RegistryError {
+    #[error("ingestor '{ingestor}' has invalid instancing in domain '{domain}'")]
+    IngestorInstancing {
+        domain: DomainName,
+        ingestor: nervix_models::IngestorName,
+    },
     #[error("client '{client}' configuration is invalid in domain '{domain}'")]
     ClientConfig {
         domain: DomainName,

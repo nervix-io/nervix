@@ -1491,3 +1491,17 @@ released claim becomes available again. Task teardown removes its confirmation/s
 and pooled emitter teardown removes its wait registration; cancellation clears a pending borrow's
 wait through its guard. Handoff watches register before reading their unit's retained freeze
 publication, and release publishes thaw before waking them.
+
+## Stopping Spread Intake
+
+A source instance is stopped under its exact `DomainNodeUnitRef`. Node drain suspends intake for
+the units whose primaries it owns, waits for their admitted ACK roots and transport confirmation,
+and transfers their unit-qualified offsets and branch checkpoints. A sibling whose owner remains
+live retains its host task, readiness and ACK roots. Per-partition intake moves with its exact
+relay partition component. Whole-domain shutdown still selects every current unit, including
+retained work from a source whose live registration has already ended.
+
+The ending loop closes its transport before its readiness is retired. MQTT input retirement
+compares the logical input once and selects only the global indices ending on this node. Forced
+node loss retains the transport's declared replay and duplicate limits; instance placement does
+not strengthen broker acknowledgement guarantees.

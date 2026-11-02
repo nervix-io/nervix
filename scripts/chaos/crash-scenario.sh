@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Sourced by run-baseline.sh after the external cluster and graph are ready.
 
+# shellcheck source=instance-owners.sh
+source "${script_dir}/instance-owners.sh"
+
 crash_fail() {
     failure_category="$1"
     shift
@@ -16,9 +19,16 @@ observe_crash_target() {
     local output_dir="$1"
     mkdir -p "${output_dir}"
     cluster_settled "${output_dir}" || return 1
+    if [[ "${scenario}" == ingestor-instances-owner-crash ]]; then
+        verify_spread_instance_start "${output_dir}/ingestor.attempt.txt" "${output_dir}/instance-owners.json" || return 1
+    fi
     local leader ingestor_owner emitter_owner
     leader="$(<"${output_dir}/leader.txt")"
-    ingestor_owner="$(owner_from_description "${output_dir}/ingestor.attempt.txt")"
+    if [[ "${scenario}" == ingestor-instances-owner-crash ]]; then
+        ingestor_owner="$(jq -er '.[0].owner' "${output_dir}/instance-owners.json")" || return 1
+    else
+        ingestor_owner="$(owner_from_description "${output_dir}/ingestor.attempt.txt")"
+    fi
     emitter_owner="$(owner_from_description "${output_dir}/emitter.attempt.txt")"
     [[ "${leader}" =~ ^node-[123]$ \
         && "${ingestor_owner}" =~ ^node-[123]$ \
@@ -36,7 +46,7 @@ observe_crash_target() {
                 fi
             done
             ;;
-        ingestor-owner-crash) target_node="${ingestor_owner}" ;;
+        ingestor-owner-crash | ingestor-instances-owner-crash) target_node="${ingestor_owner}" ;;
         emitter-owner-crash) target_node="${emitter_owner}" ;;
     esac
     [[ "${target_node}" =~ ^node-[123]$ ]] || return 1
@@ -120,10 +130,18 @@ surviving_owners_ready() {
         >"${output_dir}/emitter-survivor.attempt.txt" 2>&1 || return 1
     local description owner
     for description in ingestor relay emitter; do
+        if [[ "${description}" == ingestor && "${scenario}" == ingestor-instances-owner-crash ]]; then
+            continue
+        fi
         owner="$(owner_from_description "${output_dir}/${description}-survivor.attempt.txt")"
         [[ "${owner}" =~ ^node-[123]$ && "${owner}" != "node-${target##*-}" ]] \
             || return 1
     done
+    if [[ "${scenario}" == ingestor-instances-owner-crash ]]; then
+        verify_instance_handoff "${output_dir}/immediately-before/instance-owners.json" \
+            "${output_dir}/ingestor-survivor.attempt.txt" "node-${target##*-}" \
+            "${output_dir}/instance-owners-after.json" || return 1
+    fi
     grep -Fxq 'status: running' "${output_dir}/ingestor-survivor.attempt.txt" || return 1
     grep -Fxq 'ready: true' "${output_dir}/ingestor-survivor.attempt.txt" || return 1
     grep -Fxq 'status: OK' "${output_dir}/emitter-survivor.attempt.txt" || return 1

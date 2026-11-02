@@ -63,13 +63,17 @@ impl Runtime {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
+        unit: Unit,
     ) -> domain_clock::DomainClockAccessResult<IngestTaskHandles> {
         let clock = self.domain_clock_lifecycle(domain)?;
         Ok(IngestTaskHandles {
             inner: Arc::new(IngestTaskDependencies {
                 clock,
-                trackers: self.ingestor_ack_root_trackers(domain, ingestor),
-                metrics: self.branch_metrics_mark(domain, ModelKind::Ingestor, ingestor),
+                trackers: self.ingestor_ack_root_trackers(domain, ingestor, unit),
+                metrics: self.unit_branch_metrics_mark(
+                    domain,
+                    &NodeUnitRef::new(NodeRef::new(ModelKind::Ingestor, ingestor), unit),
+                ),
             }),
         })
     }
@@ -86,6 +90,68 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_instance_handoff_counts_only_the_selected_units_ack_roots() {
+        let runtime = Runtime::new();
+        let domain = domain("instances");
+        let ingestor = named::<IngestorName>("source");
+        runtime.sync_domains(&BTreeMap::from([(
+            domain.clone(),
+            unpaced_domain_state(domain.as_str()),
+        )]));
+        let first = runtime
+            .ingest_task_handles(&domain, &ingestor, Unit::Instance(0))
+            .expect("the first unit binds its domain");
+        let sibling = runtime
+            .ingest_task_handles(&domain, &ingestor, Unit::Instance(2))
+            .expect("the sibling binds its domain");
+        let (first_ack, first_completion) = first.tracked_root();
+        let (sibling_ack, sibling_completion) = sibling.tracked_root();
+        let entity = NodeRef::new(ModelKind::Ingestor, &ingestor);
+        let targets =
+            EntityGateTargets::Units(vec![NodeUnitRef::new(entity.clone(), Unit::Instance(0))]);
+        let status = || {
+            runtime.entity_drain_status(
+                &domain,
+                &[],
+                &targets,
+                nervix_interconnect::EntityGatePurpose::OwnershipHandoff,
+            )
+        };
+        assert_eq!(status().outstanding_acks, 1);
+        first_ack.ack_success();
+        drop(first_completion);
+        assert!(status().is_drained());
+        assert_eq!(runtime.domain_outstanding_work(&domain), 1);
+        let all = runtime.entity_drain_status(
+            &domain,
+            &[],
+            &EntityGateTargets::Entities(vec![entity]),
+            nervix_interconnect::EntityGatePurpose::ModelAlteration,
+        );
+        assert_eq!(all.outstanding_acks, 1);
+        sibling_ack.ack_success();
+        drop(sibling_completion);
+        assert_eq!(runtime.domain_outstanding_work(&domain), 0);
+    }
+
+    #[test]
+    fn replacing_one_units_readiness_leaves_its_sibling_ready() {
+        let runtime = Runtime::new();
+        let domain = domain("instances");
+        let ingestor = named::<IngestorName>("source");
+        let ending = runtime.prepare_ingestor_readiness(&domain, &ingestor, Unit::Instance(0));
+        let sibling = runtime.prepare_ingestor_readiness(&domain, &ingestor, Unit::Instance(2));
+        ending.mark_ready();
+        sibling.mark_ready();
+        let replacement = runtime.prepare_ingestor_readiness(&domain, &ingestor, Unit::Instance(0));
+        replacement.mark_ready();
+        ending.mark_unready();
+        assert!(runtime.ingestor_ready(&domain, &ingestor, Unit::Instance(0)));
+        assert!(runtime.ingestor_ready(&domain, &ingestor, Unit::Instance(2)));
+        assert!(!ending.is_ready());
+    }
+
+    #[test]
     fn retained_ingest_handles_share_drain_accounting_and_follow_domain_lifecycle() {
         let runtime = Runtime::new();
         let domain = domain("retained");
@@ -93,9 +159,10 @@ mod tests {
         let mut state = unpaced_domain_state(domain.as_str());
         runtime.sync_domains(&BTreeMap::from([(domain.clone(), state.clone())]));
         let handles = runtime
-            .ingest_task_handles(&domain, &ingestor)
+            .ingest_task_handles(&domain, &ingestor, nervix_models::Unit::Single)
             .assured("the source binds an installed domain");
-        let observer = runtime.ingestor_ack_root_trackers(&domain, &ingestor);
+        let observer =
+            runtime.ingestor_ack_root_trackers(&domain, &ingestor, nervix_models::Unit::Single);
         let (acks, completion) = handles.tracked_root();
         assert_eq!(runtime.domain_outstanding_work(&domain), 1);
         assert_eq!(observer.ingestor_outstanding(), 1);

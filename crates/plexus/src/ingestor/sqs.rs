@@ -38,7 +38,7 @@ pub(super) fn queue_body<'src>()
     client_ref()
         .then_ignore(kw(Identifier::Queue))
         .then(external_name::<SqsQueueName>())
-        .then(optional_instances())
+        .then(optional_instances::<SqsQueueIngestor>())
         .then_ignore(kw(Identifier::Mode))
         .then(mode)
         .then(suspend_only_quiesce_clause())
@@ -87,7 +87,10 @@ mod tests {
             panic!("the SQS QUEUE head constructs the SQS queue Model");
         };
         assert_eq!(source.queue.as_str(), queue);
-        assert_eq!(source.instances.get(), 2);
+        assert_eq!(
+            source.instances,
+            nervix_models::IngestorInstances::Count(nonzero_ext::nonzero!(2u16))
+        );
     }
 
     #[test]

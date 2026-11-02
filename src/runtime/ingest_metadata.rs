@@ -1444,7 +1444,7 @@ mod tests {
             client: named("logic_kafka"),
             topic: named("logic_notifications"),
             offset_mode: nervix_models::KafkaOffsetMode::Domain,
-            instances: nonzero!(1u64),
+            instances: nervix_models::IngestorInstances::Count(nonzero!(1u16)),
             mode: nervix_models::KafkaIngestMode::AckSequential {
                 timeout: "5s".to_string(),
                 retry_policy: RetryPolicy {

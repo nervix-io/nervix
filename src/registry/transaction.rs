@@ -1429,7 +1429,7 @@ fn complete_model_impact(input: ModelImpactInput<'_>) -> CompletedModelImpact {
     let moved_entities = ownership_moves
         .as_slice()
         .iter()
-        .map(|moved| moved.node.node.clone())
+        .map(|moved| nervix_models::NodeUnitRef::new(moved.node.node.clone(), moved.unit))
         .collect::<Vec<_>>();
     let ownership_gate =
         EntityGatePlan::for_ownership_handoff(current_schedule, next_schedule, moved_entities);
@@ -1516,7 +1516,7 @@ fn complete_placement_impact(
     let moved_entities = ownership_moves
         .as_slice()
         .iter()
-        .map(|moved| moved.node.node.clone());
+        .map(|moved| nervix_models::NodeUnitRef::new(moved.node.node.clone(), moved.unit));
     let ownership_gate =
         EntityGatePlan::for_ownership_handoff(current_schedule, next_schedule, moved_entities);
     let mut pause_nodes =
@@ -1893,7 +1893,7 @@ fn add_ownership_pause_nodes(
     by_entity: &mut BTreeMap<NodeRef, BTreeSet<TransactionOperationNumber>>,
 ) {
     let attribution = merged_ownership_attribution(ownership_moves, fallback_attribution);
-    for entity in gate.affected_entities() {
+    for entity in &gate.affected_entities() {
         let moved = ownership_moves
             .as_slice()
             .iter()
@@ -1928,7 +1928,7 @@ fn add_model_gate_pause_nodes(
     let Some(schedule) = current else {
         return;
     };
-    for entity in gate.affected_entities() {
+    for entity in &gate.affected_entities() {
         let operations = by_entity
             .get(entity)
             .cloned()
@@ -1964,7 +1964,7 @@ fn attributed_gate_boundaries(
         (model_gate, [current, desired]),
         (ownership_gate, [current, None]),
     ] {
-        for entity in gate.affected_entities() {
+        for entity in &gate.affected_entities() {
             let operations = entity_operations
                 .get(entity)
                 .cloned()

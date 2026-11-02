@@ -3005,3 +3005,23 @@ lock, concurrent map or memory-ordering protocol. OTEL entities delegate to one 
 The HTTP and WebSockets endpoint wrappers share an intake owner whose drop still ends the exact
 binding lifetime. Their existing host Shuttle checks and lifecycle Deloxide lanes remain the
 concurrency evidence; moving these owners requires current inventory paths, not a new protocol model.
+
+## Independent Ingestor Units
+
+Source, quiesce, status, readiness and ACK-root registries are keyed by `DomainNodeUnitRef`. A host
+resolves its exact entries during preparation and retains its handles on record paths. Each
+quiesce control owns one bounded scalar retained-payload buffer; no per-instance shared map is
+reached by intake. Route runtimes and branch checkpoints carry their `NodeUnitRef` owner.
+
+A handoff's `Units` target freezes and drains only the selected units. A whole-model `Entities`
+target expands the installed unit declaration together with retained counters and ACK roots, so
+work remains visible across publication. Release retains the original controls and lease identity;
+late source teardown cannot retire a sibling or a replacement readiness handle.
+
+The fake-connector Shuttle check
+`shuttle_an_instance_handoff_leaves_a_sibling_running_and_cannot_release_its_replacement` explores
+intake, one unit's handoff/stop, continued sibling delivery and replacement admission. Deloxide
+workloads exercise real start, stop, drain and failover beside the unit-local tracked buffer and
+checkpoint locks. These are lifecycle and interleaving claims; no new cross-location memory-ordering
+protocol is introduced. The concurrent-map ledger records preparation, observation and retirement
+frequency for each affected registry, including the execution-owned immutable MQTT client cache.

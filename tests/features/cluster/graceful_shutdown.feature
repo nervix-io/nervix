@@ -216,7 +216,7 @@ Feature: Graceful shutdown
     And the last cluster status owner for scheduled "emitter" "handoff_output" is saved as placeholder "handoff_emitter_destination"
     And the last command output contains
       """
-      kind=ingestor name=handoff_source owner={{handoff_source_destination}} replicas=- transition_from=node-1 state_recovery=complete
+      kind=ingestor name=handoff_source unit=instance:0 owner={{handoff_source_destination}} replicas=- transition_from=node-1 state_recovery=complete
       """
     And the last command output contains
       """
@@ -1165,7 +1165,7 @@ Feature: Graceful shutdown
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=peer_source owner=node-1
+      - domain={{domain}} kind=ingestor name=peer_source unit=instance:0 owner=node-1
       """
     When these Plexus commands are executed on the leader node
       """
@@ -1245,7 +1245,7 @@ Feature: Graceful shutdown
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=unactivated_source owner=node-2
+      - domain={{domain}} kind=ingestor name=unactivated_source unit=instance:0 owner=node-2
       """
     When these Plexus commands are executed on the leader node
       """

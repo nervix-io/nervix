@@ -350,8 +350,9 @@ impl Runtime {
             .collect::<Vec<_>>();
         for ingestor in ingestors {
             self.engage_ingestor_quiesce(
-                &ingestor.domain,
-                &IngestorName::from(ingestor.identifier()),
+                &ingestor.entity.domain,
+                &IngestorName::from(ingestor.entity.identifier()),
+                ingestor.unit,
                 IngestorQuiesceCause::Shutdown,
             );
         }
@@ -397,7 +398,7 @@ impl LocalDomainDrainSources for RuntimeDomainDrainSources<'_> {
     fn force_flush_obligations(&self) -> usize {
         let mut obligations = 0;
         for counters in self.runtime.inner.node_quiesce_counters.iter() {
-            if &counters.key().domain == self.domain {
+            if &counters.key().entity.domain == self.domain {
                 LocalDomainDrainStatus::tally(
                     &mut obligations,
                     counters.value().force_flush_obligations(),
@@ -420,7 +421,7 @@ impl LocalDomainDrainSources for RuntimeDomainDrainSources<'_> {
     fn admitting_ingestors(&self) -> usize {
         let mut admitting = 0;
         for ingestor in self.runtime.inner.ingestors.iter() {
-            if &ingestor.key().domain != self.domain {
+            if &ingestor.key().entity.domain != self.domain {
                 continue;
             }
             let stopped_admitting = match self.runtime.inner.ingestor_quiescence.get(ingestor.key())
@@ -469,7 +470,7 @@ impl LocalDomainDrainSources for RuntimeDomainDrainSources<'_> {
     fn node_work(&self) -> LocalNodeWork {
         let mut work = LocalNodeWork::default();
         for counters in self.runtime.inner.node_quiesce_counters.iter() {
-            if &counters.key().domain == self.domain {
+            if &counters.key().entity.domain == self.domain {
                 work.count(counters.value());
             }
         }
@@ -635,7 +636,10 @@ mod tests {
         let control =
             test_ingestor_quiesce_control(&runtime, &domain, &ingestor, IngestQuiesceMode::Suspend);
         runtime.inner.ingestor_quiescence.insert(
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
+            DomainNodeUnitRef::new(
+                DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
+                Unit::Single,
+            ),
             control.clone(),
         );
 

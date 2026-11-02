@@ -355,7 +355,7 @@ Feature: Drain node
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=event_source owner=node-1
+      - domain={{domain}} kind=ingestor name=event_source unit=instance:0 owner=node-1
       """
     And the last command output contains
       """
@@ -390,7 +390,7 @@ Feature: Drain node
       """
     And the last command output contains
       """
-      - kind=ingestor name=event_source from=node-1 to=
+      - kind=ingestor name=event_source unit=instance:0 from=node-1 to=
       """
     And the last command output contains
       """

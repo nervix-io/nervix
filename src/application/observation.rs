@@ -67,7 +67,7 @@ use super::{
         format_window_processor_describe_output, ordered_placement_corridor, placement_claim_owner,
         placement_group_host, placement_groups_claimed_by_rule, placement_rule_coverage_status,
         placement_rule_endpoint_nodes, placement_rule_runtime_nodes,
-        runtime_ingestor_describe_from_envelope, runtime_ingestor_describe_to_envelope,
+        runtime_ingestor_describe_to_envelope,
     },
     model_mutation::{command_error, command_failure, command_ok},
     session_service::SessionServiceImpl,
@@ -76,12 +76,9 @@ use super::{
         render_subscription_literal, validate_subscription_bindings,
     },
 };
-use crate::{
-    registry::RegistryError,
-    runtime::{IngestorDescribe as RuntimeIngestorDescribe, RelayPartitioning},
-    runtime_schema,
-};
+use crate::{registry::RegistryError, runtime::RelayPartitioning, runtime_schema};
 
+mod ingestor_units;
 mod relay_units;
 
 const REMOTE_DESCRIBE_RELAY_TIMEOUT: Duration = Duration::from_secs(1);
@@ -666,82 +663,6 @@ impl SessionServiceImpl {
         }
     }
 
-    /// What the node that executes an ingestor reports about it, and its metrics. An ingestor no
-    /// node executes reports as stopped.
-    pub(in crate::application) async fn ingestor_summary(
-        &self,
-        domain: &DomainName,
-        ingestor: &IngestorName,
-        ingestor_node: &ScheduledNode,
-    ) -> error_stack::Result<(RuntimeIngestorDescribe, Vec<String>), ObservationError> {
-        let local_node_id = self.inner.consensus.local_node_id();
-        if ingestor_node.executes_on(local_node_id) {
-            let summary = self
-                .inner
-                .runtime
-                .describe_local_ingestor(domain, ingestor)
-                .change_context(ObservationError::LocalDescribe {
-                    domain: domain.clone(),
-                    entity: NodeRef::new(ModelKind::Ingestor, ModelName::from(ingestor)),
-                })?;
-            let metrics = self
-                .inner
-                .runtime
-                .describe_metrics_for(domain, "INGESTOR", ingestor);
-            return Ok((summary, metrics));
-        }
-        let Some(owner) = ingestor_node.execution_node() else {
-            let summary = RuntimeIngestorDescribe {
-                running: false,
-                ready: false,
-                quiesce_state: None,
-                quiesce_counters: Default::default(),
-                transport_redeliveries_total: 0,
-                decode_rejections_total: 0,
-                last_decode_rejection: None,
-                oversized_payloads_total: 0,
-                memory_backpressure_paused: self
-                    .inner
-                    .runtime
-                    .ingestors_paused_for_memory_pressure(),
-                transient_error: None,
-                reconnect_backoff: None,
-                reconnect_wait_millis: None,
-                kafka_domain_offsets: None,
-                client_producers: None,
-            };
-            let metrics = self
-                .inner
-                .runtime
-                .describe_metrics_for(domain, "INGESTOR", ingestor);
-            return Ok((summary, metrics));
-        };
-        let answered = self
-            .inner
-            .interconnect
-            .request(
-                owner,
-                RemoteDescribeIngestorRequest {
-                    domain: domain.clone(),
-                    name: ingestor.clone(),
-                },
-            )
-            .await;
-        match answered {
-            Ok(Ok(summary)) => Ok(runtime_ingestor_describe_from_envelope(summary)),
-            Ok(Err(failure)) => Err(Report::new(ObservationError::RemoteDescribeFailure {
-                failure,
-            })),
-            Err(error) => Err(
-                error.change_context(ObservationError::RemoteDescribeRequest {
-                    domain: domain.clone(),
-                    entity: NodeRef::new(ModelKind::Ingestor, ModelName::from(ingestor)),
-                    node: owner.clone(),
-                }),
-            ),
-        }
-    }
-
     /// Lists the ingestors of `domain`: each one's source, its schema or codec, the node that
     /// executes it and its state, and for a client ingestor whether it admits batches and the
     /// producers attached to it.
@@ -783,31 +704,34 @@ impl SessionServiceImpl {
                     .cloned(),
                 None => None,
             };
-            let summary = match &scheduled {
-                Some(scheduled) => {
-                    match self.ingestor_summary(domain, &ingestor, scheduled).await {
+            if let Some(scheduled) = &scheduled {
+                for unit in scheduled.units.keys() {
+                    let summary = match self
+                        .ingestor_summary(domain, &ingestor, scheduled, *unit)
+                        .await
+                    {
                         Ok((summary, _)) => Some(summary),
                         Err(error) => {
-                            debug!(
-                                ingestor = ingestor.as_str(),
-                                error = %error,
-                                "an ingestor listing could not read its runtime state"
-                            );
+                            debug!(ingestor = ingestor.as_str(), error = %error, "could not read ingestor unit state");
                             None
                         }
-                    }
+                    };
+                    let owner = match scheduled
+                        .unit(*unit)
+                        .and_then(|placement| placement.execution_node())
+                    {
+                        Some(node) => node.as_str(),
+                        None => "-",
+                    };
+                    lines.push(format!(
+                        "{}{}",
+                        format_ingestor_listing_line(&model, owner, summary.as_ref()),
+                        unit.label_suffix()
+                    ));
                 }
-                None => None,
-            };
-            let owner = match scheduled.as_ref().and_then(ScheduledNode::execution_node) {
-                Some(owner) => owner.as_str().to_string(),
-                None => "-".to_string(),
-            };
-            lines.push(format_ingestor_listing_line(
-                &model,
-                &owner,
-                summary.as_ref(),
-            ));
+            } else {
+                lines.push(format_ingestor_listing_line(&model, "-", None));
+            }
         }
         command_ok(lines.join("\n"))
     }
@@ -873,22 +797,33 @@ impl SessionServiceImpl {
             Err(message) => return command_error(format!("{message:#}")),
         };
 
-        let summary = self
-            .ingestor_summary(domain, &describe.ingestor, &ingestor_node)
-            .await;
-
-        match summary {
-            Ok((summary, metrics)) => match format_ingestor_describe_output(
+        let mut outputs = Vec::with_capacity(ingestor_node.units.len());
+        let mut metric_lines = std::collections::BTreeSet::new();
+        for unit in ingestor_node.units.keys() {
+            let (summary, metrics) = match self
+                .ingestor_summary(domain, &describe.ingestor, &ingestor_node, *unit)
+                .await
+            {
+                Ok(summary) => summary,
+                Err(error) => return command_error(format!("{error:#}")),
+            };
+            let output = match format_ingestor_describe_output(
                 &describe.ingestor,
                 &ingestor,
                 &ingestor_node,
+                *unit,
                 &summary,
             ) {
-                Ok(output) => command_ok(append_metrics_lines(output, metrics)),
-                Err(error) => command_error(format!("{error:#}")),
-            },
-            Err(message) => command_error(format!("{message:#}")),
+                Ok(output) => output,
+                Err(error) => return command_error(format!("{error:#}")),
+            };
+            outputs.push(output);
+            metric_lines.extend(metrics);
         }
+        command_ok(append_metrics_lines(
+            outputs.join("\n\n"),
+            metric_lines.into_iter().collect(),
+        ))
     }
 
     pub(in crate::application) async fn dataflow_node_status_for_graph(
@@ -1108,12 +1043,22 @@ impl SessionServiceImpl {
         &self,
         request: RemoteDescribeIngestorRequest,
     ) -> Result<IngestorDescribeEnvelope, RemoteOperationFailure> {
-        self.prepare_owner_control_request(&request.domain, ModelKind::Ingestor, &request.name)
+        let node = self
+            .prepare_owner_control_request(&request.domain, ModelKind::Ingestor, &request.name)
             .await?;
+        if !node.unit_executes_on(request.unit, self.inner.consensus.local_node_id()) {
+            return Err(RemoteOperationFailure::Rejected {
+                subject: RemoteOperationSubject::entity(
+                    &request.domain,
+                    ModelKind::Ingestor,
+                    request.name.clone(),
+                ),
+            });
+        }
         let summary = self
             .inner
             .runtime
-            .describe_local_ingestor(&request.domain, &request.name)
+            .describe_local_ingestor(&request.domain, &request.name, request.unit)
             .map_err(|reason| {
                 RemoteOperationFailure::failed(
                     RemoteOperationSubject::entity(
@@ -1124,10 +1069,11 @@ impl SessionServiceImpl {
                     reason.to_string(),
                 )
             })?;
-        let metrics =
-            self.inner
-                .runtime
-                .describe_metrics_for(&request.domain, "INGESTOR", &request.name);
+        let metrics = self.inner.runtime.describe_ingestor_unit_metrics(
+            &request.domain,
+            &request.name,
+            request.unit,
+        );
         Ok(runtime_ingestor_describe_to_envelope(summary, metrics))
     }
 

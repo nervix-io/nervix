@@ -113,6 +113,12 @@
           "run": ["ingestor-owner-crash"]
         },
         {
+          "id": "ingestor-instances-owner-crash",
+          "shard": 3,
+          "budget_minutes": 7,
+          "run": ["ingestor-instances-owner-crash"]
+        },
+        {
           "id": "emitter-owner-crash",
           "shard": 3,
           "budget_minutes": 5,

@@ -139,7 +139,9 @@ impl EmptyRelayHandoffFixture {
                 &coordination,
                 &self.domain,
                 &[],
-                std::slice::from_ref(&self.entity),
+                &nervix_models::EntityGateTargets::Entities(
+                    (std::slice::from_ref(&self.entity)).to_vec(),
+                ),
                 EntityGatePurpose::OwnershipHandoff,
                 EntityGateLease {
                     deadline: nervix_primitives::time::Instant::now() + Duration::from_secs(30),
@@ -154,7 +156,9 @@ impl EmptyRelayHandoffFixture {
                     &coordination,
                     &self.domain,
                     &[],
-                    std::slice::from_ref(&self.entity),
+                    &nervix_models::EntityGateTargets::Entities(
+                        (std::slice::from_ref(&self.entity)).to_vec()
+                    ),
                     EntityGatePurpose::OwnershipHandoff,
                 )
                 .expect("the empty relay should publish its capture freeze after draining")
@@ -2011,13 +2015,13 @@ fn branch_aggregated_state_snapshot_roundtrips_metrics() {
     let state = ReplicatedBranchAggregatedState::new(
         placement.clone(),
         Some(ClusterNodeName::parse("node-1").expect("valid name")),
-        ClusterNodeName::parse("node-1").expect("valid name"),
         &metrics,
         None,
     )
     .expect("branch-aggregated state should initialize");
     metrics
         .resolve_node_batch_metrics(NodeBatchMetricsSpec {
+            unit: Unit::Single,
             domain: &placement.domain,
             kind: placement.kind,
             node: &placement.identifier,
@@ -2037,7 +2041,6 @@ fn branch_aggregated_state_snapshot_roundtrips_metrics() {
     let _restored = ReplicatedBranchAggregatedState::new(
         placement.clone(),
         Some(ClusterNodeName::parse("node-1").expect("valid name")),
-        ClusterNodeName::parse("node-1").expect("valid name"),
         &restored_metrics,
         Some(snapshot),
     )
@@ -2072,15 +2075,11 @@ fn a_metrics_update_after_a_flush_took_its_snapshot_is_persisted_by_the_next_flu
         branch_key: None,
     };
     let relay = named("notifications");
-    let state = ReplicatedBranchAggregatedState::new(
-        placement.clone(),
-        Some(node.clone()),
-        node.clone(),
-        &metrics,
-        None,
-    )
-    .assured("a state without a persisted snapshot initializes");
+    let state =
+        ReplicatedBranchAggregatedState::new(placement.clone(), Some(node.clone()), &metrics, None)
+            .assured("a state without a persisted snapshot initializes");
     let batch_metrics = metrics.resolve_node_batch_metrics(NodeBatchMetricsSpec {
+        unit: Unit::Single,
         domain: &placement.domain,
         kind: placement.kind,
         node: &placement.identifier,

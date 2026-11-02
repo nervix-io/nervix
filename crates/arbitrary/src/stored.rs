@@ -509,11 +509,11 @@ impl Arbitrary<'_> {
     fn placement_group(&mut self) -> PlacementGroupSchedule {
         let members = self.records(|arbitrary| {
             let kind = arbitrary.model_kind();
-            NodeRef::new(kind, arbitrary.name::<ModelName>())
+            let node = NodeRef::new(kind, arbitrary.name::<ModelName>());
+            nervix_models::NodeUnitRef::new(node, arbitrary.unit())
         });
         let primary_node = self.optional_cluster_node();
         PlacementGroupSchedule {
-            unit: nervix_models::Unit::Single,
             members,
             primary_node,
         }

@@ -219,7 +219,7 @@ Feature: NATS emission
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=columnar_events_in owner=node-1
+      - domain={{domain}} kind=ingestor name=columnar_events_in unit=instance:0 owner=node-1
       """
     And the last command output contains
       """

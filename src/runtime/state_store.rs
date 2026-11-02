@@ -2100,6 +2100,35 @@ impl RuntimeStateStore {
         Ok(Some(decoded))
     }
 
+    /// The units with a current checkpoint for this exact entity and state kind. Reading only
+    /// keys keeps inspection independent of the size of the retained checkpoints.
+    pub(in crate::runtime) fn stored_units(
+        &self,
+        domain: &DomainName,
+        state: RuntimeStateKind,
+        kind: ModelKind,
+        identifier: &ModelName,
+    ) -> error_stack::Result<Vec<Unit>, RuntimePersistenceError> {
+        let view = self.db.snapshot();
+        let namespace = backup::active_namespace(&view, &self.restore_publications, domain)?;
+        let mut prefix = namespace.prefix(domain);
+        prefix.extend_from_slice(domain.as_str().as_bytes());
+        prefix.extend_from_slice(&[0, u8::from(state), 0]);
+        prefix.extend_from_slice(kind.as_str().as_bytes());
+        prefix.push(0);
+        prefix.extend_from_slice(identifier.as_str().as_bytes());
+        prefix.push(0);
+        let mut units = BTreeSet::new();
+        for item in view.prefix(&self.latest, prefix) {
+            let key = item
+                .key()
+                .change_context(RuntimePersistenceError::ReadValue)?;
+            let (_, placement) = physical_placement(&key)?;
+            units.insert(placement.unit);
+        }
+        Ok(units.into_iter().collect())
+    }
+
     #[cfg_attr(
         nervix_lint,
         nervix::context(

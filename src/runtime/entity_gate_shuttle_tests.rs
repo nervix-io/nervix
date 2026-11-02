@@ -22,8 +22,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_interconnect::EntityGatePurpose;
 use nervix_model_harness::shuttle::{check_pct, check_random};
 use nervix_models::{
-    ClusterNodeName, CoordinationIdentity, DomainName, DomainNodeRef, DomainNodeUnitRef, ModelKind,
-    ModelName, NodeRef, RelayName,
+    ClusterNodeName, CoordinationIdentity, DomainName, DomainNodeRef, DomainNodeUnitRef,
+    EntityGateTargets, ModelKind, ModelName, NodeRef, NodeUnitRef, RelayName, Unit,
 };
 use nervix_primitives::{
     collections::DashMap,
@@ -484,10 +484,10 @@ fn scope(domain: &DomainName, relay: &RelayName) -> EntityGateScope {
     EntityGateScope::new(
         domain,
         std::slice::from_ref(relay),
-        &[NodeRef {
+        &nervix_models::EntityGateTargets::Entities(vec![NodeRef {
             kind: ModelKind::Relay,
             identifier: ModelName::from(relay),
-        }],
+        }]),
         EntityGatePurpose::ModelAlteration,
     )
 }
@@ -563,7 +563,7 @@ fn one_engagement_wakes_every_waiter_and_is_taken_once(deadline: Instant) {
                     "shuttle engagement",
                     deadline,
                 ),
-                affected_entities: Vec::new(),
+                targets: EntityGateTargets::default(),
                 purpose: EntityGatePurpose::ModelAlteration,
                 quiesced_ingestors: Vec::new(),
             });
@@ -793,7 +793,7 @@ fn releasing_an_ownership_handoff_wakes_every_frozen_waiter(deadline: Instant) {
                         "shuttle ownership handoff",
                         deadline,
                     ),
-                    affected_entities: vec![entity],
+                    targets: EntityGateTargets::Entities(vec![entity]),
                     purpose: EntityGatePurpose::OwnershipHandoff,
                     quiesced_ingestors: Vec::new(),
                 },
@@ -868,7 +868,7 @@ fn observing_an_ownership_handoff_freeze_never_misses_its_release() {
                         gates: Vec::new(),
                         branch_gates: Vec::new(),
                     },
-                    affected_entities: vec![entity],
+                    targets: EntityGateTargets::Entities(vec![entity]),
                     purpose: EntityGatePurpose::OwnershipHandoff,
                     quiesced_ingestors: Vec::new(),
                 },
@@ -902,6 +902,8 @@ fn handoff_freeze_follows_admitted_route_flush() {
             ModelKind::Ingestor,
             ModelName::parse("source").assured("valid source"),
         );
+        let targets =
+            EntityGateTargets::Units(vec![NodeUnitRef::new(entity.clone(), Unit::Single)]);
         let counters = runtime.node_quiesce_counters(&domain, entity.clone());
         let mut participant = runtime.force_flush_participant(&domain, counters.clone());
         counters.admit(1);
@@ -913,12 +915,7 @@ fn handoff_freeze_follows_admitted_route_flush() {
         ));
         assert!(
             !runtime
-                .freeze_drained_ownership_handoff(
-                    &coordination(),
-                    &domain,
-                    &[],
-                    std::slice::from_ref(&entity)
-                )
+                .freeze_drained_ownership_handoff(&coordination(), &domain, &[], &targets)
                 .is_drained()
         );
         assert!(!freeze.observe().is_frozen());
@@ -943,14 +940,14 @@ fn handoff_freeze_follows_admitted_route_flush() {
         });
         let freezing_runtime = runtime.clone();
         let freezing_domain = domain.clone();
-        let freezing_entity = entity.clone();
+        let freezing_targets = targets.clone();
         let freeze_task = nervix_primitives::task::spawn(async move {
             while !freezing_runtime
                 .freeze_drained_ownership_handoff(
                     &coordination(),
                     &freezing_domain,
                     &[],
-                    std::slice::from_ref(&freezing_entity),
+                    &freezing_targets,
                 )
                 .is_drained()
             {
@@ -965,7 +962,7 @@ fn handoff_freeze_follows_admitted_route_flush() {
                     .entity_drain_status(
                         &freezing_domain,
                         &[],
-                        &[freezing_entity],
+                        &freezing_targets,
                         EntityGatePurpose::OwnershipHandoff
                     )
                     .is_drained()

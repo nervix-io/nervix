@@ -47,7 +47,7 @@ Feature: Remote relay senders held back while relay memory is full
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=grant_hold_source owner=node-1
+      - domain={{domain}} kind=ingestor name=grant_hold_source unit=instance:0 owner=node-1
       """
     And the last command output contains
       """
@@ -145,7 +145,7 @@ Feature: Remote relay senders held back while relay memory is full
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=storage_hold_source owner=node-1
+      - domain={{domain}} kind=ingestor name=storage_hold_source unit=instance:0 owner=node-1
       """
     And the last command output contains
       """

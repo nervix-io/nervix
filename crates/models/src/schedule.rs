@@ -135,6 +135,64 @@ impl NodeUnitRef {
     }
 }
 
+/// The scope of an intake gate: a model operation selects complete logical entities, whereas an
+/// ownership handoff selects only the units being transferred.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum EntityGateTargets {
+    Entities(Vec<NodeRef>),
+    Units(Vec<NodeUnitRef>),
+}
+
+impl Default for EntityGateTargets {
+    fn default() -> Self {
+        Self::Entities(Vec::new())
+    }
+}
+
+impl EntityGateTargets {
+    pub fn entities(&self) -> Vec<NodeRef> {
+        match self {
+            Self::Entities(entities) => entities.clone(),
+            Self::Units(units) => units
+                .iter()
+                .map(|unit| unit.node.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    pub fn contains(&self, member: &NodeUnitRef) -> bool {
+        match self {
+            Self::Entities(entities) => entities.contains(&member.node),
+            Self::Units(units) => units.contains(member),
+        }
+    }
+
+    pub fn normalized(&self) -> Self {
+        match self {
+            Self::Entities(entities) => Self::Entities(
+                entities
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+            ),
+            Self::Units(units) => Self::Units(
+                units
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+            ),
+        }
+    }
+}
+
 /// A scheduled unit in its owning domain. Shared by state assignment and ownership records.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct DomainNodeUnitRef {
@@ -232,8 +290,7 @@ pub struct ScheduledModel<'a, M> {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct PlacementGroupSchedule {
-    pub members: Vec<NodeRef>,
-    pub unit: Unit,
+    pub members: Vec<NodeUnitRef>,
     pub primary_node: Option<ClusterNodeName>,
 }
 
@@ -456,20 +513,24 @@ impl ScheduledNode {
     /// An unplaced entry for `config`, whose records are laid out by the schemas `schema_fingerprint`
     /// covers, before a scheduler decides which cluster nodes run it.
     pub fn new(config: Model, schema_fingerprint: SchemaFingerprint) -> Self {
-        let unit = ScheduledUnit::for_model(&config);
+        let units = Self::units_for(&config, None)
+            .into_iter()
+            .map(|unit| (unit, ScheduledUnit::for_model(&config)))
+            .collect();
         Self {
             identifier: config.name(),
             config: Box::new(config),
             resolved_branching: None,
             schema_fingerprint,
             kafka_partition_schedule: None,
-            units: IndexMap::from([(Unit::Single, unit)]),
+            units,
         }
     }
 
     /// The complete branch declaration the registry resolved for this node, and the units it
     /// decides: a relay of a branch with several partitions is scheduled as one `Partition` unit
-    /// per partition, and every other node keeps its one `Single` unit. Units are unplaced until
+    /// per partition. Fixed-count ingestors declare `Instance` units; the registry supplies a
+    /// per-partition ingestor's resolved units with [`Self::with_units`]. Units are unplaced until
     /// [`Self::placed_on`] or [`Self::place_unit`] places them.
     #[must_use]
     pub fn with_resolved_branching(mut self, branching: Option<ResolvedBranching>) -> Self {
@@ -485,10 +546,33 @@ impl ScheduledNode {
         self
     }
 
+    /// Installs an explicit unit declaration. Units retained by the declaration retain their
+    /// placements; newly declared units are unplaced.
+    #[must_use]
+    pub fn with_units(mut self, units: &[Unit]) -> Self {
+        let mut previous = std::mem::take(&mut self.units);
+        self.units = units
+            .iter()
+            .map(|unit| {
+                let scheduled = previous
+                    .swap_remove(unit)
+                    .unwrap_or_else(|| ScheduledUnit::for_model(self.config.as_ref()));
+                (*unit, scheduled)
+            })
+            .collect();
+        self
+    }
+
     /// The units a node configured by `config` is scheduled as under `branching`.
     fn units_for(config: &Model, branching: Option<&ResolvedBranching>) -> Vec<Unit> {
         match (config, branching) {
             (Model::Relay(_), Some(branching)) => branching.units(),
+            (Model::Ingestor(ingestor), _) => match ingestor.input.instances() {
+                Some(crate::IngestorInstances::Count(count)) => (0..count.get())
+                    .map(|index| Unit::Instance(u32::from(index)))
+                    .collect(),
+                _ => vec![Unit::Single],
+            },
             _ => vec![Unit::Single],
         }
     }
@@ -542,18 +626,16 @@ impl ScheduledNode {
         self
     }
 
-    /// The sole unit of a node that is not scheduled as partitions.
+    /// The unit of a node with exactly one execution unit, regardless of its unit kind.
     pub fn single_unit(&self) -> &ScheduledUnit {
-        self.units
-            .get(&Unit::Single)
-            .assured("only relays of partitioned branches are scheduled without a Single unit")
+        self.sole_unit()
+            .assured("this operation selects a node with exactly one execution unit")
     }
 
-    /// The sole unit of a node that is not scheduled as partitions.
+    /// The unit of a node with exactly one execution unit, mutably.
     pub fn single_unit_mut(&mut self) -> &mut ScheduledUnit {
-        self.units
-            .get_mut(&Unit::Single)
-            .assured("only relays of partitioned branches are scheduled without a Single unit")
+        self.sole_unit_mut()
+            .assured("this operation selects a node with exactly one execution unit")
     }
 
     /// The first unit of this node in unit order. A placement group places every unit of each
@@ -833,16 +915,20 @@ impl ScheduledNode {
         self.units.values().any(|unit| unit.is_assigned_to(node_id))
     }
 
-    /// The one unit of a node scheduled as a single unit, and `None` for a relay scheduled as
-    /// several partitions, whose units each have their own placement.
+    /// The one execution unit of a node, or `None` when its units have distinct placements.
     pub fn sole_unit(&self) -> Option<&ScheduledUnit> {
-        self.units.get(&Unit::Single)
+        match self.units.len() {
+            1 => self.units.values().next(),
+            _ => None,
+        }
     }
 
-    /// The one unit of a node scheduled as a single unit, mutably, and `None` for a relay
-    /// scheduled as several partitions.
+    /// The one execution unit of a node, mutably, or `None` for several units.
     pub fn sole_unit_mut(&mut self) -> Option<&mut ScheduledUnit> {
-        self.units.get_mut(&Unit::Single)
+        match self.units.len() {
+            1 => self.units.values_mut().next(),
+            _ => None,
+        }
     }
 
     /// The one node a single-unit node is assigned to, when it is assigned to exactly one. `None`

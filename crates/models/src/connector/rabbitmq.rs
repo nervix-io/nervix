@@ -16,7 +16,7 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::num::{NonZeroU16, NonZeroU64};
+use std::num::NonZeroU16;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -89,7 +89,7 @@ fn rabbitmq_name_rule(text: &str) -> Result<(), ExternalNameError> {
 pub struct RabbitMqQueueIngestor {
     pub client: ClientName,
     pub queue: RabbitMqQueueName,
-    pub instances: NonZeroU64,
+    pub instances: crate::IngestorInstances,
     pub mode: RabbitMqIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
@@ -221,6 +221,7 @@ const RABBITMQ_EXCHANGE_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for RabbitMqQueueIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::PerPartition,
         // An AMQP field table holds one value per name, in ascending order of name.
         headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),
         metadata: IngestorMetadataDeclaration::NONE,
@@ -244,6 +245,10 @@ impl IngestorDeclaration for RabbitMqQueueIngestor {
 }
 
 impl IngestorEntityBody for RabbitMqQueueIngestor {
+    fn instances(&self) -> Option<crate::IngestorInstances> {
+        Some(self.instances)
+    }
+
     fn reference(&self) -> IngestorReference<'_> {
         IngestorReference::Client(&self.client)
     }

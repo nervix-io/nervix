@@ -31,7 +31,30 @@ use super::{
 /// The resolved connector plan and the resource mounts kept alive while it is used.
 struct ResolvedMqttIngestor {
     connector: MqttTopicIngestorPlan,
-    client_mounts: Vec<Arc<ClientResourceMounts>>,
+    client_mounts: Arc<[Option<Arc<ClientResourceMounts>>]>,
+}
+
+/// Immutable per-instance client material rendered once for a logical ingestor on this node.
+struct RenderedMqttClient {
+    entries: Arc<[Vec<nervix_models::ClientConfigEntry>]>,
+    mounts: Arc<[Option<Arc<ClientResourceMounts>>]>,
+}
+
+pub(in crate::runtime) struct PreparedMqttIngestorClient {
+    declaration: MqttTopicIngestorStartPlan,
+    rendered: Arc<RenderedMqttClient>,
+}
+
+impl PreparedMqttIngestorClient {
+    pub(in crate::runtime) fn agrees_with(
+        &self,
+        name: &IngestorName,
+        revision: &ExecutionRevision,
+    ) -> bool {
+        revision.entrypoints.ingestor(name, Unit::Instance(0)).is_some_and(|plan|
+            matches!(&plan.input, IngestorInputPlan::Transport(input)
+                if matches!(&input.source, IngestorConnectorPlan::Mqtt(MqttIngestorStartPlan::Topic(source)) if source == &self.declaration)))
+    }
 }
 
 const _: () = assert!(matches!(
@@ -82,7 +105,15 @@ impl MqttTopicIngestorStartPlan {
             // the connection once one and a half keep-alive intervals pass without a packet from
             // it, and lose what was published until the ingestor reconnects.
             unacknowledged_admission: QueueAdmission::RefuseWhenFull,
-            client_mounts,
+            client_mounts: client_mounts
+                .get(
+                    usize::try_from(ingestor.instance_index())
+                        .assured("a source unit index fits usize"),
+                )
+                .assured("rendering retains one mount slot per global instance")
+                .clone()
+                .into_iter()
+                .collect(),
         }
         .open::<MqttTopicIngestor>(ingestor)
         .await
@@ -93,23 +124,47 @@ impl MqttTopicIngestorStartPlan {
         runtime: &Runtime,
         ingestor: &IngestorSpec,
     ) -> error_stack::Result<ResolvedMqttIngestor, IngestorConnectorStartError> {
-        let mut instance_configs = Vec::with_capacity(self.instances.get().arch_into());
-        let mut client_mounts = Vec::new();
-        for instance_index in 0..self.instances.get() {
-            nervix_primitives::task::consume_budget().await;
-            let resolved = runtime
-                .resolve_client_config_with_instance(
-                    &ingestor.domain,
-                    self.client.mount.as_ref(),
-                    &self.client.config,
-                    instance_index,
-                )
-                .change_context(IngestorConnectorStartError::ClientConfiguration)?;
-            instance_configs.push(resolved.entries);
-            if let Some(mounts) = resolved.mounts {
-                client_mounts.push(mounts);
+        let cached = match runtime.inner.executions.get(&ingestor.domain) {
+            Some(execution) => match execution.mqtt_ingestor_clients.get(&ingestor.name) {
+                Some(prepared) if prepared.declaration == *self => Some(prepared.rendered.clone()),
+                _ => None,
+            },
+            None => None,
+        };
+        let rendered = match cached {
+            Some(rendered) => rendered,
+            None => {
+                let mut entries = Vec::with_capacity(self.instances.get().arch_into());
+                let mut mounts = Vec::with_capacity(self.instances.get().arch_into());
+                for index in 0..self.instances.get() {
+                    nervix_primitives::task::consume_budget().await;
+                    let resolved = runtime
+                        .resolve_client_config_with_instance(
+                            &ingestor.domain,
+                            self.client.mount.as_ref(),
+                            &self.client.config,
+                            index,
+                        )
+                        .change_context(IngestorConnectorStartError::ClientConfiguration)?;
+                    entries.push(resolved.entries);
+                    mounts.push(resolved.mounts);
+                }
+                let rendered = Arc::new(RenderedMqttClient {
+                    entries: entries.into(),
+                    mounts: mounts.into(),
+                });
+                if let Some(mut execution) = runtime.inner.executions.get_mut(&ingestor.domain) {
+                    execution.mqtt_ingestor_clients.insert(
+                        ingestor.name.clone(),
+                        PreparedMqttIngestorClient {
+                            declaration: self.clone(),
+                            rendered: rendered.clone(),
+                        },
+                    );
+                }
+                rendered
             }
-        }
+        };
         let Some(dns) = runtime.dns() else {
             return Err(Report::new(IngestorConnectorStartError::NodeDnsUnavailable));
         };
@@ -118,10 +173,11 @@ impl MqttTopicIngestorStartPlan {
         let read_ahead_dropped = runtime.inner.metrics.ingestor_read_ahead_dropped_payloads(
             &ingestor.domain,
             &ingestor.name,
+            ingestor.unit,
             dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
         );
         let connector = MqttTopicIngestorPlan::new(MqttTopicIngestorSettings {
-            instances: instance_configs,
+            instances: rendered.entries.clone(),
             client_id_conflict: MqttTopicIngestorPlan::client_id_conflict(
                 &self.client.config,
                 self.instances,
@@ -137,7 +193,7 @@ impl MqttTopicIngestorStartPlan {
         });
         Ok(ResolvedMqttIngestor {
             connector,
-            client_mounts,
+            client_mounts: rendered.mounts.clone(),
         })
     }
 
@@ -145,8 +201,16 @@ impl MqttTopicIngestorStartPlan {
         &self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
+        units: &[Unit],
         replacement: Option<&Self>,
     ) -> error_stack::Result<(), RuntimeError> {
+        let ending = units
+            .iter()
+            .map(|unit| match unit {
+                Unit::Instance(index) => u64::from(*index),
+                _ => unreachable!("MQTT plans declare instance units"),
+            })
+            .collect::<std::collections::BTreeSet<_>>();
         let context = || RuntimeError::RetireIngestorEntity {
             domain: ingestor.domain.clone(),
             ingestor: ingestor.name.clone(),
@@ -193,7 +257,11 @@ impl MqttTopicIngestorStartPlan {
         if let Some(previous) = previous.as_ref()
             && let Some(sessions) = previous_sessions.as_ref()
         {
-            let instances = sessions.retiring_instances(replacement_sessions.as_ref());
+            let instances = sessions
+                .retiring_instances(replacement_sessions.as_ref())
+                .into_iter()
+                .filter(|index| ending.contains(index))
+                .collect();
             for error in previous.retire_instances(instances).await {
                 nervix_primitives::task::consume_budget().await;
                 let error = error.change_context(context());
@@ -208,7 +276,11 @@ impl MqttTopicIngestorStartPlan {
         );
         // A changed subscription starts from a clean session at the new endpoint even when
         // cleanup at the preceding endpoint failed. Sessions unchanged by the transition stay.
-        let instances = sessions.retiring_instances(previous_sessions.as_ref());
+        let instances = sessions
+            .retiring_instances(previous_sessions.as_ref())
+            .into_iter()
+            .filter(|index| ending.contains(index))
+            .collect();
         let mut first_failure = None;
         for error in replacement.retire_instances(instances).await {
             nervix_primitives::task::consume_budget().await;

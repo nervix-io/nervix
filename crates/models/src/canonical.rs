@@ -4911,7 +4911,7 @@ mod tests {
                         client: named("kafka_main"),
                         topic: named("Orders.Topic"),
                         offset_mode: KafkaOffsetMode::ConsumerGroup(named("Orders Group")),
-                        instances: nonzero!(3u64),
+                        instances: crate::IngestorInstances::Count(nonzero!(3u16)),
                         mode: KafkaIngestMode::AckParallel {
                             max: nonzero!(8u64),
                             batch_timeout: "100ms".to_string(),
@@ -4936,7 +4936,7 @@ mod tests {
                             name: named("Readers"),
                             ownership: PulsarSubscriptionOwnership::Provisioned,
                         },
-                        instances: nonzero!(1u64),
+                        instances: crate::IngestorInstances::Count(nonzero!(1u16)),
                         mode: PulsarIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
@@ -4951,7 +4951,7 @@ mod tests {
                     decoded(MqttTopicIngestor {
                         client: named("mqtt_main"),
                         topic: named("devices/+/Orders"),
-                        instances: nonzero!(2u64),
+                        instances: crate::IngestorInstances::Count(nonzero!(2u16)),
                         session: MqttSession::Clean,
                         qos: MqttQos::Qos0,
                         mode: MqttIngestMode::NoAck,
@@ -4967,7 +4967,7 @@ mod tests {
                     decoded(MqttTopicIngestor {
                         client: named("mqtt_main"),
                         topic: named("devices/#"),
-                        instances: nonzero!(1u64),
+                        instances: crate::IngestorInstances::Count(nonzero!(1u16)),
                         session: MqttSession::Persistent,
                         qos: MqttQos::Qos2,
                         mode: MqttIngestMode::NoAck,
@@ -4984,7 +4984,7 @@ mod tests {
                         client: named("nats_main"),
                         subject: named("orders.*.created"),
                         queue_group: named("Orders-Workers"),
-                        instances: nonzero!(2u64),
+                        instances: crate::IngestorInstances::Count(nonzero!(2u16)),
                         mode: NatsIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Drop,
                     }),
@@ -4999,7 +4999,7 @@ mod tests {
                     decoded(RabbitMqQueueIngestor {
                         client: named("rmq_main"),
                         queue: named("Orders Queue"),
-                        instances: nonzero!(1u64),
+                        instances: crate::IngestorInstances::Count(nonzero!(1u16)),
                         mode: RabbitMqIngestMode::AckSequential {
                             timeout: "20s".to_string(),
                             retry_policy: retry.clone(),
@@ -5076,7 +5076,7 @@ mod tests {
                     decoded(SqsQueueIngestor {
                         client: named("sqs_main"),
                         queue: named("Orders.fifo"),
-                        instances: nonzero!(4u64),
+                        instances: crate::IngestorInstances::Count(nonzero!(4u16)),
                         mode: SqsIngestMode::AckSequential {
                             timeout: "45s".to_string(),
                             retry_policy: retry.clone(),

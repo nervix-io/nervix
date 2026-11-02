@@ -1220,6 +1220,7 @@ mod tests {
         );
         let mut graph = DiGraph::<ActiveNode, EdgeKind>::new();
         let relay_index = graph.add_node(ActiveNode {
+            ingestor_units: None,
             identifier: named("events"),
             kind: ModelKind::Relay,
             config: Arc::new(relay("events", "event_schema")),
@@ -1536,7 +1537,9 @@ mod tests {
                                         client: named("broker_in_2"),
                                         topic: named("notifications"),
                                         offset_mode: KafkaOffsetMode::ConsumerGroup(named("cg")),
-                                        instances: nonzero!(1u64),
+                                        instances: nervix_models::IngestorInstances::Count(
+                                            nonzero!(1u16),
+                                        ),
                                         mode: KafkaIngestMode::AckSequential {
                                             timeout: "30s".to_string(),
                                             retry_policy: nervix_models::RetryPolicy {

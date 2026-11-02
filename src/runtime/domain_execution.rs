@@ -207,6 +207,8 @@ impl std::ops::DerefMut for DomainRouting {
 }
 
 pub(super) struct DomainExecution {
+    pub(super) mqtt_ingestor_clients:
+        HashMap<IngestorName, super::ingestors::mqtt::PreparedMqttIngestorClient>,
     pub(super) revision: Arc<ExecutionRevision>,
     pub(super) start_version: u64,
     pub(super) domain_clock: DomainClock,
@@ -502,7 +504,7 @@ impl Runtime {
                 .retain(|key, _| key.entity.domain != domain);
             self.inner
                 .in_flight_by_ingestor
-                .retain(|key, _| key.domain != domain);
+                .retain(|key, _| key.entity.domain != domain);
             self.inner.generator_activity_by_domain.remove(&domain);
             if let Some((_, force_flush)) = self.inner.force_flush_by_domain.remove(&domain) {
                 force_flush.close();
@@ -948,6 +950,7 @@ impl Runtime {
         self.install_domain_execution(
             domain,
             DomainExecution {
+                mqtt_ingestor_clients: HashMap::default(),
                 revision,
                 start_version,
                 domain_clock,

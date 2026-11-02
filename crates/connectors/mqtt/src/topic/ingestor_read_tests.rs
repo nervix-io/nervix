@@ -325,7 +325,8 @@ fn acknowledged_plan_at(
         instances: vec![vec![ClientConfigEntry {
             key: "addr".to_string(),
             value: addr.to_string(),
-        }]],
+        }]]
+        .into(),
         client_id_conflict: None,
         default_client_id: "client".to_string(),
         share_group: "default~ingestor".to_string(),

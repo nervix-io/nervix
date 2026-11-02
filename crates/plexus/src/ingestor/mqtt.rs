@@ -232,7 +232,7 @@ pub(super) fn topic_body<'src>()
     client_ref()
         .then_ignore(kw(Identifier::Topic))
         .then(external_name::<MqttTopicFilter>())
-        .then(optional_instances())
+        .then(optional_instances::<MqttTopicIngestor>())
         .then(subscription().then_with_ctx(quiesce_clause()))
         .map(
             |(
@@ -323,7 +323,10 @@ mod tests {
     fn topic_filters_reach_the_ingestor_model_unchanged(#[case] filter: &str) {
         let source = source(&statement(filter, NO_ACK, "DROP"));
         assert_eq!(source.topic.as_str(), filter);
-        assert_eq!(source.instances.get(), 2);
+        assert_eq!(
+            source.instances,
+            nervix_models::IngestorInstances::Count(nonzero_ext::nonzero!(2u16))
+        );
     }
 
     #[rstest]

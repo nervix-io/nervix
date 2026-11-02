@@ -468,7 +468,8 @@ literal or names a client secret, `ALTER BRANCH` among the archived statements a
 partition count every resolved branch declaration of the committed schedule carries. Its state
 metadata requires the current `RestoredLifecycle` encoding, including the durable restore
 installation gate and the unit-keyed committed schedule in which a relay of a partitioned branch is
-scheduled as one unit per partition. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
+scheduled as one unit per partition. The current shape also requires typed ingestor instancing,
+exact-unit placement-group members and entity-versus-unit transaction gate targets. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
 are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery
 and snapshot installation therefore retain their complete magnitudes. See
 [Archived Counts](./typed-states.md#archived-counts).

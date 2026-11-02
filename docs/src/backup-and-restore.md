@@ -289,7 +289,7 @@ deduplicator keys.
 
 ```text
 backup: ./cluster.nvxb
-format: 1
+format: 3
 producer_version: 0.1.0
 language_version: 0.1.0
 cluster: nervix-3f1c
@@ -839,9 +839,8 @@ its format version, each a little-endian 16-bit integer. The rest is an
 | Deduplicator keyspace descriptor | 10 | 2 | Domain and deduplicator names, scheduled unit, schema fingerprint, branch fingerprint and typed branch fields, revision, key count and group count |
 | Window state descriptor | 11 | 2 | Domain and window processor names, scheduled unit, schema fingerprint, window model digest, branch fingerprint and typed branch fields, revision, branch incarnation, first and next admission sequence, each retained row's low/high ingestion watermarks, group count, and each aggregate's structure: rebuilt from the retained rows, or a linear histogram with its delayed removals as expiry time and bucket |
 
-The archive format major version is `2`. An archive with another major version fails before any
-state section can be skipped or installed; capture a new archive in the current unit-bearing
-format. A reader refuses invalid record magic, an unsupported
+The archive format major version is `3`. An archive with another major version fails before any
+state section can be skipped or installed; capture a new archive in the current instance-unit format. A reader refuses invalid record magic, an unsupported
 manifest or required configuration record, an unknown record kind in the manifest, a first entry
 other than the manifest, and any section whose place, length or digest differs from what the
 manifest declares. A state record whose header names another state kind than the manifest declares,
@@ -1035,3 +1034,9 @@ restore no longer plans against the cluster, reports `restore failed:`, the reas
 steps it recorded stay applied. A restore whose archive no client sent to a new leader before the
 retry validity of its execution reference ended reports `restore stopped after the steps it
 recorded`. No message includes password hashes or resource bytes.
+
+Ingestor offset and branch-lifecycle records retain their global `Instance(i)` placement. A
+quiesced cut observes and checkpoints each locally owned source unit; restore preserves those
+identities and lets the current scheduler choose their owners. Canonical Models retain fixed
+counts or `INSTANCES PER PARTITION`. The current major fences this ownership contract before any
+configuration or state is installed.

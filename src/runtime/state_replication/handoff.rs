@@ -244,8 +244,7 @@ impl Runtime {
                             && self.entity_gate_operation_owns_unit(
                                 &prepared.coordination,
                                 &entity.entity.domain,
-                                &entity.entity.node,
-                                entity.unit,
+                                &NodeUnitRef::new(entity.entity.node.clone(), entity.unit),
                                 EntityGatePurpose::OwnershipHandoff,
                             )
                     }

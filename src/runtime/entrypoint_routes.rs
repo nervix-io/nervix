@@ -502,18 +502,19 @@ impl RelayRuntimeHandles<'_> {
         &self,
         kind: ModelKind,
         identifier: &ModelName,
+        unit: Unit,
         routes: &[PlannedEntryRoute],
     ) -> error_stack::Result<HashMap<RelayName, IngestorRouteTemplate>, EntrypointBindingError>
     {
         let mut templates = HashMap::default();
         for route in routes {
             let template =
-                materialize_ingestor_route_template(kind, identifier, route, self.services)
+                materialize_ingestor_route_template(kind, identifier, unit, route, self.services)
                     .change_context(EntrypointBindingError::PrepareRoute {
-                        kind,
-                        node: identifier.clone(),
-                        relay: route.relay.clone(),
-                    })?;
+                    kind,
+                    node: identifier.clone(),
+                    relay: route.relay.clone(),
+                })?;
             templates.insert(route.relay.clone(), template);
         }
         Ok(templates)
@@ -622,7 +623,7 @@ mod tests {
     fn planned_ingestor(fixture: &EntrypointTestDomain<'_>) -> Arc<IngestorStartPlan> {
         fixture
             .plan(&domain("default"), filtering_ingestor())
-            .ingestor(&named("source"))
+            .ingestor(&named("source"), Unit::Single)
             .cloned()
             .assured("the fixture schedules the ingestor")
     }

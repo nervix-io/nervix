@@ -380,7 +380,9 @@ fn EntityOptionEditor(signals: CreateSignals, option: OptionDeclaration) -> impl
         _ => "create-ingestor-option",
     };
     view! {
-        <EntityValueEditor signals=signals keywords=keywords default=default />
+        <Show when=move || keywords != "INSTANCES" || signals.ingestor.get().source.chosen_option("INSTANCES") != Some("PER PARTITION") fallback=|| ()>
+            <EntityValueEditor signals=signals keywords=keywords default=default />
+        </Show>
         <Show when=move || !choices.is_empty() fallback=|| ()>
             <fieldset class=class data-option=keywords>
                 <legend>{keywords}</legend>
@@ -400,7 +402,7 @@ fn EntityOptionEditor(signals: CreateSignals, option: OptionDeclaration) -> impl
                                 on:click=move |_| {
                                     signals.ingestor.update(|draft| draft.source.choose_option(keywords, choice.name));
                                     signals.edit();
-                                }>{choice.name}</button>
+                                }>{if choice.name == "<count>" { "COUNT" } else { choice.name }}</button>
                         }
                     } />
             </fieldset>

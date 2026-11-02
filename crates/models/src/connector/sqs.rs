@@ -17,7 +17,7 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::{num::NonZeroU64, time::Duration};
+use std::time::Duration;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -99,7 +99,7 @@ fn sqs_queue_rule(text: &str) -> Result<(), ExternalNameError> {
 pub struct SqsQueueIngestor {
     pub client: ClientName,
     pub queue: SqsQueueName,
-    pub instances: NonZeroU64,
+    pub instances: crate::IngestorInstances,
     pub mode: SqsIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
@@ -153,6 +153,7 @@ const SQS_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for SqsQueueIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::PerPartition,
         // An SQS message's attributes: one value per name, in no order.
         headers: Some(HeaderModel::exact(HeaderLayout::LastWins)),
         metadata: IngestorMetadataDeclaration::new(&[
@@ -182,6 +183,10 @@ impl IngestorDeclaration for SqsQueueIngestor {
 }
 
 impl IngestorEntityBody for SqsQueueIngestor {
+    fn instances(&self) -> Option<crate::IngestorInstances> {
+        Some(self.instances)
+    }
+
     fn reference(&self) -> IngestorReference<'_> {
         IngestorReference::Client(&self.client)
     }

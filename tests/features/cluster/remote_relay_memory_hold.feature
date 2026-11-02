@@ -47,7 +47,7 @@ Feature: Remote relay delivery held back while the relay memory budget is full
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=remote_hold_source owner=node-1
+      - domain={{domain}} kind=ingestor name=remote_hold_source unit=instance:0 owner=node-1
       """
     And the last command output contains
       """
@@ -159,11 +159,11 @@ Feature: Remote relay delivery held back while the relay memory budget is full
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=full_hold_first_source owner=node-1
+      - domain={{domain}} kind=ingestor name=full_hold_first_source unit=instance:0 owner=node-1
       """
     And the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=full_hold_second_source owner=node-1
+      - domain={{domain}} kind=ingestor name=full_hold_second_source unit=instance:0 owner=node-1
       """
     And the last command output contains
       """
