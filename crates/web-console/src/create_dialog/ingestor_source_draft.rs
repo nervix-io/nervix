@@ -27,12 +27,13 @@ use nervix_models::{
     PrometheusIngestMode, PrometheusIngestorEntity, PrometheusQueryIngestor, PulsarIngestMode,
     PulsarIngestorEntity, PulsarSubscription, PulsarSubscriptionName, PulsarSubscriptionOwnership,
     PulsarTopicIngestor, PulsarTopicName, RabbitMqIngestMode, RabbitMqIngestorEntity,
-    RabbitMqQueueIngestor, RabbitMqQueueName, RedisChannelName, RedisIngestorEntity,
-    RedisPubSubIngestMode, RedisPubSubIngestor, RetryPolicy, SqsIngestMode, SqsIngestorEntity,
-    SqsQueueIngestor, SqsQueueName, SqsReceiveMax, SyslogIngestMode, SyslogIngestorEntity,
-    SyslogListenerIngestor, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
-    WebsocketsIngestMode, WebsocketsIngestorEntity, WebsocketsUpgradeHeader,
-    WebsocketsUpgradeHeaders, ZeroMqIngestMode, ZeroMqIngestorEntity, ZeroMqPullIngestor,
+    RabbitMqQueueIngestor, RabbitMqQueueName, RedisChannelName, RedisChannelPattern,
+    RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor, RedisSubscriptionTarget,
+    RetryPolicy, SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor, SqsQueueName, SqsReceiveMax,
+    SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor, WebsocketsConnectionIngestor,
+    WebsocketsEndpointIngestor, WebsocketsIngestMode, WebsocketsIngestorEntity,
+    WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders, ZeroMqIngestMode, ZeroMqIngestorEntity,
+    ZeroMqPullIngestor,
 };
 use strum::IntoEnumIterator as _;
 use thiserror::Error;
@@ -52,6 +53,7 @@ pub(super) struct IngestorEntityDraft {
     pub(super) topic: String,
     pub(super) queue: String,
     pub(super) channel: String,
+    pub(super) pattern: String,
     pub(super) subject: String,
     pub(super) queue_group: String,
     pub(super) subscription: String,
@@ -343,8 +345,7 @@ impl IngestorEntityDraft {
             .into(),
             IngestorEntityKind::Redis(RedisIngestorEntity::PubSub) => RedisPubSubIngestor {
                 client: self.client()?,
-                channel: RedisChannelName::parse(&self.channel)
-                    .change_context(IngestorEntityDraftError::Channel)?,
+                subscription: self.redis_subscription()?,
                 mode: RedisPubSubIngestMode::NoAck,
                 quiesce,
             }
@@ -403,6 +404,24 @@ impl IngestorEntityDraft {
             return Err(Report::new(IngestorEntityDraftError::UnsupportedQuiesce));
         }
         Ok(source)
+    }
+
+    /// The subscription the Redis fields write: the pattern where one is written, otherwise the
+    /// channel. A form that writes both names two subscriptions, which no ingestor holds.
+    fn redis_subscription(
+        &self,
+    ) -> error_stack::Result<RedisSubscriptionTarget, IngestorEntityDraftError> {
+        if self.pattern.is_empty() {
+            let channel = RedisChannelName::parse(&self.channel)
+                .change_context(IngestorEntityDraftError::Channel)?;
+            return Ok(RedisSubscriptionTarget::Channel(channel));
+        }
+        if !self.channel.is_empty() {
+            return Err(Report::new(IngestorEntityDraftError::ChannelAndPattern));
+        }
+        let pattern = RedisChannelPattern::parse(&self.pattern)
+            .change_context(IngestorEntityDraftError::Pattern)?;
+        Ok(RedisSubscriptionTarget::Pattern(pattern))
     }
 
     fn client(&self) -> error_stack::Result<ClientName, IngestorEntityDraftError> {
@@ -712,6 +731,10 @@ pub(super) enum IngestorEntityDraftError {
     Queue,
     #[error("Enter a valid channel")]
     Channel,
+    #[error("Enter a valid channel pattern")]
+    Pattern,
+    #[error("Enter a channel or a channel pattern, not both")]
+    ChannelAndPattern,
     #[error("Enter a valid subject")]
     Subject,
     #[error("Enter a valid queue group")]
@@ -925,9 +948,10 @@ mod tests {
                 draft.queue = entity.queue.to_string();
                 draft.instances = entity.instances.to_string();
             }
-            IngestorEntity::Redis(RedisIngestor::PubSub(entity)) => {
-                draft.channel = entity.channel.to_string()
-            }
+            IngestorEntity::Redis(RedisIngestor::PubSub(entity)) => match &entity.subscription {
+                RedisSubscriptionTarget::Channel(channel) => draft.channel = channel.to_string(),
+                RedisSubscriptionTarget::Pattern(pattern) => draft.pattern = pattern.to_string(),
+            },
             IngestorEntity::Sqs(SqsIngestor::Queue(entity)) => {
                 draft.queue = entity.queue.to_string();
                 draft.instances = entity.instances.to_string();
@@ -973,6 +997,34 @@ mod tests {
                     );
                 }
             });
+    }
+
+    #[test]
+    fn a_redis_form_subscribes_by_its_pattern_or_its_channel_but_never_both() {
+        use nervix_models::{RedisChannelPattern, RedisIngestor, RedisSubscriptionTarget};
+        let mut draft = complete(IngestorEntityKind::Redis(RedisIngestorEntity::PubSub));
+        draft.channel.clear();
+        draft.pattern = "orders.*".into();
+        let IngestorEntity::Redis(RedisIngestor::PubSub(source)) = draft
+            .build()
+            .assured("a pattern written alone is a subscription")
+        else {
+            panic!("the Redis Pub/Sub form builds a Redis Pub/Sub source");
+        };
+        assert_eq!(
+            source.subscription,
+            RedisSubscriptionTarget::Pattern(
+                RedisChannelPattern::parse("orders.*").assured("the pattern is within the bound")
+            )
+        );
+        draft.channel = "orders".into();
+        let error = draft
+            .build()
+            .expect_err("a channel and a pattern name two subscriptions");
+        assert_eq!(
+            error.current_context(),
+            &super::IngestorEntityDraftError::ChannelAndPattern
+        );
     }
 
     fn complete(kind: IngestorEntityKind) -> IngestorEntityDraft {

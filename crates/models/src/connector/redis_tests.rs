@@ -66,6 +66,19 @@ fn both_pubsub_directions_share_the_channel_and_client_contract() {
     assert_eq!(ingest.locator, channel);
     assert_eq!(emit.locator, channel);
     assert_eq!(
+        IngestorEntityKind::Redis(RedisIngestorEntity::PubSub).locators(),
+        [
+            LocatorDeclaration {
+                keywords: "CHANNEL",
+                name: LocatorName::External(RedisChannelName::DECLARATION),
+            },
+            LocatorDeclaration {
+                keywords: "PATTERN",
+                name: LocatorName::External(RedisChannelPattern::DECLARATION),
+            },
+        ]
+    );
+    assert_eq!(
         ingest.reference,
         IngestorReferenceKind::Client(ConnectorKind::Redis)
     );
@@ -103,7 +116,13 @@ fn pubsub_declares_payloads_without_headers_or_an_envelope() {
 
     assert_eq!(ingest.headers, None);
     assert_eq!(emit.headers, None);
-    assert!(ingest.metadata.fields().is_empty());
+    assert_eq!(
+        ingest.metadata.fields(),
+        [
+            IngestorMetadataField::new("channel", IngestorMetadataType::String),
+            IngestorMetadataField::new("pattern", IngestorMetadataType::String),
+        ]
+    );
     assert!(ingest.options.is_empty());
     assert!(emit.options.is_empty());
     assert!(emit.envelope.is_empty());
@@ -304,4 +323,54 @@ fn channel_length_is_bounded_in_utf8_bytes() {
             .as_str(),
         "a"
     );
+}
+
+#[rstest]
+#[case("orders.*")]
+#[case("Orders:[EU]?/[^x]*")]
+#[case("literal\\*star")]
+#[case(" pattern with spaces ")]
+fn channel_patterns_preserve_every_literal_byte(#[case] raw: &str) {
+    let pattern = RedisChannelPattern::try_from(raw)
+        .assured("each fixture is nonempty and fits the declared pattern byte bound");
+    assert_eq!(pattern.as_str(), raw);
+    assert_eq!(pattern.to_string(), raw);
+}
+
+#[test]
+fn channel_pattern_length_is_bounded_in_utf8_bytes() {
+    let at_bound = "é".repeat(512);
+    let pattern = RedisChannelPattern::try_from(at_bound.as_str())
+        .assured("512 two-byte characters fit the declared 1024-byte bound");
+    assert_eq!(pattern.as_str(), at_bound);
+    assert_eq!(
+        RedisChannelPattern::try_from(format!("{at_bound}*").as_str()),
+        Err(ExternalNameError::TooLong {
+            max: 1024,
+            actual: 1025,
+        })
+    );
+    assert_eq!(
+        RedisChannelPattern::try_from(""),
+        Err(ExternalNameError::Empty)
+    );
+}
+
+#[test]
+fn a_subscription_names_the_locator_it_is_written_with() {
+    let channel = RedisSubscriptionTarget::Channel(
+        RedisChannelName::try_from("orders").assured("a plain channel is within the bound"),
+    );
+    let pattern = RedisSubscriptionTarget::Pattern(
+        RedisChannelPattern::try_from("orders.*").assured("a plain pattern is within the bound"),
+    );
+    assert_eq!(channel.locator().keywords, "CHANNEL");
+    assert_eq!(pattern.locator().keywords, "PATTERN");
+    assert_eq!(channel.as_str(), "orders");
+    assert_eq!(pattern.as_str(), "orders.*");
+    assert_eq!(channel.to_string(), "channel 'orders'");
+    assert_eq!(pattern.to_string(), "pattern 'orders.*'");
+    let locators = IngestorEntityKind::Redis(RedisIngestorEntity::PubSub).locators();
+    assert!(locators.contains(&channel.locator()));
+    assert!(locators.contains(&pattern.locator()));
 }

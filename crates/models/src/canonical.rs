@@ -4990,7 +4990,7 @@ mod tests {
                     "redis_ingestor",
                     decoded(RedisPubSubIngestor {
                         client: named("redis_main"),
-                        channel: named("orders:*"),
+                        subscription: crate::RedisSubscriptionTarget::Channel(named("orders:*")),
                         mode: RedisPubSubIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Drop,
                     }),
