@@ -122,10 +122,11 @@ configuration. HTTP and WebSockets endpoint plans remain distinct entities while
 host's intake lifetime mechanism. Labels are derived from declarations and retained at plan/start
 time, without an allocation per published batch.
 
-An HTTP polling leaf carries the statement's validated method, literal headers and effective
-response size limit together with its cadence and client reference. Runtime composition resolves
-the client's mount and node DNS handle once, then passes those typed values to the connector;
-polling never reads a configuration Model to recover the request method.
+An HTTP polling leaf carries the statement's validated method, its headers, each a literal or a
+client secret reference, and its effective response size limit together with its cadence and client
+reference. Runtime composition resolves the client's mount and node DNS handle once, then passes
+those typed values to the connector, which reads each referenced secret from the client's resolved
+configuration when it opens.
 
 An Iceberg plan carries the statement's validated catalog namespace with its table identity.
 Local opening uses exactly those namespace levels, independently of the Nervix domain name.

@@ -19,7 +19,8 @@ use nervix_models::{
     ClientConfigSchemaError, ClientName, CodecName, CodecWireFormat, CreateClientHttp,
     CreateClientPrometheus, CreateClientS3, CreateClientSqs, CreateWireSchema, EmitterEntityKind,
     ErrorPolicies, FlushPolicy, GeneralErrorPolicy, HttpEmitterEntity, HttpEndpointIngestor,
-    HttpIngestor, IcebergCatalog, IcebergTableEmitter, IngestorEntity, IngestorName, JsonType,
+    HttpIngestor, HttpRequestFieldError, HttpRequestIngestMode, HttpRequestIngestor,
+    IcebergCatalog, IcebergTableEmitter, IngestorEntity, IngestorName, JsonType,
     KafkaConsumerGroupName, KafkaEmitter, KafkaIngestMode, KafkaIngestor, KafkaOffsetMode,
     KafkaTopicEmitter, KafkaTopicIngestor, MaterializedRelayState, MessageErrorPolicy,
     MqttIngestMode, MqttIngestor, MqttQos, MqttSession, MqttTopicIngestor, NatsEmitter,
@@ -1562,6 +1563,59 @@ fn an_ingestor_source_says_why_its_reject_retry_delay_names_no_duration() {
         assert_invalid_model_reason(
             &error,
             &format!("invalid quiesce REJECT RETRY AFTER duration '{retry_after}': {why}"),
+        );
+    }
+}
+
+/// An `HTTP REQUEST` ingestor polling with `method`, which the grammar takes as any string
+/// literal and leaves to this validation.
+fn http_polling_ingestor(method: &str) -> CreateIngestor {
+    let mut ingestor = ingestor_statement("polled", "notifications", "event_codec", "http", &[]);
+    let nervix_models::IngestorInput::Transport(input) = &mut ingestor.input else {
+        unreachable!("the fixture builds a transport ingestor")
+    };
+    input.source = IngestorEntity::Http(HttpIngestor::Request(HttpRequestIngestor {
+        client: named("http"),
+        method: method.to_string(),
+        headers: Vec::new(),
+        max_body_size: None,
+        every: "1s"
+            .parse()
+            .expect("the fixture cadence is a positive duration"),
+        mode: HttpRequestIngestMode::NoAck,
+        quiesce: nervix_models::IngestQuiesceMode::Suspend,
+    }));
+    ingestor
+}
+
+#[test]
+fn a_polling_method_http_cannot_send_is_refused_with_its_cause_beneath_the_ingestor() {
+    let domain = DomainName::parse("default").expect("valid domain");
+    let identifier: ModelName = named("polled");
+    for method in ["GET", "get", "POST", "PROPFIND"] {
+        validate_ingestor_source(&domain, &identifier, &http_polling_ingestor(method))
+            .expect("HTTP can send this method in a request without a body");
+    }
+    for method in ["TRACE", "connect", "GET POST", "", "G\u{e9}T"] {
+        let error = validate_ingestor_source(&domain, &identifier, &http_polling_ingestor(method))
+            .expect_err("HTTP cannot send this method");
+        assert_eq!(
+            error.current_context(),
+            &RegistryError::InvalidHttpRequestMethod {
+                domain: domain.clone(),
+                ingestor: identifier.clone(),
+            },
+            "{error:?}"
+        );
+        assert_eq!(
+            error.downcast_ref::<HttpRequestFieldError>(),
+            Some(&HttpRequestFieldError::Method),
+            "{error:?}"
+        );
+        assert_eq!(
+            format!("{error:#}"),
+            "ingestor 'polled' in domain 'default' cannot use its METHOD: method is not a \
+             supported HTTP token"
         );
     }
 }
