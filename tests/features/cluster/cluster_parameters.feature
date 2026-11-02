@@ -58,13 +58,21 @@ Feature: Committed cluster parameters
 
   Scenario: A node down during a parameter change adopts the committed record when it returns
     Given a 3 node nervix cluster is started
+    When these Plexus commands are executed on node "node-1"
+      """
+      DESCRIBE CLUSTER;
+      """
     And node "node-3" is stopped
-    When this Plexus command request with execution reference "parameter-change" is sent once to node "node-1"
+    # A refused finalization leaves the committed change recoverable under its original
+    # reference. The returning node must install that same revision before recovery completes.
+    Given the leader refuses the finalization of execution reference "parameter-change" as a leader whose lease lapsed
+    When the active session begins this Plexus command request with execution reference "parameter-change" in the background
       """
       ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;
       """
-    Then the last command request succeeded
-    And node "node-1" eventually reports status containing "node-unavailability-timeout committed=15s"
+    Then the background command request reports an unknown outcome because the leader could not confirm its lease
+    And the leader refused the finalization of execution reference "parameter-change" as a leader whose lease lapsed
+    And node "node-1" eventually reports status containing "node-unavailability-timeout committed=15s revision=2"
     When node "node-3" is started with live parameter discovery paused
     Then node "node-3" eventually reports status containing "node.initialization=initializing"
     And node "node-3" eventually reports status containing "node=node-3 cluster parameters running=not installed"
@@ -80,8 +88,8 @@ Feature: Committed cluster parameters
       SHOW TRANSACTIONS;
       """
     And live parameter discovery on node "node-3" is released
-    Then node "node-3" eventually reports status containing "node=node-3 node-unavailability-timeout running=15s"
-    And node "node-3" eventually reports status containing "node=node-3 state-snapshot-interval running=250ms"
+    Then node "node-3" eventually reports status containing "node=node-3 node-unavailability-timeout running=15s revision=2"
+    And node "node-3" eventually reports status containing "node=node-3 state-snapshot-interval running=250ms revision=2"
     And node "node-3" eventually reports status containing "node.initialization=ready"
     And node "node-3" observability path "/readyz" eventually responds with 200 and "ready"
 
@@ -90,6 +98,7 @@ Feature: Committed cluster parameters
       ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;
       """
     Then the last command request succeeded
+    And node "node-1" eventually reports status containing "node-unavailability-timeout committed=15s revision=2"
 
   Scenario Outline: Lowering a cap refuses the existing model that exceeds it on a cluster of <cluster_size>
     Given a <cluster_size> node nervix cluster is started

@@ -137,7 +137,7 @@ Feature: Client wire failure regressions
       | 1            |
       | 3            |
 
-  @client_wire_duplicate_append
+  @client_wire_duplicate_append @slots_2
   Scenario Outline: Replaying an accepted <append_kind> append does not preflight or append it again
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -996,7 +996,7 @@ Feature: Client wire failure regressions
       | 1            |
       | 3            |
 
-  @client_wire_wide_rows
+  @client_wire_wide_rows @slots_2
   Scenario Outline: A native client keeps a subscription active while it receives a row that fills most of a frame
     Given a <cluster_size> node nervix cluster is started
     And a repeated text placeholder "wide_note" of 3000000 bytes is prepared
