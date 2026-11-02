@@ -382,9 +382,10 @@ current connection, retry and deadline limits.
   `EARLIEST` reads them and `LATEST` skips them. A partition the group holds an offset for ignores
   it. `CREATE KAFKA CLIENT` refuses `auto.offset.reset`, and `OFFSET BY DOMAIN` takes no `START AT`:
   in an unpaced domain a plain `START` reads what a partition retains and `START AT NOW` skips it.
-- A Kafka client never sets `allow.auto.create.topics`; `CREATE KAFKA CLIENT` refuses it. Provision each
-  topic a Kafka ingestor reads: an ingestor never creates its topic and reports it as missing until
-  it exists.
+- For Kafka's reserved client keys and offline configuration checks, follow `Ingestors` → `Kafka`
+  and `Connector Capabilities` → `KAFKA client`. Provision both input and output topics explicitly:
+  consumers disable auto-creation, while a producer's metadata request can let the broker create
+  an output topic under its own policy. Offline validation establishes no broker availability.
 - Every Kafka client writes each librdkafka property under the Apache Kafka Java client's name,
   such as `bootstrap.servers`, `linger.ms`, `acks`, `retries`, `compression.type` and
   `delivery.timeout.ms`, and writes no `topic.` prefixed key other than librdkafka's own
@@ -462,6 +463,12 @@ current connection, retry and deadline limits.
   glob over channel names, and read `metadata.channel` and `metadata.pattern` to tell deliveries
   apart. Consult the Redis manual sections for the byte bounds, how a pattern matches, the
   metadata's nulls and unavailable header operations.
+- Choose Redis Pub/Sub only where losing and repeating messages is acceptable. Redis keeps nothing
+  for a subscription that is closed: a disconnect, an ownership handoff, a graceful shutdown and
+  intake that falls behind Redis's Pub/Sub output-buffer limit each lose what is published
+  meanwhile, and an emitter retries a `PUBLISH` answered later than the driver's 500 ms, which a
+  subscriber can then receive twice. The Redis sections of `Ingestors` and `Emitters` state each
+  window.
 - An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL` with `ON QUIESCE SUSPEND`. An emitter writes
   its request shape, `SEND SINGLE` or `SEND BATCH`, before `MODE ACK RETRY POLICY ...`. Treat
   `QUEUE` as a literal, case-preserving SQS name, and check `SQS CLIENT` keys against `Ingestors` →
@@ -551,8 +558,8 @@ current connection, retry and deadline limits.
 - Treat Kafka `NO ACK` emitter success as local librdkafka producer-queue admission. Even in
   `ATTACHED` mode, Nervix does not wait for a broker delivery receipt before completing its ACK
   share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces the
-  client's `delivery.timeout.ms` as the producer's delivery bound. The producer always reports every record, so `delivery.report.only.error` in a client's
-  `CONFIG` has no effect.
+  client's `delivery.timeout.ms` as the producer's delivery bound. The producer always requests
+  every delivery report; `CREATE KAFKA CLIENT` refuses `delivery.report.only.error` as Nervix-owned.
 - A `KAFKA TOPIC` emitter's `TIMESTAMP <expression>` is each record's Kafka create time: an exact,
   non-null, non-sensitive `DATETIME`, written as the millisecond that contains it. A time before
   `1970-01-01T00:00:00.001Z` rejects its record through `ON MESSAGE ERROR`. Read `Emitters` →

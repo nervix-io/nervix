@@ -143,24 +143,32 @@ Feature: Declared connector client configuration
       | 1            |
       | 3            |
 
-  Scenario Outline: A Kafka client refuses a host-owned delivery report property
+  Scenario Outline: A Kafka client refuses each property owned by Nervix before commit
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these Plexus commands fail with "client config key 'delivery.report.only.error' is reserved for Nervix"
+    When these Plexus commands fail with "client config key '<key>' is reserved for Nervix"
       """
       CREATE KAFKA CLIENT checked CONFIG {
         'bootstrap.servers' = '127.0.0.1:9092',
-        'delivery.report.only.error' = 'true'
+        '<key>' = '<value>'
       };
       """
 
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | key                        | value      |
+      | 1            | group.id                   | user-group |
+      | 3            | group.id                   | user-group |
+      | 1            | enable.auto.commit         | true       |
+      | 3            | enable.auto.commit         | true       |
+      | 1            | enable.partition.eof       | false      |
+      | 3            | enable.partition.eof       | false      |
+      | 1            | allow.auto.create.topics   | false      |
+      | 3            | allow.auto.create.topics   | false      |
+      | 1            | delivery.report.only.error | false      |
+      | 3            | delivery.report.only.error | false      |
 
   Scenario Outline: A client refuses a duplicate key before commit
     Given a <cluster_size> node nervix cluster is started
@@ -331,7 +339,7 @@ Feature: Declared connector client configuration
       | 1            |
       | 3            |
 
-  Scenario Outline: A driver-delegated client accepts its offline-validated property
+  Scenario Outline: A Kafka client accepts an offline-validated driver property before connecting
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
@@ -341,19 +349,21 @@ Feature: Declared connector client configuration
       """
       CREATE KAFKA CLIENT checked CONFIG {
         'bootstrap.servers' = '127.0.0.1:9092',
-        'fetch.wait.max.ms' = '100'
+        '<key>' = '<value>'
       };
       SHOW CREATE CLIENT checked;
       """
     Then the last command output contains
       """
-      'fetch.wait.max.ms' = '100'
+      '<key>' = '<shown>'
       """
 
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | key                    | value | shown    |
+      | 1            | fetch.wait.max.ms      | 100   | 100      |
+      | 3            | fetch.wait.max.ms      | 100   | 100      |
+      | 1            | statistics.interval.ms | 100   | ******** |
+      | 3            | statistics.interval.ms | 100   | ******** |
 
   Scenario Outline: A NATS client accepts its declared core write timeout
     Given a <cluster_size> node nervix cluster is started
@@ -379,24 +389,51 @@ Feature: Declared connector client configuration
       | 1            |
       | 3            |
 
-  Scenario Outline: A driver-delegated client refuses an invalid property value before commit
+  Scenario Outline: A Kafka client refuses an invalid declared property value before commit
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these Plexus commands fail with "invalid client config key 'fetch.wait.max.ms'"
+    When these Plexus commands fail with "invalid client config key '<key>'"
       """
       CREATE KAFKA CLIENT checked CONFIG {
         'bootstrap.servers' = '127.0.0.1:9092',
-        'fetch.wait.max.ms' = 'not-a-number'
+        '<key>' = 'big'
       };
       """
 
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | key               |
+      | 1            | fetch.wait.max.ms |
+      | 3            | fetch.wait.max.ms |
+      | 1            | message.max.bytes |
+      | 3            | message.max.bytes |
+
+  Scenario Outline: A Kafka client refuses native properties without exposing driver values
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands fail with "invalid client config key '<key>'"
+      """
+      CREATE KAFKA CLIENT checked CONFIG {
+        'bootstrap.servers' = '127.0.0.1:1',
+        '<key>' = 'private-driver-config-value'
+      };
+      """
+    Then the last command error does not contain
+      """
+      private-driver-config-value
+      """
+
+    Examples:
+      | cluster_size | key                    |
+      | 1            | statistics.interval.ms |
+      | 3            | statistics.interval.ms |
+      | 1            | nervix.unknown         |
+      | 3            | nervix.unknown         |
 
   Scenario Outline: A database client refuses an address the driver cannot parse
     Given a <cluster_size> node nervix cluster is started
