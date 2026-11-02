@@ -1018,8 +1018,15 @@ with that keeper, rather than a bound on the complete maintenance pass or emitte
 The Postgres client schema declares its address as a driver URL whose scheme and `sslmode` Nervix
 owns: validation and the connector read the one TLS policy through the same declared option, and
 a missing, repeated or undeclared choice is a value-free refusal before storage. The TLS files are
-conditioned on `sslmode=verify-full` in that schema, and sqlx's offline parser checks every other
-query option before commit. Its table declaration admits one or two nonempty, case-preserving
+conditioned on `sslmode=verify-full` in that schema. Before commit, sqlx's offline parser refuses a
+value it cannot read for an option it knows, such as `port`, and ignores an option it does not
+know, logging a warning that names it. The driver fills what the URL leaves out from the node's
+environment, its `PG*` variables and password file, and under `verify-full` trusts its bundled
+`webpki-roots` set together with the certificates in `tls_ca_file`; the connector applies the
+client's TLS files over the URL's own `sslrootcert`, `sslcert` and `sslkey`. Every run of rows the
+host hands it starts with one catalog query for the mapped columns' declared types, and an insert
+is refused for its rows only for a SQLSTATE of class 21, 22 or 23; every other answer leaves the
+rows unresolved for the host to retry. Its table declaration admits one or two nonempty, case-preserving
 identifier parts, which the connector quotes separately in the insert and its catalog lookup. Its
 declared batch maximum is the largest protocol message the server reads, the same bound the
 statement divider keeps every insert within, and its conflict rule is the vocabulary's, which the
@@ -2499,7 +2506,9 @@ and INSERT response. Each query has a separate budget, independent of pool check
 whole flush or retry schedule. Omission sets no Nervix response deadline. A local timeout keeps
 `DeadlineElapsed` beneath the publish context and marks the interrupted connection to close instead
 of returning it idle. SQLx's five-second close-on-drop bound retains the pool permit through closing;
-the declaration names that driver-owned cleanup wait. SQLSTATE `57014` remains a transient canceled
+the declaration names that driver-owned cleanup wait. It also declares, as unbounded, the test SQLx
+runs on every connection returned to the pool, which keeps the connection's permit until the server
+answers it. SQLSTATE `57014` remains a transient canceled
 statement; when a deadline is configured the diagnostic names it without claiming that an operator
 cancellation proves it elapsed. An unanswered INSERT remains unresolved and can be retried even
 when its external outcome is unknown.
