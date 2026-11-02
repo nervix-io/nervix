@@ -237,7 +237,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_plexus/corpus"
-domain_version = 32
+domain_version = 33
 features = []
 id = "plexus-model"
 invariant = "Canonical Plexus of a generated Model of every family reparses through the client and server grammars to the complete CREATE statement."
@@ -252,7 +252,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
-domain_version = 33
+domain_version = 34
 features = []
 id = "plexus-archive-model"
 invariant = "Complete cluster/domain archives preserve every ordered canonical Model document through export, production restore reads, semantic reparse and byte-exact re-export."
@@ -447,7 +447,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_plexus/corpus"
-domain_version = 31
+domain_version = 32
 features = []
 id = "plexus-statement"
 invariant = "Canonical Plexus of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
@@ -477,7 +477,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
-domain_version = 31
+domain_version = 32
 features = []
 id = "plexus-statement-text"
 invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical Plexus reparses to them."
@@ -492,7 +492,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatted_documents_keep_their_statements/corpus"
-domain_version = 31
+domain_version = 32
 features = []
 id = "plexus-format-document"
 invariant = "Formatting a generated document with gaps, comments and either line ending keeps its statements and comments and is idempotent."
@@ -507,7 +507,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatter_text_is_formatted_or_rejected/corpus"
-domain_version = 30
+domain_version = 31
 features = []
 id = "plexus-format-text"
 invariant = "Edited documents are either refused as unparseable or formatted without changing their statements, idempotently."
@@ -3142,6 +3142,21 @@ package = "nervix-connector-mqtt"
 random_iterations = 256
 source = "crates/connectors/mqtt/src/topic/mod.rs"
 test = "topic::tests::bolero_measured_packets_are_the_bytes_the_client_writes"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/connectors/prometheus/src/query/__fuzz__/query__answer__tests__bolero_every_sample_is_exactly_the_declared_object/corpus"
+domain_version = 1
+features = []
+id = "prometheus-sample-encoding"
+invariant = "Every sample of a generated vector, read through the production answer reader, is byte for byte the declared object: its labels of any spelling under metric, an integer as that integer, a float as the shortest text of the same bits, NaN, +Inf and -Inf as the API's strings, and an instant of any nanosecond, written as a decimal or behind an exponent, as its exact RFC 3339 text; and the metadata of a poll holds the query and the evaluation instant in the entity's declared order and types."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-connector-prometheus"
+random_iterations = 256
+source = "crates/connectors/prometheus/src/query/answer.rs"
+test = "query::answer::tests::bolero_every_sample_is_exactly_the_declared_object"
 test_target = "lib"
 
 [[target]]
