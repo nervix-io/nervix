@@ -248,13 +248,13 @@ Feature: Pulsar emission
       | timestamped | TIMESTAMP input.event_at |
 
     Examples:
-      | cluster_size | mode                                                                 |
-      | 1            | ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s      |
-      | 3            | ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s      |
-      | 1            | ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s  |
-      | 3            | ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s  |
-      | 1            | NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                              |
-      | 3            | NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                              |
+      | cluster_size | mode                                                                |
+      | 1            | ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s     |
+      | 3            | ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s     |
+      | 1            | ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s |
+      | 3            | ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s |
+      | 1            | NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                             |
+      | 3            | NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                             |
 
   # DELIVER AFTER is measured from the batch's execution time, which TIMESTAMP now() writes beside
   # it. A broker holds a delayed message back from a shared subscription and may hand it over as
@@ -319,18 +319,18 @@ Feature: Pulsar emission
       envelope: TIMESTAMP now() DELIVER AFTER 4s
       """
     And SHOW CREATE EMITTER on the leader node renders these clauses
-      | emitter | clause          |
-      | delayed | TIMESTAMP now() |
+      | emitter | clause           |
+      | delayed | TIMESTAMP now()  |
       | delayed | DELIVER AFTER 4s |
 
     Examples:
-      | cluster_size | mode                                                                 |
-      | 1            | ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s      |
-      | 3            | ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s      |
-      | 1            | ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s  |
-      | 3            | ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s  |
-      | 1            | NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                              |
-      | 3            | NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                              |
+      | cluster_size | mode                                                                |
+      | 1            | ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s     |
+      | 3            | ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s     |
+      | 1            | ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s |
+      | 3            | ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s |
+      | 1            | NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                             |
+      | 3            | NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                             |
 
   # The endpoint holds the first attempt past its ACK TIMEOUT, so its outcome is unknown and the
   # emitter sends the message again. The host keeps the envelope and execution time of the batch it
