@@ -665,9 +665,10 @@ host as the caller wrote it and one `DnsLookupFailure`, the closed set that
 through one of the resolver's hooks receives the `DnsLookupError` itself and keeps it among the
 causes of its own connection error, where `DnsLookupError::find_in` recovers it. The HTTP request
 emitter, RabbitMQ, Syslog, WebSocket, Redis, MQTT, ClickHouse, SQS and the native session client keep
-it beneath their own failure, as the paragraphs below describe. HTTP polling, Prometheus, Sentry,
-OTEL and Iceberg report their failed request, export or catalog call without it, so their
-diagnostics do not name the lookup failure.
+it beneath their own failure, as the paragraphs below describe. HTTP polling keeps the Reqwest
+error and its causes beneath its own failure, so its diagnostic names the lookup failure as well,
+though no scenario asserts it. Prometheus, Sentry, OTEL and Iceberg report their failed request,
+export or catalog call without it, so their diagnostics do not name the lookup failure.
 
 During cluster startup, a node that has recovered Raft peer endpoints logs a failed lookup of its
 configured bootstrap host at `warn` and continues with the recovered seeds. A node without recovered
@@ -1332,6 +1333,10 @@ which names only the ingestor and its domain. It names the offending header of a
 ingestor's `HEADERS`, and the client key of a `CLIENT SECRET` it cannot read, with the client where
 the key is undeclared. It never quotes the key's value, and neither does the connector's
 `InvalidHeader` when a rendered secret cannot be a header at open.
+A polling ingestor's `METHOD` that HTTP cannot send is refused at `CREATE` and `ALTER` in the same
+shape: `HttpRequestFieldError` is the frame beneath the registry's `InvalidHttpRequestMethod`
+context, which names only the ingestor and its domain, as in `ingestor 'polled' in domain 'shop'
+cannot use its METHOD: method is not a supported HTTP token`.
 An Iceberg emitter's location refusal names its domain, emitter and `LOCATION`, with the
 vocabulary's typed location failure beneath that context. A malformed URL retains its URL-parser
 cause; a storage-scheme mismatch names the found scheme and the schemes its declared client

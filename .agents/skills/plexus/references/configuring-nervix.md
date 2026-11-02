@@ -30,6 +30,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Resources, uploads, mounts, and TLS files | `Resources` |
 | Syslog wire schema, codec fields, UDP/TCP/TLS framing, per-connection versus total buffer bounds, clients, sources, and emitters | `Common` → `Syslog`, and `Connector Capabilities` |
 | Source transports, delivery modes, headers, and ingestor routes | `Ingestors` |
+| HTTP polling requests and client secrets, responses, failed polls, the response bound, and the `HTTP CLIENT` keys, redirects and proxy both directions share | `Ingestors` → `HTTP REQUEST`, then `Emitters` → `HTTP client transport` |
 | Client, ingestor and emitter heads, their connector/entity choice, and kind-preserving ALTER | `Plexus Overview` → `Statement catalog`, then `Connector Capabilities` and the entity's manual section |
 | Kafka domain offsets across explicit starts, reconnects, instance changes and restored backups | `Ingestors` → `Kafka`, and `Backup And Restore` |
 | Plexus entity modes, ordered options, typed metadata, generated client CONFIG key/type/confidentiality tables and directional differences | `Connector Capabilities`, then the entity's `Ingestors` or `Emitters` section |
@@ -515,6 +516,16 @@ current connection, retry and deadline limits.
   generators run once immediately; Prometheus first runs after one interval. Keep later work on
   the original schedule, coalesce missed periods without a catch-up burst, query Prometheus at the
   due instant, and use a fresh execution snapshot for returned data and generated routes.
+- An `HTTP REQUEST` ingestor sends its `METHOD` and `HEADERS` to its client's `endpoint` exactly as
+  written, path and query included, so declare one `HTTP CLIENT` for each polled resource; a client
+  an `HTTP REQUEST` emitter also uses must name an origin. Keep credentials in `secret.<name>` keys
+  read through `CLIENT SECRET`, never in a `HEADERS` literal. A status outside `2xx`, a redirect the
+  client does not follow, or a body above `MAX BODY SIZE` (`16MiB` when left out) fails the poll as
+  the ingestor's transient error, and the failed instant is not polled again; `204` delivers
+  nothing. A `gzip`, `deflate` or `br` response arrives decompressed and without its
+  `content-encoding` and `content-length` headers. Read `Ingestors` → `HTTP REQUEST` for the
+  request, responses, failures and the shared client keys, and `Emitters` → `HTTP client transport`
+  for redirects and proxies.
 - Every `PROMETHEUS CLIENT` sets `addr` to the API root, an `http` or `https` URL without a
   query string or fragment, and a positive `timeout_ms`. It sets no key beyond `tls_ca_file` and
   the paired `tls_cert_file` and `tls_key_file`; `CREATE PROMETHEUS CLIENT` refuses any other. It
