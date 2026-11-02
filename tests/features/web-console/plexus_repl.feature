@@ -1738,7 +1738,7 @@ Feature: Web console Plexus REPL
         FLUSH EACH 250ms MAX BATCH SIZE 512kb
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG; CREATE KAFKA TOPIC INGESTOR auth_server_activity
-        FROM kafka_auth TOPIC 'datalake_auth_activity' OFFSET BY CONSUMER GROUP 'datalake_demo_auth' INSTANCES 4 MODE NO ACK
+        FROM kafka_auth TOPIC 'datalake_auth_activity' OFFSET BY CONSUMER GROUP 'datalake_demo_auth' START AT LATEST INSTANCES 4 MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING activity_codec
         TO auth_activity_landing
         INHERIT ALL

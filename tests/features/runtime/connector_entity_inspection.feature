@@ -48,7 +48,7 @@ Feature: Every connector entity uses the shared inspection rows
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE KAFKA TOPIC INGESTOR kafka_source
-        FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers'
+        FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -147,8 +147,8 @@ Feature: Every connector entity uses the shared inspection rows
       | 3            | ws_endpoint_source   | WEBSOCKETS ENDPOINT   | ws_ingress                                             | none                                                                   | NO ACK                                                                | REJECT RETRY AFTER 5s |
       | 1            | ws_connection_source | WEBSOCKETS CONNECTION | ws_main                                                | HEADERS { 'x-trace' = 'stream' }                                       | NO ACK                                                                | DROP                  |
       | 3            | ws_connection_source | WEBSOCKETS CONNECTION | ws_main                                                | HEADERS { 'x-trace' = 'stream' }                                       | NO ACK                                                                | DROP                  |
-      | 1            | kafka_source         | KAFKA TOPIC           | kafka_main TOPIC 'Orders'                              | OFFSET BY CONSUMER GROUP 'Readers' INSTANCES 1                         | NO ACK                                                                | SUSPEND               |
-      | 3            | kafka_source         | KAFKA TOPIC           | kafka_main TOPIC 'Orders'                              | OFFSET BY CONSUMER GROUP 'Readers' INSTANCES 1                         | NO ACK                                                                | SUSPEND               |
+      | 1            | kafka_source         | KAFKA TOPIC           | kafka_main TOPIC 'Orders'                              | OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST INSTANCES 1         | NO ACK                                                                | SUSPEND               |
+      | 3            | kafka_source         | KAFKA TOPIC           | kafka_main TOPIC 'Orders'                              | OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST INSTANCES 1         | NO ACK                                                                | SUSPEND               |
       | 1            | pulsar_source        | PULSAR TOPIC          | pulsar_main TOPIC 'persistent://public/default/Orders' | SUBSCRIPTION 'Readers' OWNED BY INGESTOR START AT EARLIEST INSTANCES 1 | ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s      | SUSPEND               |
       | 3            | pulsar_source        | PULSAR TOPIC          | pulsar_main TOPIC 'persistent://public/default/Orders' | SUBSCRIPTION 'Readers' OWNED BY INGESTOR START AT EARLIEST INSTANCES 1 | ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s      | SUSPEND               |
       | 1            | rabbitmq_source      | RABBITMQ QUEUE        | rabbit_main QUEUE 'Orders'                             | INSTANCES 1                                                            | ACK SEQUENTIAL ACK TIMEOUT 20s RETRY POLICY BACKOFF 1s MAX 30s        | SUSPEND               |
@@ -218,7 +218,7 @@ Feature: Every connector entity uses the shared inspection rows
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE KAFKA TOPIC INGESTOR kafka_source
-        FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers'
+        FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

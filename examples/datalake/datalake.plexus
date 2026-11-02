@@ -541,7 +541,7 @@ CREATE NATS SUBJECT INGESTOR edge_server_activity
   ON GENERAL ERROR LOG;
 
 CREATE KAFKA TOPIC INGESTOR auth_server_activity
-  FROM kafka_auth TOPIC 'datalake_auth_activity' OFFSET BY CONSUMER GROUP 'datalake_demo_auth' INSTANCES 4 MODE NO ACK ON QUIESCE SUSPEND
+  FROM kafka_auth TOPIC 'datalake_auth_activity' OFFSET BY CONSUMER GROUP 'datalake_demo_auth' START AT LATEST INSTANCES 4 MODE NO ACK ON QUIESCE SUSPEND
   DECODE USING auth_activity_json_codec
   TIMESTAMP AT ts
   TO auth_activity_landing

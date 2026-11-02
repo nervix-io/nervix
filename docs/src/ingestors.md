@@ -13,7 +13,7 @@ CREATE BRANCH by_user
 CREATE IF NOT EXISTS KAFKA TOPIC INGESTOR kafka_notifications
   FROM kafka_main
   TOPIC 'notifications'
-  OFFSET BY CONSUMER GROUP 'nervix_consumer'
+  OFFSET BY CONSUMER GROUP 'nervix_consumer' START AT LATEST
   INSTANCES 1
   MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
   ON QUIESCE SUSPEND DECODE USING notification_codec
@@ -55,7 +55,8 @@ reference is refused when the statement is applied, with a message that names bo
 `requires a KAFKA client, but client 'cache' is a REDIS client`. `SHOW CREATE INGESTOR` renders the
 complete statement under its head. `DESCRIBE INGESTOR` prints the pair, reference and locator on
 its `from:` line, such as `from: KAFKA TOPIC kafka_main TOPIC 'Orders'`. The following rows show
-`options: OFFSET BY CONSUMER GROUP 'Readers' INSTANCES 1`, `mode: NO ACK`, and `quiesce: SUSPEND`.
+`options: OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST INSTANCES 1`, `mode: NO ACK`, and
+`quiesce: SUSPEND`.
 The shared [inspection block](connector-contract.md#shared-entity-presentation) then reports its
 envelope, batching, output flush policies and error policies. `SHOW INGESTORS` prints the pair
 alone, such as `from=KAFKA TOPIC`.
@@ -1081,7 +1082,7 @@ See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md
 ```plexus,ignore
 CREATE KAFKA TOPIC INGESTOR <name>
   FROM <client> TOPIC 'orders'
-  (OFFSET BY DOMAIN | OFFSET BY CONSUMER GROUP 'readers')
+  (OFFSET BY DOMAIN | OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST | OFFSET BY CONSUMER GROUP 'readers' START AT LATEST)
   [INSTANCES 2]
   MODE <mode>
   ON QUIESCE <quiesce>
@@ -1097,7 +1098,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | KAFKA client |
 | Locator and validation rule | TOPIC 'orders' (kafka_topic) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers'` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); optional; default 1 |
+| Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST` (string literal checked by kafka_consumer_group); `OFFSET BY CONSUMER GROUP 'readers' START AT LATEST` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.partition: I32 OPTIONAL<br>metadata.offset: I64 OPTIONAL<br>metadata.key: BYTES OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.timestamp_type: STRING OPTIONAL<br>metadata.tombstone: BOOL OPTIONAL |
@@ -1115,10 +1116,11 @@ See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#
 `TOPIC` takes a string literal that Kafka accepts as a topic name: 1 to 249 ASCII letters, digits,
 `.`, `_` and `-`, other than `.` and `..`. Nervix preserves its case in both directions, so
 `TOPIC 'Orders.EU'` reads exactly that topic. `OFFSET BY CONSUMER GROUP` takes the group's name as
-a string literal of 1 to 255 bytes without control characters, passed to Kafka as written. The
-ingestor names `ON QUIESCE SUSPEND`, the only quiesce mode it declares: the topic keeps its records
-after they are read, so a suspended ingestor resumes from its position, within the topic's
-retention. It reads a record's headers through `read_header` and `read_headers`.
+a string literal of 1 to 255 bytes without control characters, passed to Kafka as written, and
+requires `START AT EARLIEST` or `START AT LATEST`. The ingestor names `ON QUIESCE SUSPEND`, the
+only quiesce mode it declares: the topic keeps its records after they are read, so a suspended
+ingestor resumes from its position, within the topic's retention. It reads a record's headers
+through `read_header` and `read_headers`.
 
 The record's metadata also exposes its key as `metadata.key` (`BYTES`), its broker timestamp as
 `metadata.timestamp` (`DATETIME`), its timestamp kind as `metadata.timestamp_type` (`STRING`), and
@@ -1141,14 +1143,26 @@ rows into a host quiesce buffer.
 
 Offset modes:
 
-- `CONSUMER GROUP '<group>'`: Kafka manages offsets
+- `CONSUMER GROUP '<group>' START AT EARLIEST|LATEST`: Kafka manages offsets, and the statement says where the group starts a partition it holds no offset for
 - `DOMAIN`: Nervix stores the next offset in replicated runtime state and commits partition-to-instance assignment in the Raft-backed domain schedule
+
+`START AT` applies only to a partition the group has no usable committed offset for: a new group,
+a partition added to the topic, or an offset the topic's retention has passed. `EARLIEST` starts it
+at the earliest retained record, and `LATEST` at the partition's end, so a new group declared
+`LATEST` skips what the topic retains and reads what is produced after it takes the partition up.
+A partition the group holds an offset for resumes there whichever position the statement declares.
+`ALTER KAFKA TOPIC INGESTOR <name> SET START AT EARLIEST|LATEST` changes the position for the next
+such partition without moving any committed offset, and `SHOW CREATE` and `DESCRIBE INGESTOR`
+print the declared position, not a report of the group's current one. Writing `START AT` with
+`OFFSET BY DOMAIN` is refused at CREATE and `SET START AT` on such an ingestor is refused at ALTER,
+leaving its definition unchanged: the domain's start point places it.
 
 `CREATE KAFKA CLIENT` requires `bootstrap.servers`, the brokers that each consumer and producer of
 the client contacts first, and refuses a client without it, which could reach no broker. It refuses
 the Nervix-owned keys `group.id`, `enable.auto.commit`, `enable.partition.eof`,
-`allow.auto.create.topics` and `delivery.report.only.error`. Other property names and values are
-checked offline by librdkafka before commitment and passed through to it.
+`allow.auto.create.topics` and `delivery.report.only.error`, and `auto.offset.reset`, naming
+`START AT`, the clause that sets it. Other property names and values are checked offline by
+librdkafka before commitment and passed through to it.
 
 librdkafka reads some properties under two names and applies whichever it is handed last, and a
 client's entries reach it in no fixed order. A Kafka client therefore accepts each such property
@@ -1166,11 +1180,10 @@ setting. Each property a client sets therefore has one name and one value on eve
 
 The statement's offset mode supplies the consumer's `group.id`. Only `OFFSET BY CONSUMER GROUP`
 with `MODE NO ACK` enables `enable.auto.commit`. Every consumer disables `enable.partition.eof`
-and `allow.auto.create.topics`. Nervix does not override
-`auto.offset.reset`; set it explicitly, for example to `earliest`, when a new consumer group must
-read records that may already exist. Under `OFFSET BY DOMAIN` in an unpaced domain the same
-setting places a partition that has no domain offset yet. These overrides also take precedence
-over the configurable driver defaults in the table above.
+and `allow.auto.create.topics`. `START AT` sets `auto.offset.reset` under
+`OFFSET BY CONSUMER GROUP`, and every `OFFSET BY DOMAIN` consumer sets it to `earliest`, so a
+position the topic's retention passed while the consumer read resumes at the next retained record.
+These overrides also take precedence over the configurable driver defaults in the table above.
 
 A Kafka ingestor never creates the topic it reads. Every consumer Nervix runs for it sets
 `allow.auto.create.topics` to `false`, whatever the broker allows, and `CREATE KAFKA CLIENT` refuses a
@@ -1195,9 +1208,9 @@ in flight, refreshing the assignment leaves and rejoins the group, and a broker 
 outlasts the group session revokes it. Whenever the group assigns the partition to the ingestor
 again, the ingestor starts it at its earliest rejected record, until a commit passes that record,
 rather than at the group's committed offset or, for a group that committed nothing, where
-`auto.offset.reset` would start it. Another member that takes the partition resumes it from the
+`START AT` would start it. Another member that takes the partition resumes it from the
 committed offset, which never passes a rejected record; where the group has committed nothing for
-the partition, that member's `auto.offset.reset` decides, and `latest` skips the rejected
+the partition, that member's `START AT` decides, and `LATEST` skips the rejected
 records. Replays after a crash or assignment change may repeat records whose output was already
 written.
 
@@ -1252,15 +1265,15 @@ Offset recovery details:
 
 - `START AT <timestamp>` and `START AT NOW` apply once per domain start generation across all instances. The first initialization persists the resolved partition positions and the applied generation together before reading. Quiescence, reconnects, rebalances, ownership changes and restarts in that generation resume acknowledged positions; they do not apply the timestamp again. A new partition without a recorded position starts at that generation's original timestamp. A later explicit `START AT` begins a new generation and replaces the positions again.
 - persisted per-partition offsets are clamped to the partition's currently available Kafka watermark range on reassignment
-- in a generation begun with plain `START`, a partition without a stored domain offset starts in a paced domain at its first record at or after the domain's current logical time, or at its end as it stood before that lookup when it has no such record yet; in an unpaced domain it starts where the client's `auto.offset.reset` says: `earliest` at its earliest retained record, `latest`, librdkafka's default, at its end when the ingestor takes the partition up, and `error` refuses to start it, which `DESCRIBE INGESTOR` shows as the ingestor's transient error
+- in a generation begun with plain `START`, a partition without a stored domain offset starts in a paced domain at its first record at or after the domain's current logical time, or at its end as it stood before that lookup when it has no such record yet; in an unpaced domain it starts at its earliest retained record, so a plain `START` reads what the topic retains and `START AT NOW` is how an unpaced domain skips it
 - the instance that takes such a partition up records its start as the partition's domain offset before it reads, so a reconnect resumes the partition there instead of placing it again past records the instance has not acknowledged
 
 Quiescing leaves a consumer group, or unassigns domain-owned partitions. Domain-owned partitions
 resume from their recorded offsets, and consumer-group
 partitions resume from the group's committed offsets or an outstanding rejection floor as described
 above. Topic time and size retention continue during the pause. For consumer-group
-offsets that age out, the client's pass-through `auto.offset.reset` setting decides whether resume
-uses the earliest retained record, skips to new records, or raises a general source error. Domain
+offsets that age out, `START AT` decides whether resume uses the earliest retained record or skips
+to new records. Domain
 offsets clamp to the partition's current low and high watermarks; records retention has removed
 cannot be recovered. Other members of a user-named group may consume and commit while Nervix is
 absent. Quiescing does not change the auto-commit loss windows of `MODE NO ACK`.
@@ -2928,3 +2941,9 @@ The following entities declare `INSTANCES`; presence and defaults follow the voc
 | RABBITMQ QUEUE | optional; default 1 |
 | SQS QUEUE | optional; default 1 |
 <!-- connector-matrix:instancing:end -->
+
+The instances of a `KAFKA TOPIC` ingestor under `OFFSET BY CONSUMER GROUP` are members of one group
+and share its `START AT`: whichever instance takes a partition the group holds no usable offset for
+starts it there, and a partition that moves to another instance resumes from the group's committed
+offset. Under `OFFSET BY DOMAIN` the domain's start point places every partition, whichever instance
+the schedule assigns it to.

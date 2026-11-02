@@ -1385,9 +1385,11 @@ fn ingestor_timestamp_field_must_use_rfc3339_schema_type() {
                             client: ClientName::parse("broker").expect("valid identifier"),
                             topic: nervix_models::KafkaTopicName::parse("notifications")
                                 .expect("valid topic"),
-                            offset_mode: KafkaOffsetMode::ConsumerGroup(
-                                KafkaConsumerGroupName::parse("cg").expect("valid consumer group"),
-                            ),
+                            offset_mode: KafkaOffsetMode::ConsumerGroup {
+                                group: KafkaConsumerGroupName::parse("cg")
+                                    .expect("valid consumer group"),
+                                start_at: nervix_models::IngestStartPosition::Earliest,
+                            },
                             instances: nonzero!(1u64),
                             mode: KafkaIngestMode::NoAck,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
@@ -1836,10 +1838,11 @@ fn ingestor_route_validation_accepts_explicit_projection() {
                                     client: ClientName::parse("broker").expect("valid identifier"),
                                     topic: nervix_models::KafkaTopicName::parse("notifications")
                                         .expect("valid topic"),
-                                    offset_mode: KafkaOffsetMode::ConsumerGroup(
-                                        KafkaConsumerGroupName::parse("cg")
+                                    offset_mode: KafkaOffsetMode::ConsumerGroup {
+                                        group: KafkaConsumerGroupName::parse("cg")
                                             .expect("valid consumer group"),
-                                    ),
+                                        start_at: nervix_models::IngestStartPosition::Earliest,
+                                    },
                                     instances: nonzero!(1u64),
                                     mode: KafkaIngestMode::NoAck,
                                     quiesce: nervix_models::IngestQuiesceMode::Suspend,
@@ -1920,9 +1923,11 @@ fn ingestor_filter_map_compile_errors_are_reported_on_leader() {
                             client: ClientName::parse("broker").expect("valid identifier"),
                             topic: nervix_models::KafkaTopicName::parse("notifications")
                                 .expect("valid topic"),
-                            offset_mode: KafkaOffsetMode::ConsumerGroup(
-                                KafkaConsumerGroupName::parse("cg").expect("valid consumer group"),
-                            ),
+                            offset_mode: KafkaOffsetMode::ConsumerGroup {
+                                group: KafkaConsumerGroupName::parse("cg")
+                                    .expect("valid consumer group"),
+                                start_at: nervix_models::IngestStartPosition::Earliest,
+                            },
                             instances: nonzero!(1u64),
                             mode: KafkaIngestMode::NoAck,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
@@ -2014,9 +2019,11 @@ fn ingestor_inherit_all_except_rejects_required_uninitialized_field() {
                             client: ClientName::parse("broker").expect("valid identifier"),
                             topic: nervix_models::KafkaTopicName::parse("notifications")
                                 .expect("valid topic"),
-                            offset_mode: KafkaOffsetMode::ConsumerGroup(
-                                KafkaConsumerGroupName::parse("cg").expect("valid consumer group"),
-                            ),
+                            offset_mode: KafkaOffsetMode::ConsumerGroup {
+                                group: KafkaConsumerGroupName::parse("cg")
+                                    .expect("valid consumer group"),
+                                start_at: nervix_models::IngestStartPosition::Earliest,
+                            },
                             instances: nonzero!(1u64),
                             mode: KafkaIngestMode::NoAck,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,

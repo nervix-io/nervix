@@ -19,12 +19,11 @@ Feature: Remote relay senders held back while relay memory is full
         FROM WIRE JSON SCHEMA grant_hold_wire TO SCHEMA grant_hold_event;
       CREATE RELAY grant_hold_records SCHEMA grant_hold_event UNBRANCHED;
       CREATE KAFKA CLIENT grant_hold_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR grant_hold_source
         FROM grant_hold_kafka TOPIC 'grant_hold_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'grant_hold_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'grant_hold_group_{{test_id}}' START AT EARLIEST
           INSTANCES 1
           MODE NO ACK
           ON QUIESCE SUSPEND DECODE USING grant_hold_codec
@@ -117,12 +116,11 @@ Feature: Remote relay senders held back while relay memory is full
         FROM WIRE JSON SCHEMA storage_hold_wire TO SCHEMA storage_hold_event;
       CREATE RELAY storage_hold_records SCHEMA storage_hold_event UNBRANCHED;
       CREATE KAFKA CLIENT storage_hold_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR storage_hold_source
         FROM storage_hold_kafka TOPIC 'storage_hold_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'storage_hold_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'storage_hold_group_{{test_id}}' START AT EARLIEST
           INSTANCES 1
           MODE NO ACK
           ON QUIESCE SUSPEND DECODE USING storage_hold_codec

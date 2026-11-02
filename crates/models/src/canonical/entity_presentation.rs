@@ -446,8 +446,11 @@ impl IngestorPresentationModel for KafkaTopicIngestor {
         presentation.external_locator(self.topic.as_str());
         let offset = match &self.offset_mode {
             KafkaOffsetMode::Domain => "DOMAIN".to_owned(),
-            KafkaOffsetMode::ConsumerGroup(group) => {
-                format!("CONSUMER GROUP {}", string_literal(group.as_str()))
+            KafkaOffsetMode::ConsumerGroup { group, start_at } => {
+                format!(
+                    "CONSUMER GROUP {} START AT {start_at}",
+                    string_literal(group.as_str())
+                )
             }
         };
         presentation.written_option("OFFSET BY", offset);
