@@ -107,6 +107,15 @@ and an absent failure means none has been observed. These are task-owned executi
 never persisted state or substitutes for a missing publishing mode. The
 [connector contract](./connector-contract.md#finishing-an-emitter) owns their completion semantics.
 
+RabbitMQ's volatile confirmation owner distinguishes a completely answered window, a deadline,
+and a lost channel with the answers collected before it. A positive driver acknowledgement and a
+returned message's owning record are separate facts. Return attribution produces a typed decided
+or incomplete state for positive mandatory answers; size-refusal recovery requires the decided
+state before replacing the channel and continuing. Unanswered records and mandatory answers whose
+return is still unknown remain unresolved for retry, while definite returns remain rejected.
+Nothing in this window is persisted. The [connector contract](./connector-contract.md) owns the
+confirmation and retry boundaries.
+
 The Kafka emitter installs its effective native queue byte capacity as `NonZeroU64` after librdkafka
 validates the client configuration. Its confirmation window's on-demand settlement returns
 `Some(EmitterRecordId)` for an answered record and `None` for an empty window. A refused enqueue
@@ -281,6 +290,15 @@ The following read starts its optional keep-alive deadline after the host acknow
 ordinary prefix; that original deadline then survives cancellation. The connection retains at
 most one discard and clears it only when it returns the size outcome after confirmation. See
 [MQTT source connections](./connector-contract.md#mqtt-source-connections).
+
+**MQTT client configuration.** The vocabulary converts one rendered MQTT client configuration into
+typed values once, at `CREATE MQTT CLIENT` and again when a connection is built. Its transport is
+plain TCP or TLS, and the TLS variant carries the trust file and the optional certificate and key
+pair, so a plain connection holds no TLS file and a TLS one cannot lack its trust root. An absent
+identity template, username or password is `None`, never an empty string, and an empty
+`client_id` is refused rather than read as absent. The keep-alive is a nonzero count of seconds and
+the admission bound a nonzero byte count, each taking the schema's one declared default where the
+client leaves it out. A password's debug rendering shows only the redaction marker.
 
 **Iceberg catalog identity.** The namespace is required configuration, represented by one shared
 validated name type from parsing through connector opening. Dot-separated levels are nonempty and
