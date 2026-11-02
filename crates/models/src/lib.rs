@@ -156,7 +156,7 @@ pub use connector::{
     NatsEmitterEntity, NatsIngestMode, NatsIngestor, NatsIngestorEntity, NatsPublishSubjectName,
     NatsQueueGroupName, NatsStreamEmitter, NatsStreamIngestMode, NatsStreamIngestor, NatsStreamName,
     NatsStreamPublishingMode,
-    NatsSubjectEmitter, NatsSubjectEmitterMode, NatsSubjectIngestor, NatsSubjectIngestorAlteration,
+    NatsSubjectEmitter, NatsEmitterMode, NatsSubjectIngestor, NatsSubjectIngestorAlteration,
     NatsSubjectName, NatsSubjectPublishingMode, OTEL_ATTRIBUTES_ENCODING, OTEL_HEADERS_FORMAT,
     OTEL_HISTOGRAM_VALUE_FIELDS, OTEL_HISTOGRAM_VALUE_TYPES, OTEL_LOG_VALUE_FIELDS,
     OTEL_LOG_VALUE_TYPES, OTEL_NUMBER_VALUE_FIELDS, OTEL_NUMBER_VALUE_TYPES,
