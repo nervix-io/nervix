@@ -1546,12 +1546,22 @@ its record delivered and the record is lost. With `MANDATORY`, on either entity,
 the message, and the emitter rejects its record through `ON MESSAGE ERROR` as an `external` error of
 the `publish` operation naming the broker's reply, such as `rabbitmq returned the message unrouted
 with reply code 312: NO_ROUTE`, in every mode, and keeps publishing the write's other records.
-Under `ACK` the broker returns the message ahead of its confirmation. Under `NO ACK` it returns the
-message ahead of its answer to the round trip that ends the write, so the emitter reads every return
-of the write once that answer arrives, and holds none of them beyond the write that published it.
-A return names the message's exchange, routing key, headers and body but not which record it was,
-so the emitter attributes it to the first message of the write, in written order, that carries all
-four; of messages identical in all four, the earlier one is rejected.
+Under `ACK` the broker returns the message ahead of its confirmation, but the driver can attach
+that return to another message's confirm. Nervix publishes up to `MAX` messages concurrently,
+collects that window's answers, and attributes every return before refilling the window or
+reporting a mandatory record delivered. Each message retains its original `ACK TIMEOUT`.
+Under `NO ACK` the return precedes the answer to the round trip that ends the write, so the emitter
+reads every return of the write once that answer arrives. A return names the message's exchange,
+routing key, properties and body, not its Nervix record. It rejects the first matching
+message in publication order: within the current confirmation window under `ACK`, or the write
+under `NO ACK`. Identical transport messages therefore take returns in that order. A return never
+changes a record settled by an earlier window.
+
+If a confirmation window is interrupted by a timeout or channel loss, a mandatory record's
+positive confirm alone may not establish delivery: another unresolved confirm can carry its
+return. Such records stay unresolved for retry, which can duplicate a message the broker accepted.
+Definitively attributed returns remain rejected, and positive nonmandatory answers remain delivered.
+An unmatched return fails the write instead of guessing which record to reject.
 
 Both entities publish the same way. `ACK` enables publisher confirms and waits for the confirm of
 each message. A broker nack is an infrastructure failure and is retried with backpressure. In `NO ACK` the broker confirms nothing,

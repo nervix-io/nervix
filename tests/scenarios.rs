@@ -169,6 +169,7 @@ use crate::common::{
         ProcessProgram, SERVER_PROGRAM, build_tools_directory, dependency_lifecycle_helper_command,
         scenario_executable,
     },
+    rabbitmq_confirm_order::RabbitMqConfirmOrder,
     raw_session::{
         SessionScope, TestSubscriptionEvent, TestUpload, TestUploadPart, WireOutcome as _,
         command_output, fresh_execution_reference, outcome_awaits_leader,
@@ -619,6 +620,8 @@ struct ScenarioWorld {
     kafka_mock_broker: Option<KafkaMockBroker>,
     /// The forwarder a scenario stood in front of the MQTT broker to drop chosen PUBLISH packets.
     mqtt_publish_filter: Option<MqttPublishFilter>,
+    /// The real-broker forwarder that gives two outstanding publishes a controlled confirm order.
+    rabbitmq_confirm_order: Option<RabbitMqConfirmOrder>,
     /// The forwarder a scenario stood in front of the SQS service to hold the answer that carries a
     /// chosen message.
     sqs_answer_hold: Option<SqsAnswerHold>,
@@ -1396,6 +1399,50 @@ async fn given_mqtt_publish_filter(world: &mut ScenarioWorld) {
         .placeholders
         .insert("mqtt_filtered_addr".to_string(), endpoint_url.to_string());
     world.mqtt_publish_filter = Some(filter);
+}
+
+#[given("a RabbitMQ endpoint that reorders the first two publisher confirmations is configured")]
+async fn given_rabbitmq_confirm_order(world: &mut ScenarioWorld) {
+    let endpoint = world
+        .dependencies
+        .endpoints()
+        .get(RABBITMQ_ADDR)
+        .unwrap_or_else(|error| panic!("RabbitMQ endpoint is unavailable: {error}"));
+    let mut address = url::Url::parse(endpoint)
+        .unwrap_or_else(|error| panic!("RabbitMQ endpoint URL is invalid: {error}"));
+    let ip = address
+        .host_str()
+        .assured("the broker endpoint has a host")
+        .parse()
+        .assured("the test broker is addressed by its IP");
+    let port = address
+        .port()
+        .assured("the broker endpoint has an explicit port");
+    let forwarder = RabbitMqConfirmOrder::start(std::net::SocketAddr::new(ip, port))
+        .await
+        .assured("the RabbitMQ confirm forwarder can bind loopback");
+    address
+        .set_host(Some("127.0.0.1"))
+        .assured("loopback is a valid URL host");
+    address
+        .set_port(Some(forwarder.port()))
+        .assured("AMQP URLs accept an explicit port");
+    world
+        .placeholders
+        .insert("rabbitmq_confirm_addr".to_string(), address.to_string());
+    world.rabbitmq_confirm_order = Some(forwarder);
+}
+
+#[then("the RabbitMQ endpoint forwarded the controlled publisher confirmations")]
+fn then_rabbitmq_confirm_order(world: &mut ScenarioWorld) {
+    let forwarder = world
+        .rabbitmq_confirm_order
+        .as_ref()
+        .assured("the scenario configured the confirmation forwarder");
+    assert!(
+        forwarder.rewrote_confirmations(),
+        "the broker must confirm both messages before the fixture releases them"
+    );
 }
 
 /// From now on the MQTT endpoint drops every PUBLISH packet whose bytes carry the docstring, so the
@@ -34691,6 +34738,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 // harness state, and they are given back once the nodes they fronted have ended.
                 world.stallable_tcp_proxies.clear();
                 world.mqtt_publish_filter = None;
+                world.rabbitmq_confirm_order = None;
                 world.sqs_answer_hold = None;
                 world.iceberg_catalog_gate = None;
                 world.nats_endpoint = None;
