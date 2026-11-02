@@ -82,6 +82,7 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
             K::defaulted("pool_idle_timeout_ms", V::Milliseconds, "600000"),
             K::defaulted("pool_max_lifetime_ms", V::Milliseconds, "1800000"),
             K::defaulted("pool_test_before_acquire", V::Boolean, "true"),
+            K::TIMEOUT,
             K::TLS_CA.only_for_query(ADDRESS, OPTION, VERIFY_FULL),
             K::TLS_CERT.only_for_query(ADDRESS, OPTION, VERIFY_FULL),
             K::TLS_KEY.only_for_query(ADDRESS, OPTION, VERIFY_FULL),
@@ -294,11 +295,22 @@ const POSTGRES_BOUNDS: DeclaredBounds = DeclaredBounds {
             },
         },
         DeclaredWait {
-            wait: "an insert and its metadata query",
-            bound: WaitBound::Unbounded,
+            wait: "each catalog query and each insert",
+            bound: WaitBound::Key {
+                key: DeadlineKey::Timeout,
+                omitted: OmittedDeadline::Unbounded,
+            },
+        },
+        DeclaredWait {
+            wait: "closing an interrupted query connection",
+            bound: WaitBound::Driver("SQLx close-on-drop timeout, 5 s"),
         },
     ],
-    driver_limits: &[],
+    driver_limits: &[
+        "timeout_ms accepts at most 2147483647 milliseconds, PostgreSQL's statement_timeout \
+         maximum.",
+        "Without timeout_ms, catalog queries and inserts have no Nervix response deadline.",
+    ],
 };
 
 impl EmitterDeclaration for PostgresTableEmitter {

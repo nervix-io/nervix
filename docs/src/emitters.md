@@ -1175,7 +1175,13 @@ CREATE [IF NOT EXISTS] <kind> CLIENT <name>
 
 Transport-specific expectations:
 
-- `KAFKA`: pass-through to librdkafka, except `allow.auto.create.topics`, which `CREATE KAFKA CLIENT` refuses. The emitter's producer keeps librdkafka's producer default, so a broker that allows auto-creation creates a missing topic on the first publish; provision topics explicitly. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and optional `'ssl.certificate.location'` plus `'ssl.key.location'`.
+- `KAFKA`: requires `bootstrap.servers` and accepts one name per librdkafka property, with the
+  Nervix-owned keys refused at `CREATE`; see [Kafka client configuration](ingestors.md#kafka).
+  Other keys pass through after offline name and value validation. The producer keeps
+  librdkafka's topic auto-creation default, so a broker that permits it can create a missing topic
+  during producer metadata discovery. Provision output topics explicitly. Typically set
+  `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and optional
+  `'ssl.certificate.location'` plus `'ssl.key.location'`.
 - `RABBITMQ`: use `amqps://...` in `addr`; Nervix honors `tls_ca_file` and presents `tls_cert_file` with `tls_key_file` as its client certificate; see [RabbitMQ](./ingestors.md#rabbitmq).
 - `REDIS`: use `rediss://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`. A plaintext `mqtt://` address reads no TLS file, so `CREATE MQTT CLIENT` refuses all three with it.
@@ -1281,7 +1287,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | records the producer queues under ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, holds back what fills it<br>records the producer queues under NO ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |
 | Network waits | a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, delivery.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT`<br>destroying a producer, for its polling thread and the reports of the records its purge failed: driver default, 100 ms poll, then a 500 ms flush |
-| Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>message.max.bytes 1000000<br>A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through ON MESSAGE ERROR.<br>A producer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes rust-rdkafka's 100 ms poll or 500 ms flush, and librdkafka then joins its threads, a broker thread still resolving a name included. |
+| Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. MODE ACK sets delivery.timeout.ms from ACK TIMEOUT.<br>message.max.bytes 1000000<br>A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through ON MESSAGE ERROR.<br>A producer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes rust-rdkafka's 100 ms poll or 500 ms flush, and librdkafka then joins its threads, a broker thread still resolving a name included. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-emit).
@@ -1339,10 +1345,11 @@ whose payload exceeds the entire `queue.buffering.max.kbytes` capacity is reject
 `ON MESSAGE ERROR`, with its payload size and the capacity in bytes. This queue capacity counts
 the payload alone; `message.max.bytes` separately bounds the encoded Kafka record.
 
-The producer keeps librdkafka's topic auto-creation default. A broker that permits it can therefore
-create a missing topic on the first publish, even though Nervix's consumers disable auto-creation
-and `CREATE KAFKA CLIENT` refuses `allow.auto.create.topics`. Provision output topics explicitly;
-the consumer's no-creation guarantee does not extend to the producer.
+The producer keeps librdkafka's topic auto-creation default. A broker that permits it can create a
+missing topic during producer metadata discovery, before the first record is written. Nervix's
+consumers disable auto-creation, and `CREATE KAFKA CLIENT` refuses `allow.auto.create.topics`.
+Provision output topics explicitly; the consumer's no-creation guarantee does not extend to the
+producer.
 
 When the emitter stops, it flushes what the producer still queues, in both modes and
 regardless of `linger.ms`: a `STOP`, an alteration or ownership move that replaces the emitter, and
@@ -2825,9 +2832,9 @@ it to the column's declared type:
 | `DATETIME` | RFC 3339 timestamp text at UTC offset `+00:00` |
 | `ARRAY<T>`, `VEC<T>` | Recursive JSON text; `BYTES` elements are padded base64 and non-finite floats are `null` |
 
-A null binds as a `NULL` element. A mapping whose inferred type is none of these is refused at
-`CREATE`. A value the column's type cannot read from its text, such as `U64` above a `bigint`'s
-range, is a row Postgres rejects with its SQLSTATE.
+A typed null binds as a `NULL` element. A mapping without a supported concrete column type is
+refused at `CREATE` and `ALTER`; an untyped `NULL` cannot infer one. A value the column's type cannot
+read from its text, such as `U64` above a `bigint`'s range, is a row Postgres rejects with its SQLSTATE.
 
 Postgres emitters may include an insert conflict policy after `VALUES`:
 
@@ -2862,9 +2869,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
-| Network waits | a pool checkout: the wait for the pool, name resolution, connection, TLS, authentication and the borrow test: `pool_acquire_timeout_ms`; 30s when omitted<br>an insert and its metadata query: unbounded |
-| Driver limits | None declared. |
-| Stalled-peer checks | `STALLED PEER pool_acquire_timeout_ms` |
+| Network waits | a pool checkout: the wait for the pool, name resolution, connection, TLS, authentication and the borrow test: `pool_acquire_timeout_ms`; 30s when omitted<br>each catalog query and each insert: `timeout_ms`; unbounded when omitted<br>closing an interrupted query connection: driver default, SQLx close-on-drop timeout, 5 s |
+| Driver limits | timeout_ms accepts at most 2147483647 milliseconds, PostgreSQL's statement_timeout maximum.<br>Without timeout_ms, catalog queries and inserts have no Nervix response deadline. |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER pool_acquire_timeout_ms` |
 
 See the [POSTGRES TABLE capability and mirror reference](connector-capabilities.md#postgres-table-emit).
 <!-- connector-matrix:emit-postgres-table:end -->
@@ -2895,6 +2902,22 @@ CREATE POSTGRES CLIENT pg
     'addr' = 'postgresql://postgres:nervix@127.0.0.1:5432/postgres?sslmode=disable'
   };
 ```
+
+The optional client key `timeout_ms` bounds each catalog query and each INSERT separately. It is a
+positive whole number of milliseconds from `1` through `2147483647`, the maximum PostgreSQL accepts
+for `statement_timeout`; `CREATE CLIENT` refuses a value outside that range. Nervix sets that server
+option on every connection and also bounds the local wait for each query's response, so a peer
+that stops answering still ends the attempt. The key takes precedence over a `statement_timeout`
+in the URL's startup options, preserving its other driver options. Omitting the key sets no Nervix
+statement or response deadline.
+
+The independent `pool_acquire_timeout_ms` bounds checkout before a query starts. Each isolated
+row's INSERT gets its own statement bound; `timeout_ms` is not a deadline for the entire flush or
+its retries. A query timeout is a transient publish failure naming the key and its bound, and
+unresolved rows follow `RETRY POLICY`. After a local timeout the borrowed connection closes rather
+than returning a pending response to the idle pool; SQLx retains its pool permit through a graceful
+close of at most five seconds. A lost response does not prove an INSERT was not applied, so use a
+suitable idempotent conflict policy when retries must not duplicate rows.
 
 For TLS connections, use `sslmode=verify-full`, mount a TLS resource, and set `'tls_ca_file'` to the mounted CA path. `'tls_cert_file'` and `'tls_key_file'` supply a client identity and must be given together. TLS files require `sslmode=verify-full`.
 

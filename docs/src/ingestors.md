@@ -1272,7 +1272,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Acknowledgement confirmation | answered |
 | Buffers | a record conversion report after a gathered prefix: at most 1 report per ingestor instance; when full, holds back what fills it<br>messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |
 | Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group commit under ACK: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign and unsubscribe: unbounded<br>destroying a consumer that joined its group, for its LeaveGroup answer: driver default, 5 s per LeaveGroup request |
-| Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the source's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |
+| Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. The ingestor supplies group.id, auto.offset.reset and enable.auto.commit, and disables enable.partition.eof and allow.auto.create.topics.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the source's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-ingest).
@@ -1323,11 +1323,32 @@ print the declared position, not a report of the group's current one. Writing `S
 leaving its definition unchanged: the domain's start point places it.
 
 `CREATE KAFKA CLIENT` requires `bootstrap.servers`, the brokers that each consumer and producer of
-the client contacts first, and refuses a client without it, which could reach no broker. It refuses
-the Nervix-owned keys `group.id`, `enable.auto.commit`, `enable.partition.eof`,
-`allow.auto.create.topics` and `delivery.report.only.error`, and `auto.offset.reset`, naming
-`START AT`, the clause that sets it. Other property names and values are checked offline by
-librdkafka before commitment and passed through to it.
+the client contacts first, and refuses a client without it, which could reach no broker. It also
+refuses each of these Nervix-owned keys, even when its value agrees with the value Nervix sets:
+
+| Reserved client key | What owns its value |
+| --- | --- |
+| `group.id` | The ingestor's `OFFSET BY` mode supplies the consumer group identity; partition inspectors use their own internal identity. |
+| `auto.offset.reset` | The consumer group's `START AT` supplies the start position; domain-offset consumers use `earliest`. The refusal names `START AT`, the statement clause that sets it. |
+| `enable.auto.commit` | Only `OFFSET BY CONSUMER GROUP` with `MODE NO ACK` enables automatic commits. An `ACK` mode commits after downstream acknowledgement. |
+| `enable.partition.eof` | Every consumer disables partition EOF events. |
+| `allow.auto.create.topics` | Every consumer disables topic auto-creation; the producer keeps its driver default, as [Kafka emission](emitters.md#kafka) explains. |
+| `delivery.report.only.error` | Every producer requests success and failure reports so it can release each retained record, in both publishing modes. |
+
+Other property names and values pass through after validation. The declared key types are checked
+first; librdkafka then checks native property names and values offline before commitment, without
+opening a consumer, producer or broker connection. An unknown property or invalid value refuses
+`CREATE KAFKA CLIENT` and names its key. For example, `'fetch.wait.max.ms' = '100'` is accepted,
+while `'message.max.bytes' = 'big'` is refused. The generated
+[Kafka client reference](connector-capabilities.md#kafka-client) lists the declared types, reserved
+keys, accepted driver names and defaults. A successful offline check does not establish that a
+broker is reachable, credentials work or the named topic exists.
+
+An accepted native property without an explicit key declaration remains confidential: for example,
+`'statistics.interval.ms' = '100'` is accepted, but public inspection shows its value as `********`.
+Invalid configuration reports name the client and key without quoting its value. The typed
+librdkafka cause remains internal, because a driver's description can include configuration values;
+see [Errors And Diagnostics](errors-and-diagnostics.md).
 
 librdkafka reads some properties under two names and applies whichever it is handed last, and a
 client's entries reach it in no fixed order. A Kafka client therefore accepts each such property
@@ -1844,7 +1865,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
 | Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: set by max_packet_size, 10240 bytes when omitted; when full, drops and counts what does not fit<br>ACK-mode QoS 1/2 outcomes in the packet-ordered read-ahead queue: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535; when full, holds back what fills it<br>ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the same packet-ordered read-ahead queue: at most 64 outcome; when full, drops and counts what does not fit<br>NO ACK outcomes in the packet-ordered read-ahead queue: at most 64 outcome; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE, PUBACK and PUBREC requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
-| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>ordinary and oversized-discard acknowledgements written to the connection: client key `keep_alive_ms`; one interval of it, or of the broker's Server Keep Alive; 60 s when omitted<br>a silent connection: client key `keep_alive_ms`; two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 s when omitted |
+| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>retire a downgraded subscription before retrying: driver default, 5 s<br>ordinary and oversized-discard acknowledgements written to the connection: client key `keep_alive_ms`; one interval of it, or of the broker's Server Keep Alive; 60 s when omitted<br>a silent connection: client key `keep_alive_ms`; two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 s when omitted |
 | Driver limits | A publish above the admission bound is acknowledged before it is counted as oversized; its topic, payload and properties never enter read-ahead. The raw framing bound is MQTT's protocol maximum, separate from the admission bound.<br>ACK-mode QoS 0 overflow is counted immediately and never consumes an acknowledged outcome's reserved capacity. An oversized QoS 0 publish refused here counts as overflow only. NO ACK retains backpressure. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
@@ -1909,6 +1930,14 @@ Delivery constraints:
   `BATCH TIMEOUT` ends it. The extra capacity lets the connection keep reading while the ingestor
   holds a batch
 - `INSTANCES <count>` controls Nervix consumer parallelism; MQTT delivery always uses Nervix-managed shared subscription groups so instances do not duplicate messages. Every instance subscribes to `$share/<domain>~<ingestor>/<filter>`, so the share group belongs to Nervix and a topic filter cannot begin with a `$share` level of its own
+
+A new subscription becomes ready only when the broker grants the declared QoS. A lower grant
+fails through the general error policy and `DESCRIBE INGESTOR` names the requested and granted
+levels. This applies to `NO ACK` too: its QoS still determines the broker's storage and redelivery
+contract. After a rejected grant, the next attempt first retires that broker session through a clean
+connection, unsubscription and session expiry zero. Cleanup failure keeps retirement pending, so a
+retained subscription cannot turn the rejection into a successful resume. An accepted persistent
+session keeps its original grant across reconnects; changing the filter or QoS retires that session.
 
 In an `ACK` mode an ingestor acknowledges a batch once every `PUBACK` its QoS 1 publishes ask for,
 and every `PUBREC` its QoS 2 publishes ask for, is written to the connection, within one keep-alive
