@@ -1609,7 +1609,9 @@ describing the target slice. Receivers fetch the slice through the same bounded 
 
 Kafka start coordination uses a Commands request bounded to sixty seconds. It carries the
 source's node incarnation, lifecycle generation and complete ownership fingerprint, with a
-descriptor for a retained candidate. The current local run is checked against its installed
+descriptor for a retained candidate. The handler binds the source node to the authenticated
+connection before admitting any read, proposal or acknowledgement; runtime admission separately
+checks its live membership incarnation. The current local run is checked against its installed
 incarnation directly, including before membership is first published; remote runs use the
 membership publication. Candidate revisions belong to the offered body. Candidate
 and pending-seed bytes travel through the Snapshot bulk subquota under the existing transfer

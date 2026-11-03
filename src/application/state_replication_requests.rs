@@ -30,10 +30,13 @@ impl SessionServiceImpl {
         let kafka_start_service = self.clone();
         self.inner
             .interconnect
-            .register_handler::<KafkaStartRequest, _, _>(move |_context, request| {
+            .register_handler::<KafkaStartRequest, _, _>(move |context, request| {
                 let service = kafka_start_service.clone();
                 async move {
                     let subject = RemoteOperationSubject::state(&request.placement);
+                    if context.peer_node_id() != request.source.node_id() {
+                        return Err(RemoteOperationFailure::rejected(subject));
+                    }
                     service
                         .inner
                         .runtime
