@@ -1,0 +1,13 @@
+[build-system]
+build-backend = "maturin"
+requires = ["maturin>=1.16,<2"]
+
+[project]
+description = "The Python package of the Nervix client"
+name = "nervix-client"
+requires-python = ">=3.12"
+version = "0.0.0"
+
+[tool.maturin]
+features = ["pyo3/abi3-py312"]
+module-name = "nervix_client"

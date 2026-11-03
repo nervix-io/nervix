@@ -127,6 +127,7 @@ use crate::common::{
         ATTACHED_LINE, ClientProbe, OPENED_LINE, ProbeExercise, ProbeRuntime, ProbeTarget,
         SUBSCRIBED_LINE, corpus_report,
     },
+    client_wire_tls_cost::TransportCostServers,
     cluster::{
         AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, BrokerRecordTime, Cluster,
         CommandHold, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, HttpsPublishLoopOutcome,
@@ -219,6 +220,7 @@ mod http_transport;
 mod iceberg_delivery;
 mod ingestion_time;
 mod kafka_metadata;
+mod materialized_state_inspection;
 mod mqtt_fixtures;
 mod mqtt_publish_properties;
 mod mqtt_sessions;
@@ -661,6 +663,8 @@ struct ScenarioWorld {
     last_interconnect_attempt_error: Option<String>,
     server_process: Option<ServerProcess>,
     server_process_cluster: Option<ServerProcessCluster>,
+    /// The plaintext and TLS release servers the client-wire transport cost compares.
+    client_wire_transport_servers: Option<TransportCostServers>,
     /// The listeners whose ports another socket is to hold from the moment the next server process,
     /// or the bootstrap member of the next real-process cluster, draws them.
     server_process_held_ports: Option<StartupPorts>,
@@ -801,6 +805,10 @@ impl fmt::Debug for ScenarioWorld {
                 &self.last_interconnect_attempt_error,
             )
             .field("server_process", &self.server_process)
+            .field(
+                "client_wire_transport_servers",
+                &self.client_wire_transport_servers,
+            )
             .field("server_process_held_ports", &self.server_process_held_ports)
             .field("server_process_http_load", &self.server_process_http_load)
             .field("held_resource_upload", &self.held_resource_upload.is_some())
@@ -4604,14 +4612,33 @@ fn then_client_wire_baseline_artifact_exists(world: &mut ScenarioWorld) {
     );
 }
 
-#[when("the client-wire command transport cost is captured")]
-async fn when_client_wire_command_transport_cost_is_captured(world: &mut ScenarioWorld) {
-    let leader = current_leader_node(world).await;
-    let grpc_uri = world
-        .cluster()
-        .grpc_uri(&leader)
-        .expect("failed to resolve leader gRPC URI");
-    let artifact = crate::common::client_wire_tls_cost::capture(&grpc_uri, &world.domain)
+#[given(
+    "plaintext and TLS release nervix-server processes are started for the client-wire transport \
+     cost"
+)]
+async fn given_plaintext_and_tls_release_servers_are_started_for_client_wire_transport_cost(
+    world: &mut ScenarioWorld,
+) {
+    assert!(
+        world.client_wire_transport_servers.is_none(),
+        "a scenario starts one pair of transport cost servers"
+    );
+    let executable = std::env::var_os("NERVIX_CLIENT_WIRE_TLS_SERVER")
+        .verified("the client-wire TLS cost recipe supplies its release server executable");
+    initialize_scenario_identity(world);
+    let servers = TransportCostServers::start(PathBuf::from(executable))
+        .await
+        .unwrap_or_else(|error| panic!("{error:#}"));
+    world.client_wire_transport_servers = Some(servers);
+}
+
+#[when("the paired client-wire transport cost is captured")]
+async fn when_paired_client_wire_transport_cost_is_captured(world: &mut ScenarioWorld) {
+    let servers = world
+        .client_wire_transport_servers
+        .as_ref()
+        .verified("the preceding step started the transport cost servers");
+    let artifact = crate::common::client_wire_tls_cost::capture(servers)
         .await
         .unwrap_or_else(|error| panic!("client-wire transport cost failed: {error:#}"));
     world.placeholders.insert(
@@ -4661,6 +4688,7 @@ fn client_probe_target(
         username: TEST_AUTH_USERNAME.to_string(),
         password: TEST_AUTH_PASSWORD.to_string(),
         domain: world.domain.clone(),
+        execution_reference: Uuid::now_v7().to_string(),
         exercise,
     }
 }
@@ -4687,27 +4715,50 @@ async fn start_client_probe(
 }
 
 #[when(
-    expr = "the {string} client probe subscribes as {string} to relay {string} on node {string} \
-            expecting {int} rows"
+    expr = "the {string} client probe subscribes as {string} to relay {string} on a follower when \
+            available expecting {int} rows"
 )]
 async fn when_client_probe_subscribes(
     world: &mut ScenarioWorld,
     runtime: String,
     subscription: String,
     relay: String,
-    node_id: String,
     rows: usize,
 ) {
     let runtime: ProbeRuntime = runtime
         .parse()
         .expect("the step names a known probe runtime");
-    let node_id = expand_placeholders(world, &node_id);
+    let leader = current_leader_node(world).await;
+    // This fixture runs with one or three nodes; select a follower from that bounded topology.
+    let follower = world
+        .cluster()
+        .node_ids()
+        .into_iter()
+        .find(|node| node != &leader);
+    let node_id = match follower {
+        Some(follower) => follower,
+        None => leader.clone(),
+    };
+    append_cucumber_log_line(&format!(
+        "client probe {runtime:?}: observed_leader={leader} initial_node={node_id} follower={}",
+        node_id != leader
+    ));
     let exercise = ProbeExercise::Subscription {
         relay: expand_placeholders(world, &relay),
         subscription: expand_placeholders(world, &subscription),
         rows,
     };
     let target = client_probe_target(world, &node_id, exercise);
+    let redirect_report = if runtime.implements_protocol() && node_id != leader {
+        let reference = &target.execution_reference;
+        format!("REDIRECT original={reference} repeated={reference} outcome={reference}")
+    } else {
+        // This is empty report content for the direct and binding controls, not a redirect state.
+        String::new()
+    };
+    world
+        .placeholders
+        .insert("client_probe_redirect_report".to_string(), redirect_report);
     start_client_probe(world, runtime, &node_id, target, SUBSCRIBED_LINE).await;
 }
 
@@ -4825,6 +4876,7 @@ async fn then_client_probe_reports(world: &mut ScenarioWorld, within: String, #[
     report
         .check(&expected)
         .unwrap_or_else(|error| panic!("{error}"));
+    append_cucumber_log_line(&format!("client probe report verified: {report:?}"));
 }
 
 #[then(expr = "the server process exits with status {int}")]
@@ -9343,6 +9395,55 @@ async fn given_sqs_answer_hold(world: &mut ScenarioWorld) {
         url.to_string().trim_end_matches('/').to_string(),
     );
     world.sqs_answer_hold = Some(hold);
+}
+
+#[then(expr = "SQS queue {string} eventually has {int} messages in flight")]
+async fn then_sqs_queue_eventually_has_messages_in_flight(
+    world: &mut ScenarioWorld,
+    queue: String,
+    in_flight: u64,
+) {
+    let queue = expand_placeholders(world, &queue);
+    world
+        .cluster()
+        .wait_for_sqs_messages_in_flight(&queue, in_flight)
+        .await
+        .expect("the SQS queue did not reach the expected count of messages in flight");
+}
+
+#[then(expr = "SQS queue {string} eventually holds no messages")]
+async fn then_sqs_queue_eventually_holds_no_messages(world: &mut ScenarioWorld, queue: String) {
+    let queue = expand_placeholders(world, &queue);
+    world
+        .cluster()
+        .wait_for_sqs_queue_empty(&queue)
+        .await
+        .expect("the SQS queue still holds messages");
+}
+
+/// The forwarder carried at least one request naming the SQS action `carried` and none naming
+/// `absent`. The step follows the outcome those requests produced, so every request it counts has
+/// already passed the forwarder.
+#[then(expr = "the SQS forwarder carried {string} requests and no {string} request")]
+fn then_the_sqs_forwarder_carried_requests_and_no_request(
+    world: &mut ScenarioWorld,
+    carried: String,
+    absent: String,
+) {
+    let forwarder = world
+        .sqs_answer_hold
+        .as_ref()
+        .expect("a forwarder in front of the SQS service must be configured first");
+    let requests = forwarder.requests_by_action();
+    assert!(
+        forwarder.requests_naming(&carried) > 0,
+        "the SQS forwarder carried no {carried} request; it carried {requests:?}"
+    );
+    assert_eq!(
+        forwarder.requests_naming(&absent),
+        0,
+        "the SQS forwarder carried {absent} requests; it carried {requests:?}"
+    );
 }
 
 /// From now on the forwarder holds the first answer whose bytes carry `text`: the service took the
@@ -27261,6 +27362,29 @@ async fn when_sqs_message_is_published(
     publish_sqs(world.dependencies.endpoints(), &queue, &payload)
         .await
         .expect("failed to publish sqs message");
+}
+
+/// Sends every message of the step's JSON array to `queue`, in batch requests, so the messages of
+/// one request become receivable together.
+#[when(expr = "SQS messages are published to queue {string}")]
+async fn when_sqs_messages_are_published(
+    world: &mut ScenarioWorld,
+    queue: String,
+    #[step] step: &Step,
+) {
+    let queue = expand_placeholders(world, &queue);
+    let payload = expand_placeholders(world, docstring(step));
+    let messages: Vec<serde_json::Value> =
+        serde_json::from_str(&payload).expect("the fixture lists messages as a JSON array");
+    let mut payloads = Vec::with_capacity(messages.len());
+    for message in messages {
+        payloads.push(message.to_string());
+    }
+    world
+        .cluster()
+        .publish_sqs_messages(&queue, &payloads)
+        .await
+        .expect("the SQS service accepts each explicitly published message");
 }
 
 #[when(expr = "TLS SQS message is published to queue {string}")]
