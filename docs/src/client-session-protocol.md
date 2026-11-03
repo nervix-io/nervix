@@ -2040,9 +2040,13 @@ Independent implementations exist as qualification clients rather than supported
 speaks native gRPC with `flatc --go` output and `google.golang.org/grpc`, and the TypeScript client
 speaks the console WebSocket with `flatc --ts` output, unchanged under Node.js and Bun. They
 correlate replies by request identity, follow a leader redirect with the same execution reference,
-and fail rather than report success when an outcome is unknown. Neither restores subscriptions or
-domain clock attachments after reconnection; that recovery belongs to the Rust client and, through
-it, to every binding host. The FlatBuffers runtimes for Go and TypeScript have no verifier, so those
+and fail rather than report success when an outcome is unknown. Their three-node row-conformance
+examples start on a confirmed follower and create an otherwise unused schema to require the leader.
+They compare the original, repeated and terminal-outcome references with the UUIDv7 reference
+supplied by the harness. Go follows a command reply's redirect; TypeScript follows the console's `SessionEnding{LeaderRedirect}` and opens its subscription on the
+replacement session. One-node examples provide direct-connection controls. Neither restores
+subscriptions or domain clock attachments after reconnection; that recovery belongs to the Rust
+client and, through it, to every binding host. The FlatBuffers runtimes for Go and TypeScript have no verifier, so those
 clients check each frame's identifier and every union discriminant and required value they read, and
 the Rust verifier remains the only full structural verification. [Conformance
 Evidence](./client-implementation-manual.md#conformance-evidence) lists the probes, the runtimes
