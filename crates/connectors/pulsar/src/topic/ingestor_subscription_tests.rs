@@ -29,6 +29,7 @@ fn settings<'a>(
             ownership: PulsarSubscriptionOwnership::Ingestor {
                 start_at: nervix_models::IngestStartPosition::Earliest,
             },
+            kind: PulsarSubscriptionType::Shared,
         },
         consumer_name: "domain~events".to_string(),
         ack_receipts: PulsarAckReceipts::Awaited,
@@ -56,6 +57,7 @@ fn equivalent_topics_and_changed_consumer_policies_keep_the_subscription() {
             .assured("changing a creation policy does not change a broker subscription")
     );
     replacement.subscription.ownership = PulsarSubscriptionOwnership::Provisioned;
+    replacement.subscription.kind = PulsarSubscriptionType::Exclusive;
     replacement.consumer_name = "another~consumer".to_string();
     replacement.ack_receipts = PulsarAckReceipts::Unawaited;
     assert!(

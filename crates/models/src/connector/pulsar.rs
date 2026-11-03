@@ -4,8 +4,8 @@
 //!
 //! - **Owns.** The Pulsar client Model, the topic source and emitter Models with their delivery
 //!   modes, the topic and subscription names a source reads with the rules Pulsar holds them to,
-//!   the namespace that qualifies a local topic name, who owns a source's subscription, and what
-//!   each entity declares.
+//!   the namespace that qualifies a local topic name, who owns a source's subscription and the
+//!   type it reads as, and what each entity declares.
 //!   Client declarations also own public configuration keys, types, defaults and confidentiality.
 //! - **Depends on.** The shared source and emitter declarations and the names a body references.
 //! - **Must not know.** The Pulsar driver, or how a topic is consumed or
@@ -52,18 +52,22 @@ const PULSAR_TLS_SCHEME: &str = "pulsar+ssl";
 ///
 /// A local topic name is placed in `namespace`, so the namespace is exactly a tenant and a
 /// namespace, the two levels a qualified topic names before the topic. A plaintext connection uses
-/// no TLS setting, so every TLS key requires a `pulsar+ssl` address.
+/// no TLS setting, so every TLS key requires a `pulsar+ssl` address. The token is a credential, and
+/// the certificate and its key are a pair.
 const CLIENT_CONFIG: crate::ClientConfigSchema = {
     use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
     ClientConfigSchema::new(
         &[
             K::required("addr", V::Url(&["pulsar", PULSAR_TLS_SCHEME])),
+            K::optional("auth_token", V::String).secret(),
             K::defaulted("namespace", V::Levels("tenant/namespace"), "public/default"),
             K::optional("tls_allow_insecure_connection", V::Boolean)
                 .only_for_scheme("addr", PULSAR_TLS_SCHEME),
             K::TLS_CA.only_for_scheme("addr", PULSAR_TLS_SCHEME),
+            K::TLS_CERT.only_for_scheme("addr", PULSAR_TLS_SCHEME),
             K::optional("tls_hostname_verification_enabled", V::Boolean)
                 .only_for_scheme("addr", PULSAR_TLS_SCHEME),
+            K::TLS_KEY.only_for_scheme("addr", PULSAR_TLS_SCHEME),
         ],
         &[],
         &[],
@@ -146,13 +150,68 @@ pub struct PulsarTopicIngestor {
     pub quiesce: IngestQuiesceMode,
 }
 
-/// The durable subscription a Pulsar source reads through, and who owns it on the broker.
+impl PulsarTopicIngestor {
+    /// Whether this ingestor's instances fit the type of its subscription. A type that reads through
+    /// one consumer has no use for a second instance.
+    pub fn instances_fit_subscription(&self) -> bool {
+        self.instances.get() == 1 || !self.subscription.kind.reads_through_one_consumer()
+    }
+}
+
+/// The durable subscription a Pulsar source reads through, who owns it on the broker, and the type
+/// its consumers read it as.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct PulsarSubscription {
     pub name: PulsarSubscriptionName,
     pub ownership: PulsarSubscriptionOwnership,
+    pub kind: PulsarSubscriptionType,
+}
+
+/// How a Pulsar subscription shares what its topic holds among the consumers that join it, which
+/// its statement declares after the subscription's owner.
+///
+/// The type decides ordering, parallelism and failover, so a statement states it rather than Nervix
+/// choosing one. The broker holds one type per subscription while any consumer is connected, and
+/// takes a new one from the first consumer to join an empty subscription.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    strum::EnumIter,
+    strum::Display,
+    strum::IntoStaticStr,
+)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+pub enum PulsarSubscriptionType {
+    /// `SHARED`: every consumer takes messages, with no order across them.
+    Shared,
+    /// `KEY_SHARED`: every consumer takes messages, and one consumer takes all of a key's.
+    KeyShared,
+    /// `FAILOVER`: one consumer takes messages while the others stand by to replace it.
+    Failover,
+    /// `EXCLUSIVE`: the broker admits one consumer and refuses any other.
+    Exclusive,
+}
+
+impl PulsarSubscriptionType {
+    /// The word a statement writes for this type after `TYPE`.
+    pub fn keyword(self) -> &'static str {
+        self.into()
+    }
+
+    /// Whether the broker delivers through one consumer at a time.
+    pub const fn reads_through_one_consumer(self) -> bool {
+        matches!(self, Self::Failover | Self::Exclusive)
+    }
 }
 
 /// Who owns a Pulsar source's subscription, which its statement declares after the
@@ -212,6 +271,18 @@ impl PulsarSubscriptionOwnership {
 }
 
 impl PulsarSubscription {
+    /// The subscription of the Pulsar topic ingestor an alteration changes.
+    fn altered_by_operation(ingestor: &mut crate::CreateIngestor) -> &mut Self {
+        let source = ingestor
+            .input
+            .transport_source_mut()
+            .verified(super::entity_union::ALTERED_PAIR_CHECKED);
+        let crate::IngestorEntity::Pulsar(PulsarIngestor::Topic(source)) = source else {
+            unreachable!("{}", super::entity_union::ALTERED_PAIR_CHECKED);
+        };
+        &mut source.subscription
+    }
+
     fn set_start_at(
         &mut self,
         position: IngestStartPosition,
@@ -237,6 +308,7 @@ impl PulsarSubscription {
 pub enum PulsarTopicIngestorOperation {
     Transport(crate::AlterTransportIngestorOperation<PulsarTopicIngestor>),
     SetStartAt { position: IngestStartPosition },
+    SetType { kind: PulsarSubscriptionType },
 }
 
 impl From<crate::AlterTransportIngestorOperation<PulsarTopicIngestor>>
@@ -255,14 +327,11 @@ impl super::ingestor::TransportIngestorOperation for PulsarTopicIngestorOperatio
         match self {
             Self::Transport(operation) => operation.apply_to(ingestor),
             Self::SetStartAt { position } => {
-                let source = ingestor
-                    .input
-                    .transport_source_mut()
-                    .verified(super::entity_union::ALTERED_PAIR_CHECKED);
-                let crate::IngestorEntity::Pulsar(PulsarIngestor::Topic(source)) = source else {
-                    unreachable!("{}", super::entity_union::ALTERED_PAIR_CHECKED);
-                };
-                source.subscription.set_start_at(*position)
+                PulsarSubscription::altered_by_operation(ingestor).set_start_at(*position)
+            }
+            Self::SetType { kind } => {
+                PulsarSubscription::altered_by_operation(ingestor).kind = *kind;
+                Ok(())
             }
         }
     }
@@ -271,6 +340,7 @@ impl super::ingestor::TransportIngestorOperation for PulsarTopicIngestorOperatio
         match self {
             Self::Transport(operation) => operation.to_plexus(),
             Self::SetStartAt { position } => Ok(format!("SET START AT {position}")),
+            Self::SetType { kind } => Ok(format!("SET TYPE {kind}")),
         }
     }
 }
@@ -338,11 +408,11 @@ const PULSAR_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
         DeclaredWait {
             wait: "connection: TCP, TLS and CONNECT",
-            bound: WaitBound::Driver("10 s per address, 12 retries"),
+            bound: WaitBound::Driver("10 s per address, one attempt"),
         },
         DeclaredWait {
             wait: "topic lookup and subscribe",
-            bound: WaitBound::Driver("30 s per attempt, retried without limit"),
+            bound: WaitBound::Driver("30 s, one attempt"),
         },
         DeclaredWait {
             wait: "an acknowledgement under ACK",
@@ -457,6 +527,32 @@ impl IngestorDeclaration for PulsarTopicIngestor {
                         name: PulsarSubscriptionOwnership::Provisioned.keywords(),
                         value: Some(OptionValue::Name(PulsarSubscriptionName::DECLARATION)),
                         example: "SUBSCRIPTION 'readers' PROVISIONED",
+                    },
+                ]),
+            },
+            OptionDeclaration {
+                keywords: "TYPE",
+                presence: OptionPresence::Required,
+                form: OptionForm::Choice(&[
+                    OptionChoice {
+                        name: "SHARED",
+                        value: None,
+                        example: "TYPE SHARED",
+                    },
+                    OptionChoice {
+                        name: "KEY_SHARED",
+                        value: None,
+                        example: "TYPE KEY_SHARED",
+                    },
+                    OptionChoice {
+                        name: "FAILOVER",
+                        value: None,
+                        example: "TYPE FAILOVER",
+                    },
+                    OptionChoice {
+                        name: "EXCLUSIVE",
+                        value: None,
+                        example: "TYPE EXCLUSIVE",
                     },
                 ]),
             },

@@ -94,11 +94,11 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: options, modes, headers, ingest metadata. Consumption declares subscription ownership and, when ingestor-owned, its EARLIEST or LATEST creation position; existing cursors prevail. Publication uses a producer receipt. Both directions use the same quoted, case-preserving Pulsar topic names. |
+| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: options, modes, headers, ingest metadata. Consumption declares subscription ownership and, when ingestor-owned, its EARLIEST or LATEST creation position, and the subscription's type; existing cursors prevail. Publication uses a producer receipt. Both directions use the same quoted, case-preserving Pulsar topic names. |
 | Reference | PULSAR client |  |
 | Locator and validation rule | TOPIC 'orders' (pulsar_topic) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
-| Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`INSTANCES 2` (positive count); optional; default 1 |  |
+| Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`TYPE SHARED` (keyword choice); `TYPE KEY_SHARED` (keyword choice); `TYPE FAILOVER` (keyword choice); `TYPE EXCLUSIVE` (keyword choice); required<br>`INSTANCES 2` (positive count); optional; default 1 |  |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.publish_time: DATETIME OPTIONAL<br>metadata.event_time: DATETIME OPTIONAL<br>metadata.key: STRING OPTIONAL<br>metadata.ordering_key: BYTES OPTIONAL<br>metadata.producer_name: STRING OPTIONAL<br>metadata.sequence_id: I64 OPTIONAL<br>metadata.redelivery_count: I64 OPTIONAL |  |
@@ -106,7 +106,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Position class | replayable |  |
 | Acknowledgement confirmation | answered |  |
 | Buffers | messages each partition consumer receives ahead of the host: driver default, a receiver queue of 1000 messages; when full, holds back what fills it |  |
-| Network waits | name resolution: unbounded<br>connection: TCP, TLS and CONNECT: driver default, 10 s per address, 12 retries<br>topic lookup and subscribe: driver default, 30 s per attempt, retried without limit<br>an acknowledgement under ACK: driver default, 30 s operation timeout<br>close: unbounded |  |
+| Network waits | name resolution: unbounded<br>connection: TCP, TLS and CONNECT: driver default, 10 s per address, one attempt<br>topic lookup and subscribe: driver default, 30 s, one attempt<br>an acknowledgement under ACK: driver default, 30 s operation timeout<br>close: unbounded |  |
 | Driver limits | Inbound frames have no size limit. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
@@ -234,7 +234,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | SQS QUEUE | Compare `SQS QUEUE`: options, modes, headers, ingest metadata. Receiving uses a visibility timeout and deletion; publishing sends SEND SINGLE or SEND BATCH service requests, may declare a FIFO group, and writes typed message attributes and a per-message delay or deduplication id. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix. |
+| Entity | SQS QUEUE | Compare `SQS QUEUE`: options, modes, headers, ingest metadata. Receiving hides each message for the queue's visibility timeout, deletes it once it is acknowledged and makes it visible again at once when it is rejected; ACK PARALLEL MAX gathers up to ten messages from each receive and deletes them in batches, and this parallel receive is ingest-only. Publishing chooses its request shape with SEND SINGLE or SEND BATCH, which is emit-only, may declare a FIFO GROUP, and sets a per-message DELAY or DEDUPLICATION ID. Both directions treat message attributes as headers: an ingestor reads each value as text, while an emitter writes typed String, Number and Binary values. Both use the same quoted, case-preserving SQS queue names, including the .fifo suffix. |
 | Reference | SQS client |  |
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |  |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 10 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -379,7 +379,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: options, modes, headers, emit envelope/properties. Consumption declares subscription ownership and, when ingestor-owned, its EARLIEST or LATEST creation position; existing cursors prevail. Publication uses a producer receipt. Both directions use the same quoted, case-preserving Pulsar topic names. |
+| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: options, modes, headers, emit envelope/properties. Consumption declares subscription ownership and, when ingestor-owned, its EARLIEST or LATEST creation position, and the subscription's type; existing cursors prevail. Publication uses a producer receipt. Both directions use the same quoted, case-preserving Pulsar topic names. |
 | Reference | PULSAR client |  |
 | Locator and validation rule | TOPIC 'orders' (pulsar_topic) |  |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -526,7 +526,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | SQS QUEUE | Compare `SQS QUEUE`: options, modes, headers, emit envelope/properties. Receiving uses a visibility timeout and deletion; publishing sends SEND SINGLE or SEND BATCH service requests, may declare a FIFO group, and writes typed message attributes and a per-message delay or deduplication id. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix. |
+| Entity | SQS QUEUE | Compare `SQS QUEUE`: options, modes, headers, emit envelope/properties. Receiving hides each message for the queue's visibility timeout, deletes it once it is acknowledged and makes it visible again at once when it is rejected; ACK PARALLEL MAX gathers up to ten messages from each receive and deletes them in batches, and this parallel receive is ingest-only. Publishing chooses its request shape with SEND SINGLE or SEND BATCH, which is emit-only, may declare a FIFO GROUP, and sets a per-message DELAY or DEDUPLICATION ID. Both directions treat message attributes as headers: an ingestor reads each value as text, while an emitter writes typed String, Number and Binary values. Both use the same quoted, case-preserving SQS queue names, including the .fifo suffix. |
 | Reference | SQS client |  |
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |  |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -881,10 +881,13 @@ The driver also strips its `topic.` prefix from a key that names none of its own
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
 | `addr` | required | URL (pulsar or pulsar+ssl) | Nervix; strict | no | none |
+| `auth_token` | optional | string | Nervix; strict | yes | none |
 | `namespace` | optional; default `public/default` | tenant/namespace | Nervix; strict | no | none |
 | `tls_allow_insecure_connection` | optional; requires `addr` to use `pulsar+ssl` | boolean | Nervix; strict | no | none |
 | `tls_ca_file` | optional; requires `addr` to use `pulsar+ssl` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional; requires `addr` to use `pulsar+ssl` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
 | `tls_hostname_verification_enabled` | optional; requires `addr` to use `pulsar+ssl` | boolean | Nervix; strict | no | none |
+| `tls_key_file` | optional; requires `addr` to use `pulsar+ssl` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
 
 Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 

@@ -150,11 +150,11 @@ impl Registry {
                     warn!(
                         path = %path.display(),
                         result = "err",
-                        error = %err,
+                        error = %format_args!("{err:#}"),
                         "persistent state load failed"
                     );
                 } else {
-                    warn!(result = "err", error = %err, "persistent state load failed");
+                    warn!(result = "err", error = %format_args!("{err:#}"), "persistent state load failed");
                 }
                 return Err(err);
             }
@@ -797,7 +797,7 @@ impl Registry {
                     batch_size,
                     operation = operation_name,
                     result = "err",
-                    error = %err,
+                    error = %format_args!("{err:#}"),
                     "failed to apply mutation batch\n{}",
                     current_state.graph.describe()
                 );
@@ -1515,7 +1515,7 @@ fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
 }
 
 // The header identifies the current persisted Model shape before archive decoding.
-const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX MQTT EMIT";
+const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX SUB TYPES";
 
 #[cfg(test)]
 #[cfg_attr(

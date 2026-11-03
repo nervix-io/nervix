@@ -167,3 +167,92 @@ Feature: Kafka record keys, timestamps and tombstones
       | cluster_size |
       | 1            |
       | 3            |
+
+  Scenario Outline: A Kafka timestamp no DATETIME holds refuses its record only where metadata.timestamp is read
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka metadata topic "stamps_{{test_id}}" is created
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA reading ( value I64 );
+      CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( value integer );
+      CREATE CODEC reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
+      CREATE SCHEMA observed_reading ( value I64, source STRING, record_time DATETIME OPTIONAL, time_type STRING OPTIONAL );
+      CREATE SCHEMA refused_reading ( value I64, source STRING, code STRING, operation STRING, message STRING );
+      CREATE RELAY readings SCHEMA observed_reading UNBRANCHED;
+      CREATE RELAY refusals SCHEMA refused_reading UNBRANCHED;
+      CREATE KAFKA CLIENT source CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA TOPIC INGESTOR stamped FROM source TOPIC 'stamps_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'stamped_{{test_id}}' START AT EARLIEST
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING reading_codec
+        TO readings INHERIT ALL SET source = 'stamped', record_time = metadata.timestamp UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR SEND TO refusals
+            SET value = input.value, source = 'stamped', code = error.code,
+              operation = error.operation, message = error.message
+        ON GENERAL ERROR LOG;
+      CREATE KAFKA TOPIC INGESTOR timed FROM source TOPIC 'stamps_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'timed_{{test_id}}' START AT EARLIEST
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING reading_codec TIMESTAMP AT metadata.timestamp
+        TO readings INHERIT ALL SET source = 'timed' UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR SEND TO refusals
+            SET value = input.value, source = 'timed', code = error.code,
+              operation = error.operation, message = error.message
+        ON GENERAL ERROR LOG;
+      CREATE KAFKA TOPIC INGESTOR typed FROM source TOPIC 'stamps_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'typed_{{test_id}}' START AT EARLIEST
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING reading_codec
+        TO readings INHERIT ALL SET source = 'typed', time_type = metadata.timestamp_type UNBRANCHED
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE KAFKA TOPIC INGESTOR plain FROM source TOPIC 'stamps_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'plain_{{test_id}}' START AT EARLIEST
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING reading_codec
+        TO readings INHERIT ALL SET source = 'plain' UNBRANCHED
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION reading_observations TO readings;
+      CREATE SUBSCRIPTION refusal_observations TO refusals;
+      """
+    # The second record's producer wrote microseconds where Kafka specifies milliseconds: an
+    # instant in the year 57,970, which no DATETIME holds.
+    And these Kafka records are published to topic "stamps_{{test_id}}"
+      """
+      [
+        {"key":null,"payload":"{\"value\":6}","timestamp":"2026-01-01T00:00:00Z"},
+        {"key":null,"payload":"{\"value\":7}","timestamp":1767225600000000},
+        {"key":null,"payload":"{\"value\":8}","timestamp":"2026-01-01T00:00:02Z"}
+      ]
+      """
+    And these Plexus statements are executed on the leader node
+      """
+      START;
+      """
+    Then within "60s" the relay subscription receives exactly one payload for each fragment set
+      """
+      "source":"stamped" | "value":6 | "record_time":"2026-01-01T00:00:00+00:00"
+      "code":"validation" | "operation":"admit" | metadata.timestamp | 1767225600000000 | "source":"stamped" | "value":7
+      "source":"stamped" | "value":8 | "record_time":"2026-01-01T00:00:02+00:00"
+      "source":"timed" | "value":6
+      "code":"validation" | "operation":"admit" | metadata.timestamp | 1767225600000000 | "source":"timed" | "value":7
+      "source":"timed" | "value":8
+      "source":"typed" | "value":6 | "time_type":"create_time"
+      "source":"typed" | "value":7 | "time_type":"create_time"
+      "source":"typed" | "value":8 | "time_type":"create_time"
+      "source":"plain" | "value":6
+      "source":"plain" | "value":7
+      "source":"plain" | "value":8
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

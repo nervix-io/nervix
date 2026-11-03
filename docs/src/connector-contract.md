@@ -673,8 +673,8 @@ and the operation and attempt timeouts `timeout_ms` sets for every request of bo
 include the lookup; a receive's start after the long poll of at most one second it asks the service
 to hold it for. The client names static credentials, with `session_token` where they are temporary ones, and its
 region, so `aws-config` never consults the default credential or region chains that could reach
-IMDS, ECS, STS or SSO over HTTP. It still builds its SSO token chain, which SQS never asks for
-a token because it signs with SigV4; the loader receives the same HTTP client, so that chain would
+IMDS, ECS, STS or SSO over HTTP. It still builds its SSO token chain, which SQS never asks for a
+token, because it signs with SigV4; the loader receives the same HTTP client, so that chain would
 use the node resolver too.
 
 Both hooks give a lookup at most 30 seconds, like the Reqwest hooks; the client's own deadline
@@ -750,13 +750,13 @@ A connector runs on the host's asynchronous tasks and never blocks one. Synchron
 itself, such as writing or reading a local file, goes through the node's bounded executor, which the
 emitter host hands a connector as `EmitterHost::executor`. The connector chooses the storage or CPU class
 of its work and the memory it charges; the executor admits that work beside the rest of the node's,
-and a refusal is the connector's own typed failure. The Iceberg emitter writes and reads its staged
-Arrow IPC files on the filesystem storage workers. A staging write the node cannot take now fails
-the publish, which the host retries as it retries any other. A commit charges the bulk memory class
-for every staged byte it reads back before it reads them, or the whole class for a single staged
-file larger than the class, and takes that charge only when the class has room now, because a
-place in the class's queue would take every byte the class frees and hold the node's other bulk
-work behind the commit. A refusal fails the commit, which keeps its staged files and
+and a refusal is the connector's own typed failure. The Iceberg emitter appends to and reads its
+Arrow IPC staging files on the filesystem storage workers. A staging write the node cannot take now
+fails the publish, which the host retries as it retries any other. A commit charges the bulk memory
+class for every staged byte it reads back before it reads them, or the whole class for a single
+staged batch larger than the class, and takes that charge only when the class has room now, because
+a place in the class's queue would take every byte the class frees and hold the node's other bulk
+work behind the commit. A refusal fails the commit, which keeps its staged rows and
 acknowledgements while the host retries it. The read itself waits for a place among the filesystem
 workers instead of being refused, because nothing could present again the rows the emitter already
 accepted.
@@ -1103,17 +1103,22 @@ the pattern subscription's runtime scenario observes both metadata fields.
 
 `SQS QUEUE` shares one queue-name rule between ingestion and emission: 1 to 80 ASCII letters,
 digits, `-` and `_`, where a FIFO queue's name ends in `.fifo` within those 80 characters, passed
-through exactly as written. Its declaration permits `ACK SEQUENTIAL`, `ACK PARALLEL` with a
-window of at most the ten messages one receive returns, and `SUSPEND` for intake, since the queue
-keeps a message until the source deletes it, and `SINGLE` or `BATCH` for emission,
-where a `.fifo` queue requires `FIFO GROUP` and a standard queue refuses it. Message attributes are
-its headers in both directions, as `last_wins` exact names; the emitter declares no envelope and
-optional batching up to the 256 KiB SQS admits in one message. An SQS client declares only the keys
-its connections read, each in both directions: the required `endpoint`, `region`, `access_key_id`
-and `secret_access_key`, and the optional `session_token`, `timeout_ms`, which bounds every request,
-and `tls_ca_file`. An SQS connection trusts `tls_ca_file`, or the platform's roots without it, takes
-no proxy and presents no client certificate, so the client declares neither a proxy nor a
-client-identity key.
+through exactly as written. The ingestor declares `ACK SEQUENTIAL`, `ACK PARALLEL` with a window
+of at most the ten messages one receive returns, `INSTANCES`, and `SUSPEND` for intake, since the
+queue keeps a message until the source deletes it, and its typed metadata is the message identity,
+send and first-receive times, receive count, group and deduplication identifiers, sequence number
+and sender identifier. The emitter declares `MODE ACK` alone, a required `SEND SINGLE` or
+`SEND BATCH` request shape, and `FIFO GROUP`, which a `.fifo` queue requires and a standard queue
+refuses. The request shape is emit-only and the parallel receive ingest-only. Message attributes
+are its headers in both directions, as `last_wins` exact names: the ingestor reads each value as
+text, and the emitter writes a `STRING` as a `String`, an integer as a `Number` and `BYTES` as a
+`Binary` attribute. The emitter declares the `DELAY` and `DEDUPLICATION ID` envelope clauses, which
+the registry holds to a standard and a FIFO queue respectively, and optional batching up to the
+1 MiB SQS admits in one message. An SQS client declares only the keys its connections read, each
+in both directions: the required `endpoint`, `region`, `access_key_id` and `secret_access_key`, and
+the optional `session_token`, `timeout_ms`, which bounds every request, and `tls_ca_file`. An SQS
+connection trusts `tls_ca_file` alone, or the platform's roots without it, takes no proxy and
+presents no client certificate, so the client declares neither a proxy nor a client-identity key.
 The SQS-specific declaration tests, generated grammar conformance and one-/three-node public
 declaration scenarios qualify these facts together.
 
@@ -1205,18 +1210,21 @@ together.
 connector places in its client's namespace, or a fully qualified
 `persistent://tenant/namespace/topic` or `non-persistent://tenant/namespace/topic`, sent as
 written; at most 1,024 bytes without whitespace, control characters or an empty level. The
-ingestor names a subscription of 1 to 255 bytes with its declared owner, declares `NO ACK`,
+ingestor names a subscription of 1 to 255 bytes with its declared owner and type, declares `NO ACK`,
 `ACK SEQUENTIAL` and `ACK PARALLEL` in Pulsar's own delivery-mode type, and quiesces only by
 `SUSPEND`, since the durable subscription keeps its backlog. The emitter declares `NO ACK` and
 `ACK` publishing, optional batching under the `maxMessageSize` the broker announces, the `TIMESTAMP`
 and `DELIVER AFTER` envelope clauses it writes as each message's `event_time` and `deliver_at_time`,
-and no other envelope clause or properties. Message properties are headers in both directions, `ordered_repeats` on ingestion and `last_wins` on
-emission. A Pulsar client declares only the keys both directions read. `namespace` holds exactly a
-tenant and a namespace, with the default `public/default` written once in the declaration, and topic
-qualification reads that effective value, so a namespace that cannot qualify a topic is refused at
-`CREATE`. `tls_ca_file`, `tls_allow_insecure_connection` and `tls_hostname_verification_enabled`
-require a `pulsar+ssl` address, since a plaintext connection uses none of them. The
-Pulsar-specific declaration tests, generated grammar conformance and one-/three-node public
+and no other envelope clause or properties. Message properties are headers in both directions,
+`ordered_repeats` on ingestion and `last_wins` on emission. A Pulsar client declares only the keys
+both directions read, and both directions connect through one builder in the connector, so the two
+cannot disagree on how they connect. `namespace` holds exactly a tenant and a namespace, with the
+default `public/default` written once in the declaration, and topic qualification reads that
+effective value, so a namespace that cannot qualify a topic is refused at `CREATE`. `auth_token` is
+confidential, so inspection shows it redacted. `tls_ca_file`, `tls_cert_file`, `tls_key_file`,
+`tls_allow_insecure_connection` and `tls_hostname_verification_enabled` require a `pulsar+ssl`
+address, since a plaintext connection uses none of them, and the certificate and key are a pair.
+The Pulsar-specific declaration tests, generated grammar conformance and one-/three-node public
 declaration scenarios qualify these facts together.
 
 Every-node execution is independent of the kind of reference an ingestor names. HTTP and WebSocket
@@ -1443,9 +1451,10 @@ rather than a wider or narrower one, and it is absent where the message carries 
 that keeps a message whose transport value its field's type cannot hold hands that value over as
 unrepresentable, with its declared type and a description of the transport value, never a
 substitute value and never an absence: `RABBITMQ QUEUE` does so for an AMQP timestamp after
-2262-04-11, the last instant a `DATETIME` holds. `KAFKA TOPIC` and `SQS QUEUE` instead fail the read
-of a message whose timestamp is out of range, as their paragraphs below state, before any value is
-handed over.
+2262-04-11, the last instant a `DATETIME` holds, and `KAFKA TOPIC` for a record timestamp before
+1677-09-21 or after 2262-04-11. `SQS QUEUE` instead fails the read of a message whose system
+attribute timestamp is out of range, as its paragraph below states, before any value is handed
+over.
 A `STRING` such as a socket address may be written into the column in place instead of being
 allocated per message.
 A message that hands over another number of values than its entity declares, or a value of another
@@ -1478,15 +1487,19 @@ with the domain's routing, outside the source host.
 Kafka metadata borrows the record's key without allocating another byte sequence. Missing keys
 remain distinct from empty keys. Its timestamp is the exact instant of the driver's Unix
 milliseconds, with `create_time` or `log_append_time` as its kind; an unavailable timestamp has no
-instant or kind. A null value and an empty non-null value both lend an empty payload, but their
-tombstone flags differ. The codec decides whether an empty payload yields any rows. Every row
-that it yields shares the originating record's metadata and transport position. Kafka's
-`SUSPEND`-only quiesce declaration makes retained quiesce metadata unreachable for this entity.
-A present timestamp out of range is a typed source read failure, not an unrepresentable metadata
-value. If conversion fails after a valid prefix was gathered, the source returns that prefix and
-keeps one report for the next admitted read. A cancelled read leaves the report pending; no later
-record is taken while it is pending. The source declares this single-report bound beside its
-driver buffers.
+instant or kind. A present timestamp whose milliseconds name an instant before 1677-09-21 or after
+2262-04-11, which no `DATETIME` holds, is handed over as unrepresentable, described by those
+milliseconds, and its kind still reads as `create_time` or `log_append_time`. Reading the record
+never converts its timestamp: the message converts it only when the host visits its metadata, so
+such a record is read, acknowledged and positioned like any other. A null value and an empty
+non-null value both lend an empty payload, but their tombstone flags differ. The codec decides
+whether an empty payload yields any rows. Every row that it yields shares the originating record's
+metadata and transport position. Kafka's `SUSPEND`-only quiesce declaration makes retained quiesce
+metadata unreachable for this entity. A record at the last offset Kafka's signed offsets reach has
+no next position to acknowledge, which is a typed source read failure. If that failure follows a
+valid prefix gathered in the same read, the source returns that prefix and keeps one report for the
+next admitted read. A cancelled read leaves the report pending; no later record is taken while it
+is pending. The source declares this single-report bound beside its driver buffers.
 
 MQTT metadata and headers borrow the delivered packet the message owns, the one admission copied
 out of its frame, so the host copies them only when a quiesce buffer retains the message. The
@@ -1952,9 +1965,30 @@ and subscription ownership. A replacement reading the same subscription keeps it
 including an ownership handoff to `PROVISIONED`. Routes and codecs alone create no retirement.
 A preceding provisioned subscription is never retired.
 
+Each statement declares the subscription's `TYPE` as a required entity option, and the Model holds
+it in the subscription. The plan carries it, and the connector passes it to every consumer it
+builds: the data consumers, the non-durable existence probe and the removal consumer. Subscription
+identity ignores it, like ownership and the start position, so `SET TYPE` and a `SET FROM` that
+changes only the type retain the subscription. The registry refuses `FAILOVER` and `EXCLUSIVE` with
+more than one instance at `CREATE` and on every alteration, because those types read through one
+consumer. The rule holds until the partitioning epic defines how instances and these types combine.
+
+A Pulsar ingestor's client gives the driver one attempt at an operation. The driver would otherwise
+repeat a subscribe the broker answers with `ConsumerBusy` or `ServiceNotReady` without limit, which
+would leave a refused consumer waiting with nothing to report. The join's refusal reaches the
+connector instead, as `PulsarTopicIngestorError::SubscriptionRefused` with the broker's server error
+and reason. An owned subscription joins at open so that a statement following `START` finds it
+created, but a refusal for what holds right now, `ConsumerBusy` or `ServiceNotReady`, leaves the
+instance to its first resume, where it is the transient status and the host's retry cadence
+applies. Any other refusal fails the open, as a failure to subscribe does. The broker treats a
+redelivery request as a rewind on a `FAILOVER` or `EXCLUSIVE` subscription, and the driver does not
+clear its receive queue, so a rejection there can deliver the messages behind it twice; the
+position class stays replayable and delivery at least once.
+
 The Pulsar composition root resolves the preceding input's client entries through its pinned mounts
 and keeps their lease through the removal. The connector connects a client, joins the subscription
-with a durable shared consumer registered under `<domain>~<ingestor>-removal` and unsubscribes it,
+with a durable consumer of its declared type registered under `<domain>~<ingestor>-removal` and
+unsubscribes it,
 and the broker removes the subscription with its backlog. An absent subscription is created by the
 join and removed again. The broker refuses while another consumer is connected, and the removal
 then closes its own consumer so that it does not keep the subscription busy. The driver's
@@ -2492,7 +2526,7 @@ Where it can learn that limit it measures the complete message and rejects a rec
 fit before writing it, with a reason naming the size and the limit, so the rejection follows the
 message error policy instead of failing the transport: the MQTT emitter measures the `PUBLISH` packet
 against the Maximum Packet Size of the broker's latest `CONNACK` and the largest packet MQTT can
-express, the SQS emitter counts attributes and the FIFO group against 256 KiB, and the Kafka producer,
+express, the SQS emitter counts attributes and the FIFO group against 1 MiB, and the Kafka producer,
 the NATS client and the Pulsar client check `message.max.bytes`, `max_payload` and the
 `maxMessageSize` of the connection's `CommandConnected` with the key, headers or message metadata
 they write. A limit the connector cannot learn stays with the destination, and the destination's own
@@ -2627,18 +2661,30 @@ bytes; the one- and three-node Sentry scenarios qualify those bytes through a re
 after a mock endpoint's `503` response. See
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md#behavioral-properties).
 
-Iceberg is a row emitter. Without `BATCH` it stages each carrier of the run as one Arrow IPC file,
-and its commit writes the rows with the 512 MiB Parquet rollover target. With `BATCH`, the typed
+Iceberg is a row emitter. It appends every staged batch as its own Arrow IPC record-batch message
+to one local staging file, which begins with the staged schema's message, and records the exact
+byte range of each. Every write appends to the same staging file until a commit begins and seals
+it, so a commit reads one staging file however many carriers, source relays and branches its
+writes carried, and a write that follows starts the next file. Without `BATCH` each carrier of a
+write is one staged batch, and its commit writes the rows with the 512 MiB Parquet rollover target.
+With `BATCH`, the typed
 start plan hands the row and byte limits to the connector. It projects selected rows onto the
 loaded table schema, counts the complete Parquet encoding on the bounded bulk CPU workers, and
 uses the shared fallible row division to make staged Arrow IPC segments. A row whose own file is
-too large is refused alone through `ON MESSAGE ERROR`; the accepted segments become one data file
-each in the catalog commit. The connector retains a carrier's one acknowledgement handle on its
-final staged segment, so splitting files neither acknowledges at staging nor repeats a commit
-acknowledgement. If staging any segment fails, it removes the segments from that carrier's attempt
-and leaves the host's unresolved rows retryable. Commit checks the written files' physical row and
-byte counts before appending them. The property target `iceberg-staged-file-encoding` checks Arrow
-IPC readback and that the counting Parquet writer agrees with the encoded file's byte length.
+too large is refused alone through `ON MESSAGE ERROR`; each accepted segment is one staged batch,
+which becomes one data file in the catalog commit. The connector retains a carrier's one
+acknowledgement handle on its final staged batch, so splitting it into segments neither
+acknowledges at staging nor repeats a commit acknowledgement. A carrier is staged whole or not at
+all: an append that fails cuts the staging file back to where the carrier's first batch began and
+leaves the host's unresolved rows retryable, and carriers staged before it stay staged. An append
+also cuts off whatever follows the end its emitter recorded, so bytes an interrupted append left
+behind never precede a staged batch. Commit reads back the contiguous span of staged batches each
+load group takes from a staging file, decoding it after the file's schema message, and checks the
+written files' physical row and byte counts before appending them. The property target
+`iceberg-staging-file-spans` checks that every span of staged batches reads back exactly what its
+appends wrote and that a refused append leaves the file as before, and
+`iceberg-staged-file-encoding` that rows read back from a staging file count the same Parquet bytes
+the encoded data file holds.
 
 OTEL is a row request emitter, which the host hands one carrier per preparation. Without `BATCH` it
 prepares the successfully mapped rows of the carrier as one Export request. With `BATCH`, its typed
@@ -2894,7 +2940,26 @@ sequenceDiagram
   command, and resolves the acknowledgement with the broker's `CommandAckResponse`, its server
   error, or the client's operation timeout. A negative acknowledgement returns whether the consumer
   sent its redelivery request, with the connection error that kept it from being sent, where the
-  released crate only logs that error.
+  released crate only logs that error. A TLS connection takes a complete rustls client
+  configuration from Nervix, because the released crate's rustls path presents no client certificate
+  and reads neither of its insecure options, so the shared TLS provider owns trust and identity for
+  this connector as it does for the others. A connection that failed for good returns its error,
+  where the released crate replaces it with a fixed message, so a broker's `AuthenticationError`
+  reaches the host, and the fork logs neither the `CONNECT` frame nor an authentication response,
+  which carry the client's credential.
+  The connector authenticates a token under the broker's `token` method. A certificate without a
+  token authenticates under `tls`, the method that makes a broker read the TLS session, and carries
+  no data. With both, the token names the role and the certificate satisfies a broker's
+  `tlsRequireTrustedClientCertOnConnect`.
+  The driver's retries are off in both directions: no connection retry and no operation retry, so
+  a `ServiceNotReady`, a refused connection or a failed consumer reconnect reaches the host at once.
+  The host owns the retry: a failed read or resume follows the source's retry policy, a failed emitter
+  open follows the emitter's, and a failed start, which an owned subscription's join or a client
+  that cannot connect ends, is retried by the node's runtime reconciliation. An unreachable broker
+  at start therefore keeps the domain from starting rather than becoming a transient status.
+  The one retry left in the driver is a partitioned topic's: a consumer of one partition whose
+  single reconnect fails ends, and the multi-topic consumer resubscribes it at its 30-second topic
+  refresh while the other partitions keep flowing.
 - **NATS source.** Each source instance owns one client and its queue subscription. The client
   reports a lost connection through its event callback, and the instance ends the subscription
   with a read failure once it has handed over every message the client received before the loss,
@@ -2952,7 +3017,7 @@ sequenceDiagram
   arbitrary UTF-8 text and the exact key and reason of every refusal.
 - **Iceberg emitter.** It stages Arrow data locally on the node's filesystem storage workers, prepares
   data files, and publishes a catalog update once its `COMMIT EACH` cadence, which the host measures
-  from staging, ends or its staged files reach the maximum commit size. Open loads the declared
+  from staging, ends or its staged rows reach the maximum commit size. Open loads the declared
   table from the REST catalog. A REST catalog answers a missing namespace and a missing table alike,
   so a catalog that does not hold the table is asked for the table's namespace, and the open fails
   with `EmitterOpenError::MissingExternalEntity` naming the namespace, or the table in a namespace
@@ -2967,12 +3032,12 @@ sequenceDiagram
   pairs a batch's columns with a data file's by position: a mapped column lands in the column of its
   name and an optional column `VALUES` leaves out is written as null. Staging does not complete an
   ACK; successful catalog commit does. The emitter retains ACKs and its client while a failed commit is
-  retried. A commit reads its staged files back in groups the bulk memory class can hold at once,
-  and a single file larger than the class alone, charged with the whole class. It charges each group
-  before reading it, returns the charge once the group's rows are in data files, and appends the
-  data files of every group in one catalog commit. It covers the staged files it found when it
-  began, so the retry of a failed append commits files staged since then in a commit of their own
-  instead of acknowledging them unwritten.
+  retried. A commit reads its staged batches back in groups the bulk memory class can hold at once,
+  and a single staged batch larger than the class alone, charged with the whole class. It charges
+  each group before reading it, returns the charge once the group's rows are in data files, and
+  appends the data files of every group in one catalog commit. It covers the rows staged when it
+  began and seals their staging file, so the retry of a failed append commits rows staged since then,
+  which a new staging file holds, in a commit of their own instead of acknowledging them unwritten.
   [Iceberg emission](./emitters.md#iceberg) defines the external commit and duplicate limits.
 - **RabbitMQ emitter.** `RABBITMQ QUEUE` and `RABBITMQ EXCHANGE` share one publisher, which writes a
   queue emitter's messages to the default exchange under the queue's name and an exchange emitter's

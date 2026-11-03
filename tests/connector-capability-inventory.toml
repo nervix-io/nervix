@@ -1075,6 +1075,34 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "TYPE SHARED"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_subscription_types.feature", scenario = "A Pulsar ingestor reads its subscription as the declared TYPE <type> under MODE <delivery>" },
+]
+
+[[capability]]
+capability = "TYPE KEY_SHARED"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_subscription_types.feature", scenario = "KEY_SHARED instances keep each key's messages in publication order" },
+]
+
+[[capability]]
+capability = "TYPE FAILOVER"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_subscription_types.feature", scenario = "A FAILOVER subscription hands over to its standby when the active ingestor stops" },
+]
+
+[[capability]]
+capability = "TYPE EXCLUSIVE"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_subscription_types.feature", scenario = "A subscription another consumer holds is the ingestor's transient status until it leaves" },
+]
+
+[[capability]]
 capability = "BATCH"
 entity = "RABBITMQ EXCHANGE EMITTER"
 scenarios = [

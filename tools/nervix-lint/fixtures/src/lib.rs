@@ -40,6 +40,7 @@ pub use nervix_primitives::{
 pub use nervix_recovery;
 use nervix_recovery::Discarded as _;
 pub use thiserror;
+pub use tracing;
 
 #[derive(Debug, thiserror::Error)]
 #[error("the fixture operation failed")]

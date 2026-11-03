@@ -1,7 +1,8 @@
 //! Public Kafka record metadata probes.
 //!
 //! Layer: test harness.
-//! - **Owns.** Producing explicitly keyed, timestamped and null-valued Kafka records.
+//! - **Owns.** Producing explicitly keyed, timestamped and null-valued Kafka records, including
+//!   records whose CreateTime no `DATETIME` holds.
 //! - **Depends on.** The public scenario cluster and the Kafka producer driver.
 //! - **Must not know.** Ingestor internals, metadata projection or acknowledgement state.
 
@@ -33,8 +34,27 @@ async fn create_metadata_topic(world: &mut ScenarioWorld, topic: String) {
 pub(crate) struct KafkaMetadataRecord {
     key: Option<Vec<u8>>,
     payload: Option<String>,
-    #[serde(deserialize_with = "record_timestamp")]
-    timestamp: Timestamp,
+    timestamp: KafkaRecordCreateTime,
+}
+
+/// The CreateTime a fixture record is published with: an instant written as RFC 3339 text, or a
+/// number of milliseconds since the Unix epoch, which may name an instant no `DATETIME` holds, as a
+/// producer that writes microseconds where Kafka specifies milliseconds does.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum KafkaRecordCreateTime {
+    UnixMillis(i64),
+    Instant(#[serde(deserialize_with = "record_timestamp")] Timestamp),
+}
+
+impl KafkaRecordCreateTime {
+    /// The CreateTime as Kafka carries it, in milliseconds since the Unix epoch.
+    fn unix_millis(&self) -> i64 {
+        match self {
+            Self::UnixMillis(millis) => *millis,
+            Self::Instant(instant) => instant.unix_nanos().div_euclid(1_000_000),
+        }
+    }
 }
 
 fn record_timestamp<'de, D: serde::Deserializer<'de>>(
@@ -58,7 +78,7 @@ impl KafkaMetadataRecord {
             .map_err(std::io::Error::other)?;
         let mut record = FutureRecord::<[u8], str>::to(topic)
             .partition(0)
-            .timestamp(self.timestamp.unix_nanos().div_euclid(1_000_000));
+            .timestamp(self.timestamp.unix_millis());
         if let Some(key) = &self.key {
             record = record.key(key);
         }
