@@ -3397,14 +3397,15 @@ mod tests {
         PlacementPolicy, PostgresConflictAction, PostgresEmitter, PostgresTableEmitter,
         PostgresValueMapping, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
         PrometheusConfigEntry, PrometheusIngestMode, PrometheusQueryIngestor, PulsarEmitter,
-        PulsarIngestMode, PulsarSubscription, PulsarSubscriptionOwnership, PulsarTopicEmitter,
-        PulsarTopicIngestor, RabbitMqEmitter, RabbitMqExchangeEmitter, RabbitMqIngestMode,
-        RabbitMqQueueEmitter, RabbitMqQueueIngestor, RedisEmitter, RedisPubSubEmitter,
-        RedisPubSubIngestMode, RedisPubSubIngestor, RelayBranching, RetryPolicy, RouteConstruction,
-        SchemaField, SentryConfigEntry, SentryEmitter, SentryEventEmitter, SignalingProtobufConfig,
-        SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsEmitter, SqsIngestMode,
-        SqsQueueEmitter, SqsQueueIngestor, SyslogCollectorEmitter, SyslogEmitter, SyslogIngestMode,
-        SyslogListenerIngestor, UdfArgument, UdfLanguage, UdfReturn, WebsocketsConnectionIngestor,
+        PulsarIngestMode, PulsarSubscription, PulsarSubscriptionOwnership, PulsarSubscriptionType,
+        PulsarTopicEmitter, PulsarTopicIngestor, RabbitMqEmitter, RabbitMqExchangeEmitter,
+        RabbitMqIngestMode, RabbitMqQueueEmitter, RabbitMqQueueIngestor, RedisEmitter,
+        RedisPubSubEmitter, RedisPubSubIngestMode, RedisPubSubIngestor, RelayBranching,
+        RetryPolicy, RouteConstruction, SchemaField, SentryConfigEntry, SentryEmitter,
+        SentryEventEmitter, SignalingProtobufConfig, SignalingStep, SignalingWaitStep,
+        SignalingWireFormat, SqsEmitter, SqsIngestMode, SqsQueueEmitter, SqsQueueIngestor,
+        SyslogCollectorEmitter, SyslogEmitter, SyslogIngestMode, SyslogListenerIngestor,
+        UdfArgument, UdfLanguage, UdfReturn, WebsocketsConnectionIngestor,
         WebsocketsEndpointIngestor, WebsocketsIngestMode, WindowBound, WindowStateLimit,
         WireSchemaField, ZeroMqEmitter, ZeroMqIngestMode, ZeroMqPullIngestor, ZeroMqPushEmitter,
         expression_to_plexus,
@@ -4921,6 +4922,7 @@ mod tests {
                         subscription: PulsarSubscription {
                             name: named("Readers"),
                             ownership: PulsarSubscriptionOwnership::Provisioned,
+                            kind: PulsarSubscriptionType::KeyShared,
                         },
                         instances: nonzero!(1u64),
                         mode: PulsarIngestMode::NoAck,
@@ -4928,8 +4930,8 @@ mod tests {
                     }),
                 ),
                 "CREATE PULSAR TOPIC INGESTOR pulsar_ingestor\n  FROM pulsar_main TOPIC \
-                 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' PROVISIONED MODE NO \
-                 ACK ON QUIESCE SUSPEND",
+                 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' PROVISIONED TYPE \
+                 KEY_SHARED MODE NO ACK ON QUIESCE SUSPEND",
             ),
             (
                 orders_ingestor(

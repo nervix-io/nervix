@@ -61,7 +61,7 @@ impl AdminFixture {
 #[nervix_primitives::test]
 async fn namespace_readiness_requires_an_exact_ok_without_following_redirects() {
     let fixture = AdminFixture::bind().await;
-    let readiness = HttpReadiness::new(fixture.port(), NAMESPACE_PATH);
+    let readiness = HttpReadiness::new(fixture.port(), NAMESPACE_PATH, None);
     let server = task::spawn(async move {
         for status in [
             "201 Created",
@@ -89,7 +89,7 @@ async fn namespace_readiness_requires_an_exact_ok_without_following_redirects() 
 #[nervix_primitives::test]
 async fn an_unavailable_namespace_retains_its_last_status_at_the_deadline() {
     let fixture = AdminFixture::bind().await;
-    let readiness = HttpReadiness::new(fixture.port(), NAMESPACE_PATH);
+    let readiness = HttpReadiness::new(fixture.port(), NAMESPACE_PATH, None);
     let server: task::JoinHandle<()> = task::spawn(async move {
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -119,7 +119,7 @@ async fn an_unavailable_namespace_retains_its_last_status_at_the_deadline() {
 #[nervix_primitives::test]
 async fn a_peer_that_never_sends_headers_cannot_extend_the_probe_budget() {
     let fixture = AdminFixture::bind().await;
-    let readiness = HttpReadiness::new(fixture.port(), NAMESPACE_PATH);
+    let readiness = HttpReadiness::new(fixture.port(), NAMESPACE_PATH, None);
     let (release, released) = oneshot::channel::<()>();
     let server = task::spawn(async move {
         let (_stream, _) = fixture.listener.accept().await?;
@@ -142,7 +142,7 @@ async fn a_peer_that_never_sends_headers_cannot_extend_the_probe_budget() {
 #[nervix_primitives::test]
 async fn an_initialized_namespace_is_ready_on_its_first_response() {
     let fixture = AdminFixture::bind().await;
-    let readiness = HttpReadiness::new(fixture.port(), NAMESPACE_PATH);
+    let readiness = HttpReadiness::new(fixture.port(), NAMESPACE_PATH, None);
     let server = task::spawn(async move { fixture.respond("200 OK").await });
     readiness
         .wait(Duration::from_secs(30))
@@ -157,7 +157,7 @@ async fn an_initialized_namespace_is_ready_on_its_first_response() {
 #[nervix_primitives::test]
 async fn a_stalled_first_request_yields_to_a_later_ready_response() {
     let fixture = AdminFixture::bind().await;
-    let readiness = HttpReadiness::new(fixture.port(), NAMESPACE_PATH);
+    let readiness = HttpReadiness::new(fixture.port(), NAMESPACE_PATH, None);
     let server = task::spawn(async move {
         let (_unanswered, _) = fixture.listener.accept().await?;
         fixture.respond("200 OK").await
@@ -176,7 +176,7 @@ async fn a_stalled_first_request_yields_to_a_later_ready_response() {
 #[nervix_primitives::test]
 async fn a_transport_failure_remains_visible_at_the_probe_deadline() {
     let fixture = AdminFixture::bind().await;
-    let readiness = HttpReadiness::new(fixture.port(), NAMESPACE_PATH);
+    let readiness = HttpReadiness::new(fixture.port(), NAMESPACE_PATH, None);
     let server = task::spawn(async move { fixture.respond("invalid").await });
     let error = readiness
         .wait(Duration::from_secs(1))

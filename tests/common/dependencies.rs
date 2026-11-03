@@ -16,8 +16,9 @@ pub(crate) use nervix_test_environment::{
     KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MOCK_WS_ADDR, MOCK_WSS_ADDR,
     MONGODB_ADDR, MONGODB_MTLS_ADDR, MONGODB_REPLICA_SET_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR,
     MQTT_TLS_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, NATS_ADDR, NATS_TLS_ADDR, PULSAR_ADDR,
-    PULSAR_ADMIN_ADDR, PULSAR_TLS_ADDR, QUICKWIT_ADDR, RABBITMQ_ADDR, RABBITMQ_MANAGEMENT_ADDR,
-    RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
+    PULSAR_ADMIN_ADDR, PULSAR_AUTH_ADDR, PULSAR_AUTH_TOKEN, PULSAR_TLS_ADDR, QUICKWIT_ADDR,
+    RABBITMQ_ADDR, RABBITMQ_MANAGEMENT_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR,
+    RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
     collector_exports::CollectorSignal,
     collector_output::{CollectorOutput, CollectorWait},
 };
@@ -178,6 +179,7 @@ impl TestDependencies {
     dependency_starters! {
         start_kafka => "kafka",
         start_pulsar => "pulsar",
+        start_pulsar_auth => "pulsar-auth",
         start_rabbitmq => "rabbitmq",
         start_redis => "redis",
         start_mqtt => "mqtt",

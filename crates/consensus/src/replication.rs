@@ -665,7 +665,7 @@ impl ProtocolReceiver {
                     Ok(Some(decoded)) => decoded,
                     Ok(None) => return None,
                     Err(error) => {
-                        debug!(%error, "raft append stream ended");
+                        debug!(error = %format_args!("{error:#}"), "raft append stream ended");
                         return None;
                     }
                 };
@@ -676,7 +676,7 @@ impl ProtocolReceiver {
                 if let Err(error) =
                     validate_protocol_origin(&peer_node_id, record.origin_node_id(), "replication")
                 {
-                    debug!(%error, "raft append stream carried a foreign batch");
+                    debug!(error = %format_args!("{error:#}"), "raft append stream carried a foreign batch");
                     return None;
                 }
                 let request = match record.into_request() {

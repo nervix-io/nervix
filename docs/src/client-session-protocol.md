@@ -958,14 +958,16 @@ recover the outcome later, within the retry validity.
 
 The Rust client bounds each connection attempt by `connect_timeout` (10 seconds by default), each
 request by `request_timeout` (120 seconds), and each public call, including all of its retries and
-redirects, by `retry_timeout` (120 seconds). Without keepalives, a request that outlives
-`request_timeout` is the client's only sign that its session may be dead, so it ends every request
-still waiting on that session, and the next request opens a new one. While an election converges it
-retries with a delay that starts at 100 milliseconds and doubles up to one second. When a call's
-deadline passes before a command's outcome is known, and the command may have been admitted, the
-call fails as uncertain and names the execution reference. The Rust client, the CLI, and the console
-never send `CancelRequest`: a caller that stops waiting only drops its waiter, and the reply, when
-it comes, is discarded.
+redirects, by `retry_timeout` (120 seconds). A `BACKUP` takes `backup_wait_timeout` in place of
+both: its replies and every redirect and reconnect it makes share that one deadline, so a backup
+keeps reconnecting through an outage longer than `retry_timeout`. Without keepalives, a request
+that outlives `request_timeout` is the client's only sign that its session may be dead, so it ends
+every request still waiting on that session, and the next request opens a new one. While an
+election converges it retries with a delay that starts at 100 milliseconds and doubles up to one
+second. When a call's deadline passes before a command's outcome is known, and the command may have
+been admitted, the call fails as uncertain and names the execution reference. The Rust client, the
+CLI, and the console never send `CancelRequest`: a caller that stops waiting only drops its waiter,
+and the reply, when it comes, is discarded.
 
 `nervix-cli backup --timeout` sets only each running domain's quiesce timeout; its request and
 retry budgets stay at their defaults, and `--backup-wait-timeout` bounds the overall command wait.
@@ -1109,7 +1111,12 @@ is a per-session counter that starts at 1, so a handle, the name together with i
 unique within its session only; a generation taken by a request that then failed is simply skipped.
 The visibility wait is what makes the reply meaningful: by the time a client reads
 `SubscriptionOpened`, every live node already routes the relay's batches to the subscriber's node,
-and an advertisement left over from before an earlier withdrawal cannot satisfy it.
+and an advertisement left over from before an earlier withdrawal cannot satisfy it. When a live node
+does not confirm the interest, the refusal names every such node and carries, beneath it, the first
+one's own cause: the interconnect failure that ended the request to it, such as its deadline or the
+node leaving the membership, or the node's own refusal. Like every failed command's message, it is
+the whole chain of the report, as [Errors And Diagnostics](./errors-and-diagnostics.md#rendering)
+describes.
 
 The reply carries the schema and precedes every row. Delivery is held back until the reply is queued
 on the control lane, which the transport always serves first. When the reply cannot be queued,

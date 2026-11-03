@@ -8,12 +8,14 @@ use std::{io, time::Duration};
 
 pub(super) struct HttpReadiness {
     url: String,
+    bearer_token: Option<&'static str>,
 }
 
 impl HttpReadiness {
-    pub(super) fn new(host_port: u16, path: &str) -> Self {
+    pub(super) fn new(host_port: u16, path: &str, bearer_token: Option<&'static str>) -> Self {
         Self {
             url: format!("http://127.0.0.1:{host_port}{path}"),
+            bearer_token,
         }
     }
 
@@ -32,7 +34,11 @@ impl HttpReadiness {
         let wait = async {
             loop {
                 nervix_primitives::task::consume_budget().await;
-                let observation = client.get(&self.url).send().await;
+                let mut request = client.get(&self.url);
+                if let Some(token) = self.bearer_token {
+                    request = request.bearer_auth(token);
+                }
+                let observation = request.send().await;
                 match observation {
                     Ok(response) => {
                         if response.status() == reqwest::StatusCode::OK {

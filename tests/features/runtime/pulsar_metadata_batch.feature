@@ -25,7 +25,7 @@ Feature: Pulsar batch member metadata
       CREATE RELAY events SCHEMA observed UNBRANCHED;
       CREATE PULSAR CLIENT source CONFIG { 'addr' = '{{pulsar_addr}}' };
       CREATE PULSAR TOPIC INGESTOR records FROM source TOPIC 'batch_{{test_id}}'
-        SUBSCRIPTION 'batch_{{test_id}}' PROVISIONED MODE NO ACK
+        SUBSCRIPTION 'batch_{{test_id}}' PROVISIONED TYPE SHARED MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING event_codec TIMESTAMP AT metadata.publish_time
         TO events INHERIT ALL
           SET topic = metadata.topic, message_id = metadata.message_id,

@@ -11,7 +11,7 @@ env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   # scripts/kache_remote.py lets each job's local store hold a quarter of its cache volume, so a
   # runner's disk still sets the store's budget.
-  KACHE_VERSION: "1.2.2"
+  KACHE_VERSION: "2.0.0"
   KACHE_REMOTE_KEY_LISTING: "false"
   # Kache disables free-space recovery in CI unless a decimal-byte floor is explicit: 64 GiB.
   KACHE_AUTO_RECOVER_MIN_FREE_BYTES: "68719476736"
@@ -87,10 +87,17 @@ jobs:
           commitlintRulesPath: ./commitlint.config.js
 
   checks:
-    name: checks
+    name: checks (${{ matrix.shard }} of ${{ strategy.job-total }})
     runs-on: boat-xlarge
     # Cold validation includes Clippy and the complete compiler matrix.
     timeout-minutes: 120
+    # `just validate-ci` divides the checks into two parts, each on a runner of its own: formatting,
+    # the ordinary, Turmoil and Deloxide lints and the validations, and the Shuttle, Loom and compiler
+    # tooling lints with the ratchet. Each part's verdict stands on its own.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -194,7 +201,7 @@ jobs:
 
       - name: Start kache remote
         env:
-          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}
           KACHE_S3_BUCKET: ${{ secrets.KACHE_EU_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
           KACHE_S3_ENDPOINT: ${{ secrets.KACHE_EU_BUCKET_ENDPOINT }}
@@ -218,30 +225,35 @@ jobs:
       - name: Validate
         run: |
           just toolchains-install
-          just validate-ci 4
+          just validate-ci 4 "${SHARD}"
         env:
           GH_TOKEN: ${{ github.token }}
+          SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
 
       - name: Publish runner load
         if: always()
         uses: ./.github/actions/runner-load
         with:
           phase: finish
-          artifact-name: runner-load-checks
+          artifact-name: runner-load-checks-${{ matrix.shard }}
 
       # Every script test, the book tooling's and the docs worker's included, for every pull request:
-      # the book build that also runs them runs only for a pull request labeled `book`.
+      # the book build that also runs them runs only for a pull request labeled `book`. They run in
+      # the second part, which has already built the ratchet's tools they measure with.
       - name: Setup uv for the script tests
+        if: matrix.shard == 2
         uses: astral-sh/setup-uv@v6
 
       # The docs worker's tests run under Node.js. Boat's own Node.js comes from nvm, which a job's
       # shell may not load.
       - name: Setup Node.js for the docs worker's tests
+        if: matrix.shard == 2
         uses: actions/setup-node@v4
         with:
           node-version: "24"
 
       - name: Script tests
+        if: matrix.shard == 2
         run: just test-docs
 
       - name: Publish kache cache
@@ -269,7 +281,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          name: kache-${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
 
@@ -277,7 +289,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: go-tool-bootstrap-${{ github.job }}
+          name: go-tool-bootstrap-${{ github.job }}-${{ matrix.shard }}
           path: ${{ runner.temp }}/go-tool-bootstrap
           if-no-files-found: ignore
 
@@ -623,7 +635,10 @@ jobs:
   tests:
     name: tests
     needs: [scenarios-build]
-    runs-on: boat-xlarge
+    # GitHub's hosted runner: 4 CPUs, 16 GB and a 150 GB disk with about 84 GiB free, room for the
+    # archive and its 32 GiB restored. On Boat the archive's download and restore alone outlasted
+    # this limit.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -668,9 +683,10 @@ jobs:
       # The tests sync their storage below /tmp and the checkout. A single-use runner needs no crash
       # consistency, so those volumes drop their write barriers, as the build job's kache start step
       # drops them for its store.
-      # The archives restore only at the checkout path they were built in, and Blacksmith's differs
-      # from Boat's, so this checkout also appears at the build's path. A bind mount, unlike a
-      # symbolic link, keeps that path through `pwd -P` and the path of a running executable.
+      # The archive restores only at the checkout path it was built in, and GitHub's hosted runner
+      # checks out at another path than Blacksmith's, so this checkout also appears at the build's
+      # path. A bind mount, unlike a symbolic link, keeps that path through `pwd -P` and the path of
+      # a running executable.
       - name: Mount the checkout at the build's path
         env:
           BUILD_CHECKOUT: ${{ needs.scenarios-build.outputs.checkout }}
@@ -776,7 +792,7 @@ jobs:
       contents: read
     outputs:
       shards: ${{ steps.shards.outputs.shards }}
-      # The jobs that restore the archives run on another provider, at this path.
+      # The tests job restores its archive on GitHub's hosted runner, at this path.
       checkout: ${{ github.workspace }}
     env:
       NO_COLOR: "1"
@@ -1035,10 +1051,12 @@ jobs:
   # checkout of the same revision at the same path, and runs its share of the scenario runs, which
   # the scenario executable's --shard option deals out. SCENARIO_SHARDS sets how many shards run.
   # A shard compiles nothing, so it needs neither the build's toolchain setup nor the cache.
+  # The scenarios are timing sensitive, so the shards run on Blacksmith, where the build runs and
+  # its checkout path is theirs too: Boat's runners lost up to 58% of their CPU to their hosts.
   scenarios:
     name: scenarios (${{ matrix.shard }} of ${{ strategy.job-total }})
     needs: [scenarios-build]
-    runs-on: boat-xlarge
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     # The harness derives each shard's 85-minute suite budget from this limit, with 15 minutes for
     # setup and the archive's restore before it and 15 for cleanup, export and uploads after it.
     # Keep tests/common/suite_watchdog.rs in step.
@@ -1053,9 +1071,10 @@ jobs:
       NO_COLOR: "1"
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
-      # 48 slots on the 16-CPU runner. Every scenario's steps run on one runner thread, and 64 slots
-      # (Check 40358096404) kept that thread on a CPU for 86% of the run, made every scenario about
-      # 45% slower and raised no throughput; see the run slots in docs/src/integration-test-lifecycle.md.
+      # 24 slots on the 8-CPU runner. Every scenario's steps run on one runner thread, and factor 4,
+      # 64 slots on 16 CPUs (Check 40358096404), kept that thread on a CPU for 86% of the run, made
+      # every scenario about 45% slower and raised no throughput; see the run slots in
+      # docs/src/integration-test-lifecycle.md.
       NERVIX_TEST_CONCURRENCY_FACTOR: "3"
     steps:
       - name: Checkout
@@ -1075,8 +1094,7 @@ jobs:
         with:
           tool: just@latest,cargo-llvm-cov
 
-      # Boat's own Node.js comes from nvm, which a job's shell may not load, so a global install
-      # goes into the Node.js this step pins instead.
+      # Playwright's global install goes into the Node.js this step pins.
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -1099,16 +1117,6 @@ jobs:
       # The nodes a scenario starts sync their storage below /tmp. A single-use runner needs no crash
       # consistency, so the volumes holding it and the checkout drop their write barriers, as the
       # build job's kache start step drops them for its store.
-      # The archives restore only at the checkout path they were built in, and Blacksmith's differs
-      # from Boat's, so this checkout also appears at the build's path. A bind mount, unlike a
-      # symbolic link, keeps that path through `pwd -P` and the path of a running executable.
-      - name: Mount the checkout at the build's path
-        env:
-          BUILD_CHECKOUT: ${{ needs.scenarios-build.outputs.checkout }}
-        run: |
-          sudo mkdir -p "${BUILD_CHECKOUT}"
-          sudo mount --bind "${GITHUB_WORKSPACE}" "${BUILD_CHECKOUT}"
-
       - name: Lighten the scenario volume
         run: |
           python3 scripts/kache_remote.py lighten-volume /tmp
@@ -1136,13 +1144,11 @@ jobs:
           path: ${{ runner.temp }}/scenario-suite
 
       - name: Restore the scenario suite
-        working-directory: ${{ needs.scenarios-build.outputs.checkout }}
         run: |
           just test-scenarios-coverage-unpack "${RUNNER_TEMP}/scenario-suite/scenario-suite.tar.zst"
           rm "${RUNNER_TEMP}/scenario-suite/scenario-suite.tar.zst"
 
       - name: Scenario coverage
-        working-directory: ${{ needs.scenarios-build.outputs.checkout }}
         env:
           SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
         run: just test-scenarios-coverage-shard "${SHARD}"

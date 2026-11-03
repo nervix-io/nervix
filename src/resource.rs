@@ -715,7 +715,7 @@ impl Drop for ResourceBundleStager {
             }
             .await;
             if let Err(error) = cleanup {
-                warn!(error = %error, "failed to clean dropped resource bundle staging tree");
+                warn!(error = %format_args!("{error:#}"), "failed to clean dropped resource bundle staging tree");
             }
         }));
     }
