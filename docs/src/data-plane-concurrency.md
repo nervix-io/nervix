@@ -2244,7 +2244,11 @@ observes the existing host state; foreign Pulsar driver channels, borrowed visit
 broker waits remain outside its tracked lock graph. The existing ingestor-host Shuttle checks
 retain responsibility for host acknowledgement and cancellation interleavings.
 
-The registered `@restarted_voter_observation` workload reaches whole-cluster restart, concurrent live-policy discovery and automatic scheduling when the leader first hears a voter through a relayed heartbeat. Its test-only reconciliation gate releases after leadership is established; that gate, the watch channels and the concurrent fault map are untracked. The registered native metadata restore workload exercises distributed Kafka checkpoint replication, acknowledgement, restart and exact restoration above the resident replication message budget; its stream waits and assignment atomics retain their complementary checks.
+The registered `@restarted_voter_observation` workload reaches whole-cluster restart and automatic scheduling when the leader first hears a voter through a relayed heartbeat. Its test-only watch channels and concurrent fault map are untracked. The registered native metadata restore workload exercises distributed Kafka checkpoint replication, acknowledgement, restart and exact restoration above the resident replication message budget; its stream waits and assignment atomics retain their complementary checks.
+
+The `@restarted_voter_observation` workload also reaches concurrent live-policy discovery. Its
+test-only reconciliation gate releases after leadership is established and remains outside the
+detector's tracked lock graph.
 
 The lane builds all selected executables and diagnostic drivers before starting its workload clock.
 For each prepared invocation it lists what the build holds or reads
