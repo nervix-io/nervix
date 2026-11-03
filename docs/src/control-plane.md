@@ -107,7 +107,8 @@ that domain as its selected domain. An unclean transport loss or leadership chan
 transaction available for attach. Binding is leader-local soft state, so a leader that does not
 hold it reports the session as detached; clients treat that as a routing condition, attach the
 transaction again, and replay the command. A session that its client closes cleanly, with no
-request in flight, reverts the open transaction bound to it on the leader.
+request in flight, reverts the open transaction bound to it on the leader; a revert the leader
+cannot record leaves the transaction open until it expires.
 
 Only the bound domain's replicated configuration effects may be queued:
 

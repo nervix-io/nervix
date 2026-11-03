@@ -878,7 +878,7 @@ impl SessionServiceImpl {
         {
             warn!(
                 transaction_id = id,
-                error = %error,
+                error = %format_args!("{error:#}"),
                 "failed to revert transaction during clean session close"
             );
         }
