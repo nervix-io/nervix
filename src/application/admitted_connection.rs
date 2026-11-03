@@ -1,18 +1,21 @@
-//! A client connection a public listener accepted, which ends when the node closes admission.
+//! A client connection a public listener accepted, which ends when the stopping node cuts it.
 //!
 //! Layer: edges.
 //!
 //! - **Owns.** Accepting connections for a public listener and failing every read and write on
-//!   them once admission closes, so the protocol served on a connection ends together with the
-//!   requests it carries.
-//! - **Depends on.** Tokio's listener and I/O traits, the admission cancellation token, and
-//!   tonic's connection information.
+//!   them once the node cuts the connections it accepted, so the protocol served on a connection
+//!   ends together with the requests it carries.
+//! - **Depends on.** Tokio's listener and I/O traits, the cancellation token that cuts accepted
+//!   connections, and tonic's connection information.
 //! - **Must not know.** The protocol carried on a connection or what its requests do.
 //!
-//! A gRPC server's graceful shutdown waits until every connection it accepted has closed, and a
-//! request that waits for its client, such as a resource upload waiting for its next chunk, would
-//! hold that wait open for as long as the client chooses. Ending the connection itself releases
-//! the wait without asking the client.
+//! Closing admission does not end a connection: the server serving the listener stops accepting
+//! and asks each connection to take no new call, and a session still writes the ending that tells
+//! its client why it ends. A gRPC server's graceful shutdown then waits until every connection it
+//! accepted has closed, and a request that waits for its client, such as a resource upload waiting
+//! for its next chunk or a session whose client reads nothing, would hold that wait open for as
+//! long as the client chooses. Cutting the connection itself, once shutdown's grace period has
+//! passed, releases the wait without asking the client.
 
 #![cfg_attr(
     nervix_lint,
@@ -34,18 +37,15 @@ use nervix_recovery::Reported as _;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tonic::transport::server::Connected;
 
-/// A public listener whose accepted connections end when admission closes.
+/// A public listener whose accepted connections end when the node cuts them.
 pub(in crate::application) struct AdmittingListener {
     listener: TcpListener,
-    admission: CancellationToken,
+    cut: CancellationToken,
 }
 
 impl AdmittingListener {
-    pub(in crate::application) fn new(listener: TcpListener, admission: CancellationToken) -> Self {
-        Self {
-            listener,
-            admission,
-        }
+    pub(in crate::application) fn new(listener: TcpListener, cut: CancellationToken) -> Self {
+        Self { listener, cut }
     }
 
     /// Every connection the listener accepts, in the form a gRPC server serves.
@@ -62,7 +62,7 @@ impl AdmittingListener {
                 stream
                     .set_nodelay(true)
                     .reported("disabling Nagle on an accepted gRPC connection");
-                Ok(AdmittedConnection::new(stream, &self.admission))
+                Ok(AdmittedConnection::new(stream, &self.cut))
             }
             Err(error) => Err(error),
         };
@@ -70,46 +70,46 @@ impl AdmittingListener {
     }
 }
 
-/// An accepted connection whose reads and writes fail once admission closes.
+/// An accepted connection whose reads and writes fail once the node cuts it.
 pub(in crate::application) struct AdmittedConnection<IO> {
     io: IO,
-    admission: Admission,
+    cut: Cut,
 }
 
-/// Whether the listener that accepted a connection still admits clients.
-enum Admission {
-    Open(Pin<Box<WaitForCancellationFutureOwned>>),
-    Closed,
+/// Whether the node has cut the connections its listener accepted.
+enum Cut {
+    Pending(Pin<Box<WaitForCancellationFutureOwned>>),
+    Done,
 }
 
-impl Admission {
-    /// Reports whether admission has closed. While it is still open, `context` is woken when it
-    /// closes.
-    fn poll_closed(&mut self, context: &mut Context<'_>) -> bool {
-        let Self::Open(closing) = self else {
+impl Cut {
+    /// Reports whether the node has cut the connection. Until it has, `context` is woken when it
+    /// does.
+    fn poll_done(&mut self, context: &mut Context<'_>) -> bool {
+        let Self::Pending(cutting) = self else {
             return true;
         };
-        if closing.as_mut().poll(context).is_pending() {
+        if cutting.as_mut().poll(context).is_pending() {
             return false;
         }
-        *self = Self::Closed;
+        *self = Self::Done;
         true
     }
 }
 
 impl<IO> AdmittedConnection<IO> {
-    fn new(io: IO, admission: &CancellationToken) -> Self {
+    fn new(io: IO, cut: &CancellationToken) -> Self {
         Self {
             io,
-            admission: Admission::Open(Box::pin(admission.clone().cancelled_owned())),
+            cut: Cut::Pending(Box::pin(cut.clone().cancelled_owned())),
         }
     }
 }
 
-fn admission_closed() -> io::Error {
+fn connection_cut() -> io::Error {
     io::Error::new(
         io::ErrorKind::ConnectionAborted,
-        "the node closed admission",
+        "the stopping node cut the connection",
     )
 }
 
@@ -123,8 +123,8 @@ where
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let connection = self.get_mut();
-        if connection.admission.poll_closed(context) {
-            return Poll::Ready(Err(admission_closed()));
+        if connection.cut.poll_done(context) {
+            return Poll::Ready(Err(connection_cut()));
         }
         Pin::new(&mut connection.io).poll_read(context, buf)
     }
@@ -140,8 +140,8 @@ where
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let connection = self.get_mut();
-        if connection.admission.poll_closed(context) {
-            return Poll::Ready(Err(admission_closed()));
+        if connection.cut.poll_done(context) {
+            return Poll::Ready(Err(connection_cut()));
         }
         Pin::new(&mut connection.io).poll_write(context, buf)
     }
@@ -152,8 +152,8 @@ where
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
         let connection = self.get_mut();
-        if connection.admission.poll_closed(context) {
-            return Poll::Ready(Err(admission_closed()));
+        if connection.cut.poll_done(context) {
+            return Poll::Ready(Err(connection_cut()));
         }
         Pin::new(&mut connection.io).poll_write_vectored(context, bufs)
     }
@@ -164,16 +164,16 @@ where
 
     fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
         let connection = self.get_mut();
-        if connection.admission.poll_closed(context) {
-            return Poll::Ready(Err(admission_closed()));
+        if connection.cut.poll_done(context) {
+            return Poll::Ready(Err(connection_cut()));
         }
         Pin::new(&mut connection.io).poll_flush(context)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
         let connection = self.get_mut();
-        if connection.admission.poll_closed(context) {
-            return Poll::Ready(Err(admission_closed()));
+        if connection.cut.poll_done(context) {
+            return Poll::Ready(Err(connection_cut()));
         }
         Pin::new(&mut connection.io).poll_shutdown(context)
     }
@@ -199,10 +199,10 @@ mod tests {
     use super::*;
 
     #[nervix_primitives::test]
-    async fn an_admitted_connection_carries_data_while_admission_is_open() {
-        let admission = CancellationToken::new();
+    async fn an_admitted_connection_carries_data_until_it_is_cut() {
+        let cut = CancellationToken::new();
         let (mut client, server) = tokio::io::duplex(64);
-        let mut connection = AdmittedConnection::new(server, &admission);
+        let mut connection = AdmittedConnection::new(server, &cut);
 
         client
             .write_all(b"ping")
@@ -212,20 +212,20 @@ mod tests {
         connection
             .read_exact(&mut received)
             .await
-            .expect("an admitted connection reads while admission is open");
+            .expect("an admitted connection reads until it is cut");
         connection
             .write_all(b"pong")
             .await
-            .expect("an admitted connection writes while admission is open");
+            .expect("an admitted connection writes until it is cut");
 
         assert_eq!(&received, b"ping");
     }
 
     #[nervix_primitives::test]
-    async fn closing_admission_ends_a_read_that_waits_for_the_client() {
-        let admission = CancellationToken::new();
+    async fn cutting_the_connection_ends_a_read_that_waits_for_the_client() {
+        let cut = CancellationToken::new();
         let (_client, server) = tokio::io::duplex(64);
-        let mut connection = AdmittedConnection::new(server, &admission);
+        let mut connection = AdmittedConnection::new(server, &cut);
         let mut received = [0; 4];
         let mut read = pin!(connection.read(&mut received));
         let mut context = Context::from_waker(Waker::noop());
@@ -234,26 +234,51 @@ mod tests {
             "a read waits while the client sends nothing"
         );
 
-        admission.cancel();
+        cut.cancel();
 
         let error = read
             .await
-            .expect_err("closing admission must end the waiting read");
+            .expect_err("cutting the connection must end the waiting read");
         assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
     }
 
     #[nervix_primitives::test]
-    async fn closing_admission_fails_every_later_write() {
-        let admission = CancellationToken::new();
+    async fn cutting_the_connection_fails_every_later_write() {
+        let cut = CancellationToken::new();
         let (_client, server) = tokio::io::duplex(64);
-        let mut connection = AdmittedConnection::new(server, &admission);
+        let mut connection = AdmittedConnection::new(server, &cut);
 
-        admission.cancel();
+        cut.cancel();
 
         let error = connection
             .write_all(b"late")
             .await
-            .expect_err("a connection must not write after admission closed");
+            .expect_err("a connection must not write after it was cut");
         assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+    }
+
+    #[nervix_primitives::test]
+    async fn cutting_the_connection_fails_its_vectored_writes_flush_and_shutdown() {
+        let cut = CancellationToken::new();
+        let (_client, server) = tokio::io::duplex(64);
+        let mut connection = AdmittedConnection::new(server, &cut);
+
+        cut.cancel();
+
+        let vectored = connection
+            .write_vectored(&[io::IoSlice::new(b"late")])
+            .await
+            .expect_err("a cut connection must not take a vectored write");
+        assert_eq!(vectored.kind(), io::ErrorKind::ConnectionAborted);
+        let flushed = connection
+            .flush()
+            .await
+            .expect_err("a cut connection must not flush");
+        assert_eq!(flushed.kind(), io::ErrorKind::ConnectionAborted);
+        let shut = connection
+            .shutdown()
+            .await
+            .expect_err("a cut connection must not shut down its write half");
+        assert_eq!(shut.kind(), io::ErrorKind::ConnectionAborted);
     }
 }

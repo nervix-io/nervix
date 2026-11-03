@@ -4476,6 +4476,29 @@ async fn given_authenticated_resource_upload_is_held_open(
     world.held_resource_upload = Some(upload);
 }
 
+#[then(expr = "the held resource upload ended with status {string}")]
+async fn then_held_resource_upload_ended_with_status(world: &mut ScenarioWorld, expected: String) {
+    let upload = world
+        .held_resource_upload
+        .take()
+        .verified("the preceding step held a resource upload open");
+    // The node already exited, so the call's ending is either buffered on the client or lost.
+    let ending = nervix_primitives::time::timeout(Duration::from_secs(30), upload.ending()).await;
+    let status = match ending {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => panic!(
+            "the held upload's call failed with its HTTP/2 stream instead of ending with a \
+             status: {error}"
+        ),
+        Err(_) => panic!("the held upload's call had not ended 30 seconds after its node exited"),
+    };
+    assert_eq!(
+        format!("{:?}", status.code()),
+        expected,
+        "the held upload's call ended with {status:?}"
+    );
+}
+
 #[when(expr = "the server process receives {word}")]
 async fn when_server_process_receives_signal(world: &mut ScenarioWorld, signal: String) {
     let signal = signal
