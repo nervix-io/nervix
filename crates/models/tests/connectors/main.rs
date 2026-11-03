@@ -309,9 +309,21 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
             every_node: false,
             reference: IngestorReferenceKind::Client(ConnectorKind::Pulsar),
         },
-        IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => {
-            headers_only(None, ConnectorKind::Mqtt)
-        }
+        IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => IngestorDeclaration {
+            headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+            metadata: &[
+                ("topic", IngestorMetadataType::String),
+                ("retain", IngestorMetadataType::Bool),
+                ("qos", IngestorMetadataType::U8),
+                ("duplicate", IngestorMetadataType::Bool),
+                ("content_type", IngestorMetadataType::String),
+                ("response_topic", IngestorMetadataType::String),
+                ("correlation_data", IngestorMetadataType::Bytes),
+                ("message_expiry", IngestorMetadataType::U32),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Mqtt),
+        },
         IngestorEntityKind::Nats(NatsIngestorEntity::Subject) => headers_only(
             Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
             ConnectorKind::Nats,
