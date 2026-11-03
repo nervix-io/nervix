@@ -2119,8 +2119,8 @@ impl Cluster {
         }
         Err(io::Error::other(format!(
             "timed out after {:?} establishing restarted bootstrap '{bootstrap}' as leader; \
-             requested transfers: {requested:?}; last status: {last_status:?}; \
-             last failure: {last_failure:?}",
+             requested transfers: {requested:?}; last status: {last_status:?}; last failure: \
+             {last_failure:?}",
             deadline.elapsed()
         )))
     }

@@ -2011,8 +2011,8 @@ bootstrap node as leader. It requests a transfer once for each observed non-boot
 term: OpenRaft ignores a request delivered to a follower, so a startup leadership change must not
 leave the fixture waiting on a request addressed to a former leader. The original cluster-state
 deadline bounds these observations and requests; the fixture releases its reconciliation gate
-only after the bootstrap node reports itself leading. It waits for the held voter's catch-up after releasing its
-scheduling barrier. Adding a node, or starting one a
+only after the bootstrap node reports itself leading. It waits for the held voter's catch-up after
+releasing its scheduling barrier. Adding a node, or starting one a
 scenario stopped, spends one 84-second node startup and the catch-up that follows it; adding a node
 also repeats the convergence checks. A node started while its consensus connectivity is blocked
 spends the node startup without the catch-up. A scenario whose subject is a node that cannot apply
