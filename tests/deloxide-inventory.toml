@@ -77,6 +77,106 @@ invocation = "stress-scenarios"
 scenario = "Kafka broker event time makes historical windows due independently in two branches"
 selections = ["deloxide-stress"]
 
+[[workload]]
+coverage = "Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata.feature"
+id = "scenario.pulsar-message-topic"
+invariant = "A route reading only the topic admits its payload while the other typed metadata columns remain unread."
+invocation = "scenarios"
+scenario = "A Pulsar ingestor projects its message topic"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 6
+feature = "tests/features/runtime/pulsar_metadata_values.feature"
+id = "scenario.pulsar-message-values"
+invariant = "Every delivered message keeps its exact nine-field metadata and properties in all three acknowledgement modes."
+invocation = "scenarios"
+scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata_values.feature"
+id = "scenario.pulsar-message-event-time"
+invariant = "Each branch's historical duration window uses the broker message's event time and preserves its fields."
+invocation = "scenarios"
+scenario = "Pulsar event time flushes historical windows separately for two branches"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata_values.feature"
+id = "scenario.pulsar-message-redelivery"
+invariant = "A rejected graph attempt redelivers the same message id with the broker's incremented count and eventually settles its subscription."
+invocation = "scenarios"
+scenario = "A Pulsar redelivery keeps its message identity and reports the broker's count"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata.feature"
+id = "stress.pulsar-message-topic"
+invariant = "A route reading only the topic admits its payload while the other typed metadata columns remain unread."
+invocation = "stress-scenarios"
+scenario = "A Pulsar ingestor projects its message topic"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 6
+feature = "tests/features/runtime/pulsar_metadata_values.feature"
+id = "stress.pulsar-message-values"
+invariant = "Every delivered message keeps its exact nine-field metadata and properties in all three acknowledgement modes."
+invocation = "stress-scenarios"
+scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata_values.feature"
+id = "stress.pulsar-message-event-time"
+invariant = "Each branch's historical duration window uses the broker message's event time and preserves its fields."
+invocation = "stress-scenarios"
+scenario = "Pulsar event time flushes historical windows separately for two branches"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: Real Pulsar delivery passes through tracked ingestion, relay and acknowledgement state on one and three nodes. Driver channels, borrowed metadata visits and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata_values.feature"
+id = "stress.pulsar-message-redelivery"
+invariant = "A rejected graph attempt redelivers the same message id with the broker's incremented count and eventually settles its subscription."
+invocation = "stress-scenarios"
+scenario = "A Pulsar redelivery keeps its message identity and reports the broker's count"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "A real broker-stored batch passes through tracked ingestion, relay and acknowledgement state on one and three nodes. The bounded protocol fixture, driver channels and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata_batch.feature"
+id = "scenario.pulsar-batch-member-metadata"
+invariant = "Present member sequence ids and event times override their envelope fields, including zero; omitted member fields inherit the envelope. Each member preserves all metadata and its exact batch position."
+invocation = "scenarios"
+scenario = "Pulsar batch members retain their own sequence ids and complete metadata"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: A real broker-stored batch passes through tracked ingestion, relay and acknowledgement state on one and three nodes. The bounded protocol fixture, driver channels and async waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/pulsar_metadata_batch.feature"
+id = "stress.pulsar-batch-member-metadata"
+invariant = "Present member sequence ids and event times override their envelope fields, including zero; omitted member fields inherit the envelope. Each member preserves all metadata and its exact batch position."
+invocation = "stress-scenarios"
+scenario = "Pulsar batch members retain their own sequence ids and complete metadata"
+selections = ["deloxide-stress"]
+
 [lane]
 # All diagnostic test and driver executables build before any workload starts, under their own
 # real-time budget. The measured cold stressed scenario build took 1988s on a loaded host; 80
@@ -170,6 +270,8 @@ package = "nervix-scenarios"
 selections = ["deloxide", "deloxide-order"]
 tags = [
   "@kafka_record_metadata",
+  "@pulsar_message_metadata",
+  "@rabbitmq_metadata",
   "@restore_client_inspection",
   "@runtime_installation_retry",
   "@execution_class_drain",
@@ -187,6 +289,7 @@ tags = [
   "@client_ingestor_alter_drain",
   "@syslog_suspend_handoff",
   "@syslog_listener_rebind",
+  "@syslog_metadata",
   "@resource_source_discovery",
   "@resource_upload_publication",
   "@deadlock_reports",
@@ -226,6 +329,8 @@ tags = [
   "@websocket_declaration_lifecycle",
   "@endpoint_metadata_buffer",
   "@mqtt_source_retirement",
+  "@mqtt_emitter_pubcomp_boundary",
+  "@mqtt_client_credentials_refused",
   "@pulsar_source_retirement",
   "@pulsar_subscription_conflict",
   "@forced_failover_delivery",
@@ -337,6 +442,86 @@ package = "nervix-scenarios"
 selections = ["deloxide-stress-restore"]
 tags = ["@deloxide_stress_restore"]
 target = "test:scenarios"
+
+[[workload]]
+coverage = "RabbitMQ deliveries through the real broker and the source host's tracked ingestion and ACK state, with every declared metadata field read under ACK SEQUENTIAL and NO ACK on one and three nodes. The AMQP client's reader and borrowed metadata visits are untracked."
+examples = 4
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "scenario.rabbitmq-delivery-metadata"
+invariant = "Every admitted delivery reads its own envelope and each AMQP basic property as its field's exact type, and a property its publisher left unset reads as null."
+invocation = "scenarios"
+scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A delivery rejected through an emitter fault returns through the real broker and the source host's tracked ACK state on one and three nodes, read on each delivery. Broker redelivery and the emitter's fault timing are untracked."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "scenario.rabbitmq-redelivered-metadata"
+invariant = "A delivery the ingestor rejected reads metadata.redelivered as false on its first delivery and true when the broker delivers it again, and reaches its emitter once the fault ends."
+invocation = "scenarios"
+scenario = "A RabbitMQ delivery the ingestor rejected reads metadata.redelivered as true when the broker delivers it again"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A producer's AMQP timestamp drives a paced window through tracked source and processor lifecycle state on one and three nodes. Logical timer waits and borrowed metadata conversion are untracked."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "scenario.rabbitmq-timestamp-event-time"
+invariant = "TIMESTAMP AT metadata.timestamp admits a delivery at the instant its producer wrote, and the window aggregates every row it decoded at that instant."
+invocation = "scenarios"
+scenario = "TIMESTAMP AT metadata.timestamp windows RabbitMQ messages at the instant their producer wrote"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "One delivery reaches two ingestors on one and three nodes, and the one that reads a timestamp no DATETIME holds refuses it through the message-error path and tracked ACK state. The ingest group's async refusal step and borrowed metadata conversion are untracked."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "scenario.rabbitmq-timestamp-refusal"
+invariant = "A timestamp no DATETIME holds refuses its message with a validation admit error naming metadata.timestamp only where the field is read, and the next representable delivery passes both ingestors."
+invocation = "scenarios"
+scenario = "A RabbitMQ timestamp no DATETIME holds refuses its message only where metadata.timestamp is read"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: real-broker RabbitMQ ingestion and ACK state in both modes with every declared metadata field read. The AMQP client's reader and borrowed metadata visits remain untracked."
+examples = 4
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "stress.rabbitmq-delivery-metadata"
+invariant = "Every admitted delivery reads its own envelope and each AMQP basic property as its field's exact type, and a property its publisher left unset reads as null."
+invocation = "stress-scenarios"
+scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a delivery rejected through an emitter fault returns through the real broker and the source host's tracked ACK state. Broker redelivery and the emitter's fault timing remain untracked."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "stress.rabbitmq-redelivered-metadata"
+invariant = "A delivery the ingestor rejected reads metadata.redelivered as false on its first delivery and true when the broker delivers it again, and reaches its emitter once the fault ends."
+invocation = "stress-scenarios"
+scenario = "A RabbitMQ delivery the ingestor rejected reads metadata.redelivered as true when the broker delivers it again"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a producer's AMQP timestamp drives a paced window beside tracked source and processor lifecycle state. Logical timer waits and borrowed metadata conversion remain untracked."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "stress.rabbitmq-timestamp-event-time"
+invariant = "TIMESTAMP AT metadata.timestamp admits a delivery at the instant its producer wrote, and the window aggregates every row it decoded at that instant."
+invocation = "stress-scenarios"
+scenario = "TIMESTAMP AT metadata.timestamp windows RabbitMQ messages at the instant their producer wrote"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: one delivery reaches two ingestors, and the one that reads a timestamp no DATETIME holds refuses it through the message-error path and tracked ACK state. The ingest group's async refusal step and borrowed metadata conversion remain untracked."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_metadata.feature"
+id = "stress.rabbitmq-timestamp-refusal"
+invariant = "A timestamp no DATETIME holds refuses its message with a validation admit error naming metadata.timestamp only where the field is read, and the next representable delivery passes both ingestors."
+invocation = "stress-scenarios"
+scenario = "A RabbitMQ timestamp no DATETIME holds refuses its message only where metadata.timestamp is read"
+selections = ["deloxide-stress"]
 
 [[workload]]
 coverage = "Actual outer and nested snapshot decoders, their execution worker FIFO admission and callback destruction, and native checkpoint readers. The independent input charge uses untracked semaphore permits; explicit queued cancellation is covered by the production-owner Shuttle check."
@@ -887,6 +1072,26 @@ scenario = "STOP waits for the publish a QOS 0 MQTT TOPIC emitter's client holds
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "An attached MQTT QOS 2 emitter on one and three nodes whose endpoint drops every PUBREL, so each publish reaches the broker and its exchange stops after PUBREC: the persistent session's event loop keeps running while ACK TIMEOUT expires, the host retries the record on its policy, and the retry's exchange reaches PUBCOMP once the endpoint forwards again."
+examples = 2
+feature = "tests/features/runtime/mqtt_emission.feature"
+id = "scenario.mqtt-emitter-pubcomp-boundary"
+invariant = "An MQTT QOS 2 record stays unacknowledged until PUBCOMP, whatever the broker already holds, and a retried exchange completes through the same running event loop without blocking its emitter task."
+invocation = "scenarios"
+scenario = "An attached MQTT QOS 2 emitter holds the input offset until PUBCOMP"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "MQTT sources and emitters on one and three nodes whose broker listener refuses a client that writes no credentials: each source resume and emitter connection fails with the broker's refusal, the source connects again on the host's reconnect cadence and the emitter on its retry policy, beside the tracked locks of the Plexus commands, the ingestor and emitter status publication and the cluster's teardown. The client's event loop, the broker's refusal and the reconnect waits are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_client_keys.feature"
+id = "scenario.mqtt-client-credentials-refused"
+invariant = "An MQTT client that writes no credentials to a broker requiring them never subscribes or publishes, and its source and emitter keep reporting the broker's refusal while they connect again."
+invocation = "scenarios"
+scenario = "The broker refuses an MQTT client without credentials, and its source and emitter report the refusal"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "A connect-mode ZeroMQ emitter on one and three nodes whose sink open runs out of connect_timeout_ms against a port that refuses every connection, the emitter task's reopen on its retry policy, and the reopen that connects once a peer listens, beside the tracked locks of the Plexus commands, the HTTP endpoint intake and the cluster's teardown. The ZeroMQ driver's connection attempts, the connect deadline and the emitter's retry wait are untracked."
 examples = 2
 feature = "tests/features/runtime/zeromq_emission.feature"
@@ -1300,6 +1505,16 @@ id = "scenario.syslog-suspend-handoff"
 invariant = "One-node and every three-node Syslog listener delivers every numbered frame once through entity suspension and resume."
 invocation = "scenarios"
 scenario = "A full Syslog TCP intake keeps every frame through source suspension on <cluster_size> nodes via <node_id>"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Verified TLS client-subject extraction and complete Syslog metadata projection through real one- and three-node hosts. The source's async connection and immutable peer metadata are outside Deloxide; node lifecycle and host owners retain their tracked locks."
+examples = 4
+feature = "tests/features/runtime/syslog_metadata.feature"
+id = "scenario.syslog-tls-metadata"
+invariant = "Every TLS frame carries its transport and peer address, with the exact client subject only after client-certificate verification."
+invocation = "scenarios"
+scenario = "A Syslog TLS frame exposes a peer only when the client certificate is verified"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1770,6 +1985,16 @@ id = "stress.syslog-suspend-handoff"
 invariant = "One-node and every three-node Syslog listener delivers every numbered frame once through entity suspension and resume."
 invocation = "stress-scenarios"
 scenario = "A full Syslog TCP intake keeps every frame through source suspension on <cluster_size> nodes via <node_id>"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: verified TLS subject extraction and complete Syslog metadata through the real host. Deloxide observes the host's tracked locks, not the source's async connection or immutable metadata."
+examples = 4
+feature = "tests/features/runtime/syslog_metadata.feature"
+id = "stress.syslog-tls-metadata"
+invariant = "Every TLS frame carries its transport and peer address, with the exact client subject only after client-certificate verification."
+invocation = "stress-scenarios"
+scenario = "A Syslog TLS frame exposes a peer only when the client certificate is verified"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -2410,6 +2635,26 @@ id = "stress.mqtt-finish-at-stop"
 invariant = "STOP retains an MQTT client until every QOS 0 publish it took is flushed to the broker within the finish deadline, rather than completing while that publish is held behind a broker fault."
 invocation = "stress-scenarios"
 scenario = "STOP waits for the publish a QOS 0 MQTT TOPIC emitter's client holds"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: an attached MQTT QOS 2 emitter on one and three nodes whose endpoint drops every PUBREL, so each publish reaches the broker and its exchange stops after PUBREC: the persistent session's event loop keeps running while ACK TIMEOUT expires, the host retries the record on its policy, and the retry's exchange reaches PUBCOMP once the endpoint forwards again."
+examples = 2
+feature = "tests/features/runtime/mqtt_emission.feature"
+id = "stress.mqtt-emitter-pubcomp-boundary"
+invariant = "An MQTT QOS 2 record stays unacknowledged until PUBCOMP, whatever the broker already holds, and a retried exchange completes through the same running event loop without blocking its emitter task."
+invocation = "stress-scenarios"
+scenario = "An attached MQTT QOS 2 emitter holds the input offset until PUBCOMP"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: MQTT sources and emitters on one and three nodes whose broker listener refuses a client that writes no credentials: each source resume and emitter connection fails with the broker's refusal, the source connects again on the host's reconnect cadence and the emitter on its retry policy, beside the tracked locks of the Plexus commands, the ingestor and emitter status publication and the cluster's teardown. The client's event loop, the broker's refusal and the reconnect waits are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_client_keys.feature"
+id = "stress.mqtt-client-credentials-refused"
+invariant = "An MQTT client that writes no credentials to a broker requiring them never subscribes or publishes, and its source and emitter keep reporting the broker's refusal while they connect again."
+invocation = "stress-scenarios"
+scenario = "The broker refuses an MQTT client without credentials, and its source and emitter report the refusal"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -3776,21 +4021,21 @@ scenario = "MQTT ACK PARALLEL publishes a quiesce change meets half gathered rea
 selections = ["deloxide-stress"]
 
 [[workload]]
-coverage = "An entity hold that quiesces an SQS ingestor while its receive waits for the service's answer, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The held answer, the SQS client and the read's cancellation are outside the detector."
+coverage = "An entity hold that quiesces an SQS ingestor while its receive waits for the service's answer, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The admitted message exercises U32 and DATETIME projection at the quiesce boundary; the bounded ingest-metadata-projection property separately verifies retained-copy replay. The held answer, the SQS client and the read's cancellation are outside the detector."
 examples = 2
 feature = "tests/features/runtime/sqs_ingestion.feature"
 id = "scenario.sqs-receive-at-quiesce"
-invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message reaches the relay without waiting for its visibility timeout, on one and three nodes."
+invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message with exact U32 receive_count and DATETIME sent_at reaches the relay without waiting for its visibility timeout, on one and three nodes."
 invocation = "scenarios"
 scenario = "An SQS receive in flight when its ingestor quiesces delivers its message without waiting for the visibility timeout"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "Under scheduling stress: an entity hold that quiesces an SQS ingestor while its receive waits for the service's answer, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The held answer, the SQS client and the read's cancellation are outside the detector."
+coverage = "Under scheduling stress: an entity hold that quiesces an SQS ingestor while its receive waits for the service's answer, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The admitted message exercises U32 and DATETIME projection at the quiesce boundary; the bounded ingest-metadata-projection property separately verifies retained-copy replay. The held answer, the SQS client and the read's cancellation are outside the detector."
 examples = 2
 feature = "tests/features/runtime/sqs_ingestion.feature"
 id = "stress.sqs-receive-at-quiesce"
-invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message reaches the relay without waiting for its visibility timeout, on one and three nodes."
+invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message with exact U32 receive_count and DATETIME sent_at reaches the relay without waiting for its visibility timeout, on one and three nodes."
 invocation = "stress-scenarios"
 scenario = "An SQS receive in flight when its ingestor quiesces delivers its message without waiting for the visibility timeout"
 selections = ["deloxide-stress"]

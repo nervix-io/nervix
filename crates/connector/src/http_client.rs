@@ -3,12 +3,12 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Building an HTTP client from a client's entries: the node DNS resolver, the
-//!   request deadline its `timeout_ms` sets, optional CA file and optional client identity, the
+//!   request deadline its `timeout_ms` sets, the shared TLS trust and client identity, the
 //!   one proxy the client declares and the credentials it carries, refusing every redirect so the
 //!   connector that sends decides what a redirect means, and never reading a proxy from the
 //!   environment.
-//! - **Depends on.** The client configuration's entries, TLS paths and PEM files, `nervix-dns`,
-//!   URLs, Base64 and percent decoding, and `reqwest`.
+//! - **Depends on.** The client configuration's entries, the shared rustls configuration owner,
+//!   `nervix-dns`, URLs, Base64 and percent decoding, and `reqwest`.
 //! - **Must not know.** Which connector sends requests through the client, or what it sends.
 
 #![cfg_attr(
@@ -25,17 +25,13 @@ use base64::Engine as _;
 use error_stack::{Report, ResultExt as _};
 use nervix_dns::DnsResolver;
 use percent_encoding::percent_decode_str;
-use reqwest::{
-    Certificate as HttpCertificate, Client as HttpClient, Identity as HttpIdentity, Proxy, redirect,
-};
+use reqwest::{Client as HttpClient, Proxy, redirect};
 use thiserror::Error;
 use url::Url;
 
 use crate::{
-    client_config::{
-        client_identity_pem, client_tls_paths, optional_client_config_value, read_tls_file,
-    },
-    client_deadline::ConfiguredDeadline,
+    client_config::optional_client_config_value, client_deadline::ConfiguredDeadline,
+    tls::RustlsClientConfigProvider,
 };
 
 /// The configuration key that names a client's proxy.
@@ -45,12 +41,8 @@ const PROXY: &str = "proxy";
 pub enum HttpClientConfigError {
     #[error("invalid {label} timeout_ms")]
     InvalidTimeout { label: &'static str },
-    #[error("failed to read {label} TLS configuration")]
-    ReadTls { label: &'static str },
-    #[error("failed to parse {label} TLS CA certificate")]
-    ParseCaCertificate { label: &'static str },
-    #[error("failed to parse {label} TLS client identity")]
-    ParseClientIdentity { label: &'static str },
+    #[error("failed to configure {label} TLS")]
+    Tls { label: &'static str },
     /// The `proxy` value is not an `http` or `https` URL with a host. The value itself is never
     /// quoted, because its user information is a credential.
     #[error("invalid {label} proxy")]
@@ -192,27 +184,13 @@ impl<'a> HttpClientConfig<'a> {
             builder = builder.timeout(timeout.bound());
         }
 
-        let tls = client_tls_paths(self.entries);
-        if let Some(ca_file) = tls.ca_file.as_ref() {
-            let ca_pem = read_tls_file(ca_file, "TLS CA certificate")
-                .change_context(HttpClientConfigError::ReadTls { label: self.label })?;
-            builder = builder.add_root_certificate(HttpCertificate::from_pem(&ca_pem).map_err(
-                |source| {
-                    Report::new(HttpClientConfigError::ParseCaCertificate { label: self.label })
-                        .attach_printable(source.to_string())
-                },
-            )?);
-        }
-        if let Some(identity_pem) = client_identity_pem(&tls)
-            .change_context(HttpClientConfigError::ReadTls { label: self.label })?
-        {
-            builder =
-                builder.identity(HttpIdentity::from_pem(&identity_pem).map_err(|source| {
-                    Report::new(HttpClientConfigError::ParseClientIdentity { label: self.label })
-                        .attach_printable(source.to_string())
-                })?);
-        }
-        Ok(builder)
+        let tls = RustlsClientConfigProvider::new(self.entries)
+            .build_with_default_roots()
+            .change_context(HttpClientConfigError::Tls { label: self.label })?;
+        let mut tls = (*tls).clone();
+        // Reqwest preserves a preconfigured client's ALPN instead of setting its HTTP defaults.
+        tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        Ok(builder.tls_backend_preconfigured(tls))
     }
 }
 
@@ -441,6 +419,77 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn http_client_builds_without_native_trust_anchors()
+    -> Result<(), Report<DnsConfigurationError>> {
+        const CHILD: &str = "NERVIX_TEST_HTTP_EMPTY_TRUST_STORE";
+        if std::env::var_os(CHILD).is_some() {
+            let dns = DnsResolver::load(DnsConfiguration::system()).await?;
+            let entries = [entry("timeout_ms", "5000")];
+            HttpClientConfig::new(&entries, "HTTP", &dns)
+                .build()
+                .expect("the bundled roots suffice when native roots are empty");
+            return Ok(());
+        }
+
+        // Root-store discovery reads process environment. Isolate those paths in this one child,
+        // never in the test process that runs alongside the other connector tests.
+        let directory = tempfile::tempdir().expect("the trust-store fixture is writable");
+        let certificate_file = directory.path().join("empty.pem");
+        let certificate_directory = directory.path().join("empty-roots");
+        std::fs::write(&certificate_file, b"").expect("the empty certificate file is writable");
+        std::fs::create_dir(&certificate_directory).expect("the empty root directory is writable");
+        let executable = std::env::current_exe().expect("the running test has an executable");
+        let mut child = tokio::process::Command::new(executable);
+        child
+            .args([
+                "--exact",
+                "http_client::tests::http_client_builds_without_native_trust_anchors",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("SSL_CERT_FILE", certificate_file)
+            .env("SSL_CERT_DIR", certificate_directory)
+            .kill_on_drop(true);
+        let output =
+            nervix_primitives::time::timeout(std::time::Duration::from_secs(60), child.output())
+                .await
+                .expect("the isolated trust-store test finishes within its supervision bound")
+                .expect("the child test starts");
+        assert!(
+            output.status.success(),
+            "empty native roots must not prevent HTTP client construction: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    }
+
+    #[nervix_primitives::test]
+    async fn http_client_keeps_the_shared_tls_configuration_cause()
+    -> Result<(), Report<DnsConfigurationError>> {
+        let dns = DnsResolver::load(DnsConfiguration::system()).await?;
+        let directory = tempfile::tempdir().expect("the TLS fixture directory is writable");
+        let ca = directory.path().join("invalid-ca.pem");
+        std::fs::write(
+            &ca,
+            b"-----BEGIN CERTIFICATE-----\n!!!\n-----END CERTIFICATE-----\n",
+        )
+        .expect("the malformed CA fixture is writable");
+        let entries = [entry("tls_ca_file", &ca.to_string_lossy())];
+        let error = HttpClientConfig::new(&entries, "HTTP", &dns)
+            .build()
+            .expect_err("a malformed trust anchor must refuse the client");
+        let cause = error
+            .downcast_ref::<crate::TlsClientConfigError>()
+            .expect("HTTP clients retain the shared TLS owner's typed failure");
+        assert!(matches!(
+            cause,
+            crate::TlsClientConfigError::ParseCaCertificate { path } if path == &ca
+        ));
+        Ok(())
+    }
+
+    #[nervix_primitives::test]
     async fn http_client_classifies_invalid_tls_material()
     -> Result<(), Report<DnsConfigurationError>> {
         let dns = DnsResolver::load(DnsConfiguration::system()).await?;
@@ -462,8 +511,7 @@ mod tests {
             .expect_err("an invalid CA certificate must fail");
         assert!(matches!(
             ca.current_context(),
-            HttpClientConfigError::ParseCaCertificate { label: "HTTP" }
-                | HttpClientConfigError::Build { label: "HTTP" }
+            HttpClientConfigError::Tls { label: "HTTP" }
         ));
 
         let identity_entries = [
@@ -481,7 +529,7 @@ mod tests {
             .expect_err("an invalid client identity must fail");
         assert!(matches!(
             identity.current_context(),
-            HttpClientConfigError::ParseClientIdentity { label: "HTTP" }
+            HttpClientConfigError::Tls { label: "HTTP" }
         ));
         Ok(())
     }

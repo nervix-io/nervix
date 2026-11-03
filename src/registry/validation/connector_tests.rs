@@ -19,7 +19,8 @@ use nervix_models::{
     ClientConfigSchemaError, ClientName, CodecName, CodecWireFormat, CreateClientHttp,
     CreateClientPrometheus, CreateClientS3, CreateClientSqs, CreateWireSchema, EmitterEntityKind,
     ErrorPolicies, FlushPolicy, GeneralErrorPolicy, HttpEmitterEntity, HttpEndpointIngestor,
-    HttpIngestor, IcebergCatalog, IcebergTableEmitter, IngestorEntity, IngestorName, JsonType,
+    HttpIngestor, HttpRequestFieldError, HttpRequestIngestMode, HttpRequestIngestor,
+    IcebergCatalog, IcebergTableEmitter, IngestorEntity, IngestorName, JsonType,
     KafkaConsumerGroupName, KafkaEmitter, KafkaIngestMode, KafkaIngestor, KafkaOffsetMode,
     KafkaTopicEmitter, KafkaTopicIngestor, MaterializedRelayState, MessageErrorPolicy,
     MqttIngestMode, MqttIngestor, MqttQos, MqttSession, MqttTopicIngestor, NatsEmitter,
@@ -315,6 +316,50 @@ fn emitter_publishing_contract_rejects_model_level_bypasses() {
     )
     .expect_err("FIFO GROUP on a standard queue must be rejected");
     assert!(format!("{error:#}").contains("requires a queue name ending in .fifo"));
+}
+
+#[test]
+fn a_publishing_mode_needs_the_option_choices_its_entity_declares_beside_it() {
+    let domain = DomainName::parse("default").expect("valid domain");
+    let Model::Emitter(mut emitter) = emitter("emit", "events", "event_codec", "broker_out") else {
+        unreachable!("emitter helper must build an emitter model")
+    };
+    let topic = nervix_models::MqttTopicName::try_from("devices/orders").expect("valid topic");
+    *emitter.connector = EmitterEntity::Mqtt(nervix_models::MqttEmitter::Topic(
+        nervix_models::MqttTopicEmitter {
+            mode: nervix_models::MqttTopicPublishingMode::NoAck {
+                retry_policy: RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
+            client: named("mqtt_main"),
+            topic,
+            qos: nervix_models::MqttQos::Qos1,
+        },
+    ));
+
+    let error = validate_emitter_publishing_contract(
+        &domain,
+        &ModelName::from(&emitter.name),
+        &ModelIndex::new(),
+        &emitter,
+    )
+    .expect_err("NO ACK beside QoS 1 must be refused");
+
+    let RegistryError::InvalidConnectorDeclaration { node, issue, .. } = error.current_context()
+    else {
+        panic!("expected the connector declaration refusal, got {error:?}");
+    };
+    assert_eq!(node.kind, nervix_models::ModelKind::Emitter);
+    let ConnectorDeclarationIssue::Publishing(unmet) = issue else {
+        panic!("expected the publishing requirement, got {issue:?}");
+    };
+    assert_eq!(unmet.mode, nervix_models::EmitterPublishingModeKind::NoAck);
+    assert_eq!(
+        issue.to_string(),
+        "MQTT TOPIC emitters name MODE NO ACK only with QOS 0; the statement writes QOS 1"
+    );
 }
 
 fn batch_policy(max_messages: u32, max_size: &str) -> nervix_models::EmitterBatchPolicy {
@@ -1342,9 +1387,11 @@ fn ingestor_timestamp_field_must_use_rfc3339_schema_type() {
                             client: ClientName::parse("broker").expect("valid identifier"),
                             topic: nervix_models::KafkaTopicName::parse("notifications")
                                 .expect("valid topic"),
-                            offset_mode: KafkaOffsetMode::ConsumerGroup(
-                                KafkaConsumerGroupName::parse("cg").expect("valid consumer group"),
-                            ),
+                            offset_mode: KafkaOffsetMode::ConsumerGroup {
+                                group: KafkaConsumerGroupName::parse("cg")
+                                    .expect("valid consumer group"),
+                                start_at: nervix_models::IngestStartPosition::Earliest,
+                            },
                             instances: nonzero!(1u64),
                             mode: KafkaIngestMode::NoAck,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
@@ -1613,6 +1660,59 @@ fn a_pulsar_subscription_type_that_reads_through_one_consumer_refuses_more_insta
     }
 }
 
+/// An `HTTP REQUEST` ingestor polling with `method`, which the grammar takes as any string
+/// literal and leaves to this validation.
+fn http_polling_ingestor(method: &str) -> CreateIngestor {
+    let mut ingestor = ingestor_statement("polled", "notifications", "event_codec", "http", &[]);
+    let nervix_models::IngestorInput::Transport(input) = &mut ingestor.input else {
+        unreachable!("the fixture builds a transport ingestor")
+    };
+    input.source = IngestorEntity::Http(HttpIngestor::Request(HttpRequestIngestor {
+        client: named("http"),
+        method: method.to_string(),
+        headers: Vec::new(),
+        max_body_size: None,
+        every: "1s"
+            .parse()
+            .expect("the fixture cadence is a positive duration"),
+        mode: HttpRequestIngestMode::NoAck,
+        quiesce: nervix_models::IngestQuiesceMode::Suspend,
+    }));
+    ingestor
+}
+
+#[test]
+fn a_polling_method_http_cannot_send_is_refused_with_its_cause_beneath_the_ingestor() {
+    let domain = DomainName::parse("default").expect("valid domain");
+    let identifier: ModelName = named("polled");
+    for method in ["GET", "get", "POST", "PROPFIND"] {
+        validate_ingestor_source(&domain, &identifier, &http_polling_ingestor(method))
+            .expect("HTTP can send this method in a request without a body");
+    }
+    for method in ["TRACE", "connect", "GET POST", "", "G\u{e9}T"] {
+        let error = validate_ingestor_source(&domain, &identifier, &http_polling_ingestor(method))
+            .expect_err("HTTP cannot send this method");
+        assert_eq!(
+            error.current_context(),
+            &RegistryError::InvalidHttpRequestMethod {
+                domain: domain.clone(),
+                ingestor: identifier.clone(),
+            },
+            "{error:?}"
+        );
+        assert_eq!(
+            error.downcast_ref::<HttpRequestFieldError>(),
+            Some(&HttpRequestFieldError::Method),
+            "{error:?}"
+        );
+        assert_eq!(
+            format!("{error:#}"),
+            "ingestor 'polled' in domain 'default' cannot use its METHOD: method is not a \
+             supported HTTP token"
+        );
+    }
+}
+
 /// An MQTT TOPIC source subscribing with `session` at `qos` under `mode`, as an alteration or a
 /// restored Model can state it without the grammar's own check.
 fn mqtt_source(session: MqttSession, qos: MqttQos, mode: MqttIngestMode) -> IngestorEntity {
@@ -1841,10 +1941,11 @@ fn ingestor_route_validation_accepts_explicit_projection() {
                                     client: ClientName::parse("broker").expect("valid identifier"),
                                     topic: nervix_models::KafkaTopicName::parse("notifications")
                                         .expect("valid topic"),
-                                    offset_mode: KafkaOffsetMode::ConsumerGroup(
-                                        KafkaConsumerGroupName::parse("cg")
+                                    offset_mode: KafkaOffsetMode::ConsumerGroup {
+                                        group: KafkaConsumerGroupName::parse("cg")
                                             .expect("valid consumer group"),
-                                    ),
+                                        start_at: nervix_models::IngestStartPosition::Earliest,
+                                    },
                                     instances: nonzero!(1u64),
                                     mode: KafkaIngestMode::NoAck,
                                     quiesce: nervix_models::IngestQuiesceMode::Suspend,
@@ -1925,9 +2026,11 @@ fn ingestor_filter_map_compile_errors_are_reported_on_leader() {
                             client: ClientName::parse("broker").expect("valid identifier"),
                             topic: nervix_models::KafkaTopicName::parse("notifications")
                                 .expect("valid topic"),
-                            offset_mode: KafkaOffsetMode::ConsumerGroup(
-                                KafkaConsumerGroupName::parse("cg").expect("valid consumer group"),
-                            ),
+                            offset_mode: KafkaOffsetMode::ConsumerGroup {
+                                group: KafkaConsumerGroupName::parse("cg")
+                                    .expect("valid consumer group"),
+                                start_at: nervix_models::IngestStartPosition::Earliest,
+                            },
                             instances: nonzero!(1u64),
                             mode: KafkaIngestMode::NoAck,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,
@@ -2019,9 +2122,11 @@ fn ingestor_inherit_all_except_rejects_required_uninitialized_field() {
                             client: ClientName::parse("broker").expect("valid identifier"),
                             topic: nervix_models::KafkaTopicName::parse("notifications")
                                 .expect("valid topic"),
-                            offset_mode: KafkaOffsetMode::ConsumerGroup(
-                                KafkaConsumerGroupName::parse("cg").expect("valid consumer group"),
-                            ),
+                            offset_mode: KafkaOffsetMode::ConsumerGroup {
+                                group: KafkaConsumerGroupName::parse("cg")
+                                    .expect("valid consumer group"),
+                                start_at: nervix_models::IngestStartPosition::Earliest,
+                            },
                             instances: nonzero!(1u64),
                             mode: KafkaIngestMode::NoAck,
                             quiesce: nervix_models::IngestQuiesceMode::Suspend,

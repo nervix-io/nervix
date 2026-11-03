@@ -48,7 +48,7 @@ Feature: Ingestors name their connector and entity in the statement head
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE KAFKA TOPIC INGESTOR kafka_source
-        FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers'
+        FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -152,7 +152,7 @@ Feature: Ingestors name their connector and entity in the statement head
     Then the last command output contains
       """
       CREATE KAFKA TOPIC INGESTOR kafka_source
-        FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' MODE NO ACK ON QUIESCE SUSPEND
+        FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST MODE NO ACK ON QUIESCE SUSPEND
         DECODE USING event_codec
       """
     When these Plexus commands are executed on the leader node
@@ -276,7 +276,7 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA TOPIC INGESTOR kafka_source
-        FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers'
+        FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -291,7 +291,7 @@ Feature: Ingestors name their connector and entity in the statement head
     Then the last command output contains
       """
       from: KAFKA TOPIC kafka_main TOPIC 'Orders'
-      options: OFFSET BY CONSUMER GROUP 'Readers' INSTANCES 1
+      options: OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST INSTANCES 1
       mode: NO ACK
       quiesce: SUSPEND
       """
@@ -466,11 +466,10 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT kafka_main CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR orders_source
-        FROM kafka_main TOPIC 'Orders_{{test_id}}' OFFSET BY CONSUMER GROUP 'Readers_{{test_id}}'
+        FROM kafka_main TOPIC 'Orders_{{test_id}}' OFFSET BY CONSUMER GROUP 'Readers_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG

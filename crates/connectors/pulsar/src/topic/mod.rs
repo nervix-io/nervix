@@ -3,10 +3,12 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Pulsar client and producer configuration, its TLS options, topic
-//!   qualification, the shared-subscription consumers an ingestor reads through, message
-//!   properties as ingest headers, per-message acknowledgement, record and property
-//!   publication, the bounded receipts a NO ACK producer retains through finish, and the classification of a send or its receipt, including a message the
-//!   client refuses because it exceeds the maximum message size the broker announced.
+//!   qualification, the consumers of the declared subscription type an ingestor reads through,
+//!   message properties as ingest headers, per-message acknowledgement, record and property
+//!   publication, the event time and delivery time a message carries from its record, the
+//!   bounded receipts a NO ACK producer retains through finish, and the classification of a send
+//!   or its receipt, including a message the client refuses because it exceeds the maximum
+//!   message size the broker announced.
 //! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio and
 //!   `pulsar`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -25,7 +27,10 @@
 )]
 
 mod ingestor;
+mod message_times;
 
+#[cfg(test)]
+mod message_times_tests;
 #[cfg(test)]
 mod receipt_tests;
 
@@ -40,6 +45,7 @@ pub use ingestor::{
     PulsarTopicIngestorError, PulsarTopicIngestorMessage, PulsarTopicIngestorPlan,
     PulsarTopicIngestorPosition, PulsarTopicIngestorSettings, PulsarUnresolvedRequest,
 };
+use message_times::{PulsarMessageTimeError, PulsarMessageTimes};
 use meticulous::OptionExt as _;
 use nervix_connector::{
     AckConfirmation, BrokerAnswer, BrokerPublishingMode, BrokerVerdict, ConfirmationWindow,
@@ -87,6 +93,13 @@ fn qualified_topic(config: &[ClientConfigEntry], topic: &PulsarTopicName) -> Str
 /// Why one message is refused for good: sending it again cannot succeed while the broker keeps its
 /// configuration.
 #[derive(Debug, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "a refused message is a semantic per-record rejection the emitter answers with"
+    )
+)]
 enum PulsarRecordError {
     /// The client refused the message before writing it, because its metadata and payload
     /// together exceed the maximum message size the broker announced for the connection.
@@ -99,6 +112,9 @@ enum PulsarRecordError {
     /// size.
     #[error("the Pulsar broker does not allow the message: {reason}")]
     NotAllowed { reason: String },
+    /// The record's envelope sets a time its message cannot carry.
+    #[error(transparent)]
+    MessageTime(#[from] PulsarMessageTimeError),
 }
 
 impl PulsarRecordError {
@@ -194,12 +210,21 @@ impl UnconfirmedPulsarPublication {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         for record in records {
             nervix_primitives::task::consume_budget().await;
-            self.make_room().await;
             let record_id = record.id;
             let occurred_at = record.occurred_at;
-            let sent = producer
-                .send_non_blocking(PulsarTopicEmitter::message(record))
-                .await;
+            let message = match PulsarTopicEmitter::message(record) {
+                Ok(message) => message,
+                Err(rejection) => {
+                    outcome.reject(PulsarTopicEmitter::rejected(
+                        record_id,
+                        occurred_at,
+                        &rejection,
+                    ));
+                    continue;
+                }
+            };
+            self.make_room().await;
+            let sent = producer.send_non_blocking(message).await;
             match sent.map_err(PulsarSendFailure::from) {
                 Ok(receipt) => {
                     self.retain(receipt);
@@ -474,7 +499,14 @@ impl PulsarTopicEmitter {
             nervix_primitives::task::consume_budget().await;
             let record_id = record.id;
             let occurred_at = record.occurred_at;
-            let sent = self.producer.send_non_blocking(Self::message(record)).await;
+            let message = match Self::message(record) {
+                Ok(message) => message,
+                Err(rejection) => {
+                    window.reject(Self::rejected(record_id, occurred_at, &rejection));
+                    continue;
+                }
+            };
+            let sent = self.producer.send_non_blocking(message).await;
             let receipt = match sent.map_err(PulsarSendFailure::from) {
                 Ok(receipt) => receipt,
                 Err(PulsarSendFailure::Rejected(rejection)) => {
@@ -503,13 +535,17 @@ impl PulsarTopicEmitter {
         }
     }
 
-    fn message(record: EmitterRecord) -> PulsarProducerMessage {
-        PulsarProducerMessage {
+    /// The producer message of `record`, or why `record` cannot be one.
+    fn message(record: EmitterRecord) -> Result<PulsarProducerMessage, PulsarRecordError> {
+        let times = PulsarMessageTimes::of(&record)?;
+        Ok(PulsarProducerMessage {
             payload: record.payload,
             properties: record.headers.into_iter().collect(),
             partition_key: record.key,
+            event_time: times.event_time,
+            deliver_at_time: times.deliver_at_time,
             ..Default::default()
-        }
+        })
     }
 
     fn rejected(
@@ -632,6 +668,7 @@ mod tests {
 
     use futures_util::SinkExt as _;
     use meticulous::ResultExt as _;
+    use nervix_connector::RecordEnvelope;
     use nervix_primitives::{
         net::{TcpListener, TcpStream},
         sync::{CancellationToken, mpsc},
@@ -642,7 +679,7 @@ mod tests {
         proto::{
             BaseCommand, CommandConnected, CommandLookupTopicResponse,
             CommandPartitionedTopicMetadataResponse, CommandPong, CommandProducerSuccess,
-            CommandSendError, CommandSendReceipt, CommandSuccess, MessageIdData,
+            CommandSendError, CommandSendReceipt, CommandSuccess, MessageIdData, MessageMetadata,
             base_command::Type as CommandType,
             command_lookup_topic_response::LookupType as TopicLookupType,
             command_partitioned_topic_metadata_response::LookupType as PartitionLookupType,
@@ -820,12 +857,18 @@ mod tests {
         OldestLastAfter(usize),
     }
 
+    /// One message that reached the fake broker.
+    struct ReceivedMessage {
+        payload: Vec<u8>,
+        metadata: MessageMetadata,
+    }
+
     /// A Pulsar broker on loopback that serves the handshake one producer needs, announces
     /// `max_message_size`, and answers each message it receives by its payload. It reports every
-    /// payload that reaches it.
+    /// message that reaches it.
     struct FakeBroker {
         service_url: String,
-        received: mpsc::UnboundedReceiver<Vec<u8>>,
+        received: mpsc::UnboundedReceiver<ReceivedMessage>,
     }
 
     /// One message the fake broker received and has not answered yet.
@@ -872,7 +915,7 @@ mod tests {
             service_url: String,
             max_message_size: Option<i32>,
             order: AnswerOrder,
-            received: mpsc::UnboundedSender<Vec<u8>>,
+            received: mpsc::UnboundedSender<ReceivedMessage>,
         ) {
             let mut held: Vec<HeldMessage> = Vec::new();
             while let Some(Ok(frame)) = connection.next().await {
@@ -889,13 +932,17 @@ mod tests {
                 } else if let Some(request) = command.producer {
                     replies.push(Self::producer_ready(request.request_id));
                 } else if let Some(send) = command.send {
-                    let payload = frame.payload.expect("a send carries its message").data;
+                    let message = frame.payload.expect("a send carries its message");
                     held.push(HeldMessage {
                         producer_id: send.producer_id,
                         sequence_id: send.sequence_id,
-                        answer: BrokerAnswer::for_payload(&payload),
+                        answer: BrokerAnswer::for_payload(&message.data),
                     });
-                    if received.send(payload).is_err() {
+                    let received_message = ReceivedMessage {
+                        payload: message.data,
+                        metadata: message.metadata,
+                    };
+                    if received.send(received_message).is_err() {
                         // The test that reads the payloads has finished.
                         return;
                     }
@@ -1061,13 +1108,18 @@ mod tests {
             })
         }
 
-        /// The next payload to reach the broker. Messages on one connection arrive in the order
+        /// The next message to reach the broker. Messages on one connection arrive in the order
         /// they were written.
-        async fn next_payload(&mut self) -> Vec<u8> {
+        async fn next_message(&mut self) -> ReceivedMessage {
             nervix_primitives::time::timeout(Duration::from_secs(60), self.received.recv())
                 .await
                 .expect("the broker receives the next message")
                 .expect("the broker keeps listening while the test runs")
+        }
+
+        /// The next payload to reach the broker.
+        async fn next_payload(&mut self) -> Vec<u8> {
+            self.next_message().await.payload
         }
     }
 
@@ -1352,6 +1404,117 @@ mod tests {
         );
     }
 
+    /// A record of a batch that executed at 2001-02-03T04:05:06.789Z, which writes `timestamp` and
+    /// `deliver_after`.
+    fn timed_record(
+        index: usize,
+        payload: &[u8],
+        timestamp: Timestamp,
+        deliver_after: Option<Duration>,
+    ) -> EmitterRecord {
+        let envelope = RecordEnvelope {
+            timestamp: Some(timestamp),
+            deliver_after,
+            ..RecordEnvelope::default()
+        };
+        let mut record = record(index, payload.to_vec()).with_envelope(envelope);
+        record.occurred_at = Timestamp::from_unix_nanos(981_173_106_789_000_000);
+        record
+    }
+
+    #[nervix_primitives::test]
+    async fn a_messages_times_reach_the_broker_and_a_record_without_them_carries_none() {
+        for mode in [BrokerPublishingMode::NoAck, confirmed(1)] {
+            let mut broker = FakeBroker::start(None, AnswerOrder::OnArrival).await;
+            let mut connector = connector(&broker, mode).await;
+            let timestamp = Timestamp::from_unix_nanos(1_000_000_002_000_000);
+            let deliver_after = Some(Duration::from_secs(5));
+
+            let outcome = connector
+                .publish(vec![
+                    timed_record(0, b"timed", timestamp, deliver_after),
+                    record(1, b"untimed".to_vec()),
+                ])
+                .await
+                .into_parts();
+
+            assert_eq!(
+                outcome.delivered,
+                vec![EmitterRecordId::new(0), EmitterRecordId::new(1)],
+                "{mode:?}"
+            );
+            let timed = broker.next_message().await;
+            assert_eq!(timed.payload, b"timed");
+            assert_eq!(timed.metadata.event_time, Some(1_000_000_002));
+            assert_eq!(timed.metadata.deliver_at_time, Some(981_173_111_789));
+            let untimed = broker.next_message().await;
+            assert_eq!(untimed.payload, b"untimed");
+            assert_eq!(untimed.metadata.event_time, None);
+            assert_eq!(untimed.metadata.deliver_at_time, None);
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn a_record_whose_time_no_message_carries_is_rejected_before_it_is_written() {
+        for mode in [BrokerPublishingMode::NoAck, confirmed(1)] {
+            let mut broker = FakeBroker::start(None, AnswerOrder::OnArrival).await;
+            let mut connector = connector(&broker, mode).await;
+            let before_the_epoch = Timestamp::from_unix_nanos(-1);
+
+            let outcome = connector
+                .publish(vec![
+                    timed_record(0, b"refused", before_the_epoch, None),
+                    record(1, b"written".to_vec()),
+                ])
+                .await
+                .into_parts();
+
+            assert_eq!(outcome.delivered, vec![EmitterRecordId::new(1)], "{mode:?}");
+            assert_eq!(
+                rejected_messages(&outcome.rejected),
+                vec![(
+                    EmitterRecordId::new(0),
+                    "PULSAR rejected record: message TIMESTAMP 1969-12-31T23:59:59.999999999Z \
+                     precedes 1970-01-01T00:00:00.001Z, the earliest event time a PULSAR message \
+                     carries"
+                        .to_string()
+                )],
+                "{mode:?}"
+            );
+            assert!(outcome.infrastructure_error.is_none(), "{mode:?}");
+            assert_eq!(
+                broker.next_payload().await,
+                b"written",
+                "the refused message, written first, never reaches the broker"
+            );
+        }
+    }
+
+    /// The host hands a record it retained to every attempt, so each one writes what the first
+    /// wrote, however much later it runs.
+    #[nervix_primitives::test]
+    async fn every_attempt_at_a_record_writes_the_times_of_the_first() {
+        let mut broker = FakeBroker::start(None, AnswerOrder::OnArrival).await;
+        let mut connector = connector(&broker, confirmed(1)).await;
+        let timestamp = Timestamp::from_unix_nanos(1_000_000_002_000_000);
+        let deliver_after = Some(Duration::from_secs(5));
+
+        for _attempt in 0..2 {
+            let attempt = timed_record(0, b"timed", timestamp, deliver_after);
+            let outcome = connector.publish(vec![attempt]).await.into_parts();
+            assert_eq!(outcome.delivered, vec![EmitterRecordId::new(0)]);
+        }
+
+        let first = broker.next_message().await;
+        let second = broker.next_message().await;
+        assert_eq!(first.metadata.event_time, second.metadata.event_time);
+        assert_eq!(
+            first.metadata.deliver_at_time,
+            second.metadata.deliver_at_time
+        );
+        assert_eq!(second.metadata.deliver_at_time, Some(981_173_111_789));
+    }
+
     #[test]
     fn client_retries_are_disabled_in_favor_of_the_declared_retry_policy() {
         let (connection, operation) =
@@ -1428,7 +1591,7 @@ mod tests {
         }
         let mut record = record(0, b"{}".to_vec());
         record.headers = headers;
-        let message = PulsarTopicEmitter::message(record);
+        let message = PulsarTopicEmitter::message(record).assured("the record sets no time");
         let properties: std::collections::BTreeMap<_, _> = message.properties.into_iter().collect();
         let expected = std::collections::BTreeMap::from([
             ("Tenant".to_string(), "x".to_string()),

@@ -147,8 +147,12 @@ client_plan!(HttpRequestIngestorStartPlan {
 /// Where a Kafka ingestor keeps the offsets it resumes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum KafkaOffsetPlan {
-    /// The broker keeps them for this consumer group.
-    ConsumerGroup(nervix_models::KafkaConsumerGroupName),
+    /// The broker keeps them for this consumer group, which starts a partition without a usable
+    /// committed offset at `start_at`.
+    ConsumerGroup {
+        group: nervix_models::KafkaConsumerGroupName,
+        start_at: nervix_models::IngestStartPosition,
+    },
     /// The domain keeps them as node-owned state, originated by the scheduled primary.
     Domain(KafkaDomainOffsetPlacement),
 }
@@ -156,7 +160,10 @@ pub(crate) enum KafkaOffsetPlan {
 impl KafkaOffsetPlan {
     fn decide(mode: &KafkaOffsetMode, primary_node: Option<&ClusterNodeName>) -> Self {
         match mode {
-            KafkaOffsetMode::ConsumerGroup(group) => Self::ConsumerGroup(group.clone()),
+            KafkaOffsetMode::ConsumerGroup { group, start_at } => Self::ConsumerGroup {
+                group: group.clone(),
+                start_at: *start_at,
+            },
             KafkaOffsetMode::Domain => Self::Domain(KafkaDomainOffsetPlacement {
                 primary_node: primary_node.cloned(),
             }),
@@ -1244,7 +1251,7 @@ mod tests {
         nervix_models::PulsarSubscription {
             name: named("nervix"),
             ownership: PulsarSubscriptionOwnership::Ingestor {
-                start_at: nervix_models::PulsarStartPosition::Earliest,
+                start_at: nervix_models::IngestStartPosition::Earliest,
             },
             kind: nervix_models::PulsarSubscriptionType::Shared,
         }
@@ -1293,7 +1300,10 @@ mod tests {
             source: IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
                 client: named("upstream"),
                 topic: named("events"),
-                offset_mode: KafkaOffsetMode::ConsumerGroup(named("nervix")),
+                offset_mode: KafkaOffsetMode::ConsumerGroup {
+                    group: named("nervix"),
+                    start_at: nervix_models::IngestStartPosition::Earliest,
+                },
                 instances: nonzero!(1u64),
                 mode: KafkaIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Suspend,
@@ -1307,7 +1317,10 @@ mod tests {
                 KafkaTopicIngestorStartPlan {
                     client: client(),
                     topic: named("events"),
-                    offsets: KafkaOffsetPlan::ConsumerGroup(named("nervix")),
+                    offsets: KafkaOffsetPlan::ConsumerGroup {
+                        group: named("nervix"),
+                        start_at: nervix_models::IngestStartPosition::Earliest,
+                    },
                     instances: nonzero!(1u64),
                     mode: KafkaIngestMode::NoAck,
                 },
@@ -1846,7 +1859,7 @@ mod tests {
             panic!("the Pulsar fixture produces a typed Pulsar source");
         };
         source.subscription.ownership = PulsarSubscriptionOwnership::Ingestor {
-            start_at: nervix_models::PulsarStartPosition::Latest,
+            start_at: nervix_models::IngestStartPosition::Latest,
         };
         let mut latest = owned.clone();
         latest.input = IngestorInputPlan::Transport(input);

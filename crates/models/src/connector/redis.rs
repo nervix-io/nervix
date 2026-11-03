@@ -179,7 +179,11 @@ const REDIS_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             },
         },
     ],
-    driver_limits: &[],
+    driver_limits: &[
+        "Redis closes a subscription whose unsent messages pass the server's \
+         client-output-buffer-limit for Pub/Sub clients, by default 32 MiB at once or 8 MiB held \
+         for 60 seconds; the messages it held are lost.",
+    ],
 };
 
 /// What the connector of a REDIS PUBSUB emitter holds and how long it waits.
@@ -193,19 +197,22 @@ const REDIS_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     }],
     waits: &[
         DeclaredWait {
-            wait: "checking out a connection, a new one's name resolution, connection, TLS and \
-                   Redis setup included",
+            wait: "checking out a connection, the PING that tests it and a new one's name \
+                   resolution, connection, TLS and Redis setup included",
             bound: WaitBound::Key {
                 key: DeadlineKey::ConnectTimeout,
                 omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
             },
         },
         DeclaredWait {
-            wait: "the answer to a PUBLISH",
+            wait: "the answer to the checkout's PING and to the PUBLISH",
             bound: WaitBound::Driver("500 ms"),
         },
     ],
-    driver_limits: &[],
+    driver_limits: &[
+        "A payload above the server's proto-max-bulk-len is rejected, and Redis then closes the \
+         connection that sent it.",
+    ],
 };
 
 impl IngestorDeclaration for RedisPubSubIngestor {

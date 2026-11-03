@@ -1021,8 +1021,7 @@ Feature: Narrow schedule activation on ownership change
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR metric_source
         FROM kafka_ingress TOPIC 'offset_replica_{{test_id}}'

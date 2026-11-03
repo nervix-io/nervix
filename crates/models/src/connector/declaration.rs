@@ -99,8 +99,9 @@ pub enum OptionValue {
     Expression,
     /// `{ '<name>' = <expression>, … }`: named expressions.
     Mapping,
-    /// `{ '<name>' = '<value>', … }`: named string literals.
-    LiteralMapping,
+    /// `{ '<name>' = '<value>' | CLIENT SECRET '<key>', … }`: named string literals, or the secret
+    /// keys of the client that read them.
+    RequestHeaders,
     /// A configured client of one connector.
     Client(ConnectorKind),
     /// A clause of several parts, as the option's example writes them.
@@ -116,7 +117,7 @@ pub struct OptionChoice {
     /// in angle brackets. A requirement and a capability name the choice by it.
     pub name: &'static str,
     /// The value a statement writes with the choice, where it takes one: after the choice's own
-    /// words, or before them where the example writes it there.
+    /// words, or before or among them where the example writes it there.
     pub value: Option<OptionValue>,
     /// The option written in full with this choice, its keywords included.
     pub example: &'static str,
@@ -256,6 +257,50 @@ impl ChoiceRequirement {
     pub fn conjunction(requirements: &[Self]) -> String {
         let phrases: Vec<String> = requirements.iter().map(Self::phrase).collect();
         phrases.join(" and ")
+    }
+}
+
+/// The choice a statement makes for one declared option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WrittenChoice {
+    /// The keywords of the option.
+    pub option: &'static str,
+    /// The name of the choice the statement makes, where its body answers for the option.
+    pub choice: Option<&'static str>,
+}
+
+impl WrittenChoice {
+    /// The choice a statement makes for each option `requirements` name, in their order, where
+    /// `chosen` names the choice it makes for an option by the option's keywords.
+    pub(crate) fn of(
+        requirements: &[ChoiceRequirement],
+        chosen: &dyn Fn(&str) -> Option<&'static str>,
+    ) -> Vec<Self> {
+        let mut written = Vec::with_capacity(requirements.len());
+        for requirement in requirements {
+            written.push(Self {
+                option: requirement.option,
+                choice: chosen(requirement.option),
+            });
+        }
+        written
+    }
+
+    /// Every choice of `written`, as a statement writes them together, such as
+    /// `SESSION CLEAN and QOS 0`.
+    pub(crate) fn conjunction(written: &[Self]) -> String {
+        let phrases: Vec<String> = written.iter().map(ToString::to_string).collect();
+        phrases.join(" and ")
+    }
+}
+
+/// A choice is written as its option's keywords, then the choice's own name.
+impl Display for WrittenChoice {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self.choice {
+            Some(choice) => write!(f, "{} {choice}", self.option),
+            None => write!(f, "no {}", self.option),
+        }
     }
 }
 

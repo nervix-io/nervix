@@ -109,6 +109,11 @@ impl ScriptedBroker {
         self.accept_answering(&[0x20, 0x03, 0x00, 0x00, 0x00]).await
     }
 
+    /// Resumes a persistent session, which can exist even after SUBACK refused its filter.
+    pub(crate) async fn accept_retained_session(&self) -> ScriptedConnection {
+        self.accept_answering(&[0x20, 0x03, 0x01, 0x00, 0x00]).await
+    }
+
     /// Accepts the client's connection and answers its CONNECT with a CONNACK that resumes no
     /// session and declares `maximum` as the largest packet the broker receives.
     pub(crate) async fn accept_declaring_packet_limit(&self, maximum: u32) -> ScriptedConnection {
@@ -138,15 +143,28 @@ impl ScriptedBroker {
 
     /// Accepts and reads CONNECT without answering, so a check can exercise the handshake budget.
     pub(crate) async fn accept_without_reply(&self) -> ScriptedConnection {
+        let (connection, _) = self.accept_connect().await;
+        connection
+    }
+
+    /// Answer a cleanup connection, whose clean start must discard its rejected subscription.
+    pub(crate) async fn accept_expiring_session(&self) -> ScriptedConnection {
+        let (mut connection, connect) = self.accept_connect().await;
+        assert_ne!(connect[7] & 0x02, 0, "retirement asks for a clean start");
+        connection.write(&[0x20, 0x03, 0x00, 0x00, 0x00]).await;
+        connection
+    }
+
+    async fn accept_connect(&self) -> (ScriptedConnection, Vec<u8>) {
         let (stream, _) = self
             .listener
             .accept()
             .await
             .expect("the sink's client connects to the scripted broker");
         let mut connection = ScriptedConnection { stream };
-        let (packet_type, _) = connection.read_packet().await;
+        let (packet_type, connect) = connection.read_packet().await;
         assert_eq!(packet_type, CONNECT, "the client opens with a CONNECT");
-        connection
+        (connection, connect)
     }
 }
 
@@ -190,13 +208,22 @@ impl ScriptedConnection {
 
     /// Reads the client's SUBSCRIBE and answers it with a SUBACK that grants the QoS `qos`.
     pub(crate) async fn grant_subscription_at(&mut self, qos: u8) {
+        self.answer_subscription(qos).await;
+    }
+
+    /// Refuses the requested filter with MQTT 5's Not Authorized reason code.
+    pub(crate) async fn refuse_subscription(&mut self) {
+        self.answer_subscription(0x87).await;
+    }
+
+    async fn answer_subscription(&mut self, reason: u8) {
         let (packet_type, body) = self.read_packet().await;
         assert_eq!(
             packet_type, SUBSCRIBE,
             "the client subscribes once connected"
         );
-        // SUBACK: the SUBSCRIBE's packet identifier, an empty property section, the granted QoS.
-        self.write(&[0x90, 0x04, body[0], body[1], 0, qos]).await;
+        // SUBACK: the SUBSCRIBE's packet identifier, an empty property section, and its reason.
+        self.write(&[0x90, 0x04, body[0], body[1], 0, reason]).await;
     }
 
     /// A QoS 1 PUBLISH to `events` under the packet identifier `packet_id`, carrying `payload`.
@@ -333,4 +360,17 @@ fn variable_integer(bytes: &[u8]) -> (usize, usize) {
         }
     }
     panic!("a variable byte integer ends within {VARIABLE_INTEGER_BYTES} bytes");
+}
+
+impl ScriptedConnection {
+    /// A rejected subscription ends its session instead of retaining the downgraded grant.
+    pub(crate) async fn expect_session_expiry_zero(&mut self) {
+        let (packet_type, body) = self.read_packet().await;
+        assert_eq!(
+            packet_type, 14,
+            "the client ends the refused session with DISCONNECT"
+        );
+        // Normal Disconnection, five property bytes: Session Expiry Interval (0x11), zero.
+        assert_eq!(body, [0, 5, 0x11, 0, 0, 0, 0]);
+    }
 }

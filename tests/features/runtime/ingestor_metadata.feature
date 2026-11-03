@@ -64,12 +64,12 @@ Feature: Typed ingestor metadata
     When these Plexus statements fail with "ingestor 'kafka_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but KAFKA TOPIC ingestors declare only metadata.topic, metadata.partition, metadata.offset, metadata.key, metadata.timestamp, metadata.timestamp_type and metadata.tombstone"
       """
       CREATE KAFKA TOPIC INGESTOR kafka_source
-        FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers'
+        FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'pulsar_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but PULSAR TOPIC ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'pulsar_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but PULSAR TOPIC ingestors declare only metadata.topic, metadata.message_id, metadata.publish_time, metadata.event_time, metadata.key, metadata.ordering_key, metadata.producer_name, metadata.sequence_id and metadata.redelivery_count"
       """
       CREATE PULSAR TOPIC INGESTOR pulsar_source
         FROM pulsar_main TOPIC 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED
@@ -78,7 +78,7 @@ Feature: Typed ingestor metadata
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'rabbitmq_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but RABBITMQ QUEUE ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'rabbitmq_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but RABBITMQ QUEUE ingestors declare only metadata.exchange, metadata.routing_key, metadata.delivery_tag, metadata.redelivered, metadata.content_type, metadata.content_encoding, metadata.message_id, metadata.correlation_id, metadata.reply_to, metadata.type, metadata.app_id, metadata.user_id, metadata.priority, metadata.expiration and metadata.timestamp"
       """
       CREATE RABBITMQ QUEUE INGESTOR rabbitmq_source
         FROM rabbit_main QUEUE 'Orders'
@@ -111,7 +111,7 @@ Feature: Typed ingestor metadata
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'sqs_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but SQS QUEUE ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'sqs_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but SQS QUEUE ingestors declare only metadata.message_id, metadata.sent_at, metadata.receive_count, metadata.first_received_at, metadata.group_id, metadata.deduplication_id, metadata.sequence_number and metadata.sender_id"
       """
       CREATE SQS QUEUE INGESTOR sqs_source
         FROM sqs_main QUEUE 'Orders.fifo'
@@ -127,14 +127,14 @@ Feature: Typed ingestor metadata
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'syslog_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but SYSLOG LISTENER ingestors declare only metadata.peer_addr"
+    When these Plexus statements fail with "ingestor 'syslog_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but SYSLOG LISTENER ingestors declare only metadata.peer_addr, metadata.transport and metadata.tls_peer"
       """
       CREATE SYSLOG LISTENER INGESTOR syslog_source
         FROM syslog_main MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'prometheus_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but PROMETHEUS QUERY ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'prometheus_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but PROMETHEUS QUERY ingestors declare only metadata.query and metadata.evaluated_at"
       """
       CREATE PROMETHEUS QUERY INGESTOR prometheus_source
         FROM prom_main QUERY 'up' EVERY 15s MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
@@ -152,7 +152,7 @@ Feature: Typed ingestor metadata
     When these Plexus statements are executed on the leader node
       """
       CREATE KAFKA TOPIC INGESTOR kafka_declared
-        FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers'
+        FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.topic UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -184,10 +184,22 @@ Feature: Typed ingestor metadata
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE MQTT CLIENT mqtt_main CONFIG { 'addr' = 'mqtt://127.0.0.1:1883' };
       """
+    When these Plexus statements fail with "ingestor 'sqs_count_time' in domain '{{domain}}' takes its TIMESTAMP AT metadata.receive_count, but SQS QUEUE ingestors declare metadata.receive_count as U32, not DATETIME"
+      """
+      CREATE SQS CLIENT sqs_time CONFIG {
+        'endpoint' = 'http://127.0.0.1:9324', 'region' = 'us-east-1',
+        'access_key_id' = 'scenario-key', 'secret_access_key' = 'scenario-secret'
+      };
+      CREATE SQS QUEUE INGESTOR sqs_count_time
+        FROM sqs_time QUEUE 'Orders' MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+        RETRY POLICY BACKOFF 200ms MAX 1s ON QUIESCE SUSPEND DECODE USING event_codec
+        TIMESTAMP AT metadata.receive_count
+        TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
     When these Plexus statements fail with "ingestor 'kafka_offset_time' in domain '{{domain}}' takes its TIMESTAMP AT metadata.offset, but KAFKA TOPIC ingestors declare metadata.offset as I64, not DATETIME"
       """
       CREATE KAFKA TOPIC INGESTOR kafka_offset_time
-        FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers'
+        FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TIMESTAMP AT metadata.offset
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -195,7 +207,7 @@ Feature: Typed ingestor metadata
     When these Plexus statements fail with "ingestor 'kafka_missing_time' in domain '{{domain}}' takes its TIMESTAMP AT metadata.missing, but KAFKA TOPIC ingestors declare only metadata.topic, metadata.partition, metadata.offset, metadata.key, metadata.timestamp, metadata.timestamp_type and metadata.tombstone"
       """
       CREATE KAFKA TOPIC INGESTOR kafka_missing_time
-        FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers'
+        FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' START AT LATEST
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TIMESTAMP AT metadata.missing
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

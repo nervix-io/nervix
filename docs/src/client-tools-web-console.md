@@ -250,7 +250,9 @@ MQTT topic's `SESSION` and `QOS`, starts unchosen and has no default: the draft 
 until each is chosen, and validates the declared requirements too.
 Switching sources refreshes the option controls and quiesce choices from the selected entity.
 A WebSocket connection edits literal upgrade headers as
-ordered name/value rows. A RabbitMQ queue offers its declared `NO ACK`, `ACK SEQUENTIAL` and
+ordered name/value rows. An `HTTP REQUEST` edits its request headers as ordered rows too: a row
+holds a literal value, or, with **Client secret** checked, the client key it reads, and the preview
+shows `CLIENT SECRET '<key>'`. A RabbitMQ queue offers its declared `NO ACK`, `ACK SEQUENTIAL` and
 `ACK PARALLEL` modes; the parallel window, batch timeout and retry settings are retained in the
 preview and submitted command. A topic,
 queue, subject, channel, consumer group, queue group or subscription keeps its text exactly as
@@ -465,6 +467,10 @@ then gets an explicit takeover error. A clean console session close reverts an o
 while an accepted commit continues on the leader without the browser. See
 [Replicated Plexus Transactions](control-plane.md#replicated-plexus-transactions) and
 [Client Session Protocol](client-session-protocol.md).
+
+Connector expression completion follows the same entity declarations as the
+[CLI](./client-tools-cli.md#completion), including filters, HTTP request expressions, `ALTER`
+constructions and typed metadata fields. Header functions are offered only in a supported scope.
 
 `Tab` cycles through completions offered by the server for the current cursor position. `ArrowUp`
 and `ArrowDown` walk the session's command history, `Ctrl`/`Cmd` with `Enter` submits, and `clear`

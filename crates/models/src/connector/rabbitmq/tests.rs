@@ -170,7 +170,30 @@ fn queue_ingestion_declares_current_consumer_modes_and_transport_bounds() {
     );
     assert!(!declaration.executes_on_every_cluster_node);
     assert_eq!(declaration.options, &[OptionDeclaration::INSTANCES]);
-    assert_eq!(declaration.metadata.fields(), vec![]);
+    let mut metadata = Vec::new();
+    for field in declaration.metadata.fields() {
+        metadata.push((field.name(), field.ty()));
+    }
+    assert_eq!(
+        metadata,
+        [
+            ("exchange", IngestorMetadataType::String),
+            ("routing_key", IngestorMetadataType::String),
+            ("delivery_tag", IngestorMetadataType::U64),
+            ("redelivered", IngestorMetadataType::Bool),
+            ("content_type", IngestorMetadataType::String),
+            ("content_encoding", IngestorMetadataType::String),
+            ("message_id", IngestorMetadataType::String),
+            ("correlation_id", IngestorMetadataType::String),
+            ("reply_to", IngestorMetadataType::String),
+            ("type", IngestorMetadataType::String),
+            ("app_id", IngestorMetadataType::String),
+            ("user_id", IngestorMetadataType::String),
+            ("priority", IngestorMetadataType::U8),
+            ("expiration", IngestorMetadataType::String),
+            ("timestamp", IngestorMetadataType::Datetime),
+        ]
+    );
     assert_eq!(
         declaration.headers,
         Some(HeaderModel::exact(HeaderLayout::SortedByName))
@@ -229,7 +252,7 @@ fn queue_emission_declares_codec_batches_and_broker_confirmation_modes() {
     );
     assert!(!declaration.requires_batch_transformation);
     assert_eq!(
-        declaration.publishing_modes,
+        declaration.publishing_kinds(),
         &[
             EmitterPublishingModeKind::NoAck,
             EmitterPublishingModeKind::BrokerAck,
@@ -244,12 +267,42 @@ fn queue_emission_declares_codec_batches_and_broker_confirmation_modes() {
         RabbitMqQueueIngestor::CAPABILITIES.locator
     );
     assert_eq!(declaration.options, &[]);
-    assert_eq!(declaration.envelope, &[EnvelopeClauseKind::Mandatory]);
-    assert_eq!(declaration.properties, &[]);
+    assert_emitter_envelope(declaration);
     assert_emitter_buffers(declaration.bounds);
     assert_eq!(
         declaration.bounds.deadline_keys(),
         vec![DeadlineKey::Timeout, DeadlineKey::ConnectTimeout]
+    );
+}
+
+fn assert_emitter_envelope(declaration: EmitterEntityCapabilities) {
+    assert_eq!(
+        declaration.envelope,
+        &[
+            EnvelopeClauseKind::Persistent,
+            EnvelopeClauseKind::Mandatory,
+            EnvelopeClauseKind::Timestamp,
+        ]
+    );
+    let properties = declaration
+        .properties
+        .iter()
+        .map(|property| (property.name, property.ty))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        properties,
+        vec![
+            ("content_type", crate::PropertyType::String),
+            ("content_encoding", crate::PropertyType::String),
+            ("message_id", crate::PropertyType::String),
+            ("correlation_id", crate::PropertyType::String),
+            ("reply_to", crate::PropertyType::String),
+            ("expiration", crate::PropertyType::String),
+            ("priority", crate::PropertyType::U8),
+            ("type", crate::PropertyType::String),
+            ("app_id", crate::PropertyType::String),
+            ("user_id", crate::PropertyType::String),
+        ]
     );
 }
 
@@ -302,8 +355,7 @@ fn exchange_emission_declares_its_locator_routing_key_and_the_queue_emitters_con
             example: "ROUTING KEY input.category",
         }
     );
-    assert_eq!(declaration.envelope, &[EnvelopeClauseKind::Mandatory]);
-    assert_eq!(declaration.properties, &[]);
+    assert_emitter_envelope(declaration);
     assert_emitter_buffers(declaration.bounds);
     assert_eq!(declaration.bounds.waits.len(), queue.bounds.waits.len());
     assert!(
@@ -326,7 +378,25 @@ fn exchange_emission_declares_its_locator_routing_key_and_the_queue_emitters_con
                 keywords: "ROUTING KEY"
             },
             RuntimeCapability::Batch,
+            RuntimeCapability::Envelope(EnvelopeClauseKind::Persistent),
             RuntimeCapability::Envelope(EnvelopeClauseKind::Mandatory),
+            RuntimeCapability::Envelope(EnvelopeClauseKind::Timestamp),
+            RuntimeCapability::Property {
+                name: "content_type"
+            },
+            RuntimeCapability::Property {
+                name: "content_encoding"
+            },
+            RuntimeCapability::Property { name: "message_id" },
+            RuntimeCapability::Property {
+                name: "correlation_id"
+            },
+            RuntimeCapability::Property { name: "reply_to" },
+            RuntimeCapability::Property { name: "expiration" },
+            RuntimeCapability::Property { name: "priority" },
+            RuntimeCapability::Property { name: "type" },
+            RuntimeCapability::Property { name: "app_id" },
+            RuntimeCapability::Property { name: "user_id" },
             RuntimeCapability::StalledPeer(DeadlineKey::Timeout),
             RuntimeCapability::StalledPeer(DeadlineKey::ConnectTimeout),
         ]

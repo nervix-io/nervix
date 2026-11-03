@@ -103,6 +103,46 @@ fn the_top_level_suggestion_set_is_probed_not_empty() {
 // -- label classification and materialization --
 
 #[test]
+fn expression_references_fill_complete_syntactic_units() {
+    use meticulous::ResultExt as _;
+
+    struct Case {
+        prefix: &'static str,
+        label: &'static str,
+        suffix: &'static str,
+    }
+    let materializer = Materializer::new();
+    for case in [
+        Case {
+            prefix: "CREATE JUNCTION j FROM incoming UNBRANCHED TO outgoing SET ",
+            label: "ref:expression_target",
+            suffix: " FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        },
+        Case {
+            prefix: "CREATE JUNCTION j FROM incoming UNBRANCHED TO outgoing SET x = udf::",
+            label: "ref:expression_udf",
+            suffix: " FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        },
+        Case {
+            prefix: "CREATE KAFKA TOPIC EMITTER e FROM incoming TO broker TOPIC 'events' MODE NO \
+                     ACK RETRY POLICY BACKOFF 1s MAX 2s ENCODE USING codec INVOKE ",
+            label: "ref:expression_invocation",
+            suffix: " FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+        },
+    ] {
+        let filler = materializer
+            .materialize(case.label, 0)
+            .assured("the walker registers fillers for these three expression references");
+        let statement = format!("{}{}{}", case.prefix, filler.text, case.suffix);
+        assert_eq!(
+            Grammar::Client.parse(&statement),
+            ParseOutcome::Accepted,
+            "{statement}"
+        );
+    }
+}
+
+#[test]
 fn websocket_upgrade_header_completion_builds_a_literal_header_declaration() {
     let grammar = Grammar::Client;
     let prefix = "CREATE WEBSOCKETS CONNECTION INGESTOR nx_ingestor FROM nx_client HEADERS {";

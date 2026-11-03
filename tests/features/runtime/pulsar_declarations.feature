@@ -92,8 +92,8 @@ Feature: Pulsar topic declarations
       | 3            |                                                                        | SUSPEND                                      | expected SUBSCRIPTION, found MODE                 |
       | 1            | SUBSCRIPTION 'readers'                                                 | SUSPEND                                      | PROVISIONED, found MODE                           |
       | 3            | SUBSCRIPTION 'readers'                                                 | SUSPEND                                      | PROVISIONED, found MODE                           |
-      | 1            | SUBSCRIPTION 'readers' PROVISIONED                                     | SUSPEND                                      | expected TYPE, found MODE                         |
-      | 3            | SUBSCRIPTION 'readers' PROVISIONED                                     | SUSPEND                                      | expected TYPE, found MODE                         |
+      | 1            | SUBSCRIPTION 'readers' PROVISIONED TYPE SHARED                         | SUSPEND                                      | expected TYPE, found MODE                         |
+      | 3            | SUBSCRIPTION 'readers' PROVISIONED TYPE SHARED                         | SUSPEND                                      | expected TYPE, found MODE                         |
       | 1            | SUBSCRIPTION '' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED        | SUSPEND                                      | invalid pulsar_subscription '': must not be empty |
       | 3            | SUBSCRIPTION '' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED        | SUSPEND                                      | invalid pulsar_subscription '': must not be empty |
       | 1            | SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED | DROP                                         | expected SUSPEND, found DROP                      |

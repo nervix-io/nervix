@@ -14,7 +14,7 @@
 
 use std::{
     future::pending,
-    num::{NonZeroU16, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU32, NonZeroUsize},
     time::Duration,
 };
 
@@ -23,7 +23,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     IngestorBatch, IngestorBatchRequest, IngestorMessage as _, IngestorReadCancellation,
 };
-use nervix_models::MQTT_SOURCE_MAXIMUM_PACKET_BYTES;
+use nervix_models::{ClientConfigEntry, MqttClientConfig};
 use nervix_primitives::{
     sync::mpsc,
     time::{Instant, sleep},
@@ -38,6 +38,17 @@ use crate::topic::ingestor::{
     IngestorAcknowledgement, MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorPosition,
     PublishRead as _, metrics_fixture::IngestorMetricsFixture,
 };
+
+/// The largest complete publish a client that leaves `max_packet_size` out admits.
+fn default_admission() -> NonZeroU32 {
+    let client = [ClientConfigEntry {
+        key: "addr".to_string(),
+        value: "mqtt://127.0.0.1:1883".to_string(),
+    }];
+    MqttClientConfig::parse(&client)
+        .assured("an address alone is a valid MQTT client configuration")
+        .max_packet_size()
+}
 
 /// The event loop of a connection whose broker stopped reading it: it writes nothing and yields
 /// nothing.
@@ -68,6 +79,7 @@ async fn an_acknowledgement_its_connection_cannot_write_fails_after_one_keep_ali
             receive_maximum: NonZeroU16::MIN,
         },
         Some(keep_alive),
+        default_admission(),
         IngestorMetricsFixture::new().counter(),
     );
     let mut publish = Publish::new("events", QoS::AtLeastOnce, vec![1], None);
@@ -96,7 +108,8 @@ async fn an_acknowledgement_its_connection_cannot_write_fails_after_one_keep_ali
 
 #[test]
 fn admission_bounds_the_complete_packet_and_retains_only_a_discard_acknowledgement() {
-    let maximum = usize::try_from(MQTT_SOURCE_MAXIMUM_PACKET_BYTES).assured("ten KiB fits usize");
+    let admission = default_admission();
+    let maximum = usize::try_from(admission.get()).assured("the default bound fits usize");
     for qos in [QoS::AtMostOnce, QoS::AtLeastOnce, QoS::ExactlyOnce] {
         let mut publish = Publish::new("events", qos, vec![7; maximum], None);
         publish.pkid = if qos == QoS::AtMostOnce { 0 } else { 7 };
@@ -104,7 +117,8 @@ fn admission_bounds_the_complete_packet_and_retains_only_a_discard_acknowledgeme
         publish.payload = publish.payload.slice(..payload_bytes);
         assert_eq!(publish.size(), maximum);
         let manual = AckMode::Manual;
-        let IngestorPacket::Message(admitted) = IngestorPacket::classify(publish.clone(), manual)
+        let IngestorPacket::Message(admitted) =
+            IngestorPacket::classify(publish.clone(), manual, admission)
         else {
             panic!("a packet at the admission bound is delivered");
         };
@@ -112,7 +126,7 @@ fn admission_bounds_the_complete_packet_and_retains_only_a_discard_acknowledgeme
         publish.payload = vec![7; payload_bytes + 1].into();
         assert_eq!(publish.size(), maximum + 1);
         let IngestorPacket::Oversized(acknowledgement) =
-            IngestorPacket::classify(publish.clone(), manual)
+            IngestorPacket::classify(publish.clone(), manual, admission)
         else {
             panic!("a complete packet above the bound is counted without its bytes");
         };
@@ -123,10 +137,39 @@ fn admission_bounds_the_complete_packet_and_retains_only_a_discard_acknowledgeme
             pair => panic!("the discard retains the acknowledgement its QoS needs: {pair:?}"),
         }
         assert!(matches!(
-            IngestorPacket::classify(publish, AckMode::Automatic),
+            IngestorPacket::classify(publish, AckMode::Automatic, admission),
             IngestorPacket::Oversized(None)
         ));
     }
+}
+
+#[test]
+fn admission_follows_the_bound_the_client_declares() {
+    let publish = Publish::new("events", QoS::AtLeastOnce, vec![7; 20_480], None);
+    let mut acknowledged = publish.clone();
+    acknowledged.pkid = 7;
+    assert!(matches!(
+        IngestorPacket::classify(acknowledged.clone(), AckMode::Manual, default_admission()),
+        IngestorPacket::Oversized(Some(ManualAck::PubAck(_)))
+    ));
+    let declared = NonZeroU32::new(32_768).assured("the declared bound is positive");
+    let IngestorPacket::Message(admitted) =
+        IngestorPacket::classify(acknowledged.clone(), AckMode::Manual, declared)
+    else {
+        panic!("a 20 KiB publish fits a 32 KiB bound");
+    };
+    assert_eq!(admitted, acknowledged);
+    let exact = NonZeroU32::new(u32::try_from(publish.size()).assured("a 20 KiB packet fits"))
+        .assured("a packet has bytes");
+    assert!(matches!(
+        IngestorPacket::classify(publish.clone(), AckMode::Automatic, exact),
+        IngestorPacket::Message(_)
+    ));
+    let below = NonZeroU32::new(exact.get() - 1).assured("the packet is larger than one byte");
+    assert!(matches!(
+        IngestorPacket::classify(publish, AckMode::Automatic, below),
+        IngestorPacket::Oversized(None)
+    ));
 }
 
 #[test]
@@ -142,7 +185,7 @@ fn an_admitted_publish_owns_its_topic_payload_and_correlation_bytes() {
         ..Publish::new("events", QoS::AtMostOnce, Vec::new(), None)
     };
     let IngestorPacket::Message(admitted) =
-        IngestorPacket::classify(publish.clone(), AckMode::Automatic)
+        IngestorPacket::classify(publish.clone(), AckMode::Automatic, default_admission())
     else {
         panic!("a small packet is admitted");
     };
@@ -205,6 +248,7 @@ async fn a_cancelled_discard_keeps_its_acknowledgement_progress_and_original_dea
                 receive_maximum: NonZeroU16::MIN,
             },
             Some(keep_alive),
+            default_admission(),
             IngestorMetricsFixture::new().counter(),
         );
         let cancellation = IngestorReadCancellation::new();
@@ -282,6 +326,7 @@ async fn a_discard_whose_connection_ends_preserves_the_acknowledgement_failure_c
             receive_maximum: NonZeroU16::MIN,
         },
         None,
+        default_admission(),
         IngestorMetricsFixture::new().counter(),
     );
     let request = IngestorBatchRequest {
@@ -347,6 +392,7 @@ async fn a_discard_deadline_starts_after_the_host_settles_its_ordinary_prefix() 
             receive_maximum: NonZeroU16::new(2).assured("two is nonzero"),
         },
         Some(keep_alive),
+        default_admission(),
         IngestorMetricsFixture::new().counter(),
     );
     let request = IngestorBatchRequest {
@@ -423,6 +469,7 @@ async fn qos_zero_overflow_keeps_polling_and_preserves_acknowledged_publishes() 
             receive_maximum: NonZeroU16::new(65).assured("the sequential window includes headroom"),
         },
         Some(Duration::from_secs(10)),
+        default_admission(),
         metrics.counter(),
     );
     let mut first = Publish::new("events", QoS::AtLeastOnce, vec![1], None);

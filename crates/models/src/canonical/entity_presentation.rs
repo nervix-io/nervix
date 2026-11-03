@@ -23,12 +23,12 @@ use super::{
 };
 use crate::{
     ClickHouseEmitter, ClientProducerIngestor, EmitterEntity, EmitterEntityKind, EmitterReference,
-    HttpEmitter, HttpEndpointIngestor, HttpIngestor, HttpRequestIngestor, IcebergCatalog,
-    IcebergEmitter, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration, IngestorEntity,
-    IngestorEntityBody, IngestorEntityKind, IngestorEntityModel, IngestorInput, KafkaEmitter,
-    KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, LocatorDeclaration, MongoDbEmitter,
-    MqttEmitter, MqttIngestor, MqttTopicIngestor, MySqlEmitter, NatsEmitter, NatsIngestor,
-    NatsSubjectIngestor, OptionDeclaration, OptionPresence, OtelEmitter, OtelMetric,
+    HttpEmitter, HttpEndpointIngestor, HttpIngestor, HttpRequestHeaderValue, HttpRequestIngestor,
+    IcebergCatalog, IcebergEmitter, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
+    IngestorEntity, IngestorEntityBody, IngestorEntityKind, IngestorEntityModel, IngestorInput,
+    KafkaEmitter, KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, LocatorDeclaration,
+    MongoDbEmitter, MqttEmitter, MqttIngestor, MqttTopicIngestor, MySqlEmitter, NatsEmitter,
+    NatsIngestor, NatsSubjectIngestor, OptionDeclaration, OptionPresence, OtelEmitter, OtelMetric,
     OtelMetricKind, PostgresEmitter, PrometheusIngestor, PrometheusQueryIngestor, PulsarEmitter,
     PulsarIngestor, PulsarTopicIngestor, RabbitMqEmitter, RabbitMqIngestor, RabbitMqQueueIngestor,
     RedisEmitter, RedisIngestor, RedisPubSubIngestor, SentryEmitter, SqsEmitter, SqsFifoGroup,
@@ -420,11 +420,13 @@ impl IngestorPresentationModel for HttpRequestIngestor {
                 .headers
                 .iter()
                 .map(|header| {
-                    format!(
-                        "{} = {}",
-                        string_literal(&header.name),
-                        string_literal(&header.value)
-                    )
+                    let value = match &header.value {
+                        HttpRequestHeaderValue::Literal(value) => string_literal(value),
+                        HttpRequestHeaderValue::ClientSecret(key) => {
+                            format!("CLIENT SECRET {}", string_literal(key))
+                        }
+                    };
+                    format!("{} = {value}", string_literal(&header.name))
                 })
                 .collect();
             presentation.written_option("HEADERS", format!("{{ {} }}", fields.join(", ")));
@@ -444,8 +446,11 @@ impl IngestorPresentationModel for KafkaTopicIngestor {
         presentation.external_locator(self.topic.as_str());
         let offset = match &self.offset_mode {
             KafkaOffsetMode::Domain => "DOMAIN".to_owned(),
-            KafkaOffsetMode::ConsumerGroup(group) => {
-                format!("CONSUMER GROUP {}", string_literal(group.as_str()))
+            KafkaOffsetMode::ConsumerGroup { group, start_at } => {
+                format!(
+                    "CONSUMER GROUP {} START AT {start_at}",
+                    string_literal(group.as_str())
+                )
             }
         };
         presentation.written_option("OFFSET BY", offset);
@@ -617,7 +622,8 @@ impl EmitterEntity {
                 presentation.external_locator(entity.channel.as_str())
             }
             Self::Mqtt(MqttEmitter::Topic(entity)) => {
-                presentation.external_locator(entity.topic.as_str())
+                presentation.external_locator(entity.topic.as_str());
+                presentation.written_option("QOS", entity.qos.spelling().to_owned());
             }
             Self::Nats(NatsEmitter::Subject(entity)) => {
                 presentation.external_locator(entity.subject.as_str())

@@ -13,6 +13,7 @@
     )
 )]
 
+use meticulous::ResultExt as _;
 use nervix_connector::{RetainedIngestMetadata, RetainedIngestMetadataValue as Value};
 use rdkafka::{Timestamp as KafkaTimestamp, message::OwnedMessage};
 

@@ -311,6 +311,14 @@ listening socket. The test-only fault channel enters through the source plan and
 request until its selected listener acknowledges it. Another arm cannot replace an unobserved
 request, and a cancelled accept leaves it available. No shared lock or map is reached per frame.
 
+The Syslog frame carries its immutable peer metadata through that same handoff. UDP and TCP keep
+their socket address inline; TLS frames share one connection-owned address and optional verified
+client subject, decoded once after the handshake. Retaining a quiesced payload copies the complete
+declared metadata row, so ending the source message cannot change its transport or TLS peer. The
+source's Shuttle check includes metadata preservation across the occupied-queue pause race. Its
+async channel and watch, and the immutable metadata itself, have no tracked blocking-lock
+acquisition for Deloxide to observe.
+
 Restore storage qualification includes the store's cancellation, corruption, snapshot, queued
 writer, active chunk liveness and many-key cleanup regressions in `just test-deloxide`,
 `just test-deloxide-order` and `just test-deloxide-stress`, plus the public one-node and three-node `@restore_installation`
@@ -703,6 +711,17 @@ row and its retained replay to the source record. The registered `scenario.kafka
 from empty values, and drive event time through two branch windows beside tracked ingestion and
 lifecycle locks. Driver polling and metadata conversion remain outside Deloxide's lock detector;
 the ingestor-host Shuttle checks retain their existing intake and settlement scope.
+
+RabbitMQ delivery metadata stays with its delivery in the same way. The visit borrows the envelope
+and every basic property, adds no lock or shared state, and hands a timestamp no `DATETIME` holds
+over as unrepresentable, which the ingest group refuses through the message-error path its other
+admission refusals use. The `ingest-metadata-projection` Bolero property holds the projected values
+and refusals to their messages. The registered `scenario.rabbitmq-delivery-metadata`,
+`rabbitmq-redelivered-metadata`, `rabbitmq-timestamp-event-time` and `rabbitmq-timestamp-refusal`
+workloads, and their `stress.` forms, read every field in both ACK modes, observe a redelivery,
+drive a paced window from the producer's timestamp and refuse a timestamp beside tracked ingestion,
+acknowledgement and lifecycle locks. The AMQP client's reader, metadata visits and the async
+refusal step remain outside Deloxide's lock detector.
 
 ### Kafka source rejection floors
 
@@ -1199,6 +1218,22 @@ the production owner. Shuttle does not model Tokio's cooperative budget;
 ordinary primitive and window tests deliver more answers than one budget permits and verify that
 every given answer is settled. [Execution Primitives](execution-primitives.md) owns the adapter's
 behavior in each mode, and [Connector Contract](connector-contract.md) owns the publish outcomes.
+
+RabbitMQ's confirmation owner in
+`crates/connectors/rabbitmq/src/publisher/confirmation_window.rs` holds one bounded set of driver
+futures and messages exclusively. A driver confirm can carry another message's return, so the
+owner collects the set before attributing returns and refilling it. An interrupted mandatory
+window retains positive answers whose return attribution remains unknown, rather than reporting
+delivery; known returns and safe nonmandatory answers are settled once. The lookup borrows payload
+contents and compares each message's complete prepared AMQP properties, including persistence and
+timestamp. These immutable values come from its retained envelope and are reused on retransmission;
+attribution adds no shared map or tracked lock. The Shuttle checks
+`shuttle_a_return_followed_by_a_multiple_ack_rejects_only_its_message` and
+`shuttle_a_deadline_never_delivers_a_partially_attributed_mandatory_window` drive this production
+owner with selected callbacks and deadline events. They qualify the owner, not Lapin's opaque locks
+or network framing; the controlled one-/three-node real-broker scenarios cover the wire exchange.
+Deloxide does not observe these async waits or the driver's locks, and this path adds no tracked
+blocking synchronization.
 
 ### Client ingestor endpoints
 
@@ -2199,6 +2234,17 @@ registrations reach the transaction impact recorder's tracked locks. The lookup,
 resume barriers use the existing async pause owner, whose ordering remains outside Deloxide's
 observation; the public outcome and dependent mutation assert recovery under the original
 execution reference.
+
+The registered `@pulsar_message_metadata` workloads cover source metadata in all three delivery
+modes, branch-local event-time windows, broker redelivery and independent broker-stored batches.
+The batch oracle checks member sequence and event-time precedence, envelope inheritance and exact
+member positions. Its bounded protocol publisher and the driver's synchronous batch expansion add
+no tracked lock. The source's checked metadata and
+single pending read failure are instance-owned. Cancellation returns any gathered prefix without
+consuming the pending failure. Borrowed visitors add no synchronization or concurrent map. Deloxide
+observes the existing host state; foreign Pulsar driver channels, borrowed visitors and asynchronous
+broker waits remain outside its tracked lock graph. The existing ingestor-host Shuttle checks
+retain responsibility for host acknowledgement and cancellation interleavings.
 
 The registered `@restarted_voter_observation` workload reaches whole-cluster restart and automatic scheduling when the leader first hears a voter through a relayed heartbeat. Its test-only watch channels and concurrent fault map are untracked. The registered native metadata restore workload exercises distributed Kafka checkpoint replication, acknowledgement, restart and exact restoration above the resident replication message budget; its stream waits and assignment atomics retain their complementary checks.
 

@@ -64,6 +64,20 @@ fn locators(declarations: &[LocatorDeclaration]) -> Option<String> {
     Some(described.join(" | "))
 }
 
+/// What a synopsis writes after the reference: the one locator a body writes, or its alternatives,
+/// of which a body writes exactly one.
+fn locator_template(declarations: &[LocatorDeclaration]) -> String {
+    let examples: Vec<String> = declarations
+        .iter()
+        .map(LocatorDeclaration::example)
+        .collect();
+    match examples.as_slice() {
+        [] => String::new(),
+        [only] => format!(" {only}"),
+        alternatives => format!(" ({})", alternatives.join(" | ")),
+    }
+}
+
 /// The locator written in full, with the label completion offers for its name.
 fn locator_with_label(declaration: LocatorDeclaration) -> String {
     let label = match declaration.name {
@@ -81,7 +95,7 @@ fn option_value(value: OptionValue) -> String {
         OptionValue::Name(name) => format!("string literal checked by {}", name.label),
         OptionValue::Expression => "expression".to_owned(),
         OptionValue::Mapping => "named expressions".to_owned(),
-        OptionValue::LiteralMapping => "named string literals".to_owned(),
+        OptionValue::RequestHeaders => "named string literals or client secrets".to_owned(),
         OptionValue::Client(connector) => format!("{connector} client"),
         OptionValue::Clause => "composed clause".to_owned(),
         OptionValue::Size => "byte size".to_owned(),
@@ -135,7 +149,8 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
         acknowledgement_confirmation,
         delivery,
         quiesce,
-        locator: declared_locator,
+        // Read with the entity's alternatives through `kind.locators()` below.
+        locator: _,
         options: declared_options,
         bounds: declared_bounds,
     } = kind.capabilities();
@@ -144,6 +159,7 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
         IngestorReferenceKind::Endpoint(endpoint) => format!("{endpoint:?} endpoint"),
         IngestorReferenceKind::Schema => "SCHEMA <schema>".to_owned(),
     };
+    let declared_locators = kind.locators();
     let modes: Vec<_> = delivery
         .iter()
         .map(|delivery| format!("{}{}", delivery.example, requirements(delivery.requires)))
@@ -169,10 +185,7 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
             "\n  DECODE USING <codec>"
         }
     };
-    let location = match declared_locator {
-        Some(declaration) => format!(" {}", declaration.example()),
-        None => String::new(),
-    };
+    let location = locator_template(&declared_locators);
     let template = format!(
         "CREATE {} INGESTOR <name>\n  FROM {from}{location}{}\n  MODE <mode>\n  ON QUIESCE \
          <quiesce>{decode}\n  TO <relay> UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG\n  ON \
@@ -182,7 +195,7 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
     );
     json!({
         "entity": kind.phrase(), "connector": kind.connector().keyword(),
-        "reference": reference, "locator": locators(&kind.locators()), "options": options,
+        "reference": reference, "locator": locators(&declared_locators), "options": options,
         "modes": modes, "quiesce": quiesce, "metadata": metadata,
         "headers": header_model(headers), "every_node": executes_on_every_cluster_node,
         "position": position_class.as_ref(),
@@ -281,6 +294,7 @@ fn wait_bound(bound: WaitBound) -> String {
             format!("`{}`; {omitted}", key.key())
         }
         WaitBound::Clause(clause) => format!("`{clause}`"),
+        WaitBound::ClientKey { key, rule } => format!("client key `{key}`; {rule}"),
         WaitBound::Fixed(bound) => format!("fixed {}", humantime::format_duration(bound)),
         WaitBound::Driver(default) => format!("driver default, {default}"),
         WaitBound::Unbounded => "unbounded".to_owned(),
@@ -328,7 +342,10 @@ fn emitter(kind: EmitterEntityKind) -> Value {
         EmitterBatchLegality::Unavailable { reason } => (format!("unavailable: {reason}"), None),
     };
     let maximum = maximum.map(|limit| limit.to_string());
-    let modes: Vec<_> = publishing_modes.iter().map(|mode| mode.example()).collect();
+    let modes: Vec<_> = publishing_modes
+        .iter()
+        .map(|mode| format!("{}{}", mode.kind.example(), requirements(mode.requires)))
+        .collect();
     let options: Vec<_> = options.iter().map(option).collect();
     let envelope: Vec<_> = envelope.iter().map(|clause| clause.example()).collect();
     let properties: Vec<_> = properties
@@ -490,6 +507,11 @@ fn client(kind: ConnectorKind) -> Option<Value> {
         .iter()
         .map(|alias| json!({ "alias": alias.alias, "accepted": alias.accepted }))
         .collect();
+    let statement_keys: Vec<_> = config
+        .statement_keys()
+        .iter()
+        .map(|statement_key| json!({ "key": statement_key.key, "clause": statement_key.clause }))
+        .collect();
     let stripped_prefix = match config.stripped_prefix() {
         Some(stripped) => json!({ "prefix": stripped.prefix, "properties": stripped.properties }),
         None => Value::Null,
@@ -503,8 +525,11 @@ fn client(kind: ConnectorKind) -> Option<Value> {
     };
     Some(
         json!({ "kind": kind.keyword(), "pool": pool, "config_owner": config_owner, "options": options,
-            "keys": keys, "namespaces": namespaces, "reserved": config.reserved(), "aliases": aliases,
-            "stripped_prefix": stripped_prefix, "constraints": constraints }),
+            "keys": keys, "namespaces": namespaces, "reserved": config.reserved(),
+            "statement_keys": statement_keys, "aliases": aliases,
+            "stripped_prefix": stripped_prefix,
+            "secret_keys": config.secret_key_prefix().map(|prefix| format!("{prefix}*")),
+            "constraints": constraints }),
     )
 }
 

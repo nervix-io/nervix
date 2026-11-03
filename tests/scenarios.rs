@@ -130,8 +130,8 @@ use crate::common::{
     cluster::{
         AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, BrokerRecordTime, Cluster,
         CommandHold, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, HttpsPublishLoopOutcome,
-        InterconnectCredentialFault, JoinAttempt, RejoinAttempt, TEST_AUTH_PASSWORD,
-        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, TypedBrokerHeader,
+        InterconnectCredentialFault, JoinAttempt, PulsarMessageTimes, RejoinAttempt,
+        TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestClusterConfig, TestSession, TypedBrokerHeader,
         WebsocketExchangeAction, assert_kafka_consumer_group_next_offset_through,
         bind_rabbitmq_queue, client_connect_options, client_domain, command_connect_options,
         delete_rabbitmq_queue, ensure_rabbitmq_exchange, ensure_rabbitmq_queue, ensure_sqs_queue,
@@ -157,6 +157,7 @@ use crate::common::{
     iceberg_catalog_gate::IcebergCatalogGate,
     kafka_group_member::ExternalKafkaGroupMember,
     kafka_mock_broker::KafkaMockBroker,
+    mqtt_broker_clients::{MqttBrokerClient, mqtt_broker_client},
     mqtt_publish_filter::MqttPublishFilter,
     nats_endpoint::NatsEndpoint,
     node_bound_address::{NodeBoundAddress, NodeBoundListener, bind_as_its_node},
@@ -169,6 +170,7 @@ use crate::common::{
         ProcessProgram, SERVER_PROGRAM, build_tools_directory, dependency_lifecycle_helper_command,
         scenario_executable,
     },
+    rabbitmq_confirm_order::RabbitMqConfirmOrder,
     raw_session::{
         SessionScope, TestSubscriptionEvent, TestUpload, TestUploadPart, WireOutcome as _,
         command_output, fresh_execution_reference, outcome_awaits_leader,
@@ -217,8 +219,10 @@ mod http_transport;
 mod iceberg_delivery;
 mod ingestion_time;
 mod kafka_metadata;
+mod materialized_state_inspection;
 mod mqtt_fixtures;
 mod mqtt_sessions;
+mod mqtt_subscription_refusal;
 mod mysql_isolation;
 mod nats_delivery;
 mod paced_replication;
@@ -226,9 +230,13 @@ mod paced_simulation;
 mod postgres_fixtures;
 mod process_cluster;
 mod pulsar_delivery;
+mod pulsar_emission;
+mod pulsar_metadata;
 mod pulsar_readiness;
 mod pulsar_subscription_types;
 mod pulsar_subscriptions;
+mod rabbitmq_envelope;
+mod rabbitmq_properties;
 mod restarted_voter;
 mod session_protocol;
 mod standalone_transaction;
@@ -410,6 +418,8 @@ struct SubscriptionReceipt {
 
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
+    rabbitmq_envelope_broker:
+        Option<nervix_test_environment::restartable_rabbitmq::RestartableRabbitMq>,
     mqtt_fixture_publication: Option<mqtt_fixtures::Publication>,
     postgres_fixture_locks: Option<postgres_fixtures::HeldLocks>,
     postgres_fixture_observations: Option<postgres_fixtures::Observations>,
@@ -532,6 +542,8 @@ struct ScenarioWorld {
     last_broker_time: Option<BrokerRecordTime>,
     /// The typed headers of the last observed broker message: SQS attributes with their data types.
     last_broker_typed_headers: Vec<TypedBrokerHeader>,
+    /// The times of the last message a step received, where a Pulsar broker delivered it.
+    last_pulsar_times: Option<PulsarMessageTimes>,
     clickhouse_table: Option<String>,
     clickhouse_tls: bool,
     postgres_table: Option<String>,
@@ -622,6 +634,8 @@ struct ScenarioWorld {
     kafka_mock_broker: Option<KafkaMockBroker>,
     /// The forwarder a scenario stood in front of the MQTT broker to drop chosen PUBLISH packets.
     mqtt_publish_filter: Option<MqttPublishFilter>,
+    /// The real-broker forwarder that gives two outstanding publishes a controlled confirm order.
+    rabbitmq_confirm_order: Option<RabbitMqConfirmOrder>,
     /// The forwarder a scenario stood in front of the SQS service to hold the answer that carries a
     /// chosen message.
     sqs_answer_hold: Option<SqsAnswerHold>,
@@ -700,6 +714,7 @@ impl fmt::Debug for ScenarioWorld {
                 &self.last_broker_payload.as_ref().map(|value| value.len()),
             )
             .field("last_broker_header_count", &self.last_broker_headers.len())
+            .field("last_pulsar_times", &self.last_pulsar_times)
             .field("last_broker_time", &self.last_broker_time)
             .field(
                 "last_auth_attempts_elapsed",
@@ -1401,6 +1416,50 @@ async fn given_mqtt_publish_filter(world: &mut ScenarioWorld) {
     world.mqtt_publish_filter = Some(filter);
 }
 
+#[given("a RabbitMQ endpoint that reorders the first two publisher confirmations is configured")]
+async fn given_rabbitmq_confirm_order(world: &mut ScenarioWorld) {
+    let endpoint = world
+        .dependencies
+        .endpoints()
+        .get(RABBITMQ_ADDR)
+        .unwrap_or_else(|error| panic!("RabbitMQ endpoint is unavailable: {error}"));
+    let mut address = url::Url::parse(endpoint)
+        .unwrap_or_else(|error| panic!("RabbitMQ endpoint URL is invalid: {error}"));
+    let ip = address
+        .host_str()
+        .assured("the broker endpoint has a host")
+        .parse()
+        .assured("the test broker is addressed by its IP");
+    let port = address
+        .port()
+        .assured("the broker endpoint has an explicit port");
+    let forwarder = RabbitMqConfirmOrder::start(std::net::SocketAddr::new(ip, port))
+        .await
+        .assured("the RabbitMQ confirm forwarder can bind loopback");
+    address
+        .set_host(Some("127.0.0.1"))
+        .assured("loopback is a valid URL host");
+    address
+        .set_port(Some(forwarder.port()))
+        .assured("AMQP URLs accept an explicit port");
+    world
+        .placeholders
+        .insert("rabbitmq_confirm_addr".to_string(), address.to_string());
+    world.rabbitmq_confirm_order = Some(forwarder);
+}
+
+#[then("the RabbitMQ endpoint forwarded the controlled publisher confirmations")]
+fn then_rabbitmq_confirm_order(world: &mut ScenarioWorld) {
+    let forwarder = world
+        .rabbitmq_confirm_order
+        .as_ref()
+        .assured("the scenario configured the confirmation forwarder");
+    assert!(
+        forwarder.rewrote_confirmations(),
+        "the broker must confirm both messages before the fixture releases them"
+    );
+}
+
 /// From now on the MQTT endpoint drops every PUBLISH packet whose bytes carry the docstring, so the
 /// broker never sees, delivers or answers it.
 #[when("the MQTT endpoint drops every publish carrying")]
@@ -1413,13 +1472,24 @@ fn when_mqtt_endpoint_drops_publishes_carrying(world: &mut ScenarioWorld, #[step
         .drop_publishes_carrying(payload.into_bytes());
 }
 
+/// From now on the MQTT endpoint drops every PUBREL, so the broker delivers each QoS 2 publish and
+/// answers its PUBREC, and never sends the PUBCOMP that completes it.
+#[when("the MQTT endpoint drops every PUBREL")]
+fn when_mqtt_endpoint_drops_every_pubrel(world: &mut ScenarioWorld) {
+    world
+        .mqtt_publish_filter
+        .as_ref()
+        .expect("an MQTT endpoint that drops chosen publishes must be configured first")
+        .drop_releases();
+}
+
 #[when("the MQTT endpoint forwards every publish")]
 fn when_mqtt_endpoint_forwards_every_publish(world: &mut ScenarioWorld) {
     world
         .mqtt_publish_filter
         .as_ref()
         .expect("an MQTT endpoint that drops chosen publishes must be configured first")
-        .forward_every_publish();
+        .forward_every_packet();
 }
 
 #[given("a stallable Pulsar endpoint is configured")]
@@ -2151,6 +2221,19 @@ impl ExpectedHttpRequest {
         );
     }
 
+    /// Asserts that every captured request with this docstring's request line is the request it
+    /// describes.
+    fn assert_every_captured(&self, receiver: &str, captured: &[CapturedRequest]) {
+        for request in captured {
+            if self.has_request_line_of(request) {
+                self.assert_matches(
+                    &format!("HTTP receiver '{receiver}' request '{}'", self.request_line),
+                    request,
+                );
+            }
+        }
+    }
+
     /// Asserts that `request`, which `described` names in a failure, is the request this
     /// docstring describes.
     fn assert_matches(&self, described: &str, request: &CapturedRequest) {
@@ -2239,6 +2322,26 @@ async fn then_http_receiver_eventually_captures_one_request_that_is(
         Err(error) => panic!("HTTP receiver '{name}': {error}"),
     };
     expected.assert_one_captured(&name, &captured);
+}
+
+/// Waits until the receiver captures a request with the docstring's request line, then compares
+/// every such request with the request the docstring describes. A scenario uses it for a request
+/// that repeats, such as a poll on its cadence, whose number it cannot name.
+#[then(expr = "HTTP receiver {string} eventually captures requests that are")]
+async fn then_http_receiver_eventually_captures_requests_that_are(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    let expected = ExpectedHttpRequest::from_step(world, step);
+    let waited = http_receiver(world, &name)
+        .wait_for_request_line(&expected.request_line, HTTP_RECEIVER_WAIT)
+        .await;
+    let captured = match waited {
+        Ok(captured) => captured,
+        Err(error) => panic!("HTTP receiver '{name}': {error}"),
+    };
+    expected.assert_every_captured(&name, &captured);
 }
 
 /// Asserts the most requests the receiver ever held awaiting their final head at once. A request
@@ -4559,6 +4662,7 @@ fn client_probe_target(
         username: TEST_AUTH_USERNAME.to_string(),
         password: TEST_AUTH_PASSWORD.to_string(),
         domain: world.domain.clone(),
+        execution_reference: Uuid::now_v7().to_string(),
         exercise,
     }
 }
@@ -4585,27 +4689,50 @@ async fn start_client_probe(
 }
 
 #[when(
-    expr = "the {string} client probe subscribes as {string} to relay {string} on node {string} \
-            expecting {int} rows"
+    expr = "the {string} client probe subscribes as {string} to relay {string} on a follower when \
+            available expecting {int} rows"
 )]
 async fn when_client_probe_subscribes(
     world: &mut ScenarioWorld,
     runtime: String,
     subscription: String,
     relay: String,
-    node_id: String,
     rows: usize,
 ) {
     let runtime: ProbeRuntime = runtime
         .parse()
         .expect("the step names a known probe runtime");
-    let node_id = expand_placeholders(world, &node_id);
+    let leader = current_leader_node(world).await;
+    // This fixture runs with one or three nodes; select a follower from that bounded topology.
+    let follower = world
+        .cluster()
+        .node_ids()
+        .into_iter()
+        .find(|node| node != &leader);
+    let node_id = match follower {
+        Some(follower) => follower,
+        None => leader.clone(),
+    };
+    append_cucumber_log_line(&format!(
+        "client probe {runtime:?}: observed_leader={leader} initial_node={node_id} follower={}",
+        node_id != leader
+    ));
     let exercise = ProbeExercise::Subscription {
         relay: expand_placeholders(world, &relay),
         subscription: expand_placeholders(world, &subscription),
         rows,
     };
     let target = client_probe_target(world, &node_id, exercise);
+    let redirect_report = if runtime.implements_protocol() && node_id != leader {
+        let reference = &target.execution_reference;
+        format!("REDIRECT original={reference} repeated={reference} outcome={reference}")
+    } else {
+        // This is empty report content for the direct and binding controls, not a redirect state.
+        String::new()
+    };
+    world
+        .placeholders
+        .insert("client_probe_redirect_report".to_string(), redirect_report);
     start_client_probe(world, runtime, &node_id, target, SUBSCRIBED_LINE).await;
 }
 
@@ -4723,6 +4850,7 @@ async fn then_client_probe_reports(world: &mut ScenarioWorld, within: String, #[
     report
         .check(&expected)
         .unwrap_or_else(|error| panic!("{error}"));
+    append_cucumber_log_line(&format!("client probe report verified: {report:?}"));
 }
 
 #[then(expr = "the server process exits with status {int}")]
@@ -5130,6 +5258,34 @@ fn then_cli_suggestion_applies(
         actual,
         expand_placeholders(world, &expected).replace("\\n", "\n")
     );
+}
+
+#[then(expr = "the CLI offers exactly {string}")]
+fn then_cli_offers_exactly(world: &mut ScenarioWorld, expected: String) {
+    let output = world
+        .last_cli_output
+        .as_ref()
+        .verified("the preceding step ran the CLI");
+    assert!(
+        output.status.success(),
+        "CLI failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .assured("the successful CLI suggestion mode prints JSON");
+    assert_eq!(response["status"], "Ready");
+    let candidates = response["suggestions"]
+        .as_array()
+        .assured("the CLI suggestion response has an array");
+    let mut offered = BTreeSet::new();
+    for candidate in candidates {
+        let value = candidate["value"]
+            .as_str()
+            .assured("a CLI suggestion carries its value");
+        offered.insert(value);
+    }
+    let expected: BTreeSet<&str> = expected.split(", ").collect();
+    assert_eq!(offered, expected);
 }
 
 #[then(expr = "the CLI output does not contain {string}")]
@@ -7930,6 +8086,7 @@ async fn given_cluster_is_started(world: &mut ScenarioWorld, node_count: usize) 
     world.last_broker_headers.clear();
     world.last_broker_time = None;
     world.last_broker_typed_headers.clear();
+    world.last_pulsar_times = None;
     world.burst_raft_retention_peak = None;
     append_cucumber_log_line(&format!(
         "cluster start requested: nodes={node_count} domain={} test_id={}",
@@ -19349,8 +19506,7 @@ impl UnacknowledgedSourceFixture {
             Self::Kafka => {
                 r#"
       CREATE KAFKA CLIENT unacknowledged_client CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };"#
             }
             Self::Mqtt => {
@@ -19422,7 +19578,7 @@ impl UnacknowledgedSourceFixture {
         match self {
             Self::Kafka => {
                 "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'unacknowledged_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'unacknowledged_group_{{test_id}}' START AT EARLIEST
           MODE NO ACK
         ON QUIESCE SUSPEND"
             }
@@ -25706,6 +25862,18 @@ async fn given_mqtt_topic_is_observed(world: &mut ScenarioWorld, topic: String) 
     );
 }
 
+#[given(expr = "MQTT topic {string} is observed at the quality of service it is published with")]
+async fn given_mqtt_topic_is_observed_at_published_qos(world: &mut ScenarioWorld, topic: String) {
+    let topic = expand_placeholders(world, &topic);
+    world.broker_observer = Some(
+        world
+            .cluster()
+            .observe_mqtt_at_published_qos(&topic)
+            .await
+            .expect("failed to observe mqtt topic"),
+    );
+}
+
 #[given(expr = "SQS queue {string} is observed")]
 async fn given_sqs_queue_is_observed(world: &mut ScenarioWorld, queue: String) {
     let queue = expand_placeholders(world, &queue);
@@ -26665,6 +26833,79 @@ async fn when_sized_mqtt_qos1_messages_are_published(
         .expect("failed to publish the sized MQTT QoS 1 messages");
 }
 
+/// Waits until the test broker records the client whose identity is `client_id` as connected, and
+/// returns that record.
+async fn connected_mqtt_broker_client(
+    world: &ScenarioWorld,
+    duration: &str,
+    client_id: &str,
+) -> MqttBrokerClient {
+    let duration = parse_duration_text(duration).expect("step duration must be a valid duration");
+    let client_id = expand_placeholders(world, client_id);
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let record = mqtt_broker_client(world.dependencies.endpoints(), &client_id)
+            .await
+            .expect("the MQTT broker's management API must answer");
+        if let Some(record) = record.as_ref()
+            && record.connected
+        {
+            return record.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the MQTT broker to report client '{client_id}' connected; its \
+             last record: {record:?}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(expr = "within {string} the MQTT broker reports client {string} connected")]
+async fn then_mqtt_broker_reports_client_connected(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_id: String,
+) {
+    connected_mqtt_broker_client(world, &duration, &client_id).await;
+}
+
+#[then(expr = "within {string} the MQTT broker reports client {string} connected as user {string}")]
+async fn then_mqtt_broker_reports_client_connected_as_user(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_id: String,
+    username: String,
+) {
+    let username = expand_placeholders(world, &username);
+    let record = connected_mqtt_broker_client(world, &duration, &client_id).await;
+    assert_eq!(
+        record.username.as_deref(),
+        Some(username.as_str()),
+        "the MQTT broker reports client '{}' connected under another username",
+        record.client_id
+    );
+}
+
+#[then(
+    expr = "within {string} the MQTT broker reports client {string} connected with a keep-alive \
+            of {int} seconds"
+)]
+async fn then_mqtt_broker_reports_client_connected_with_keep_alive(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_id: String,
+    keep_alive_seconds: u64,
+) {
+    let record = connected_mqtt_broker_client(world, &duration, &client_id).await;
+    assert_eq!(
+        record.keep_alive_seconds, keep_alive_seconds,
+        "the MQTT broker holds client '{}' to another keep-alive",
+        record.client_id
+    );
+}
+
 #[when(expr = "RabbitMQ message is published to queue {string}")]
 async fn when_rabbitmq_message_is_published(
     world: &mut ScenarioWorld,
@@ -26768,6 +27009,56 @@ async fn when_kafka_message_is_published(
         .publish_kafka(&topic, &payload)
         .await
         .expect("failed to publish kafka message");
+}
+
+/// Publishes the docstring until the subscription receives `fragment`. A consumer that starts at
+/// a partition's end reads that end a moment after it takes the partition up, which no public
+/// surface shows, and a record published before then falls behind it. The first payload must hold
+/// `fragment`: records arrive in partition order, so anything the consumer should have skipped
+/// precedes everything published here and fails the step.
+#[when(
+    expr = "Kafka message is published to topic {string} until the relay subscription receives \
+            {string}"
+)]
+async fn when_kafka_message_is_published_until_received(
+    world: &mut ScenarioWorld,
+    topic: String,
+    fragment: String,
+    #[step] step: &Step,
+) {
+    let topic = expand_placeholders(world, &topic);
+    let payload = expand_placeholders(world, docstring(step));
+    let fragment = expand_placeholders(world, &fragment);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        nervix_primitives::task::consume_budget().await;
+        world.last_publish_at = Some(Instant::now());
+        world
+            .cluster()
+            .publish_kafka(&topic, &payload)
+            .await
+            .expect("failed to publish kafka message");
+        let session = world
+            .active_session
+            .as_mut()
+            .expect("an active session with subscription must exist");
+        let event = session
+            .try_next_subscription(Duration::from_millis(500))
+            .await
+            .expect("failed while waiting for a subscription payload");
+        let Some(event) = event else {
+            continue;
+        };
+        assert!(
+            event.payload.contains(&fragment),
+            "expected the first subscription payload to hold {fragment:?}, got: {}",
+            event.payload
+        );
+        return;
+    }
+    panic!(
+        "the relay subscription received no {fragment:?} while topic '{topic}' was published to"
+    );
 }
 
 #[when(
@@ -27011,6 +27302,51 @@ async fn when_tls_sqs_message_is_published(
         .publish_sqs_tls(&queue, &payload)
         .await
         .expect("failed to publish tls sqs message");
+}
+
+#[when(
+    expr = "a redelivered SQS FIFO message with group {string} and deduplication id {string} is \
+            ready in queue {string}"
+)]
+async fn when_redelivered_sqs_metadata_is_ready(
+    world: &mut ScenarioWorld,
+    group: String,
+    deduplication_id: String,
+    queue: String,
+    #[step] step: &Step,
+) {
+    let queue = expand_placeholders(world, &queue);
+    let group = expand_placeholders(world, &group);
+    let deduplication_id = expand_placeholders(world, &deduplication_id);
+    let payload = expand_placeholders(world, docstring(step));
+    let prepared = common::sqs_metadata::SqsMetadataFixture::prepare(
+        world.dependencies.endpoints(),
+        &queue,
+        &group,
+        &deduplication_id,
+        &payload,
+    )
+    .await;
+    let observed = match prepared {
+        Ok(observed) => observed,
+        Err(error) => panic!("failed to prepare a redelivered FIFO message: {error}"),
+    };
+    world
+        .placeholders
+        .insert("sqs_message_id".to_string(), observed.message_id);
+    world
+        .placeholders
+        .insert("sqs_sent_at".to_string(), observed.sent_at);
+    world.placeholders.insert(
+        "sqs_first_received_at".to_string(),
+        observed.first_received_at,
+    );
+    world
+        .placeholders
+        .insert("sqs_sequence_number".to_string(), observed.sequence_number);
+    world
+        .placeholders
+        .insert("sqs_sender_id".to_string(), observed.sender_id);
 }
 
 #[when(expr = "NATS message is published to subject {string}")]
@@ -30899,6 +31235,7 @@ async fn then_observed_broker_receives_payload(world: &mut ScenarioWorld, #[step
     world.last_broker_headers = message.headers;
     world.last_broker_time = message.time;
     world.last_broker_typed_headers = message.typed_headers;
+    world.last_pulsar_times = message.pulsar_times;
 
     let actual = world
         .last_broker_payload
@@ -33814,6 +34151,7 @@ async fn receive_exactly_these_broker_messages<Expected: BrokerMessageExpectatio
         }
         world.last_broker_payload = Some(message.payload.clone());
         world.last_broker_headers = message.headers;
+        world.last_pulsar_times = message.pulsar_times;
         world.last_broker_time = message.time;
         observed.push(delivered.describe());
     }
@@ -34616,6 +34954,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 // harness state, and they are given back once the nodes they fronted have ended.
                 world.stallable_tcp_proxies.clear();
                 world.mqtt_publish_filter = None;
+                world.rabbitmq_confirm_order = None;
                 world.sqs_answer_hold = None;
                 world.iceberg_catalog_gate = None;
                 world.nats_endpoint = None;
@@ -34634,11 +34973,27 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 let scenario_ports = std::mem::take(&mut world.scenario_ports);
                 crate::common::port_pool::release_test_ports(&scenario_ports);
 
+                let rabbitmq_cleanup =
+                    if let Some(mut broker) = world.rabbitmq_envelope_broker.take() {
+                        Some(broker.shutdown().await)
+                    } else {
+                        None
+                    };
+                if let Some(Err(error)) = &rabbitmq_cleanup {
+                    append_cucumber_log_line(&format!(
+                        "scenario teardown failed: isolated RabbitMQ: {error}"
+                    ));
+                }
                 world.enter_phase(
                     ScenarioPhase::Finished,
                     &format!("body={body} {cluster_cleanup}"),
                 );
                 world.scenario_admission = None;
+                if let Some(cleanup) = rabbitmq_cleanup {
+                    cleanup.assured(
+                        "the scenario-owned RabbitMQ broker is removed after all other cleanup",
+                    );
+                }
             })
         })
         .with_writer(writer)

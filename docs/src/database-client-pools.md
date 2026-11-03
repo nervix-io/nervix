@@ -102,7 +102,12 @@ authentication. A refused connection is tried again within that bound, and the b
 of how long an accepted query then runs. A checkout that runs out of it reports `checking out a
 Postgres connection did not finish within pool_acquire_timeout_ms` with the bound, then the emitter
 retries on its policy. Opening the pool takes the same bound to establish `MIN` connections and
-another for its first checkout, which opens one where `MIN` is zero. A MySQL client
+another for its first checkout, which opens one where `MIN` is zero. Its separate optional
+`timeout_ms` bounds every catalog query and INSERT response after checkout, with the same bound
+installed as PostgreSQL's `statement_timeout`. Each isolated INSERT has its own budget; a local
+timeout closes the interrupted connection instead of returning a pending response to the pool.
+See the [Postgres emitter contract](emitters.md#postgres) for its range and retry semantics.
+A MySQL client
 that sets `timeout_ms` bounds each checkout, including connection establishment and authentication,
 by that value, and bounds initial validation and each insert separately. Its minimum keeper uses
 the same checkout bound. An exhausted pool reports `checking out a MySQL connection did not finish
@@ -113,7 +118,11 @@ operation bound, so the key is not a deadline for the entire flush or its retrie
 A Redis publish checks its connection out within the client's
 `connect_timeout_ms`, 30 seconds by default, the same deadline that bounds opening each new command
 connection: a checkout that runs out of it reports `checking out a Redis command connection did not
-finish within connect_timeout_ms` with the bound. A MongoDB write has only its driver's deadlines:
+finish within connect_timeout_ms` with the bound. Every Redis checkout tests the connection it
+hands over with a `PING`, which Redis must answer within the driver's 500 ms, as it must answer the
+`PUBLISH` that follows. A connection that fails the test is closed, and the checkout takes another
+idle connection or opens a new one within the same deadline. No key turns the test off, as a
+Postgres client's `pool_test_before_acquire` does. A MongoDB write has only its driver's deadlines:
 server selection ends after `serverSelectionTimeoutMS`, 30 seconds by default, and opening a
 connection's TCP and TLS session after `connectTimeoutMS`, 10 seconds by default, both set in
 `addr`. The wait for a pooled connection, the connection handshake and each command's answer have
@@ -229,7 +238,10 @@ With `true`, a checkout that finds the connection closed replaces it within
 trip, and a connection the server or a proxy closed reaches the write that borrowed it, which fails
 as a transient error and retries on its emitter's policy. Either way the pool tests a connection
 again when it is returned, and closes one that fails. A newly opened connection is not tested
-first.
+first. The test of a returned connection has no deadline: a server that stops answering keeps that
+connection, and its place within `MAX`, until the server answers or the connection breaks, so once
+every place is held this way a checkout waits out `pool_acquire_timeout_ms` and the write retries
+on its emitter's policy.
 
 ```plexus
 CREATE POSTGRES CLIENT postgres_behind_proxy
@@ -240,6 +252,13 @@ CREATE POSTGRES CLIENT postgres_behind_proxy
     'pool_max_lifetime_ms' = '900000'
   };
 ```
+
+Every catalog query and insert of a Postgres emitter runs as a named prepared statement, which the
+driver prepares once on a connection and keeps for it, up to the URL's `statement-cache-capacity`,
+100 by default. A connection pooler between Nervix and the server must therefore keep a session's
+prepared statements: pool by session, or by transaction only where the pooler supports
+protocol-level prepared statements. Behind a pooler that does not keep them, a write that reuses
+a statement can fail with SQLSTATE `26000`, which the emitter retries on its policy.
 
 ## Accepted values
 

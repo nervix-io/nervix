@@ -443,6 +443,65 @@ fn a_refused_name_is_no_reserved_key() {
 }
 
 #[test]
+fn a_reserved_key_a_statement_sets_names_the_clause_that_sets_it() {
+    const STATEMENT_KEYS: [ClientConfigStatementKey; 1] = [ClientConfigStatementKey {
+        key: "owned.start",
+        clause: "START AT on the ingestor",
+    }];
+    let schema = ClientConfigSchema::new(&ALIASED_KEYS, &[], &["owned.group", "owned.start"])
+        .with_statement_keys(&STATEMENT_KEYS);
+
+    let refusal = schema
+        .validate(&[entry("owned.start", "value")])
+        .expect_err("a statement sets this key");
+    assert_eq!(
+        refusal.current_context(),
+        &ClientConfigSchemaError::SetByStatement {
+            key: "owned.start".to_string(),
+            clause: "START AT on the ingestor",
+        }
+    );
+
+    let refusal = schema
+        .validate(&[entry("owned.group", "value")])
+        .expect_err("Nervix sets this key itself");
+    assert_eq!(
+        refusal.current_context(),
+        &ClientConfigSchemaError::Reserved {
+            key: "owned.group".to_string()
+        }
+    );
+    assert_eq!(schema.statement_keys(), &STATEMENT_KEYS);
+}
+
+#[test]
+#[should_panic(expected = "holds_name")]
+fn a_key_a_statement_sets_is_reserved() {
+    const UNRESERVED: [ClientConfigStatementKey; 1] = [ClientConfigStatementKey {
+        key: "owned.start",
+        clause: "START AT on the ingestor",
+    }];
+    ClientConfigSchema::new(&ALIASED_KEYS, &[], &[]).with_statement_keys(&UNRESERVED);
+}
+
+#[test]
+#[should_panic(expected = "name_precedes")]
+fn keys_a_statement_sets_are_sorted() {
+    const UNSORTED: [ClientConfigStatementKey; 2] = [
+        ClientConfigStatementKey {
+            key: "owned.start",
+            clause: "START AT on the ingestor",
+        },
+        ClientConfigStatementKey {
+            key: "owned.group",
+            clause: "OFFSET BY on the ingestor",
+        },
+    ];
+    ClientConfigSchema::new(&ALIASED_KEYS, &[], &["owned.group", "owned.start"])
+        .with_statement_keys(&UNSORTED);
+}
+
+#[test]
 #[should_panic(expected = "name_precedes")]
 fn driver_aliases_are_sorted_by_the_name_each_refuses() {
     const UNSORTED: [ClientConfigAlias; 2] = [
@@ -724,6 +783,99 @@ fn a_deadline_uses_the_shared_positive_millisecond_contract() {
 }
 
 #[test]
+fn a_client_accepts_the_secret_keys_an_operator_names_and_stays_strict_about_every_other_key() {
+    let client = ConnectorKind::Http
+        .client()
+        .assured("HTTP declares a client");
+    let base = [
+        entry("endpoint", "https://api.example.com"),
+        entry("timeout_ms", "5000"),
+    ];
+
+    let mut authored = base.to_vec();
+    authored.push(entry("secret.api_token", "Bearer fixture-token"));
+    authored.push(entry("secret.tenant_key", "fixture-tenant"));
+    client
+        .config
+        .validate(&authored)
+        .assured("a client names as many secret keys as it reads");
+    assert_eq!(client.config.secret_key_prefix(), Some("secret."));
+    assert_eq!(
+        client.config.ownership_label(),
+        "Nervix",
+        "no driver reads a secret key, so the family delegates nothing"
+    );
+    assert!(client.config.namespaces().is_empty());
+
+    for key in ["secret.", "secrets.api_token", "api_token", "secret"] {
+        let mut refused = base.to_vec();
+        refused.push(entry(key, "value"));
+        let refusal = client
+            .config
+            .validate(&refused)
+            .expect_err("only the prefix and a name make a secret key");
+        assert!(
+            matches!(
+                refusal.current_context(),
+                ClientConfigSchemaError::UnknownKey { key: found } if found == key
+            ),
+            "{key}: {refusal:?}"
+        );
+    }
+    let mut repeated = base.to_vec();
+    repeated.push(entry("secret.api_token", "first"));
+    repeated.push(entry("secret.api_token", "second"));
+    assert!(matches!(
+        client
+            .config
+            .validate(&repeated)
+            .expect_err("a secret key occurs once")
+            .current_context(),
+        ClientConfigSchemaError::DuplicateKey { .. }
+    ));
+    let mut uppercase = base.to_vec();
+    uppercase.push(entry("secret.API_TOKEN", "value"));
+    assert!(matches!(
+        client
+            .config
+            .validate(&uppercase)
+            .expect_err("a secret key is lowercase like every key")
+            .current_context(),
+        ClientConfigSchemaError::KeyCase { .. }
+    ));
+}
+
+#[test]
+fn inspection_masks_every_secret_key_and_a_schema_reports_which_keys_are_secret() {
+    let client = ConnectorKind::Http
+        .client()
+        .assured("HTTP declares a client");
+    let inspected = client.config.inspection_entries(&[
+        entry("timeout_ms", "5000"),
+        entry("secret.api_token", "Bearer fixture-token"),
+    ]);
+    assert_eq!(
+        inspected,
+        [
+            entry("timeout_ms", "5000"),
+            entry("secret.api_token", CLIENT_CONFIG_REDACTION),
+        ]
+    );
+
+    assert!(client.config.is_secret("secret.api_token"));
+    assert!(!client.config.is_secret("secret."));
+    assert!(!client.config.is_secret("timeout_ms"));
+    assert!(!client.config.is_secret("unknown"));
+
+    let declared = ConnectorKind::ClickHouse
+        .client()
+        .assured("ClickHouse declares a client");
+    assert_eq!(declared.config.secret_key_prefix(), None);
+    assert!(declared.config.is_secret("password"));
+    assert!(!declared.config.is_secret("secret.api_token"));
+}
+
+#[test]
 fn http_declares_one_strict_client_transport_contract() {
     let client = ConnectorKind::Http
         .client()
@@ -994,6 +1146,12 @@ fn bolero_schema_checked_client_entries_round_trip() {
                 };
                 entries.push(entry(key.name, &value));
                 assert_eq!(schema.key(key.name), Some(key));
+            }
+            if let Some(prefix) = schema.secret_key_prefix() {
+                entries.push(entry(
+                    &format!("{prefix}fixture_secret"),
+                    &arbitrary.string(),
+                ));
             }
             if let Some(count) = NonZeroUsize::new(schema.namespaces().len()) {
                 let namespace = schema.namespaces()[arbitrary.entropy().index(count)];

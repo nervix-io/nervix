@@ -35,7 +35,11 @@ direct-value sections. Nervix validates the entity's declared limits and exact m
 `CREATE` and `ALTER`; correct a refused declaration before starting the domain.
 For MQTT sources, read [Ingestors → MQTT](../../../docs/src/ingestors.md#mqtt) before promising
 delivery during downstream stalls; it distinguishes QoS 0 overflow, acknowledged capacity and
-the counters that expose each outcome.
+the counters that expose each outcome, and the refusal of a broker grant below the declared QoS.
+For Pulsar source identity, keys, redelivery and event-time windows, read
+[Ingestors → Pulsar](../../../docs/src/ingestors.md#pulsar) and its metadata table. Choose
+`TIMESTAMP AT metadata.event_time` or `TIMESTAMP AT metadata.publish_time` deliberately: an absent
+event time stays null, while an explicit epoch time is preserved.
 
 For RabbitMQ consumption choose `MODE NO ACK`, `MODE ACK SEQUENTIAL`, or
 `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
@@ -43,11 +47,16 @@ Parallel `MAX` is 1 through 65,535 and is the broker prefetch per instance. Each
 on its own graph outcome. Automatic consumption has no prefetch or transport acknowledgement;
 work already accepted by the broker can be lost before the graph completes. Read the RabbitMQ
 Ingestors section for the exact clause order, host admission and recovery limits.
+For RabbitMQ publication, read [Emitters → RabbitMQ](../../../docs/src/emitters.md#rabbitmq) for
+`PERSISTENT`, `TIMESTAMP`, exact AMQP `PROPERTIES` types, targeted envelope alterations and the
+durable-queue requirement; property writes and `write_header` have different contracts.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and
-completion status messages.
+completion status messages. For connector expression completion, including filters, HTTP request
+expressions, ALTER constructions, metadata fields and entity-specific header functions, follow
+the CLI's Completion section.
 Read the Ingestors and Emitters chapters for `SHOW INGESTORS`, `SHOW EMITTERS`, and `DESCRIBE`;
 their inspection contracts distinguish effective options from canonical `SHOW CREATE` configuration.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
@@ -276,11 +285,19 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   whether polling is suspended or buffered; withholding work does not pause or re-anchor the
   cadence. Connector timeouts, retries, backoff, and cancellation remain physical.
 - For HTTP REQUEST polling, `metadata.polled_at` is the scheduled instant and `metadata.status`
-  is the successful HTTP status. A `204 No Content` response emits no row. `read_header` retains
-  non-ASCII UTF-8 values; invalid UTF-8 header values are omitted and counted in
-  `nervix_ingestor_header_values_dropped_total`. Read the
-  [HTTP REQUEST ingestor contract](../../../docs/src/ingestors.md#http-request) for its declaration
-  and header model.
+  is the successful HTTP status. A `204 No Content` response emits no row, and any other status
+  outside `2xx`, a redirect the client does not follow included, fails the poll; a failed instant
+  is not polled again. `read_header` retains non-ASCII UTF-8 values; invalid UTF-8 header values
+  are omitted and counted in `nervix_ingestor_header_values_dropped_total`. A `gzip`, `deflate` or
+  `br` response arrives decompressed, without its `content-encoding` and `content-length`
+  headers, and `MAX BODY SIZE` counts the decompressed body. Read the
+  [HTTP REQUEST ingestor contract](../../../docs/src/ingestors.md#http-request) for its
+  declaration, header model and failures.
+- For RABBITMQ QUEUE, `metadata.timestamp` reads the AMQP timestamp as whole seconds. A publisher
+  that writes milliseconds there sends an instant no `DATETIME` holds, so every message is refused
+  wherever a route or `TIMESTAMP AT` reads the field; check the producer's unit before choosing
+  `TIMESTAMP AT metadata.timestamp`. `metadata.exchange` is `''` for the default exchange. Read the
+  [RabbitMQ ingestor contract](../../../docs/src/ingestors.md#rabbitmq) for every field.
 - Treat domain execution time as one snapshot per accepted unit of work. Every expression in that
   unit uses the same instant, including filters, construction, keys, correlation and window
   programs, inferencer mappings, emitter `VALUES` and SQS FIFO groups, and subscription filters.
@@ -483,6 +500,14 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   wait it bounds. Read `Ingestors` or
   `Emitters` → `Client Deadlines`, and `Connector Capabilities` for each entity's waits and what
   bounds them.
+- For HTTP polling, keep a credential out of the statement: `SHOW CREATE` prints a `HEADERS` literal.
+  Declare a `secret.<name>` key on the `HTTP` client and write
+  `'authorization' = CLIENT SECRET 'secret.<name>'`; see
+  [HTTP REQUEST](../../../docs/src/ingestors.md#http-polling-requests). Change `METHOD`, `HEADERS` or
+  `MAX BODY SIZE` with `ALTER HTTP REQUEST INGESTOR … SET FROM <complete body>`. A poll goes to the
+  client's `endpoint` exactly as written, path and query included, so declare one client for each
+  polled resource; a client an `HTTP REQUEST` emitter also uses must name an origin, and
+  [`HTTP CLIENT`](../../../docs/src/ingestors.md#http-client) lists the keys both directions share.
 - For an HTTP emitter, write `CREATE HTTP REQUEST EMITTER <name> FROM <relay> TO <client> METHOD <string_expression> PATH
   <string_expression> MODE ACK RETRY POLICY BACKOFF <duration> MAX <duration>` followed by exactly
   one of `ENCODE USING <codec>` or `WITHOUT BODY`. Do not add an ACK window, `ACK TIMEOUT`,
@@ -550,8 +575,15 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   TLS-file interface, certificate and key must be supplied together, and TLS files require
   `verify-full`. A `POSTGRES TABLE` names `'Orders'` or `'sales.Orders'`, each part sent with its
   case kept; `ON CONFLICT (...) DO UPDATE` needs a target and a mapped column outside it, and
-  `MAX SIZE` is at most `1073741822B`. Read
-  [Emitters → Postgres](../../../docs/src/emitters.md#postgres).
+  `MAX SIZE` is at most `1073741822B`. Keep its optional statement `timeout_ms` separate from
+  `pool_acquire_timeout_ms`; read their bounds and retry semantics in
+  [Emitters → Postgres](../../../docs/src/emitters.md#postgres). Write every connection part in
+  `addr`: the driver fills a missing port, user, password or database from the node's `PG*`
+  environment and password file, and ignores a query option it does not know. `verify-full` trusts
+  the driver's bundled Mozilla roots as well as `tls_ca_file`. Map an `ARRAY` or `VEC` value to a
+  `json`, `jsonb` or `text` column, never a native array column. Only SQLSTATE classes 21, 22 and
+  23 reject a row; a missing table or column, an unmatched conflict target or a missing privilege
+  retries on `RETRY POLICY` until it is fixed.
 - Give a `RABBITMQ` client an `amqp://` or `amqps://` `addr` that names a host and no port 0; Nervix
   refuses any other address before commit. Mounted `tls_ca_file`, `tls_cert_file` and
   `tls_key_file` require `amqps`; `CREATE` refuses these keys with `amqp`. Certificate and key must
@@ -619,8 +651,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `WEBSOCKETS ENDPOINT`, an explicit `ON OVERFLOW DROP OLDEST|DROP NEWEST` for `BUFFER`; include
   `RETRY AFTER` for endpoint `REJECT`. Write every `MQTT TOPIC` ingestor's `SESSION CLEAN` or
   `SESSION PERSISTENT` and its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, and use its `ACK` modes
-  and `SUSPEND` only with `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. Do not invent a default or
-  use a mode offered by another entity.
+  and `SUSPEND` only with `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. Write every `MQTT TOPIC`
+  emitter's `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, with `NO ACK` only at `QOS 0` and `ACK` only
+  at `QOS 1` or `QOS 2`. Do not invent a default or use a mode offered by another entity.
 - A server endpoint WebSocket keeps its route and signaling protocol for the connection. After
   its source stops or is replaced, reconnect to use the new source; after signaling, the next
   refused payload on the preceding connection closes with 1013. Configured routes without a live

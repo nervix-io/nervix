@@ -92,21 +92,12 @@ pub(in crate::registry) fn validate_ingestor_source(
     if let Some(nervix_models::IngestorEntity::Http(nervix_models::HttpIngestor::Request(source))) =
         ingestor.input.transport_entity()
     {
-        HttpMethod::parse(&source.method, HttpBodyMode::WithoutBody)
-            .map_err(|report| invalid(report.current_context().to_string()))?;
-        let mut headers = HttpApplicationHeaders::default();
-        for header in &source.headers {
-            let name = HttpHeaderName::parse(&header.name)
-                .map_err(|report| invalid(report.current_context().to_string()))?;
-            let value = HttpHeaderValue::parse(&header.value)
-                .map_err(|report| invalid(report.current_context().to_string()))?;
-            headers
-                .insert(name, value)
-                .map_err(|report| invalid(report.current_context().to_string()))?;
-        }
-        headers
-            .validate_total()
-            .map_err(|report| invalid(report.current_context().to_string()))?;
+        HttpMethod::parse(&source.method, HttpBodyMode::WithoutBody).change_context_lazy(|| {
+            RegistryError::InvalidHttpRequestMethod {
+                domain: domain.clone(),
+                ingestor: identifier.clone(),
+            }
+        })?;
     }
     if let Some(nervix_models::IngestorEntity::Pulsar(nervix_models::PulsarIngestor::Topic(source))) =
         ingestor.input.transport_entity()
@@ -311,6 +302,17 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
                 entity: emitter.connector.kind(),
                 expected,
             },
+        }));
+    }
+
+    if let Some(unmet) = emitter.connector.unmet_publishing() {
+        return Err(Report::new(RegistryError::InvalidConnectorDeclaration {
+            domain: domain.clone(),
+            node: nervix_models::NodeRef::new(
+                nervix_models::ModelKind::Emitter,
+                identifier.clone(),
+            ),
+            issue: ConnectorDeclarationIssue::Publishing(unmet),
         }));
     }
 

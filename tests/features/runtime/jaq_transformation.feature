@@ -76,11 +76,10 @@ Feature: JAQ transformation
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
         CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -616,7 +615,7 @@ Feature: JAQ transformation
         CREATE CODEC sample_codec
         FROM JSON
         TO SCHEMA sample
-        WITH JAQ TRANSFORMATIONS ON INGESTION '{source, value: (.value * 2), timestamp}';
+        WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, value: (.value * 2), timestamp}';
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
         CREATE IF NOT EXISTS BRANCH by_prom_samples SCHEMA source_branch TTL 5m;
         CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;

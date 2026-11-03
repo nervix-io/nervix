@@ -16,18 +16,17 @@
 
 use chumsky::prelude::*;
 use nervix_models::{
-    PulsarIngestMode, PulsarStartPosition, PulsarSubscription, PulsarSubscriptionName,
-    PulsarSubscriptionOwnership, PulsarSubscriptionType, PulsarTopicIngestor,
-    PulsarTopicIngestorOperation, PulsarTopicName,
+    PulsarIngestMode, PulsarSubscription, PulsarSubscriptionName, PulsarSubscriptionOwnership,
+    PulsarSubscriptionType, PulsarTopicIngestor, PulsarTopicIngestorOperation, PulsarTopicName,
 };
 
 use super::delivery::{
     ParallelAck, SequentialAck, ack_parallel, ack_sequential, no_ack, optional_instances,
-    suspend_only_quiesce_clause,
+    start_position, suspend_only_quiesce_clause,
 };
 use crate::{
     lexer::{Identifier, Token},
-    parser_support::{ParseError, client_ref, external_name, kw, kw_phrase2, kw_phrase3},
+    parser_support::{ParseError, client_ref, external_name, kw, kw_phrase3},
 };
 
 /// `FROM <client> TOPIC '<topic>' SUBSCRIPTION '<subscription>'
@@ -119,14 +118,6 @@ fn subscription_type<'src>()
     )))
 }
 
-fn start_position<'src>()
--> impl Parser<'src, &'src [Token], PulsarStartPosition, extra::Err<ParseError<'src>>> + Clone {
-    kw_phrase2(Identifier::Start, Identifier::At).ignore_then(choice((
-        kw(Identifier::Earliest).to(PulsarStartPosition::Earliest),
-        kw(Identifier::Latest).to(PulsarStartPosition::Latest),
-    )))
-}
-
 pub(super) fn alteration<'src>()
 -> impl Parser<'src, &'src [Token], nervix_models::AlterIngestor, extra::Err<ParseError<'src>>> + Clone
 {
@@ -157,7 +148,7 @@ mod start_position_tests {
     //! - **Must not know.** Driver options, broker state or runtime lifecycle.
     use meticulous::ResultExt as _;
     use nervix_models::{
-        CreateIngestor, IngestorEntity, IngestorInput, Model, PulsarIngestor, PulsarStartPosition,
+        CreateIngestor, IngestStartPosition, IngestorEntity, IngestorInput, Model, PulsarIngestor,
         PulsarSubscriptionOwnership, Statement,
     };
 
@@ -209,10 +200,10 @@ mod start_position_tests {
     #[test]
     fn owned_subscription_start_positions_parse() {
         for (text, position) in [
-            ("EARLIEST", PulsarStartPosition::Earliest),
-            ("LATEST", PulsarStartPosition::Latest),
-            ("earliest", PulsarStartPosition::Earliest),
-            ("latest", PulsarStartPosition::Latest),
+            ("EARLIEST", IngestStartPosition::Earliest),
+            ("LATEST", IngestStartPosition::Latest),
+            ("earliest", IngestStartPosition::Earliest),
+            ("latest", IngestStartPosition::Latest),
         ] {
             let model = ingestor(&format!("OWNED BY INGESTOR START AT {text}"));
             assert_eq!(
@@ -224,7 +215,7 @@ mod start_position_tests {
 
     #[test]
     fn alters_only_the_declared_start_position() {
-        for position in [PulsarStartPosition::Earliest, PulsarStartPosition::Latest] {
+        for position in [IngestStartPosition::Earliest, IngestStartPosition::Latest] {
             let mut model = ingestor("OWNED BY INGESTOR START AT EARLIEST");
             let alter = alteration(&format!(
                 "ALTER PULSAR TOPIC INGESTOR events SET START AT {position}"
@@ -248,7 +239,7 @@ mod start_position_tests {
         assert_eq!(
             ownership(&model),
             PulsarSubscriptionOwnership::Ingestor {
-                start_at: PulsarStartPosition::Earliest
+                start_at: IngestStartPosition::Earliest
             }
         );
         assert_eq!(
@@ -307,7 +298,7 @@ mod start_position_tests {
         }
         for statement in [
             "ALTER PULSAR TOPIC INGESTOR events SET START AT UNKNOWN",
-            "ALTER KAFKA TOPIC INGESTOR events SET START AT LATEST",
+            "ALTER MQTT TOPIC INGESTOR events SET START AT LATEST",
         ] {
             assert!(refused(statement), "{statement}");
         }
@@ -544,8 +535,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case("OWNED BY INGESTOR START AT EARLIEST", PulsarSubscriptionOwnership::Ingestor { start_at: nervix_models::PulsarStartPosition::Earliest })]
-    #[case("OWNED BY INGESTOR START AT LATEST", PulsarSubscriptionOwnership::Ingestor { start_at: nervix_models::PulsarStartPosition::Latest })]
+    #[case("OWNED BY INGESTOR START AT EARLIEST", PulsarSubscriptionOwnership::Ingestor { start_at: nervix_models::IngestStartPosition::Earliest })]
+    #[case("OWNED BY INGESTOR START AT LATEST", PulsarSubscriptionOwnership::Ingestor { start_at: nervix_models::IngestStartPosition::Latest })]
     #[case("PROVISIONED", PulsarSubscriptionOwnership::Provisioned)]
     fn the_subscription_keeps_its_name_and_its_declared_owner(
         #[case] owner: &str,

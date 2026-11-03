@@ -2712,6 +2712,7 @@ fn alter_emitter_operation_to_plexus(
             "SET {}",
             commit_policy_to_plexus(commit_each, max_commit_size)
         )),
+        AlterEmitterOperation::AlterEnvelope { alteration } => alteration.to_canonical_plexus(),
     }
 }
 
@@ -3004,19 +3005,6 @@ impl EmitterPublishing<'_> {
                 ack_timeout,
                 retry_policy,
             } => confirmed("ACK", window, ack_timeout, retry_policy),
-            EmitterPublishing::MqttQos0 { retry_policy } => {
-                format!("QOS 0 {}", retry(retry_policy))
-            }
-            EmitterPublishing::MqttQos1 {
-                window,
-                ack_timeout,
-                retry_policy,
-            } => confirmed("QOS 1 ACK", window, ack_timeout, retry_policy),
-            EmitterPublishing::MqttQos2 {
-                window,
-                ack_timeout,
-                retry_policy,
-            } => confirmed("QOS 2 ACK", window, ack_timeout, retry_policy),
             EmitterPublishing::NatsJetStream {
                 window,
                 ack_timeout,
@@ -3076,7 +3064,7 @@ fn envelope_clauses(
     if !envelope.properties.is_empty() {
         clauses.push(Clause::braced(
             "PROPERTIES",
-            envelope_property_items(envelope)?,
+            envelope_property_items(&envelope.properties)?,
         ));
     }
     Ok(clauses)
@@ -3110,10 +3098,10 @@ fn envelope_clause_texts(
 
 /// Each property an envelope sets, as `'<key>' = <expression>`, in written order.
 fn envelope_property_items(
-    envelope: &EmitterEnvelope,
+    properties: &[crate::EnvelopeProperty],
 ) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
-    let mut items = Vec::with_capacity(envelope.properties.len());
-    for property in &envelope.properties {
+    let mut items = Vec::with_capacity(properties.len());
+    for property in properties {
         items.push(format!(
             "{} = {}",
             string_literal(&property.name),
@@ -3130,10 +3118,30 @@ impl EmitterEnvelope {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut parts = envelope_clause_texts(self)?;
         if !self.properties.is_empty() {
-            let items = envelope_property_items(self)?;
+            let items = envelope_property_items(&self.properties)?;
             parts.push(format!("PROPERTIES {{{}}}", items.join(", ")));
         }
         Ok(parts.join(" "))
+    }
+}
+
+impl crate::EmitterEnvelopeAlteration {
+    /// The declaration-gated targeted edit as canonical Plexus.
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        match self {
+            Self::SetPersistent => Ok("SET PERSISTENT".to_owned()),
+            Self::DropPersistent => Ok("DROP PERSISTENT".to_owned()),
+            Self::SetTimestamp { expression } => Ok(format!(
+                "SET TIMESTAMP {}",
+                expression_to_plexus(expression)?
+            )),
+            Self::DropTimestamp => Ok("DROP TIMESTAMP".to_owned()),
+            Self::SetProperties { properties } => Ok(format!(
+                "SET PROPERTIES {{{}}}",
+                envelope_property_items(properties)?.join(", ")
+            )),
+            Self::DropProperties => Ok("DROP PROPERTIES".to_owned()),
+        }
     }
 }
 
@@ -4411,7 +4419,7 @@ mod tests {
             ),
             (
                 EmitterEntity::Mqtt(MqttEmitter::Topic(MqttTopicEmitter {
-                    mode: crate::MqttTopicPublishingMode::Qos0 {
+                    mode: crate::MqttTopicPublishingMode::NoAck {
                         retry_policy: crate::RetryPolicy {
                             backoff: "250ms".to_string(),
                             max_backoff: "30s".to_string(),
@@ -4419,8 +4427,9 @@ mod tests {
                     },
                     client: named("mqtt_main"),
                     topic: named("orders_topic"),
+                    qos: MqttQos::Qos0,
                 })),
-                "mqtt_main TOPIC 'orders_topic'",
+                "mqtt_main TOPIC 'orders_topic' QOS 0",
             ),
             (
                 EmitterEntity::Nats(NatsEmitter::Subject(NatsSubjectEmitter {
@@ -4885,7 +4894,10 @@ mod tests {
                     decoded(KafkaTopicIngestor {
                         client: named("kafka_main"),
                         topic: named("Orders.Topic"),
-                        offset_mode: KafkaOffsetMode::ConsumerGroup(named("Orders Group")),
+                        offset_mode: KafkaOffsetMode::ConsumerGroup {
+                            group: named("Orders Group"),
+                            start_at: crate::IngestStartPosition::Earliest,
+                        },
                         instances: nonzero!(3u64),
                         mode: KafkaIngestMode::AckParallel {
                             max: nonzero!(8u64),
@@ -4897,9 +4909,9 @@ mod tests {
                     }),
                 ),
                 "CREATE KAFKA TOPIC INGESTOR kafka_ingestor\n  FROM kafka_main TOPIC \
-                 'Orders.Topic' OFFSET BY CONSUMER GROUP 'Orders Group' INSTANCES 3 MODE ACK \
-                 PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX \
-                 30s ON QUIESCE SUSPEND",
+                 'Orders.Topic' OFFSET BY CONSUMER GROUP 'Orders Group' START AT EARLIEST \
+                 INSTANCES 3 MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY \
+                 POLICY BACKOFF 1s MAX 30s ON QUIESCE SUSPEND",
             ),
             (
                 orders_ingestor(

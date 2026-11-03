@@ -236,9 +236,11 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
     };
     let otel = &[("ATTRIBUTES", false), ("RESOURCE", false), ("SCOPE", false)];
     let conflict = &[("ON CONFLICT", false)];
-    // Both RabbitMQ entities publish through the same channel, so either can ask the broker to
-    // return a message no queue takes.
-    let mandatory = &[EnvelopeClauseKind::Mandatory];
+    let rabbitmq = &[
+        EnvelopeClauseKind::Persistent,
+        EnvelopeClauseKind::Mandatory,
+        EnvelopeClauseKind::Timestamp,
+    ];
     match kind {
         EmitterEntityKind::Client(ClientEmitterEntity::Consumer) => EmitterSurface {
             reference: EmitterReferenceKind::Schema,
@@ -253,18 +255,22 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
             envelope: &[EnvelopeClauseKind::Timestamp],
             ..located(ConnectorKind::Kafka, "TOPIC", "kafka_topic", &[])
         },
-        EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic) => {
-            located(ConnectorKind::Pulsar, "TOPIC", "pulsar_topic", &[])
-        }
+        EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic) => EmitterSurface {
+            envelope: &[
+                EnvelopeClauseKind::Timestamp,
+                EnvelopeClauseKind::DeliverAfter,
+            ],
+            ..located(ConnectorKind::Pulsar, "TOPIC", "pulsar_topic", &[])
+        },
         EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => {
-            located(ConnectorKind::Mqtt, "TOPIC", "mqtt_topic", &[])
+            located(ConnectorKind::Mqtt, "TOPIC", "mqtt_topic", &[("QOS", true)])
         }
         EmitterEntityKind::RabbitMq(RabbitMqEmitterEntity::Queue) => EmitterSurface {
-            envelope: mandatory,
+            envelope: rabbitmq,
             ..located(ConnectorKind::RabbitMq, "QUEUE", "rabbitmq_queue", &[])
         },
         EmitterEntityKind::RabbitMq(RabbitMqEmitterEntity::Exchange) => EmitterSurface {
-            envelope: mandatory,
+            envelope: rabbitmq,
             ..located(
                 ConnectorKind::RabbitMq,
                 "EXCHANGE",
@@ -346,6 +352,8 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
 
 #[test]
 fn every_emitter_pair_declares_its_reference_locator_options_and_envelope_clauses() {
+    use nervix_models::PropertyType::{String, U8};
+
     for kind in EmitterEntityKind::all() {
         let expected = emitter_surface(kind);
         let declared = kind.capabilities();
@@ -353,8 +361,30 @@ fn every_emitter_pair_declares_its_reference_locator_options_and_envelope_clause
         assert_eq!(locator_shape(declared.locator), expected.locator, "{kind}");
         assert_eq!(option_shapes(declared.options), expected.options, "{kind}");
         assert_eq!(declared.envelope, expected.envelope, "{kind}");
-        // No entity declares an envelope property yet.
-        assert!(declared.properties.is_empty(), "{kind}");
+        let properties: &[(&str, nervix_models::PropertyType)] = match kind {
+            EmitterEntityKind::RabbitMq(_) => &[
+                ("content_type", String),
+                ("content_encoding", String),
+                ("message_id", String),
+                ("correlation_id", String),
+                ("reply_to", String),
+                ("expiration", String),
+                ("priority", U8),
+                ("type", String),
+                ("app_id", String),
+                ("user_id", String),
+            ],
+            _ => &[],
+        };
+        assert_eq!(
+            declared
+                .properties
+                .iter()
+                .map(|property| (property.name, property.ty))
+                .collect::<Vec<_>>(),
+            properties,
+            "{kind}"
+        );
     }
 }
 
@@ -537,7 +567,7 @@ fn every_delivery_and_publishing_mode_kind_is_declared_at_most_once() {
         for mode in EmitterPublishingModeKind::iter() {
             let mut count = 0;
             for declared_mode in declared.publishing_modes {
-                if *declared_mode == mode {
+                if declared_mode.kind == mode {
                     count += 1;
                 }
             }
@@ -645,7 +675,8 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_an
             "MODE ACK SEQUENTIAL",
             "MODE ACK PARALLEL",
             "OFFSET BY DOMAIN",
-            "OFFSET BY CONSUMER GROUP",
+            "OFFSET BY CONSUMER GROUP START AT EARLIEST",
+            "OFFSET BY CONSUMER GROUP START AT LATEST",
             "INSTANCES",
             "metadata.topic",
             "metadata.partition",
@@ -698,6 +729,21 @@ fn an_envelope_clause_and_a_property_are_named_as_a_statement_writes_them() {
     }
     let property = RuntimeCapability::Property { name: "priority" };
     assert_eq!(property.to_string(), "PROPERTIES priority");
+}
+
+#[test]
+fn an_mqtt_emitter_answers_the_quality_of_service_it_publishes_at() {
+    let kind = EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic);
+    for seed in 0..8 {
+        let bytes = seeded_bytes(seed);
+        let mut arbitrary = Arbitrary::new(&bytes, Domain::Vocabulary);
+        let destination = arbitrary.emitter_entity_of(kind);
+        let qos = destination
+            .chosen("QOS")
+            .assured("MQTT answers its quality of service");
+        assert!(matches!(qos, "0" | "1" | "2"), "{qos}");
+        assert_eq!(destination.chosen("SEND"), None);
+    }
 }
 
 #[test]
@@ -790,6 +836,11 @@ fn assert_generated_emitter_states_what_its_entity_declares(bytes: &[u8]) {
         declared.accepts_publishing_mode_kind(emitter.connector.publishing().kind()),
         "{emitter_kind} names an undeclared mode: {:?}",
         emitter.connector.publishing()
+    );
+    assert_eq!(
+        emitter.connector.unmet_publishing(),
+        None,
+        "{emitter_kind} names a mode without the choices it requires"
     );
     let formed = match (declared.body, &emitter.body) {
         (EmitterBodyForm::Codec, EmitterBody::Codec { .. })

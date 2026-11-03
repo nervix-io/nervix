@@ -36,8 +36,9 @@ use crate::{
     AcknowledgementConfirmation, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
     EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
-    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
-    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorReference,
+    EnvelopeClauseKind, HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode,
+    IngestStartPosition, IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
+    IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType, IngestorReference,
     IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
     OptionForm, OptionPresence, OptionValue, PositionClass, RetryPolicy,
 };
@@ -229,7 +230,7 @@ impl PulsarSubscriptionType {
 pub enum PulsarSubscriptionOwnership {
     /// `OWNED BY INGESTOR START AT EARLIEST|LATEST`: joining creates an absent subscription at
     /// the declared position, and dropping the ingestor or its domain removes it.
-    Ingestor { start_at: PulsarStartPosition },
+    Ingestor { start_at: IngestStartPosition },
     /// `PROVISIONED`: an operator provisioned the subscription. Every open verifies that it exists,
     /// and Nervix never creates or removes it.
     Provisioned,
@@ -239,10 +240,10 @@ impl PulsarSubscriptionOwnership {
     /// Every complete subscription choice the declaration and visual draft offer.
     pub const CHOICES: [Self; 3] = [
         Self::Ingestor {
-            start_at: PulsarStartPosition::Earliest,
+            start_at: IngestStartPosition::Earliest,
         },
         Self::Ingestor {
-            start_at: PulsarStartPosition::Latest,
+            start_at: IngestStartPosition::Latest,
         },
         Self::Provisioned,
     ];
@@ -255,36 +256,14 @@ impl PulsarSubscriptionOwnership {
     pub const fn keywords(self) -> &'static str {
         match self {
             Self::Ingestor {
-                start_at: PulsarStartPosition::Earliest,
+                start_at: IngestStartPosition::Earliest,
             } => "OWNED BY INGESTOR START AT EARLIEST",
             Self::Ingestor {
-                start_at: PulsarStartPosition::Latest,
+                start_at: IngestStartPosition::Latest,
             } => "OWNED BY INGESTOR START AT LATEST",
             Self::Provisioned => "PROVISIONED",
         }
     }
-}
-
-/// Where Pulsar places a newly created owned subscription's cursor. Existing cursors prevail.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-    strum::EnumIter,
-    strum::Display,
-    strum::AsRefStr,
-)]
-#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
-pub enum PulsarStartPosition {
-    Earliest,
-    Latest,
 }
 
 impl PulsarSubscription {
@@ -302,7 +281,7 @@ impl PulsarSubscription {
 
     fn set_start_at(
         &mut self,
-        position: PulsarStartPosition,
+        position: IngestStartPosition,
     ) -> error_stack::Result<(), crate::AlterIngestorError> {
         match &mut self.ownership {
             PulsarSubscriptionOwnership::Ingestor { start_at } => *start_at = position,
@@ -324,7 +303,7 @@ impl PulsarSubscription {
 )]
 pub enum PulsarTopicIngestorOperation {
     Transport(crate::AlterTransportIngestorOperation<PulsarTopicIngestor>),
-    SetStartAt { position: PulsarStartPosition },
+    SetStartAt { position: IngestStartPosition },
     SetType { kind: PulsarSubscriptionType },
 }
 
@@ -490,11 +469,24 @@ const PULSAR_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &["Messages above the broker's announced maximum are rejected."],
 };
 
+/// The identity, producer metadata and delivery count of a Pulsar message.
+const PULSAR_TOPIC_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
+    IngestorMetadataField::new("topic", IngestorMetadataType::String),
+    IngestorMetadataField::new("message_id", IngestorMetadataType::String),
+    IngestorMetadataField::new("publish_time", IngestorMetadataType::Datetime),
+    IngestorMetadataField::new("event_time", IngestorMetadataType::Datetime),
+    IngestorMetadataField::new("key", IngestorMetadataType::String),
+    IngestorMetadataField::new("ordering_key", IngestorMetadataType::Bytes),
+    IngestorMetadataField::new("producer_name", IngestorMetadataType::String),
+    IngestorMetadataField::new("sequence_id", IngestorMetadataType::I64),
+    IngestorMetadataField::new("redelivery_count", IngestorMetadataType::I64),
+]);
+
 impl IngestorDeclaration for PulsarTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         // A Pulsar message carries its properties as a list, in the order the producer wrote them.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
-        metadata: IngestorMetadataDeclaration::NONE,
+        metadata: PULSAR_TOPIC_METADATA,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Pulsar),
         position_class: PositionClass::Replayable,
@@ -620,7 +612,14 @@ impl EmitterDeclaration for PulsarTopicEmitter {
             name: LocatorName::External(PulsarTopicName::DECLARATION),
         }),
         options: &[],
-        envelope: &[],
+        // A Pulsar message carries its event time and the time it is due beside its key,
+        // properties and payload. Its topic decides how it is stored, and it has no routing or
+        // retention flag, no reply target and no per-message identity a producer chooses. Its
+        // properties carry what a PROPERTIES block would, and its ordering key is a key.
+        envelope: &[
+            EnvelopeClauseKind::Timestamp,
+            EnvelopeClauseKind::DeliverAfter,
+        ],
         properties: &[],
         bounds: PULSAR_EMITTER_BOUNDS,
     };

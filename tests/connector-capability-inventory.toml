@@ -152,21 +152,22 @@ scenarios = [
 capability = "METHOD"
 entity = "HTTP REQUEST INGESTOR"
 scenarios = [
-  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling declares its request and client transport contract on <cluster_size> nodes" },
+  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling sends the method and headers its statement declares on <cluster_size> nodes" },
 ]
 
 [[capability]]
 capability = "HEADERS"
 entity = "HTTP REQUEST INGESTOR"
 scenarios = [
-  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling declares its request and client transport contract on <cluster_size> nodes" },
+  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling sends the method and headers its statement declares on <cluster_size> nodes" },
+  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "A polling header sends a client secret that no inspection prints on <cluster_size> nodes" },
 ]
 
 [[capability]]
 capability = "MAX BODY SIZE"
 entity = "HTTP REQUEST INGESTOR"
 scenarios = [
-  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "HTTP polling declares its request and client transport contract on <cluster_size> nodes" },
+  { feature = "tests/features/runtime/http_client_ingestion.feature", scenario = "A response above MAX BODY SIZE fails its poll until ALTER raises the bound on <cluster_size> nodes" },
 ]
 
 [[capability]]
@@ -263,6 +264,22 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "TIMESTAMP"
+entity = "PULSAR TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_emission.feature", scenario = "A Pulsar emitter writes each message's TIMESTAMP as its event time" },
+  { feature = "tests/features/runtime/pulsar_emission.feature", scenario = "A Pulsar message keeps its event time and delivery time when the emitter sends it again" },
+]
+
+[[capability]]
+capability = "DELIVER AFTER"
+entity = "PULSAR TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_emission.feature", scenario = "A Pulsar emitter delivers each message DELIVER AFTER its batch's execution time" },
+  { feature = "tests/features/runtime/pulsar_emission.feature", scenario = "A Pulsar message keeps its event time and delivery time when the emitter sends it again" },
+]
+
+[[capability]]
 capability = "MODE NO ACK"
 entity = "KAFKA TOPIC EMITTER"
 scenarios = [
@@ -306,10 +323,18 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "OFFSET BY CONSUMER GROUP"
+capability = "OFFSET BY CONSUMER GROUP START AT EARLIEST"
 entity = "KAFKA TOPIC INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/kafka_ingestion.feature", scenario = "Kafka NO ACK executes ingestor programs once for a collected ingest group" },
+  { feature = "tests/features/runtime/kafka_start_position.feature", scenario = "A new consumer group declared START AT EARLIEST replays the retained backlog on <cluster_size> nodes" },
+]
+
+[[capability]]
+capability = "OFFSET BY CONSUMER GROUP START AT LATEST"
+entity = "KAFKA TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/kafka_start_position.feature", scenario = "A new consumer group declared START AT LATEST skips the retained backlog and receives the next record in <mode_name> on <cluster_size> nodes" },
 ]
 
 [[capability]]
@@ -405,24 +430,41 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "MODE QOS 0"
+capability = "MODE ACK"
+entity = "MQTT TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_emission.feature", scenario = "An attached MQTT <qos> emitter completes a record at <boundary>" },
+  { feature = "tests/features/runtime/mqtt_emission.feature", scenario = "An MQTT <qos> emitter sends again only the record its broker never answered" },
+]
+
+[[capability]]
+capability = "MODE NO ACK"
 entity = "MQTT TOPIC EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/emitter_batch_brokers.feature", scenario = "Every broker publishing mode carries one batch in one external message" },
+  { feature = "tests/features/runtime/mqtt_emission.feature", scenario = "An attached MQTT <qos> emitter completes a record at <boundary>" },
 ]
 
 [[capability]]
-capability = "MODE QOS 1 ACK"
+capability = "QOS 0"
 entity = "MQTT TOPIC EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/mqtt_emission.feature", scenario = "MQTT QoS 1 holds the input offset until PUBACK" },
+  { feature = "tests/features/runtime/mqtt_emission.feature", scenario = "An MQTT <qos> emitter in MODE <mode_name> publishes at that quality of service" },
 ]
 
 [[capability]]
-capability = "MODE QOS 2 ACK"
+capability = "QOS 1"
 entity = "MQTT TOPIC EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/mqtt_emission.feature", scenario = "An MQTT <mode> emitter sends again only the record its broker never answered" },
+  { feature = "tests/features/runtime/mqtt_emission.feature", scenario = "An MQTT <qos> emitter in MODE <mode_name> publishes at that quality of service" },
+]
+
+[[capability]]
+capability = "QOS 2"
+entity = "MQTT TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_emission.feature", scenario = "An MQTT <qos> emitter in MODE <mode_name> publishes at that quality of service" },
+  { feature = "tests/features/runtime/mqtt_emission.feature", scenario = "An attached MQTT QOS 2 emitter holds the input offset until PUBCOMP" },
 ]
 
 [[capability]]
@@ -487,6 +529,7 @@ capability = "SESSION PERSISTENT"
 entity = "MQTT TOPIC INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/mqtt_ingestion.feature", scenario = "MQTT publishes a buffering quiesce retains are acknowledged and replayed on release" },
+  { feature = "tests/features/runtime/mqtt_subscription_refusal.feature", scenario = "An authenticated MQTT subscription keeps retrying after refusal and recovers when permission is granted" },
 ]
 
 [[capability]]
@@ -763,6 +806,14 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "POSTGRES TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/postgres_timeouts.feature", scenario = "A Postgres emitter whose service stops answering is reported within timeout_ms on <nodes> nodes" },
+  { feature = "tests/features/runtime/postgres_timeouts.feature", scenario = "A Postgres insert blocked by a table lock times out and retries on <nodes> nodes" },
+]
+
+[[capability]]
 capability = "EVERY"
 entity = "PROMETHEUS QUERY INGESTOR"
 scenarios = [
@@ -791,6 +842,21 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "metadata.evaluated_at"
+entity = "PROMETHEUS QUERY INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/prometheus_samples.feature", scenario = "A route reads the query a sample answers and the instant its poll evaluated it at" },
+  { feature = "tests/features/runtime/prometheus_samples.feature", scenario = "A window takes each sample's event time from metadata.evaluated_at" },
+]
+
+[[capability]]
+capability = "metadata.query"
+entity = "PROMETHEUS QUERY INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/prometheus_samples.feature", scenario = "A route reads the query a sample answers and the instant its poll evaluated it at" },
+]
+
+[[capability]]
 capability = "STALLED PEER timeout_ms"
 entity = "PROMETHEUS QUERY INGESTOR"
 scenarios = [
@@ -816,6 +882,81 @@ capability = "MODE NO ACK"
 entity = "PULSAR TOPIC EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/pulsar_emission.feature", scenario = "Pulsar mode controls when the input offset is committed" },
+]
+
+[[capability]]
+capability = "metadata.topic"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_batch.feature", scenario = "Pulsar batch members retain their own sequence ids and complete metadata" },
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
+]
+
+[[capability]]
+capability = "metadata.message_id"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_batch.feature", scenario = "Pulsar batch members retain their own sequence ids and complete metadata" },
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar redelivery keeps its message identity and reports the broker's count" },
+]
+
+[[capability]]
+capability = "metadata.publish_time"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_batch.feature", scenario = "Pulsar batch members retain their own sequence ids and complete metadata" },
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
+]
+
+[[capability]]
+capability = "metadata.event_time"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_batch.feature", scenario = "Pulsar batch members retain their own sequence ids and complete metadata" },
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "Pulsar event time flushes historical windows separately for two branches" },
+]
+
+[[capability]]
+capability = "metadata.key"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_batch.feature", scenario = "Pulsar batch members retain their own sequence ids and complete metadata" },
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
+]
+
+[[capability]]
+capability = "metadata.ordering_key"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_batch.feature", scenario = "Pulsar batch members retain their own sequence ids and complete metadata" },
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
+]
+
+[[capability]]
+capability = "metadata.producer_name"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_batch.feature", scenario = "Pulsar batch members retain their own sequence ids and complete metadata" },
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
+]
+
+[[capability]]
+capability = "metadata.sequence_id"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_batch.feature", scenario = "Pulsar batch members retain their own sequence ids and complete metadata" },
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
+]
+
+[[capability]]
+capability = "metadata.redelivery_count"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_metadata_batch.feature", scenario = "Pulsar batch members retain their own sequence ids and complete metadata" },
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar <mode_name> ingestor projects the complete message metadata and properties" },
+  { feature = "tests/features/runtime/pulsar_metadata_values.feature", scenario = "A Pulsar redelivery keeps its message identity and reports the broker's count" },
 ]
 
 [[capability]]
@@ -1012,6 +1153,114 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "metadata.app_id"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.content_encoding"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.content_type"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.correlation_id"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.delivery_tag"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.exchange"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.expiration"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.message_id"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.priority"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.redelivered"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ delivery the ingestor rejected reads metadata.redelivered as true when the broker delivers it again" },
+]
+
+[[capability]]
+capability = "metadata.reply_to"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.routing_key"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.timestamp"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "TIMESTAMP AT metadata.timestamp windows RabbitMQ messages at the instant their producer wrote" },
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ timestamp no DATETIME holds refuses its message only where metadata.timestamp is read" },
+]
+
+[[capability]]
+capability = "metadata.type"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
+capability = "metadata.user_id"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_metadata.feature", scenario = "A RabbitMQ ingestor reads the delivery envelope and every AMQP property as metadata" },
+]
+
+[[capability]]
 capability = "BATCH"
 entity = "REDIS PUBSUB EMITTER"
 scenarios = [
@@ -1173,6 +1422,73 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "metadata.message_id"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "An SQS ingestor projects every declared message field with its exact type" },
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "A redelivered SQS message is routed by its receive count and preserves its FIFO identity and times" },
+]
+
+[[capability]]
+capability = "metadata.sent_at"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "An SQS ingestor projects every declared message field with its exact type" },
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "A redelivered SQS message is routed by its receive count and preserves its FIFO identity and times" },
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "SQS sent time feeds independent branch duration windows" },
+  { feature = "tests/features/runtime/sqs_ingestion.feature", scenario = "An SQS receive in flight when its ingestor quiesces delivers its message without waiting for the visibility timeout" },
+]
+
+[[capability]]
+capability = "metadata.receive_count"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "An SQS ingestor projects every declared message field with its exact type" },
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "A redelivered SQS message is routed by its receive count and preserves its FIFO identity and times" },
+  { feature = "tests/features/runtime/sqs_ingestion.feature", scenario = "An SQS receive in flight when its ingestor quiesces delivers its message without waiting for the visibility timeout" },
+]
+
+[[capability]]
+capability = "metadata.first_received_at"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "An SQS ingestor projects every declared message field with its exact type" },
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "A redelivered SQS message is routed by its receive count and preserves its FIFO identity and times" },
+]
+
+[[capability]]
+capability = "metadata.group_id"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "An SQS ingestor projects every declared message field with its exact type" },
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "A redelivered SQS message is routed by its receive count and preserves its FIFO identity and times" },
+]
+
+[[capability]]
+capability = "metadata.deduplication_id"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "An SQS ingestor projects every declared message field with its exact type" },
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "A redelivered SQS message is routed by its receive count and preserves its FIFO identity and times" },
+]
+
+[[capability]]
+capability = "metadata.sequence_number"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "An SQS ingestor projects every declared message field with its exact type" },
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "A redelivered SQS message is routed by its receive count and preserves its FIFO identity and times" },
+]
+
+[[capability]]
+capability = "metadata.sender_id"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "An SQS ingestor projects every declared message field with its exact type" },
+  { feature = "tests/features/runtime/sqs_metadata.feature", scenario = "A redelivered SQS message is routed by its receive count and preserves its FIFO identity and times" },
+]
+
+[[capability]]
 capability = "STALLED PEER timeout_ms"
 entity = "SQS QUEUE INGESTOR"
 scenarios = [
@@ -1219,6 +1535,24 @@ capability = "metadata.peer_addr"
 entity = "SYSLOG LISTENER INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/syslog_support.feature", scenario = "Syslog TCP intake accepts mixed RFC 6587 framing and exposes peer metadata" },
+]
+
+[[capability]]
+capability = "metadata.transport"
+entity = "SYSLOG LISTENER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "A Syslog UDP frame carries its transport and has no TLS peer" },
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "Syslog TCP frames carry their transport and have no TLS peer" },
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "A Syslog TLS frame exposes a peer only when the client certificate is verified" },
+]
+
+[[capability]]
+capability = "metadata.tls_peer"
+entity = "SYSLOG LISTENER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "A Syslog UDP frame carries its transport and has no TLS peer" },
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "Syslog TCP frames carry their transport and have no TLS peer" },
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "A Syslog TLS frame exposes a peer only when the client certificate is verified" },
 ]
 
 [[capability]]
@@ -1365,4 +1699,172 @@ capability = "metadata.frame_type"
 entity = "WEBSOCKETS CONNECTION INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/websocket_connection_declaration.feature", scenario = "A WebSockets connection sends literal upgrade headers and exposes response headers and frame types" },
+]
+
+[[capability]]
+capability = "PERSISTENT"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "TIMESTAMP"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES content_type"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES content_encoding"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES message_id"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES correlation_id"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES reply_to"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES expiration"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES priority"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES type"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES app_id"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES user_id"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PERSISTENT"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "TIMESTAMP"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES content_type"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES content_encoding"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES message_id"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES correlation_id"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES reply_to"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES expiration"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES priority"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES type"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES app_id"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES user_id"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
 ]

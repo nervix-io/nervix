@@ -288,11 +288,15 @@ test-capability-docs: build-web-console
         --package nervix-consensus --package nervix-dns --package nervix-recovery \
         --package nervix-simd-kernels --features nervix-server/testing --doc
 
+# Exercise scenario argument forwarding without compiling or starting dependencies.
+test-scenario-arguments:
+    python3 -m unittest scripts.tests.test_scenario_arguments
+
 test-scenarios *args: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    cargo test --package nervix-scenarios --test scenarios -- {{ args }}
+    cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
 # Qualify the real failed-step after hook; deliberate Cucumber failures stay failures.
 # This supervision check has its own verdict, outside ordinary coverage reports.
@@ -547,7 +551,7 @@ test-scenarios-reuse *args: tests-deps
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     export NERVIX_TESTCONTAINERS_MODE=reusable
-    cargo test --package nervix-scenarios --test scenarios -- {{ args }}
+    cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
 # Measure the public client protocol against a release nervix-server process.
 # The JSON report and raw Prometheus scrape record the workload, toolchain, hardware and limits.
@@ -610,6 +614,10 @@ test-package-lib package *args:
 # Qualify the pinned NATS driver's flush implementation through its own bounded stream tests.
 test-nats-driver checkout *args:
     CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/nats-driver") }} cargo test --manifest-path {{ quote(checkout + "/async-nats/Cargo.toml") }} --package async-nats --no-default-features --features aws-lc-rs,jetstream,server_2_10,server_2_11 --lib -- {{ args }}
+
+# Qualify the pinned Pulsar driver's metadata boundary with the product's enabled features.
+test-pulsar-driver checkout *args:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/pulsar-driver") }} cargo test --manifest-path {{ quote(checkout + "/Cargo.toml") }} --no-default-features --features compression,tokio-rustls-runtime --lib -- {{ args }}
 
 # Run the vocabulary settings' compiling and class-rejection API examples.
 test-settings:
@@ -1092,9 +1100,9 @@ test-consensus *args:
 test-models *args:
     cargo test --package nervix-models --all-targets -- {{ args }}
 
-# Include the vocabulary's declared metadata and schema mappings to Arrow.
+# Run vocabulary tests with their declared Arrow schema boundary enabled.
 test-models-arrow *args:
-    cargo test --package nervix-models --lib --features arrow -- {{ args }}
+    cargo test --package nervix-models --all-targets --features arrow -- {{ args }}
 
 # Exact OTEL field contracts, their Arrow admission and the declaration-driven Plexus grammar.
 test-otel-declarations:
@@ -1143,11 +1151,27 @@ update-client-wire-corpus:
     NERVIX_UPDATE_CLIENT_WIRE_CORPUS=1 cargo test --package nervix-client-wire --lib -- \
         tests::conformance
 
+# Build the Python package `nervix_client` with maturin into a wheel under the conformance
+# artifacts, and install it with pyarrow, the probe's test dependency, into the CPython 3.12
+# virtual environment the Python probe runs in. CPython 3.12 is the oldest the abi3 wheel supports.
+build-client-python:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    artifacts={{ quote(cargo_target_dir + "/client-conformance") }}
+    environment="${artifacts}/python"
+    rm -rf "${environment}" "${artifacts}/wheels"
+    uv venv --quiet --python 3.12 "${environment}"
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir) }} uvx --from maturin==1.16.0 maturin build \
+        --manifest-path crates/client-python/Cargo.toml --interpreter "${environment}/bin/python" \
+        --out "${artifacts}/wheels"
+    uv pip install --quiet --python "${environment}/bin/python" pyarrow==26.0.0 \
+        "${artifacts}"/wheels/nervix_client-*.whl
+
 # Build what the cross-language client probes run: the shared Rust binding, the C and C++ probes
-# linked against it, the Go probe with its generated FlatBuffers code, and the TypeScript probe
-# bundled with its generated code for Node.js and Bun. Every generated file lands under the
-# artifacts directory, never in the source tree.
-build-client-conformance:
+# linked against it, the Python package in the probe's virtual environment, the Go probe with its
+# generated FlatBuffers code, and the TypeScript probe bundled with its generated code for Node.js
+# and Bun. Every generated file lands under the artifacts directory, never in the source tree.
+build-client-conformance: build-client-python
     #!/usr/bin/env bash
     set -euo pipefail
     artifacts={{ quote(cargo_target_dir + "/client-conformance") }}
@@ -1587,7 +1611,8 @@ test-coverage-feature +features: tests-deps
 test-coverage-client-packages:
     cargo llvm-cov --no-report --all-targets \
         --package nervix-client-core --package nervix-client-wire --package nervix-client-ffi \
-        --package nervix-models --package nervix-cli --package nervix-web-console
+        --package nervix-client-host --package nervix-client-python --package nervix-models \
+        --package nervix-cli --package nervix-web-console
 
 # Add focused backup, wire, state, and primitive tests to a backup feature's coverage profile.
 test-coverage-backup-packages:
@@ -1974,6 +1999,7 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
         --package nervix-dns \
         --package nervix-client-core \
         --package nervix-client-ffi \
+        --package nervix-client-host \
         --package nervix-cli \
         --package nervix-connector \
         --package nervix-connector-http \
@@ -2025,6 +2051,7 @@ coverage-dns-clients-report output="target/dns-clients.lcov":
         --package nervix-dns \
         --package nervix-client-core \
         --package nervix-client-ffi \
+        --package nervix-client-host \
         --package nervix-cli \
         --package nervix-connector \
         --package nervix-connector-http \
@@ -2234,7 +2261,7 @@ test-client-wire-bench-fixture:
 client-wire-binding-cost output="target/client-wire-binding-cost.json":
     NERVIX_CLIENT_WIRE_BINDING_COST_OUTPUT="$(realpath -m {{ quote(output) }})" cargo test --package nervix-client-ffi --lib tests::profiles_bulk_binding_access_and_retain_release -- --exact --nocapture
 
-# Measure CPython ctypes and GC overhead on the same live rows used by conformance.
+# Measure the Python package's host and GC costs on the same live rows used by conformance.
 client-wire-binding-host-cost output_dir="target/client-wire-binding-host":
     NERVIX_CLIENT_WIRE_BINDING_PROFILE_DIR="$(realpath -m {{ quote(output_dir) }})" just test-client-conformance '@client_probe_python' --concurrency 1 --retry 0
 
@@ -2424,6 +2451,8 @@ clippy_all_features_packages := [
     "nervix-checkpoint-replication",
     "nervix-cli",
     "nervix-client-ffi",
+    "nervix-client-host",
+    "nervix-client-python",
     "nervix-client-wire",
     "nervix-columnar-json",
     "nervix-dataflow-graph",

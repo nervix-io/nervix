@@ -253,6 +253,8 @@ pub struct EmitterRecord {
     /// What the record carries beside its payload, as the emitter's envelope clauses and
     /// properties set it. Empty where the emitter writes none.
     pub envelope: RecordEnvelope,
+    /// The execution time of the batch this record's first source row came from. The host retains
+    /// it with the record, so every attempt to publish the record carries the same instant.
     pub occurred_at: Timestamp,
 }
 

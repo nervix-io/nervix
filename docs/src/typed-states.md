@@ -54,6 +54,11 @@ required, validates it there, and passes the resulting typed value to the next l
 the registry, execution plans, runtime, clients, and diagnostics from assigning different meanings
 to the same raw value.
 
+Materialized relay inspection requires the payload schema and resolved branching from its
+captured schedule. Incomplete scheduled metadata is an inspection failure, never an empty
+sensitivity set. The prepared sensitivity governs local, stored and remote record rendering;
+the declared unbranched variant has no concrete key to render.
+
 A backup cut's active phase is a typed state. Its completed phase measurements are an ordered
 sequence of typed phases and durations; an empty sequence means the first phase is still active.
 These task-owned measurements are volatile diagnostics and do not enter stored configuration,
@@ -73,6 +78,13 @@ Opening a WebSockets ingest metadata builder validates the frame-label byte capa
 the group's row bound and the vocabulary's frame labels. An estimate that exceeds the address space
 is a typed error before allocation; the ingest group adds the opening operation's context and
 retains the cause for its general-error policy.
+
+An SQS received message validates its system-attribute numbers at construction. The receive count
+is an optional `U32`, and send and first-receive times are optional `Timestamp` values converted
+exactly from Unix milliseconds. Absence means the service omitted the attribute. A parse or range
+failure is a typed read error, never an absent value or a default. Borrowed message identifiers
+and FIFO sequence numbers keep their textual representation. The shared metadata visitor,
+retained row and Arrow projection preserve the count as `U32` throughout its in-memory lifetime.
 
 A Kafka record keeps an unavailable timestamp distinct from its create-time and log-append-time
 variants. A present variant carries a validated signed-nanosecond timestamp converted exactly from
@@ -104,6 +116,15 @@ confirmation settings. An empty receipt collection means there are no outstandin
 and an absent failure means none has been observed. These are task-owned execution values,
 never persisted state or substitutes for a missing publishing mode. The
 [connector contract](./connector-contract.md#finishing-an-emitter) owns their completion semantics.
+
+RabbitMQ's volatile confirmation owner distinguishes a completely answered window, a deadline,
+and a lost channel with the answers collected before it. A positive driver acknowledgement and a
+returned message's owning record are separate facts. Return attribution produces a typed decided
+or incomplete state for positive mandatory answers; size-refusal recovery requires the decided
+state before replacing the channel and continuing. Unanswered records and mandatory answers whose
+return is still unknown remain unresolved for retry, while definite returns remain rejected.
+Nothing in this window is persisted. The [connector contract](./connector-contract.md) owns the
+confirmation and retry boundaries.
 
 The Kafka emitter installs its effective native queue byte capacity as `NonZeroU64` after librdkafka
 validates the client configuration. Its confirmation window's on-demand settlement returns
@@ -248,15 +269,19 @@ The Sentry event Model keeps an omitted `PLATFORM` as `None`, separately from an
 written string, including an empty string or `other`. Its serialized field is required and holds
 either that string or an explicit null. Planning resolves the declared default into a required
 platform string; connector preparation uses it only when the codec's event omits the field.
-The registry's `NERVIX SUB TYPES` archive signature identifies the current Model layout, including
-a Pulsar subscription's required type, an owned subscription's required start position, the required
-branch partition count,
-Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's
-`SEND` request shape, the session and quality of service an MQTT TOPIC ingestor writes beside its
-delivery mode, and a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a
-`PATTERN`. Consensus's `raft_subscription_types_` keyspaces and current state metadata
-encoding identify its stored shapes. An unrecognized signature, namespace or
-encoding fails with the owning storage error and requires the stored data to be recreated.
+A polled HTTP request's header holds a literal or names a client secret as two states of one enum,
+so a value cannot be both or neither, and the Model that names a secret holds its key and never its
+value.
+The registry's `NERVIX SUB TYPES` archive signature identifies the current Model layout, including a
+Pulsar subscription's required type, an owned Pulsar subscription's required start position, a Kafka
+consumer group's required start position, the required branch partition count, Sentry platform, an
+ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the
+session and quality of service an MQTT TOPIC ingestor writes beside its delivery mode, the quality
+of service an MQTT TOPIC emitter writes beside its publishing mode, a `REDIS PUBSUB` ingestor's
+subscription, which is either a `CHANNEL` or a `PATTERN`, and that header state. Consensus's
+`raft_subscription_types_` keyspaces and current state metadata encoding identify its stored shapes.
+An unrecognized signature, namespace or encoding fails with the owning storage error and requires
+the stored data to be recreated.
 
 ## Absence And Distinct States
 
@@ -278,6 +303,15 @@ ordinary prefix; that original deadline then survives cancellation. The connecti
 most one discard and clears it only when it returns the size outcome after confirmation. See
 [MQTT source connections](./connector-contract.md#mqtt-source-connections).
 
+**MQTT client configuration.** The vocabulary converts one rendered MQTT client configuration into
+typed values once, at `CREATE MQTT CLIENT` and again when a connection is built. Its transport is
+plain TCP or TLS, and the TLS variant carries the trust file and the optional certificate and key
+pair, so a plain connection holds no TLS file and a TLS one cannot lack its trust root. An absent
+identity template, username or password is `None`, never an empty string, and an empty
+`client_id` is refused rather than read as absent. The keep-alive is a nonzero count of seconds and
+the admission bound a nonzero byte count, each taking the schema's one declared default where the
+client leaves it out. A password's debug rendering shows only the redaction marker.
+
 **Iceberg catalog identity.** The namespace is required configuration, represented by one shared
 validated name type from parsing through connector opening. Dot-separated levels are nonempty and
 retain case. No absent namespace is filled from the Nervix domain, and no layer invents another
@@ -291,6 +325,14 @@ only once the driver drains its buffer, and a mismatched connection becomes a ty
 instead of certifying discarded bytes. A deadline leaves the pending state intact. This is
 volatile connector state, never a stored shape or a separate representation of the host's rows.
 
+**MQTT subscription admission.** An instance's connection is disconnected, running, or waiting
+to retire a refused or downgraded broker subscription. The last state survives a failed or
+cancelled cleanup and suspension of the connector; only the completed retirement exchange permits
+another resume.
+It is not ordinary disconnection: trusting a retained session there would bypass the refused
+subscription or QoS grant. This is exclusively owned, in-memory connection state, separate from a
+retained accepted broker session and from the runtime's input-plan retirement.
+
 **MQTT input retirement.** A retiring input keeps the previous typed plan and an optional
 replacement plan. Absence means the declaration is removed; stopping an execution whose input
 is unchanged creates no retirement. A connector session catalog has a private constructor that
@@ -300,6 +342,17 @@ Cleanup failure at a preceding endpoint is reported separately from failure to p
 replacement. A failed preceding configuration supplies no preservation proof: the explicit
 replacement must prepare all of its sessions. An absent `client_id` selects the domain-qualified
 default, with an instance suffix when needed.
+
+**Pulsar received messages.** The driver message crosses one conversion boundary into checked
+publish and optional event `Timestamp` values and an `I64` sequence. The admitted message retains
+those typed values rather than raw time or sequence alternatives. Optional event time, partition
+key and ordering key preserve absence independently of present zero or empty values. The driver's
+batch decoder resolves optional member sequence ids and event times by presence: a present member
+value wins, including zero; an absent member uses the envelope field. Only absence at both levels
+leaves event time absent, and publish time is never its substitute. The broker
+protocol explicitly defaults an omitted redelivery count to zero; that external default is applied
+once into a lossless `I64`. Failed conversion is a typed read failure, held separately from any
+valid gathered prefix. The full broker position remains the settlement identity.
 
 **Pulsar input retirement.** The same optional replacement plan distinguishes dropping an input
 from replacing it. A changed owned source requires a comparison of resolved broker address,
@@ -483,6 +536,13 @@ lookup. A Postgres address's TLS policy is the typed `PostgresSslMode`, read thr
 option written twice, is refused rather than defaulted to a policy. A Postgres conflict clause's
 rules belong to `PostgresConflictAction`, whose typed refusal names a missing `DO UPDATE` target, an
 empty target column or an update without a mapped column outside its target.
+
+Postgres connection options and their `Option<PostgresStatementDeadline>` are constructed together
+before the pool opens. Absence means the client omitted a Nervix statement bound; presence has
+passed both the shared positive-millisecond rule and PostgreSQL's signed integer range. Every
+borrow copies that immutable deadline, so the server option and local query wait consume the same
+validated value. A local elapsed wait and a server-canceled statement have distinct typed contexts:
+the latter may name the configured bound without asserting why the server canceled it.
 
 RabbitMQ's consumer enum distinguishes automatic acknowledgement, sequential acknowledgement
 and parallel acknowledgement. The parallel variant owns a `NonZeroU16` prefetch count and batch
@@ -689,6 +749,14 @@ BSON's signed range. It does not publish that record with a replacement BSON nul
 conflict key. An actual null remains null, and other valid records in the batch can proceed under
 the connector's record outcome contract. See [Connector Crates And The Connector Contract](./connector-contract.md)
 for the host's publish and acknowledgement boundaries.
+
+Ingest metadata keeps the same three states apart. A message hands each declared field a value of
+the field's exact type, an absence where its transport carries none, or an unrepresentable value
+where its connector keeps a message carrying one the type cannot hold, such as an AMQP timestamp
+after the last `DATETIME` instant. An unrepresentable value never reads as null and never becomes
+a nearby instant: a program or `TIMESTAMP AT` that reads the field refuses the message with a
+`validation` message error naming the field, and a field nothing reads costs nothing. The retained
+copy a quiesce buffer replays keeps the unrepresentable state with its description.
 
 The MongoDB sink also distinguishes each failed write's document answers: delivered, rejected with
 the server's definitive refusal code, or unresolved. An insert's implicit applied-document account
@@ -1075,6 +1143,13 @@ owns established connection tasks and queued frames; source close ends that reta
 The testing capability shares one named listener-fault request between the connector and host:
 the selected bound address and its acknowledgement belong to that same armed request.
 
+A Syslog frame's peer is a UDP address, a TCP address or a shared TLS connection identity. Only the
+TLS variant can hold a verified client-certificate subject, whose absence represents a connection
+without client authentication. Subject decoding happens after successful TLS verification; a
+decoding failure ends the connection with its typed cause. Each metadata visit projects the peer
+address, transport and optional subject from that one value, and retained metadata preserves every
+field after the message ends.
+
 Domain-clock publication carries lifecycle pause, generation and start
 point beside the installation. Entity assignment absence invalidates a retained checkpoint reader;
 a present assignment carries its state identity and, once the entity is placed, its checkpoint
@@ -1102,3 +1177,12 @@ OTEL field rules carry their exact type with the constraint that requires it: a 
 cannot be declared with a floating-point descriptor. Required, optional and required-for-DELTA
 presence are distinct vocabulary states. Opening an OTEL client validates its required positive
 deadline before constructing settings; the installed settings hold a duration with no absent state.
+
+
+RabbitMQ emitter envelopes distinguish an absent timestamp from the Unix epoch: `None` omits the
+AMQP timestamp and `Some` of the epoch writes zero. Conversion accepts only nonnegative whole
+seconds representable by the transport; it never defaults, clamps or truncates a failed conversion.
+String properties retain their exact declared type and cross the AMQP short-string bound before a
+message is sent. Targeted emitter alterations represent setting and dropping persistence,
+timestamps and the whole property set as separate semantic operations, and preserve the envelope
+fields each operation does not address.

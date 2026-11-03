@@ -18,9 +18,23 @@ use strum::IntoEnumIterator as _;
 use super::*;
 use crate::{
     ClientConfigEntry, ClientConfigFile, ClientConfigOwner, ClientConfigPresence,
-    ClientConfigSchema, ClientConfigSchemaError, ClientConfigValue, ClientPooling,
-    EmitterEntityKind, EmitterPublishingModeKind, IngestDeliveryKind, IngestQuiesceKind,
-    IngestorEntityKind, IngestorEntityModel as _, WrittenChoice,
+    ClientConfigReaders, ClientConfigSchema, ClientConfigSchemaError, ClientConfigValue,
+    ClientPooling, DeclaredPublishing, EmitterEntityKind, EmitterEntityModel as _,
+    EmitterPublishingModeKind, IngestDeliveryKind, IngestQuiesceKind, IngestorEntityKind,
+    IngestorEntityModel as _, WrittenChoice,
+};
+
+/// The bound of a wait for a write: one interval of the keep-alive the client asks for.
+const ONE_KEEP_ALIVE: WaitBound = WaitBound::ClientKey {
+    key: "keep_alive_ms",
+    rule: "one interval of it, or of the broker's Server Keep Alive; 60 s when omitted",
+};
+
+/// The bound of a silent connection: a ping after one keep-alive interval, unanswered for another.
+const TWO_KEEP_ALIVES: WaitBound = WaitBound::ClientKey {
+    key: "keep_alive_ms",
+    rule: "two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 \
+           s when omitted",
 };
 
 #[test]
@@ -291,7 +305,7 @@ fn topic_source(session: MqttSession, qos: MqttQos, mode: MqttIngestMode) -> Mqt
 }
 
 #[test]
-fn topic_emission_publishes_at_the_quality_of_service_its_mode_names() {
+fn topic_emission_writes_its_quality_of_service_beside_a_mode_that_pairs_with_it() {
     let emit = EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic).capabilities();
 
     assert_eq!(
@@ -301,9 +315,18 @@ fn topic_emission_publishes_at_the_quality_of_service_its_mode_names() {
     assert_eq!(
         emit.publishing_modes,
         &[
-            EmitterPublishingModeKind::MqttQos0,
-            EmitterPublishingModeKind::MqttQos1,
-            EmitterPublishingModeKind::MqttQos2,
+            DeclaredPublishing::of(EmitterPublishingModeKind::NoAck).requiring(&[
+                ChoiceRequirement {
+                    option: "QOS",
+                    choices: &["0"],
+                }
+            ]),
+            DeclaredPublishing::of(EmitterPublishingModeKind::BrokerAck).requiring(&[
+                ChoiceRequirement {
+                    option: "QOS",
+                    choices: &["1", "2"],
+                }
+            ]),
         ]
     );
     assert_eq!(emit.body, EmitterBodyForm::Codec);
@@ -316,9 +339,146 @@ fn topic_emission_publishes_at_the_quality_of_service_its_mode_names() {
             name: LocatorName::External(MqttTopicName::DECLARATION),
         })
     );
-    assert!(emit.options.is_empty());
+    let keywords: Vec<&str> = emit.options.iter().map(|option| option.keywords).collect();
+    assert_eq!(keywords, vec!["QOS"]);
+    let qos = emit.option("QOS").assured("the keywords above declare QOS");
+    assert!(qos.is_required());
+    assert_eq!(qos.examples(), vec!["QOS 0", "QOS 1", "QOS 2"]);
     assert!(emit.envelope.is_empty());
     assert!(emit.properties.is_empty());
+}
+
+#[test]
+fn both_topic_directions_declare_one_quality_of_service_option() {
+    let ingest = IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic).capabilities();
+    let emit = EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic).capabilities();
+
+    assert_eq!(ingest.option("QOS"), emit.option("QOS"));
+}
+
+/// A topic emitter that publishes at `qos` in `mode`.
+fn topic_emitter(qos: MqttQos, mode: MqttTopicPublishingMode) -> MqttTopicEmitter {
+    MqttTopicEmitter {
+        mode,
+        client: ClientName::try_from("mqtt_main").assured("a lowercase identifier is a name"),
+        topic: MqttTopicName::try_from("devices/orders").assured("a literal topic is a name"),
+        qos,
+    }
+}
+
+fn retry_policy() -> RetryPolicy {
+    RetryPolicy {
+        backoff: "1s".to_owned(),
+        max_backoff: "30s".to_owned(),
+    }
+}
+
+fn unconfirmed_publication() -> MqttTopicPublishingMode {
+    MqttTopicPublishingMode::NoAck {
+        retry_policy: retry_policy(),
+    }
+}
+
+fn confirmed_publications() -> [MqttTopicPublishingMode; 2] {
+    [
+        MqttTopicPublishingMode::Ack {
+            window: crate::AckWindow::Sequential,
+            ack_timeout: "5s".to_owned(),
+            retry_policy: retry_policy(),
+        },
+        MqttTopicPublishingMode::Ack {
+            window: crate::AckWindow::Parallel {
+                max: NonZeroU64::MIN,
+            },
+            ack_timeout: "5s".to_owned(),
+            retry_policy: retry_policy(),
+        },
+    ]
+}
+
+#[test]
+fn every_quality_of_service_pairs_with_the_mode_that_completes_it() {
+    assert_eq!(
+        topic_emitter(MqttQos::Qos0, unconfirmed_publication()).unmet_publishing(),
+        None
+    );
+    for qos in [MqttQos::Qos1, MqttQos::Qos2] {
+        for mode in confirmed_publications() {
+            assert_eq!(topic_emitter(qos, mode).unmet_publishing(), None);
+        }
+    }
+}
+
+#[rstest]
+#[case::at_least_once(MqttQos::Qos1, "1")]
+#[case::exactly_once(MqttQos::Qos2, "2")]
+fn no_ack_beside_an_answered_quality_of_service_names_what_the_statement_writes(
+    #[case] qos: MqttQos,
+    #[case] spelling: &'static str,
+) {
+    let unmet = topic_emitter(qos, unconfirmed_publication())
+        .unmet_publishing()
+        .assured("NO ACK cannot complete a publish its broker answers");
+
+    assert_eq!(unmet.entity, MqttTopicEmitter::KIND);
+    assert_eq!(unmet.mode, EmitterPublishingModeKind::NoAck);
+    assert_eq!(unmet.requires, UNANSWERED_PUBLISH);
+    assert_eq!(
+        unmet.written,
+        vec![WrittenChoice {
+            option: "QOS",
+            choice: Some(spelling),
+        }]
+    );
+    assert_eq!(
+        unmet.to_string(),
+        format!(
+            "MQTT TOPIC emitters name MODE NO ACK only with QOS 0; the statement writes QOS \
+             {spelling}"
+        )
+    );
+}
+
+#[test]
+fn ack_beside_an_unanswered_quality_of_service_names_what_the_statement_writes() {
+    for mode in confirmed_publications() {
+        let unmet = topic_emitter(MqttQos::Qos0, mode)
+            .unmet_publishing()
+            .assured("no broker answers a QoS 0 publish for ACK to wait for");
+
+        assert_eq!(unmet.mode, EmitterPublishingModeKind::BrokerAck);
+        assert_eq!(unmet.requires, ANSWERED_PUBLISH);
+        assert_eq!(
+            unmet.to_string(),
+            "MQTT TOPIC emitters name MODE ACK only with QOS 1 or 2; the statement writes QOS 0"
+        );
+    }
+}
+
+#[test]
+fn an_emitter_mode_beside_a_statement_that_answers_no_option_names_it_unwritten() {
+    let emit = EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic).capabilities();
+    let unmet = emit
+        .unmet_publishing(
+            MqttTopicEmitter::KIND,
+            EmitterPublishingModeKind::BrokerAck,
+            &|_| None,
+        )
+        .assured("a statement that answers no option makes no choice ACK requires");
+
+    assert_eq!(
+        unmet.to_string(),
+        "MQTT TOPIC emitters name MODE ACK only with QOS 1 or 2; the statement writes no QOS"
+    );
+    assert_eq!(
+        emit.unmet_publishing(
+            MqttTopicEmitter::KIND,
+            EmitterPublishingModeKind::RequestAck,
+            &|_| None,
+        ),
+        None,
+        "a mode the entity does not declare is the grammar's to refuse"
+    );
 }
 
 #[test]
@@ -342,8 +502,9 @@ fn topic_ingestion_bounds_its_connection_by_the_keep_alive_but_not_its_suback() 
         vec![
             WaitBound::Driver("5 s"),
             WaitBound::Unbounded,
-            WaitBound::Driver("one keep-alive interval of 60 s, or the broker's"),
-            WaitBound::Driver("keep-alive of 60 s, or the broker's"),
+            WaitBound::Driver("5 s"),
+            ONE_KEEP_ALIVE,
+            TWO_KEEP_ALIVES,
         ]
     );
     assert!(ingest.bounds.deadline_keys().is_empty());
@@ -377,7 +538,7 @@ fn topic_ingestion_bounds_its_connection_by_the_keep_alive_but_not_its_suback() 
     assert_eq!(
         ingest.bounds.buffers[1].bound,
         BufferBound::Bounded {
-            capacity: BufferCapacity::Bytes(MQTT_SOURCE_MAXIMUM_PACKET_BYTES),
+            capacity: BufferCapacity::Setting("max_packet_size, 10240 bytes when omitted"),
             overflow: BufferOverflow::DropAndCount,
         }
     );
@@ -392,7 +553,9 @@ fn topic_emission_bounds_broker_answers_by_its_ack_timeout_clause() {
     assert_eq!(
         emit.bounds.buffers[0].bound,
         BufferBound::Bounded {
-            capacity: BufferCapacity::Setting("1 under QOS 0, ACK PARALLEL MAX under QOS 1 and 2"),
+            capacity: BufferCapacity::Setting(
+                "1 under NO ACK and ACK SEQUENTIAL, ACK PARALLEL MAX under ACK PARALLEL",
+            ),
             overflow: BufferOverflow::FailPublish,
         }
     );
@@ -403,12 +566,21 @@ fn topic_emission_bounds_broker_answers_by_its_ack_timeout_clause() {
             WaitBound::Driver("5 s"),
             WaitBound::Clause("ACK TIMEOUT"),
             WaitBound::Unbounded,
+            TWO_KEEP_ALIVES,
         ]
     );
     assert!(emit.bounds.deadline_keys().is_empty());
     assert_eq!(
         emit.bounds.driver_limits,
-        &["Packets above the broker's maximum packet size are rejected."]
+        &[
+            "Packets above the broker's maximum packet size are rejected.",
+            "QOS 0 connects a clean session; QOS 1 and 2 connect a persistent one with the \
+             maximum Session Expiry Interval, and SESSION is not an emitter option: a publisher \
+             without acknowledgement needs no session, and an acknowledged one always keeps it.",
+            "The client resumes its own session across reconnects, and a new client is refused \
+             while the broker keeps a session under its identity, since it holds no state to \
+             resume it with.",
+        ]
     );
 }
 
@@ -424,7 +596,51 @@ fn client_schema() -> ClientConfigSchema {
 }
 
 #[test]
-fn client_declaration_names_the_broker_and_binds_tls_files_to_mqtts() {
+fn every_keep_alive_bound_names_the_client_key_and_the_default_it_states() {
+    let ingest = IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic).capabilities();
+    let emit = EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic).capabilities();
+    let mut named = 0_usize;
+    for wait in ingest.bounds.waits.iter().chain(emit.bounds.waits) {
+        let WaitBound::ClientKey { key, rule } = wait.bound else {
+            continue;
+        };
+        let declared = client_schema()
+            .key(key)
+            .assured("a wait names only a key the MQTT client declares");
+        assert_eq!(declared.presence, ClientConfigPresence::Defaulted("60000"));
+        assert!(rule.ends_with("60 s when omitted"), "{rule}");
+        named += 1;
+    }
+    assert_eq!(
+        named, 3,
+        "two source waits and the emitter's silent connection"
+    );
+}
+
+#[test]
+fn the_admitted_publish_buffer_names_the_client_key_and_the_default_it_states() {
+    let ingest = IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic).capabilities();
+    let BufferBound::Bounded {
+        capacity: BufferCapacity::Setting(setting),
+        ..
+    } = ingest.bounds.buffers[1].bound
+    else {
+        panic!("the admitted publish buffer is bounded by a client key");
+    };
+    let declared = client_schema()
+        .key("max_packet_size")
+        .assured("the MQTT client declares the admission bound");
+    let ClientConfigPresence::Defaulted(default) = declared.presence else {
+        panic!("max_packet_size has a declared default");
+    };
+    assert_eq!(
+        setting,
+        format!("max_packet_size, {default} bytes when omitted")
+    );
+}
+
+#[test]
+fn client_declaration_names_every_key_a_connection_reads() {
     let declaration = CreateClientMqtt::<u64>::DECLARATION;
     assert_eq!(CreateClientMqtt::<u64>::CONNECTOR, ConnectorKind::Mqtt);
     assert_eq!(declaration.pooling, ClientPooling::Unpooled);
@@ -437,14 +653,24 @@ fn client_declaration_names_the_broker_and_binds_tls_files_to_mqtts() {
         vec![
             "addr",
             "client_id",
+            "keep_alive_ms",
+            "max_packet_size",
+            "password",
             "tls_ca_file",
             "tls_cert_file",
-            "tls_key_file"
+            "tls_key_file",
+            "username"
         ]
     );
     for key in config.keys() {
         assert_eq!(key.owner, ClientConfigOwner::Nervix, "{}", key.name);
-        assert!(!key.confidential, "{}", key.name);
+        assert_eq!(key.confidential, key.name == "password", "{}", key.name);
+        let readers = if key.name == "max_packet_size" {
+            ClientConfigReaders::Ingestors
+        } else {
+            ClientConfigReaders::Every
+        };
+        assert_eq!(key.readers, readers, "{}", key.name);
     }
     let expected = [
         (
@@ -454,6 +680,21 @@ fn client_declaration_names_the_broker_and_binds_tls_files_to_mqtts() {
         ),
         (
             "client_id",
+            ClientConfigPresence::Optional,
+            ClientConfigValue::String,
+        ),
+        (
+            "keep_alive_ms",
+            ClientConfigPresence::Defaulted("60000"),
+            ClientConfigValue::Milliseconds,
+        ),
+        (
+            "max_packet_size",
+            ClientConfigPresence::Defaulted("10240"),
+            ClientConfigValue::PositiveInteger,
+        ),
+        (
+            "password",
             ClientConfigPresence::Optional,
             ClientConfigValue::String,
         ),
@@ -480,6 +721,11 @@ fn client_declaration_names_the_broker_and_binds_tls_files_to_mqtts() {
                 scheme: "mqtts",
             },
             ClientConfigValue::File(ClientConfigFile::PrivateKey),
+        ),
+        (
+            "username",
+            ClientConfigPresence::Optional,
+            ClientConfigValue::String,
         ),
     ];
     for (name, presence, value) in expected {
@@ -665,7 +911,7 @@ fn client_schema_refuses_a_missing_address_and_an_undeclared_key() {
         &ClientConfigSchemaError::MissingRequired { key: "addr" }
     );
 
-    for undeclared in ["keep_alive", "username", "password", "max_packet_size"] {
+    for undeclared in ["keep_alive", "keepalive", "user", "session_expiry_ms"] {
         let refusal = schema
             .validate(&[
                 config_entry("addr", "mqtt://broker.example.com:1883"),

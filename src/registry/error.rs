@@ -157,6 +157,8 @@ pub(crate) enum ConnectorDeclarationIssue {
     Envelope(nervix_models::EnvelopeDeclarationError),
     #[error("{0}")]
     Delivery(nervix_models::UnmetDeliveryRequirement),
+    #[error("{0}")]
+    Publishing(nervix_models::UnmetPublishingRequirement),
     #[error("{site} requires an exact, non-null, non-sensitive {expected} value")]
     EnvelopeValue {
         site: EnvelopeValueSite,
@@ -363,6 +365,17 @@ pub(crate) enum RegistryError {
     /// The upgrade header refusal is the frame beneath, rendered once in the chain.
     #[error("ingestor '{ingestor}' in domain '{domain}' cannot use its HEADERS")]
     InvalidWebsocketsUpgradeHeaders {
+        domain: DomainName,
+        ingestor: ModelName,
+    },
+    #[error("ingestor '{ingestor}' in domain '{domain}' cannot use its HEADERS")]
+    InvalidHttpRequestHeaders {
+        domain: DomainName,
+        ingestor: ModelName,
+    },
+    /// The method refusal is the frame beneath, rendered once in the chain.
+    #[error("ingestor '{ingestor}' in domain '{domain}' cannot use its METHOD")]
+    InvalidHttpRequestMethod {
         domain: DomainName,
         ingestor: ModelName,
     },

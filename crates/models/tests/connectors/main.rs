@@ -293,10 +293,22 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
             every_node: false,
             reference: IngestorReferenceKind::Client(ConnectorKind::Kafka),
         },
-        IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic) => headers_only(
-            Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
-            ConnectorKind::Pulsar,
-        ),
+        IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic) => IngestorDeclaration {
+            headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+            metadata: &[
+                ("topic", IngestorMetadataType::String),
+                ("message_id", IngestorMetadataType::String),
+                ("publish_time", IngestorMetadataType::Datetime),
+                ("event_time", IngestorMetadataType::Datetime),
+                ("key", IngestorMetadataType::String),
+                ("ordering_key", IngestorMetadataType::Bytes),
+                ("producer_name", IngestorMetadataType::String),
+                ("sequence_id", IngestorMetadataType::I64),
+                ("redelivery_count", IngestorMetadataType::I64),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Pulsar),
+        },
         IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => {
             headers_only(None, ConnectorKind::Mqtt)
         }
@@ -304,10 +316,28 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
             Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
             ConnectorKind::Nats,
         ),
-        IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => headers_only(
-            Some(HeaderModel::exact(HeaderLayout::SortedByName)),
-            ConnectorKind::RabbitMq,
-        ),
+        IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => IngestorDeclaration {
+            headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),
+            metadata: &[
+                ("exchange", IngestorMetadataType::String),
+                ("routing_key", IngestorMetadataType::String),
+                ("delivery_tag", IngestorMetadataType::U64),
+                ("redelivered", IngestorMetadataType::Bool),
+                ("content_type", IngestorMetadataType::String),
+                ("content_encoding", IngestorMetadataType::String),
+                ("message_id", IngestorMetadataType::String),
+                ("correlation_id", IngestorMetadataType::String),
+                ("reply_to", IngestorMetadataType::String),
+                ("type", IngestorMetadataType::String),
+                ("app_id", IngestorMetadataType::String),
+                ("user_id", IngestorMetadataType::String),
+                ("priority", IngestorMetadataType::U8),
+                ("expiration", IngestorMetadataType::String),
+                ("timestamp", IngestorMetadataType::Datetime),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::RabbitMq),
+        },
         IngestorEntityKind::Redis(RedisIngestorEntity::PubSub) => IngestorDeclaration {
             headers: None,
             metadata: &[
@@ -317,16 +347,33 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
             every_node: false,
             reference: IngestorReferenceKind::Client(ConnectorKind::Redis),
         },
-        IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query) => {
-            headers_only(None, ConnectorKind::Prometheus)
-        }
+        IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query) => IngestorDeclaration {
+            headers: None,
+            metadata: &[
+                ("query", IngestorMetadataType::String),
+                ("evaluated_at", IngestorMetadataType::Datetime),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Prometheus),
+        },
         IngestorEntityKind::ZeroMq(ZeroMqIngestorEntity::Pull) => {
             headers_only(None, ConnectorKind::ZeroMq)
         }
-        IngestorEntityKind::Sqs(SqsIngestorEntity::Queue) => headers_only(
-            Some(HeaderModel::exact(HeaderLayout::LastWins)),
-            ConnectorKind::Sqs,
-        ),
+        IngestorEntityKind::Sqs(SqsIngestorEntity::Queue) => IngestorDeclaration {
+            headers: Some(HeaderModel::exact(HeaderLayout::LastWins)),
+            metadata: &[
+                ("message_id", IngestorMetadataType::String),
+                ("sent_at", IngestorMetadataType::Datetime),
+                ("receive_count", IngestorMetadataType::U32),
+                ("first_received_at", IngestorMetadataType::Datetime),
+                ("group_id", IngestorMetadataType::String),
+                ("deduplication_id", IngestorMetadataType::String),
+                ("sequence_number", IngestorMetadataType::String),
+                ("sender_id", IngestorMetadataType::String),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Sqs),
+        },
         IngestorEntityKind::Http(HttpIngestorEntity::Endpoint) => IngestorDeclaration {
             headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
             metadata: &[
@@ -359,7 +406,11 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
         },
         IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener) => IngestorDeclaration {
             headers: None,
-            metadata: &[("peer_addr", IngestorMetadataType::String)],
+            metadata: &[
+                ("peer_addr", IngestorMetadataType::String),
+                ("transport", IngestorMetadataType::String),
+                ("tls_peer", IngestorMetadataType::String),
+            ],
             every_node: true,
             reference: IngestorReferenceKind::Client(ConnectorKind::Syslog),
         },
@@ -677,9 +728,7 @@ fn emitter_declaration(kind: EmitterEntityKind) -> EmitterDeclaration {
         EmitterEntityKind::Redis(RedisEmitterEntity::PubSub)
         | EmitterEntityKind::ZeroMq(ZeroMqEmitterEntity::Push)
         | EmitterEntityKind::Syslog(SyslogEmitterEntity::Collector) => codec(None, &["NoAck"]),
-        EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => {
-            codec(None, &["MqttQos0", "MqttQos1", "MqttQos2"])
-        }
+        EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => codec(None, &["NoAck", "BrokerAck"]),
         EmitterEntityKind::Nats(NatsEmitterEntity::Subject) => codec(
             Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
             &["NoAck", "NatsJetStream"],
@@ -739,7 +788,7 @@ fn every_emitter_pair_declares_its_headers_codec_batching_and_publishing_modes()
         );
         for (name, mode) in publishing_modes() {
             assert_eq!(
-                declared.publishing_modes.contains(&mode),
+                declared.accepts_publishing_mode_kind(mode),
                 expected.modes.contains(&name.as_str()),
                 "{kind:?} {name}"
             );
@@ -783,11 +832,7 @@ fn an_emitter_states_what_its_pair_declares() {
                 entity.requires_batch_transformation(),
                 declared.requires_batch_transformation
             );
-            assert!(
-                declared
-                    .publishing_modes
-                    .contains(&entity.publishing().kind())
-            );
+            assert!(declared.accepts_publishing_mode_kind(entity.publishing().kind()));
             match entity.reference() {
                 EmitterReference::Client(EmitterClientReference { client, connector }) => {
                     assert_eq!(entity.client(), Some(client));

@@ -159,12 +159,11 @@ Feature: Graceful shutdown
         FROM WIRE JSON SCHEMA handoff_wire TO SCHEMA handoff_event;
       CREATE RELAY handoff_records SCHEMA handoff_event UNBRANCHED CAPACITY 1;
       CREATE KAFKA CLIENT handoff_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR handoff_source
         FROM handoff_kafka TOPIC 'shutdown_handoff_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'shutdown_handoff_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'shutdown_handoff_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING handoff_codec
@@ -243,12 +242,11 @@ Feature: Graceful shutdown
         FROM WIRE JSON SCHEMA flush_wire TO SCHEMA flush_event;
       CREATE RELAY flush_records SCHEMA flush_event UNBRANCHED CAPACITY 1;
       CREATE KAFKA CLIENT flush_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR flush_source
         FROM flush_kafka TOPIC 'shutdown_flush_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'shutdown_flush_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'shutdown_flush_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING flush_codec
@@ -698,12 +696,11 @@ Feature: Graceful shutdown
       CREATE RELAY shutdown_orders SCHEMA shutdown_order BRANCHED BY by_shutdown_tenant;
       CREATE RELAY shutdown_unique_orders SCHEMA shutdown_order BRANCHED BY by_shutdown_tenant;
       CREATE KAFKA CLIENT shutdown_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR shutdown_order_source
         FROM shutdown_kafka TOPIC 'shutdown_orders_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_orders_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_orders_{{test_id}}' START AT EARLIEST
           MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5m
           RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING shutdown_order_codec
@@ -787,12 +784,11 @@ Feature: Graceful shutdown
         FROM WIRE JSON SCHEMA confirm_wire TO SCHEMA confirm_event;
       CREATE RELAY confirm_records SCHEMA confirm_event UNBRANCHED;
       CREATE KAFKA CLIENT confirm_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR confirm_source
         FROM confirm_kafka TOPIC 'shutdown_confirm_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'shutdown_confirm_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'shutdown_confirm_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING confirm_codec
@@ -839,12 +835,11 @@ Feature: Graceful shutdown
         FROM WIRE JSON SCHEMA handoff_confirm_wire TO SCHEMA handoff_confirm_event;
       CREATE RELAY handoff_confirm_records SCHEMA handoff_confirm_event UNBRANCHED;
       CREATE KAFKA CLIENT handoff_confirm_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR handoff_confirm_source
         FROM handoff_confirm_kafka TOPIC 'shutdown_confirm_handoff_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'shutdown_confirm_handoff_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'shutdown_confirm_handoff_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING handoff_confirm_codec
@@ -896,12 +891,11 @@ Feature: Graceful shutdown
       CREATE RELAY refused_stop_records SCHEMA refused_stop_event UNBRANCHED;
       CREATE KAFKA CLIENT refused_stop_kafka CONFIG {
         'bootstrap.servers' = '{{mock_kafka_addr}}',
-        'auto.offset.reset' = 'earliest',
         'session.timeout.ms' = '10000'
       };
       CREATE KAFKA TOPIC INGESTOR refused_stop_source
         FROM refused_stop_kafka TOPIC 'refused_stop_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'refused_stop_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'refused_stop_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING refused_stop_codec
@@ -1040,12 +1034,11 @@ Feature: Graceful shutdown
       CREATE RELAY everyone_ingested SCHEMA everyone_event UNBRANCHED;
       CREATE RELAY everyone_routed SCHEMA everyone_event UNBRANCHED;
       CREATE KAFKA CLIENT everyone_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR everyone_source
         FROM everyone_kafka TOPIC 'shutdown_everyone_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_everyone_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_everyone_{{test_id}}' START AT EARLIEST
           MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5m
           RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING everyone_event_codec
@@ -1116,12 +1109,11 @@ Feature: Graceful shutdown
       CREATE CODEC peer_codec FROM WIRE JSON SCHEMA peer_wire TO SCHEMA peer_event;
       CREATE RELAY peer_records SCHEMA peer_event UNBRANCHED;
       CREATE KAFKA CLIENT peer_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR peer_source
         FROM peer_kafka TOPIC 'terminating_peer_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'terminating_peer_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'terminating_peer_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING peer_codec
@@ -1198,12 +1190,11 @@ Feature: Graceful shutdown
         FROM WIRE JSON SCHEMA unactivated_wire TO SCHEMA unactivated_event;
       CREATE RELAY unactivated_records SCHEMA unactivated_event UNBRANCHED;
       CREATE KAFKA CLIENT unactivated_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR unactivated_source
         FROM unactivated_kafka TOPIC 'unactivated_handoff_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'unactivated_handoff_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'unactivated_handoff_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
           RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING unactivated_codec
@@ -1379,12 +1370,11 @@ Feature: Graceful shutdown
       CREATE RELAY waiting_input SCHEMA wait_event UNBRANCHED;
       CREATE RELAY waiting_output SCHEMA wait_event UNBRANCHED;
       CREATE KAFKA CLIENT wait_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR wait_event_source
         FROM wait_kafka TOPIC 'shutdown_waiting_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_waiting_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_waiting_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m
           RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING wait_event_codec
@@ -1468,12 +1458,11 @@ Feature: Graceful shutdown
         TO SCHEMA stalled_event;
       CREATE RELAY stalled_events SCHEMA stalled_event UNBRANCHED;
       CREATE KAFKA CLIENT stalled_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR stalled_source
         FROM stalled_kafka TOPIC 'shutdown_stalled_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_stalled_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_stalled_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m
           RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING stalled_event_codec

@@ -24,6 +24,22 @@ use crate::{
     IngestorEntityKind,
 };
 
+/// A Pulsar producer sets exactly these two clauses per message, and its emitter declares no
+/// property.
+#[test]
+fn the_topic_emitter_declares_the_event_time_and_the_delivery_time_it_writes() {
+    let emit = EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic).capabilities();
+
+    assert_eq!(
+        emit.envelope,
+        &[
+            EnvelopeClauseKind::Timestamp,
+            EnvelopeClauseKind::DeliverAfter,
+        ]
+    );
+    assert!(emit.properties.is_empty());
+}
+
 #[test]
 fn topic_declarations_match_the_subscription_and_producer_transport() {
     let ingest = IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic).capabilities();
@@ -56,7 +72,7 @@ fn topic_declarations_match_the_subscription_and_producer_transport() {
         assert_eq!(ingest.declared_quiesce(undeclared), None);
     }
     assert_eq!(
-        emit.publishing_modes,
+        emit.publishing_kinds(),
         &[
             EmitterPublishingModeKind::NoAck,
             EmitterPublishingModeKind::BrokerAck
@@ -98,7 +114,7 @@ fn both_topic_directions_share_the_topic_rule_and_the_client() {
 }
 
 #[test]
-fn topic_declares_message_properties_as_headers_and_no_envelope() {
+fn topic_declares_message_properties_and_typed_metadata() {
     let ingest = IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic).capabilities();
     let emit = EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic).capabilities();
 
@@ -110,11 +126,19 @@ fn topic_declares_message_properties_as_headers_and_no_envelope() {
         emit.headers,
         Some(HeaderModel::exact(HeaderLayout::LastWins))
     );
-    assert_eq!(ingest.metadata, IngestorMetadataDeclaration::NONE);
-    assert!(ingest.metadata.fields().is_empty());
+    const EXPECTED: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
+        crate::IngestorMetadataField::new("topic", crate::IngestorMetadataType::String),
+        crate::IngestorMetadataField::new("message_id", crate::IngestorMetadataType::String),
+        crate::IngestorMetadataField::new("publish_time", crate::IngestorMetadataType::Datetime),
+        crate::IngestorMetadataField::new("event_time", crate::IngestorMetadataType::Datetime),
+        crate::IngestorMetadataField::new("key", crate::IngestorMetadataType::String),
+        crate::IngestorMetadataField::new("ordering_key", crate::IngestorMetadataType::Bytes),
+        crate::IngestorMetadataField::new("producer_name", crate::IngestorMetadataType::String),
+        crate::IngestorMetadataField::new("sequence_id", crate::IngestorMetadataType::I64),
+        crate::IngestorMetadataField::new("redelivery_count", crate::IngestorMetadataType::I64),
+    ]);
+    assert_eq!(ingest.metadata, EXPECTED);
     assert!(emit.options.is_empty());
-    assert!(emit.envelope.is_empty());
-    assert!(emit.properties.is_empty());
 }
 
 #[test]

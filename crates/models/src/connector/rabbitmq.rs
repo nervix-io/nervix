@@ -5,7 +5,7 @@
 //! - **Owns.** The RabbitMQ client Model, the queue source and emitter Models and the exchange
 //!   emitter Model with their delivery modes, the queue and exchange names with the rule AMQP holds
 //!   them to, the routing key an exchange emitter computes for every record, and what each entity
-//!   declares.
+//!   declares, the metadata a delivery exposes included.
 //!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared source and emitter declarations and the names a body references.
 //! - **Must not know.** The AMQP driver, or how a queue is consumed or a queue or an exchange is
@@ -37,8 +37,9 @@ use crate::{
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
     EnvelopeClauseKind, Expression, HeaderLayout, HeaderModel, IngestAcknowledgement,
     IngestQuiesceMode, IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
-    IngestorMetadataDeclaration, IngestorReference, IngestorReferenceKind, LocatorDeclaration,
-    LocatorName, OptionDeclaration, PositionClass, RetryPolicy,
+    IngestorMetadataDeclaration, IngestorMetadataField, IngestorMetadataType, IngestorReference,
+    IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionDeclaration, PositionClass,
+    RetryPolicy,
 };
 
 configured_client!(RabbitMq: unpooled, config CLIENT_CONFIG, CreateClientRabbitMq => RabbitMqConfigEntry);
@@ -219,11 +220,32 @@ const RABBITMQ_EXCHANGE_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     ],
 };
 
+/// What a RabbitMQ delivery exposes: the envelope its broker attached to it, then the AMQP basic
+/// properties its publisher set, each in the exact type AMQP 0-9-1 writes. The timestamp is the
+/// instant AMQP's count of whole seconds since the Unix epoch names.
+const RABBITMQ_QUEUE_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
+    IngestorMetadataField::new("exchange", IngestorMetadataType::String),
+    IngestorMetadataField::new("routing_key", IngestorMetadataType::String),
+    IngestorMetadataField::new("delivery_tag", IngestorMetadataType::U64),
+    IngestorMetadataField::new("redelivered", IngestorMetadataType::Bool),
+    IngestorMetadataField::new("content_type", IngestorMetadataType::String),
+    IngestorMetadataField::new("content_encoding", IngestorMetadataType::String),
+    IngestorMetadataField::new("message_id", IngestorMetadataType::String),
+    IngestorMetadataField::new("correlation_id", IngestorMetadataType::String),
+    IngestorMetadataField::new("reply_to", IngestorMetadataType::String),
+    IngestorMetadataField::new("type", IngestorMetadataType::String),
+    IngestorMetadataField::new("app_id", IngestorMetadataType::String),
+    IngestorMetadataField::new("user_id", IngestorMetadataType::String),
+    IngestorMetadataField::new("priority", IngestorMetadataType::U8),
+    IngestorMetadataField::new("expiration", IngestorMetadataType::String),
+    IngestorMetadataField::new("timestamp", IngestorMetadataType::Datetime),
+]);
+
 impl IngestorDeclaration for RabbitMqQueueIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         // An AMQP field table holds one value per name, in ascending order of name.
         headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),
-        metadata: IngestorMetadataDeclaration::NONE,
+        metadata: RABBITMQ_QUEUE_METADATA,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::RabbitMq),
         position_class: PositionClass::BrokerRedelivered,
@@ -327,6 +349,56 @@ pub struct RabbitMqQueueEmitter {
     pub queue: RabbitMqQueueName,
 }
 
+/// AMQP Basic properties shared by queue and exchange publication.
+const RABBITMQ_EMITTER_PROPERTIES: &[crate::PropertyDeclaration] = &[
+    crate::PropertyDeclaration {
+        name: "content_type",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "content_encoding",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "message_id",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "correlation_id",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "reply_to",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "expiration",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "priority",
+        ty: crate::PropertyType::U8,
+    },
+    crate::PropertyDeclaration {
+        name: "type",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "app_id",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "user_id",
+        ty: crate::PropertyType::String,
+    },
+];
+
+const RABBITMQ_EMITTER_ENVELOPE: &[EnvelopeClauseKind] = &[
+    EnvelopeClauseKind::Persistent,
+    EnvelopeClauseKind::Mandatory,
+    EnvelopeClauseKind::Timestamp,
+];
+
 impl EmitterDeclaration for RabbitMqQueueEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         // An AMQP field table holds one value per name, in ascending order of name.
@@ -341,8 +413,8 @@ impl EmitterDeclaration for RabbitMqQueueEmitter {
             name: LocatorName::External(RabbitMqQueueName::DECLARATION),
         }),
         options: &[],
-        envelope: &[EnvelopeClauseKind::Mandatory],
-        properties: &[],
+        envelope: RABBITMQ_EMITTER_ENVELOPE,
+        properties: RABBITMQ_EMITTER_PROPERTIES,
         bounds: RABBITMQ_QUEUE_EMITTER_BOUNDS,
     };
 }
@@ -394,8 +466,8 @@ impl EmitterDeclaration for RabbitMqExchangeEmitter {
                 example: "ROUTING KEY input.category",
             },
         }],
-        envelope: &[EnvelopeClauseKind::Mandatory],
-        properties: &[],
+        envelope: RABBITMQ_EMITTER_ENVELOPE,
+        properties: RABBITMQ_EMITTER_PROPERTIES,
         bounds: RABBITMQ_EXCHANGE_EMITTER_BOUNDS,
     };
 }

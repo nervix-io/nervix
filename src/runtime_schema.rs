@@ -1853,11 +1853,6 @@ impl RuntimeRow {
         }
     }
 
-    /// This row's columns rendered as one JSON object, for reports that show a record to a user.
-    pub(crate) fn to_json_string(&self) -> error_stack::Result<String, RuntimeSchemaError> {
-        self.to_json_string_masking(&nervix_vm::SchemaSensitivity::default())
-    }
-
     pub(crate) fn to_json_string_masking(
         &self,
         sensitivity: &nervix_vm::SchemaSensitivity,

@@ -78,15 +78,10 @@ Feature: Physical infrastructure deadlines under domain pacing
         timestamp STRING,
         due STRING
       );
-      CREATE WIRE JSON SCHEMA physical_prometheus_wire MODE STRICT (
-        source string,
-        value number,
-        timestamp string,
-        due string
-      );
       CREATE CODEC physical_prometheus_codec
-        FROM WIRE JSON SCHEMA physical_prometheus_wire
-        TO SCHEMA physical_prometheus_sample;
+        FROM JSON
+        TO SCHEMA physical_prometheus_sample
+        WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, due: .metric.due, value, timestamp}';
       CREATE RELAY physical_prometheus_samples
         SCHEMA physical_prometheus_sample UNBRANCHED;
       CREATE PROMETHEUS CLIENT physical_prometheus_source
@@ -332,11 +327,10 @@ Feature: Physical infrastructure deadlines under domain pacing
       CREATE RELAY physical_ack_records SCHEMA physical_ack_record UNBRANCHED;
       CREATE KAFKA CLIENT physical_ack_kafka
         CONFIG {
-          'bootstrap.servers' = '{{kafka_addr}}',
-          'auto.offset.reset' = 'earliest'
+          'bootstrap.servers' = '{{kafka_addr}}'
         };
       CREATE KAFKA TOPIC INGESTOR physical_ack_source
-        FROM physical_ack_kafka TOPIC 'physical_ack_in_{{test_id}}' OFFSET BY CONSUMER GROUP 'physical_ack_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
+        FROM physical_ack_kafka TOPIC 'physical_ack_in_{{test_id}}' OFFSET BY CONSUMER GROUP 'physical_ack_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING physical_ack_codec
         TIMESTAMP NOW
         TO physical_ack_records
