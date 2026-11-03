@@ -7,7 +7,7 @@ never evidence of its owner or effect.
 
 `just ratchet` runs both owners. `just validate` and `just validate-ci` require the same gate;
 formatting is applied by the former and checked by the latter. The compiler emits ordinary
-`nervix::` diagnostics. The five structural counts compare with `debt-baseline.json`; a count
+`nervix::` diagnostics. The six structural counts compare with `debt-baseline.json`; a count
 may decrease and cannot increase. `just ratchet --update` records a decrease only after the
 complete gate passes. No numeric allowance controls a semantic rule.
 
@@ -21,7 +21,7 @@ complete gate passes. No numeric allowance controls a semantic rule.
 | Declared matrix | `tools/nervix-lint/configurations.toml` | The configurations the gate analyzes and the memory admission of their compilations. |
 | Runner | `scripts/typed_ratchet.py` (`just typed-ratchet`) | Runs Cargo with the driver once per configuration, computes the report identity, reuses complete evidence and refuses missing, partial, stale or foreign reports. |
 | Workspace wrapper | `scripts/typed_lint_wrapper.py`, `scripts/analysis_admission.py` | Runs the driver as a child beneath the compiler wrapper the host configures, records every compilation and admits it against host memory. |
-| Gate | `scripts/ratchet.py` (`just ratchet`) | Requires the complete diagnostic gate and compares the five structural counts with `debt-baseline.json`. |
+| Gate | `scripts/ratchet.py` (`just ratchet`) | Requires the complete diagnostic gate, reads the product's dependency graph with `cargo tree` and compares the six structural counts with `debt-baseline.json`. |
 | Complexity analyzer | `scripts/cargo_crap.py` | Pins and runs the analyzer behind `functions_over_complexity_30`. |
 | Audit | `scripts/lint_audit.py` (`just lint-audit`) | Attributes review candidates to the history that produced them. |
 
@@ -33,7 +33,7 @@ count: it rejects `Result<_, String>` in product code outright, and
 
 ## Rule Contracts
 
-The sixteen rule families below have one implementation each. The family name remains useful
+The seventeen rule families below have one implementation each. The family name remains useful
 for describing its purpose; a compiler family can emit more than one diagnostic where a missing
 contract and a violated contract require different corrections.
 
@@ -54,6 +54,7 @@ contract and a violated contract require different corrections.
 | `as_casts` | Count actual Rust cast expressions, not words in imports, attributes or qualified paths. | `use Value as Alias`; `r#as`; `<Type as Trait>::item`; ordinary literals. | An expression using `as`, including a const expression nested in a qualified type. | Stable source parser; inactive cfg, raw identifiers, nested syntax, macro fragments and bounded source properties. Clippy independently denies conversions in its broader build scope. |
 | `testing_feature_struct_fields` | A product struct has one field shape rather than a shape selected by `testing`. | A test-only item, an API gate or a conditional documentation attribute. | A named or tuple struct field whose presence depends on `testing`, including a conditional `cfg` attribute. | Stable source parser; field ownership, tuple, inactive, compound-predicate and `cfg_attr` controls. Enum fields are outside this specific struct rule. |
 | `files_over_3000_lines` | Keep product and in-crate test files within a source-size bound. | At most 3,000 lines, counting a final line without a newline. | An eligible file with more than 3,000 lines. | Source discovery and physical line count; exact boundary and newly authored source tests. |
+| `non_aws_lc_crypto` | Nervix-authored cryptography comes from the AWS-LC boundary, and no change brings other cryptography into the product graph. [Cryptography](cryptography.md#the-count) owns what counts. | AWS-LC through the boundary; a classified non-security hash; a non-cryptographic checksum. | An authored use of a counted crate, `OsRng`, `getrandom` or a direct provider install, and a product dependency edge onto a crate implementing cryptography outside AWS-LC. | Stable source parser; import, rename, glob, `self`/`super`, inactive, macro, boundary and look-alike controls and the registered bounded `typed-non-aws-lc-crypto` property; the product graph through `cargo tree` for both release targets, with recorded-tree, malformed-graph and added-dependency gate tests. |
 | `functions_over_complexity_30` | Keep each function's decisions within a cyclomatic complexity of 30. At full coverage a function's CRAP score equals its complexity, so a function above 30 exceeds a CRAP threshold of 30 at any coverage. [Function complexity](#function-complexity) owns the analyzer and its limits. | A function the pinned analyzer scores at most 30; an existing function above 30 that grows, which keeps the count. | A function newly scored above 30, including one in an inactive configuration or an in-crate test file. | Pinned cargo-crap analysis over source discovery; exact 30/31 boundary, inactive configuration, macro, trait and nesting limits, eligibility, and missing, failing, other-version, skipped-source, empty, configured, undiscovered and unreadable-file fixtures. |
 
 The Option/Result adapter catalog covers `and_then`, `filter`, `map`, `map_err`, `map_or`,
