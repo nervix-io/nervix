@@ -580,7 +580,13 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   case kept; `ON CONFLICT (...) DO UPDATE` needs a target and a mapped column outside it, and
   `MAX SIZE` is at most `1073741822B`. Keep its optional statement `timeout_ms` separate from
   `pool_acquire_timeout_ms`; read their bounds and retry semantics in
-  [Emitters → Postgres](../../../docs/src/emitters.md#postgres).
+  [Emitters → Postgres](../../../docs/src/emitters.md#postgres). Write every connection part in
+  `addr`: the driver fills a missing port, user, password or database from the node's `PG*`
+  environment and password file, and ignores a query option it does not know. `verify-full` trusts
+  the driver's bundled Mozilla roots as well as `tls_ca_file`. Map an `ARRAY` or `VEC` value to a
+  `json`, `jsonb` or `text` column, never a native array column. Only SQLSTATE classes 21, 22 and
+  23 reject a row; a missing table or column, an unmatched conflict target or a missing privilege
+  retries on `RETRY POLICY` until it is fixed.
 - Give a `RABBITMQ` client an `amqp://` or `amqps://` `addr` that names a host and no port 0; Nervix
   refuses any other address before commit. Mounted `tls_ca_file`, `tls_cert_file` and
   `tls_key_file` require `amqps`; `CREATE` refuses these keys with `amqp`. Certificate and key must

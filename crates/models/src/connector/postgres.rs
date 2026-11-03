@@ -305,6 +305,13 @@ const POSTGRES_BOUNDS: DeclaredBounds = DeclaredBounds {
             wait: "closing an interrupted query connection",
             bound: WaitBound::Driver("SQLx close-on-drop timeout, 5 s"),
         },
+        // SQLx tests every connection returned to the pool, keeping its place in the pool until the
+        // server answers, and gives that test no deadline.
+        DeclaredWait {
+            wait: "testing a connection returned to the pool, which keeps its place until the \
+                   server answers",
+            bound: WaitBound::Unbounded,
+        },
     ],
     driver_limits: &[
         "timeout_ms accepts at most 2147483647 milliseconds, PostgreSQL's statement_timeout \
