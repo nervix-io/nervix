@@ -93,10 +93,7 @@ fn subject_and_stream_emission_declare_their_publication_contracts() {
         emit.reference,
         EmitterReferenceKind::Client(ConnectorKind::Nats)
     );
-    assert_eq!(
-        emit.publishing_kinds(),
-        &[EmitterPublishingModeKind::NoAck]
-    );
+    assert_eq!(emit.publishing_kinds(), &[EmitterPublishingModeKind::NoAck]);
     assert_eq!(emit.body, EmitterBodyForm::Codec);
     assert_eq!(emit.batch, EmitterBatchLegality::Optional { maximum: None });
     assert!(!emit.requires_batch_transformation);
