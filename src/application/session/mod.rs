@@ -331,7 +331,7 @@ impl SessionShared {
                 match rejected.encode(self.limits()) {
                     Ok(delivery) => (delivery, QueuedReply::Rejection),
                     Err(error) => {
-                        warn!(%request_id, error = %error, "a session rejection does not fit a frame");
+                        warn!(%request_id, error = %format_args!("{error:#}"), "a session rejection does not fit a frame");
                         return QueuedReply::Nothing;
                     }
                 }
@@ -405,7 +405,7 @@ impl SessionShared {
         let ending = match (SessionEnding { reason }).encode(self.limits()) {
             Ok(frame) => Some(frame),
             Err(error) => {
-                warn!(error = %error, "a session ending does not fit a frame");
+                warn!(error = %format_args!("{error:#}"), "a session ending does not fit a frame");
                 None
             }
         };

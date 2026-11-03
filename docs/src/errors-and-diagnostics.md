@@ -324,6 +324,15 @@ alternate `Display` (`{error:#}`), including report-bearing tracing fields. A fa
 message, a runtime event, a negative acknowledgement's reason, a domain's instantiation error, the
 CLI's text and JSON reports and the C binding's error message are that chain.
 
+A tracing field records a report as `error = %format_args!("{error:#}")`. The `%error` sigil, and a
+`display` field written out, record the report's plain `Display`, which is its outermost context
+alone: a warning that a maintenance proposal failed would then say only that a consensus proposal
+failed, and not whether the leader could not confirm its lease, lost its leadership, found its log
+saturated or could not store the entry. The compiler architecture gate refuses such a field, as
+[The Reported-Error Guard](#the-reported-error-guard) describes. The transaction maintenance pass
+and the command-history reclamation report a failed commit resume, inactive-transaction expiry,
+tombstone removal or history reclamation with that whole chain.
+
 Reports remain typed until these reporting decisions; sensitivity rules continue to apply to every
 context. A boundary renders a failure once and reuses the text: a failed dead-letter dispatch
 renders its report once and uses that chain in both its runtime event and its negative
@@ -2964,7 +2973,7 @@ records each failed implementation with its chain.
 
 `just validate-typed-errors`, run by `just validate`, rejects textual
 `Result<_, String>` in product code without a baseline. It remains a separate source rule,
-including inactive source. The compiler architecture gate, run by `just ratchet`, owns four
+including inactive source. The compiler architecture gate, run by `just ratchet`, owns five
 resolved Rust diagnostics:
 
 | Diagnostic | Contract it checks |
@@ -2973,6 +2982,7 @@ resolved Rust diagnostics:
 | `nervix::discarded_outcome` | A `let` wildcard, unused statement or resolved `drop` consuming a `Result`, report, owning collection or transparent wrapper states its handling or recovery class. |
 | `nervix::bare_panic` | A resolved inherent `Option` or `Result` `unwrap`/`expect` uses `meticulous` to state its guarantee. |
 | `nervix::replaced_error` | A resolved failure replacement retains its informative cause or declares an exact ordinary-outcome boundary. |
+| `nervix::partial_report_field` | A tracing field that records an `error_stack::Report`, directly or through a borrow, box or shared owner, renders its whole context chain instead of the report's plain `Display`. |
 
 The same driver emits the source-owned layer, Model, language, awaited cluster, identity and
 installation-state diagnostics described in
@@ -3053,6 +3063,12 @@ resolution; current API doctests pair supported calls with `compile_fail` exampl
 fallible site, a reviewer identifies the deciding layer, ordinary outcome or failure class,
 actionable fields, context across boundaries and the public diagnostic or recovery that ends the
 path. That classification preserves branch and sensitivity rules.
+
+The tracing field check resolves the `display` constructor that the `%` sigil names and the type
+of the value it records. A shorthand field, `%error` or `%self.error`, is named at the tokens it
+was written with, and a value an authored macro receives or owns is named where it was written. A
+debug field, a field that records a report's current context, and a value that only shares the
+report's name are not reports rendered by their plain `Display`.
 
 A recovered operation with no other witness uses `nervix_recovery::Reported::reported` at the
 decision that continues without its result. That record renders the complete context chain at
