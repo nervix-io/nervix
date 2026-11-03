@@ -159,17 +159,18 @@ impl NatsSubjectIngestorPlan {
         config: &[ClientConfigEntry],
         lost: mpsc::Sender<()>,
     ) -> NatsSubjectIngestorResult<NatsClient> {
-        let prepared = NatsClientOptions::from_config(executor, config)
-            .await
-            .map_err(|report| {
+        let prepared = match NatsClientOptions::from_config(executor, config).await {
+            Ok(prepared) => prepared,
+            Err(report) => {
                 let context = match report.current_context() {
                     NatsClientOptionsError::CredentialsPreparation => {
                         NatsSubjectIngestorError::ClientPreparation
                     }
                     _ => NatsSubjectIngestorError::ClientConfig,
                 };
-                report.change_context(context)
-            })?;
+                return Err(report.change_context(context));
+            }
+        };
         let options = prepared
             .options
             .max_reconnects(1)
