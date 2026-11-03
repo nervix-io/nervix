@@ -14,6 +14,12 @@ errors; the public projection uses their value-free key contexts. Redis's capaci
 the ingestor plan's typed range error beneath `OfflineClientConfigError` for
 `subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
 
+Kafka's offline check retains `rdkafka::error::KafkaError` beneath `OfflineClientConfigError`.
+A native property with an invalid value and an unknown native property both project as
+`invalid client config key '<key>'`, beneath the client/domain context. The raw driver description
+stays internal because it can quote the configured value. An accepted delegated property without
+an explicit public declaration is also confidential in client inspection, which prints `********`.
+
 RabbitMQ's TLS file keys declare `amqps` as their permitted address scheme. The shared schema's
 `ClientConfigSchemaError::RequiresScheme` refuses TLS files with `amqp` before file inspection
 and commit, naming the key, `addr` and `amqps` without the configured values. The existing
@@ -455,8 +461,12 @@ MQTT QoS refusals identify the supplied number, its source span, and the levels 
 or emitter accepts. An MQTT ingestor `ACK` mode outside a persistent session at QoS 1 or 2 is
 refused with the mode underlined and the session and QoS the statement writes named beside the
 required pairing. A refused `ON QUIESCE SUSPEND` identifies `SUSPEND` and its required
-`SESSION PERSISTENT` pairing at `QOS 1` or `QOS 2`. Completion offers the quiesce modes the
-written session can use; a clean session or QoS 0 offers `BUFFER` and `DROP`.
+`SESSION PERSISTENT` pairing at `QOS 1` or `QOS 2`. Completion offers the delivery and quiesce
+modes the written session and QoS keep, so a statement that follows completion reaches neither
+refusal: a clean session or QoS 0 offers `NO ACK` after `MODE`, and `BUFFER` and `DROP` after
+`ON QUIESCE`. A grammar branch those choices close names nothing a statement could write, so a
+diagnostic lists only what the open branches expect, and says `something else` only where none
+names an item.
 
 The language layer reports rejected source the same way. Lexing and parsing each create the report
 at the stage that failed, and its context names that stage and holds the rejected text with every
@@ -472,10 +482,13 @@ cannot begin at all, the diagnostic expects the placeholder the clause names, su
 the expression grammar's first diagnostic at the tokens of the statement where it failed, with the
 message the standalone reader gives the same text. Where a complete expression is followed by a token
 no clause of the statement expects, the statement reports that token with its own expectations. An
-expression's diagnostic carries no expectations of the expression grammar, so completion inside an
-unfinished expression offers nothing rather than guessing at expression syntax. A caller that owns
-a larger operation adds its own context above the
-language's report instead of copying the diagnostics into its error: splitting a client batch reports
+unfinished expression retains the expression grammar's semantic expectations for function names,
+invocations, qualified fields and assignment targets. These expectations keep the statement's
+token positions and participate in its composed grammar. Completion resolves functions in the
+selected connector scope and metadata fields from that entity's declaration; the diagnostic keeps
+the expression reader's expected tokens and found token. Ordinary clause continuations still
+belong to the surrounding statement grammar. A caller that owns a larger operation adds its own
+context above the language's report instead of copying the diagnostics into its error: splitting a client batch reports
 that the batch could not be split, and the formatter reports a source that did not parse, the line
 of a statement the vocabulary could not render, or a rendering defect whose output changed meaning
 or no longer parses. The formatter's command line reads the language's report beneath its context
@@ -669,9 +682,10 @@ host as the caller wrote it and one `DnsLookupFailure`, the closed set that
 through one of the resolver's hooks receives the `DnsLookupError` itself and keeps it among the
 causes of its own connection error, where `DnsLookupError::find_in` recovers it. The HTTP request
 emitter, RabbitMQ, Syslog, WebSocket, Redis, MQTT, ClickHouse, SQS and the native session client keep
-it beneath their own failure, as the paragraphs below describe. HTTP polling, Prometheus, Sentry,
-OTEL and Iceberg report their failed request, export or catalog call without it, so their
-diagnostics do not name the lookup failure.
+it beneath their own failure, as the paragraphs below describe. HTTP polling keeps the Reqwest
+error and its causes beneath its own failure, so its diagnostic names the lookup failure as well,
+though no scenario asserts it. Prometheus, Sentry, OTEL and Iceberg report their failed request,
+export or catalog call without it, so their diagnostics do not name the lookup failure.
 
 During cluster startup, a node that has recovered Raft peer endpoints logs a failed lookup of its
 configured bootstrap host at `warn` and continues with the recovered seeds. A node without recovered
@@ -717,6 +731,11 @@ remain beneath the connection failure. Its configured accept capability maps soc
 injector follows the same typed path. WebSocket signaling compilation and execution retain jaq,
 frame encoding and transport causes. The runtime's Syslog source-plan and signaling compilation
 errors keep those reports as typed fields while preserving their startup messages.
+
+A Syslog listener that cannot decode the subject of a verified TLS client certificate keeps the
+X.509 parser's typed cause beneath `SyslogConnectionError::TlsPeerCertificate`. It ends that
+connection before handing over frames. A connection without client authentication is an ordinary
+absent TLS peer and produces no failure.
 
 A MySQL pool is kept at its `POOL SIZE MIN` by a task no caller waits on, so that task is the only
 witness of a pass that ends below the minimum. It reports `PoolMinimumError::NotRestored`, naming
@@ -889,6 +908,19 @@ configuration failure, not a record rejection. A checkout that runs out of
 `EmitterOpenError::Initialize` while the pool opens and beneath `EmitterWriteError::NotInitialized`
 on a write, which the host retries on its policy.
 
+The Postgres statement key `timeout_ms` is optional and held to PostgreSQL's signed integer
+millisecond range at the offline configuration boundary. A range refusal keeps its typed integer
+conversion cause beneath `ClientConfigError::InvalidDeadline` and projects the `timeout_ms` key,
+rather than the address, into `OfflineClientConfigError`. The connection's private
+`PostgresStatementDeadline` applies both the server option and each catalog-query or INSERT response
+budget. A local timeout keeps `DeadlineElapsed`, its operation, key and bound beneath
+`PostgresWriteError::Deadline` and the host publish context; its printable description survives that
+projection. The interrupted connection closes instead of returning its pending response to the
+idle pool. A server `57014` becomes `PostgresWriteError::StatementCanceled` when the client has a
+configured deadline: it reports that safe SQLSTATE and configured bound without treating every
+operator cancellation as a proven timeout. Both remain transient publish failures, with no record
+rejection or exposed server response text.
+
 Redis subscription protocol and read failures retain their driver causes beneath
 `RedisPubSubIngestorError::SubscriptionSetup` or `SubscriptionRead`. An unanswered idle probe keeps
 the shared `DeadlineElapsed` with `idle_timeout_ms` and its configured bound beneath `IdleProbe`
@@ -966,6 +998,12 @@ to take a record, and its `PublishNoticeError` when an answer leaves a record un
 `EmitterWriteError::Publish`, each with the connector's description of the failure for the
 emitter's transient error. A missed `ACK TIMEOUT` is the confirmation window's
 `ConfirmationWindowError`, which the window describes the same way.
+
+An MQTT broker's successful `SUBACK` with a grant below the requested QoS fails readiness with
+`MqttTopicIngestorError::SubscriptionDowngraded { requested, granted }` beneath
+`IngestorError::Resume`. Both fields are typed quality-of-service levels. The general error
+policy and `DESCRIBE INGESTOR` report those levels without payload or client credentials, in
+acknowledged and `NO ACK` modes alike.
 
 MQTT input retirement reports `RuntimeError::RetireIngestorEntity`, naming its domain and
 ingestor, above the connector's `MqttTopicIngestorError::RetireInstance` and instance index. The report
@@ -1061,15 +1099,11 @@ ends that resume attempt with `KafkaTopicIngestorError::UnresolvedDomainStart` b
 `IngestorError::Resume`. Its typed fields retain the accepted and observed generations. The host
 retries on its existing cadence; the connector polls only after it has canonical resume positions.
 
-A domain-offset Kafka ingestor that must start a partition without a domain offset while its
-client's `auto.offset.reset` is `error` fails its resume with
-`KafkaTopicIngestorError::ResetRefused`, which names the topic and partition, beneath
-`IngestorError::Resume`; the host shows it as the ingestor's transient status and resumes again on
-its cadence. A timestamp lookup whose answer carries a partition error keeps that `KafkaError`
+A timestamp lookup whose answer carries a partition error keeps that `KafkaError`
 beneath `KafkaTopicIngestorError::ResolveTimestampOffsets`. A consumer-group rebalance runs in the consumer's context, which has no caller to return a failure
 to: a rejected partition's floor that cannot be set on the assignment, and an assignment or
 revocation librdkafka refuses, are logged at `warn` with the driver's error, and the partition then
-starts where the group's committed offset or the client's reset policy places it.
+starts where the group's committed offset or the ingestor's `START AT` places it.
 
 A Kafka consumer takes the commands charge of the job that will destroy it before it is created,
 and a refused charge keeps `AdmissionError` beneath `KafkaTopicIngestorError::RetirementAdmission`. It
@@ -1336,9 +1370,14 @@ is created. The refusal names the connector, the client and the domain, with the
 or timeout rule, that rule's error is beneath the key, such as `PROMETHEUS client 'prom_main' in
 domain 'shop' cannot use its CONFIG: 'addr' is not an API root: the URL has a query string`.
 A `WEBSOCKETS CLIENT` uses the same validation boundary with
-`WebsocketsClientConfigError`: unknown/repeated keys, invalid endpoint, positive-duration or
-portable positive limit values, an unschedulable ping-derived idle bound,
-TLS keys on `ws`, and unpaired identity files are typed refusals naming their key, client and domain.
+`WebsocketsClientConfigError`: unknown/repeated keys, invalid endpoint, an endpoint with a fragment
+or user information, positive-duration or portable positive limit values, an unschedulable
+ping-derived idle bound, TLS keys on `ws`, and unpaired identity files are typed refusals naming
+their key, client and domain without printing a value. The connector's offline check reports a
+`tls_ca_file` without a certificate as `OfflineClientConfigError::NoCertificate`, whose public
+message names only the key, and a file it cannot read as `InvalidKey` above the contract's
+`ClientConfigError`. A certificate section it cannot parse stays
+`TlsClientConfigError::ParseCaCertificate` beneath `IngestorError::Open` when the source opens.
 `WebsocketsUpgradeHeadersError` names the connection ingestor and offending field without printing
 its value; shared HTTP name, value and limit causes remain beneath it. Planning retains that typed
 cause if a ingestor cannot produce its validated header collection. Rendered client values are
@@ -1348,6 +1387,10 @@ which names only the ingestor and its domain. It names the offending header of a
 ingestor's `HEADERS`, and the client key of a `CLIENT SECRET` it cannot read, with the client where
 the key is undeclared. It never quotes the key's value, and neither does the connector's
 `InvalidHeader` when a rendered secret cannot be a header at open.
+A polling ingestor's `METHOD` that HTTP cannot send is refused at `CREATE` and `ALTER` in the same
+shape: `HttpRequestFieldError` is the frame beneath the registry's `InvalidHttpRequestMethod`
+context, which names only the ingestor and its domain, as in `ingestor 'polled' in domain 'shop'
+cannot use its METHOD: method is not a supported HTTP token`.
 An Iceberg emitter's location refusal names its domain, emitter and `LOCATION`, with the
 vocabulary's typed location failure beneath that context. A malformed URL retains its URL-parser
 cause; a storage-scheme mismatch names the found scheme and the schemes its declared client
@@ -1716,9 +1759,14 @@ failure. An error handler whose own construction fails does not recursively invo
 
 Paced ingest admission reports a rejected event timestamp as a message error with code
 `validation` and operation `admit`. A null declared timestamp has the same classification and
-names its field. The host keeps the rejected row's source metadata and ACK attached while each
-output route applies its message-error policy. Accepted rows from the same decoded group continue
-through their normal routes.
+names its field. So does a transport metadata value its connector hands over as unrepresentable,
+with a description of it, such as an AMQP timestamp after the last `DATETIME` instant, wherever
+the ingestor's programs or its `TIMESTAMP AT` read that field: the host refuses the message after
+`FILTER WHERE` and before event-time selection, and the message names `metadata.<field>` and that
+description, never a payload value.
+The host keeps the rejected row's source metadata and ACK attached while each output route applies
+its message-error policy. Accepted rows from the same decoded group continue through their normal
+routes.
 
 Before a domain execution or replacement becomes active, the registry selects each DLQ route and
 resolves its source, partial-output and destination schemas, branch declarations and flush

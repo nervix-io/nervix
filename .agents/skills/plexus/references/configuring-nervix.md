@@ -30,6 +30,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Resources, uploads, mounts, and TLS files | `Resources` |
 | Syslog wire schema, codec fields, UDP/TCP/TLS framing, per-connection versus total buffer bounds, clients, sources, and emitters | `Common` → `Syslog`, and `Connector Capabilities` |
 | Source transports, delivery modes, headers, and ingestor routes | `Ingestors` |
+| HTTP polling requests and client secrets, responses, failed polls, the response bound, and the `HTTP CLIENT` keys, redirects and proxy both directions share | `Ingestors` → `HTTP REQUEST`, then `Emitters` → `HTTP client transport` |
 | Client, ingestor and emitter heads, their connector/entity choice, and kind-preserving ALTER | `Plexus Overview` → `Statement catalog`, then `Connector Capabilities` and the entity's manual section |
 | Kafka domain offsets across explicit starts, reconnects, instance changes and restored backups | `Ingestors` → `Kafka`, and `Backup And Restore` |
 | Plexus entity modes, ordered options, typed metadata, generated client CONFIG key/type/confidentiality tables and directional differences | `Connector Capabilities`, then the entity's `Ingestors` or `Emitters` section |
@@ -41,7 +42,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Emitter envelope clauses and `PROPERTIES`: timestamps, flags, delays, reply targets and message identities a transport carries beside each payload | `Emitters` → `Envelope clauses`, then `Connector Capabilities` |
 | MongoDB collection names and the lookup before each write, BSON field-name admission, native widths/date precision, conflict filters and upserts, write-concern outcomes, client URL configuration, the client database, paired TLS identity files, pool waits and driver deadlines | `Emitters` → `MongoDB`, `Database Client Connection Pools`, then `Connector Capabilities` |
 | MySQL table path parts, exact value bindings, duplicate-key actions, placeholder and packet limits, operation deadlines, TLS verification and identity file formats, URL lifetime settings and maintained pool minimums | `Emitters` → `MySQL`, `Database Client Connection Pools`, then `Connector Capabilities` → `MYSQL client` |
-| Postgres table path parts, conflict rules, the `sslmode` policy, TLS identity files, the checkout deadline, connection lifetimes and the borrow test | `Emitters` → `Postgres`, and `Database Client Connection Pools` |
+| Postgres table path parts, conflict rules, the `sslmode` policy, TLS identity files, statement versus checkout deadlines, connection lifetimes and the borrow test | `Emitters` → `Postgres`, and `Database Client Connection Pools` |
 | Sentry platform options, event defaults and limit, batch transformations, strict DSN/timeout configuration, the inherited HTTP transport, rejected versus retried statuses and retry hints | `Emitters` → `Sentry`, then `Connector Capabilities` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
@@ -213,7 +214,8 @@ current connection, retry and deadline limits.
   use only `MODE NO ACK` on a `SYSLOG LISTENER` ingestor and `NO ACK` on a syslog emitter,
   configure TLS identity for the client direction that consumes it, and set a key only one side
   reads, such as `framing` or `idle_timeout_ms`, only on a client that side uses; the SYSLOG
-  client reference in `Connector Capabilities` names those keys.
+  client reference in `Connector Capabilities` names those keys. Read `Common` → `Syslog` →
+  `Ingestor` for transport metadata and when a TLS connection exposes a verified client subject.
 - Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
   owner-buffer bound, not a per-branch or per-consumer bound; nonowner producer and remote consumer
   nodes each have one additional fixed dispatch slot.
@@ -370,17 +372,18 @@ current connection, retry and deadline limits.
   an ingestor's `NO ACK` or an emitter's `NO ACK`.
 - Every Kafka client sets `bootstrap.servers`; `CREATE KAFKA CLIENT` refuses a client without it.
   Treat `TOPIC` as a literal, case-preserving Kafka topic name in both directions, and give every
-  `KAFKA TOPIC` ingestor `OFFSET BY DOMAIN` or `OFFSET BY CONSUMER GROUP '<group>'` and
-  `ON QUIESCE SUSPEND`.
+  `KAFKA TOPIC` ingestor `OFFSET BY DOMAIN` or
+  `OFFSET BY CONSUMER GROUP '<group>' START AT EARLIEST|LATEST` and `ON QUIESCE SUSPEND`.
 - For Kafka record metadata, nullable keys, tombstones and `TIMESTAMP AT metadata.timestamp`,
   follow `Ingestors` → `Kafka`; convert a binary key explicitly before using it as text.
-- Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
-  group may need records that already exist; Nervix passes the setting through and does not supply
-  a hidden default. Under `OFFSET BY DOMAIN` in an unpaced domain the same policy places a
-  partition that has no domain offset yet, such as one added to the topic.
-- A Kafka client never sets `allow.auto.create.topics`; `CREATE KAFKA CLIENT` refuses it. Provision each
-  topic a Kafka ingestor reads: an ingestor never creates its topic and reports it as missing until
-  it exists.
+- Choose `START AT` for what a new consumer group should do with the records a topic retains:
+  `EARLIEST` reads them and `LATEST` skips them. A partition the group holds an offset for ignores
+  it. `CREATE KAFKA CLIENT` refuses `auto.offset.reset`, and `OFFSET BY DOMAIN` takes no `START AT`:
+  in an unpaced domain a plain `START` reads what a partition retains and `START AT NOW` skips it.
+- For Kafka's reserved client keys and offline configuration checks, follow `Ingestors` → `Kafka`
+  and `Connector Capabilities` → `KAFKA client`. Provision both input and output topics explicitly:
+  consumers disable auto-creation, while a producer's metadata request can let the broker create
+  an output topic under its own policy. Offline validation establishes no broker availability.
 - Every Kafka client writes each librdkafka property under the Apache Kafka Java client's name,
   such as `bootstrap.servers`, `linger.ms`, `acks`, `retries`, `compression.type` and
   `delivery.timeout.ms`, and writes no `topic.` prefixed key other than librdkafka's own
@@ -458,6 +461,12 @@ current connection, retry and deadline limits.
   glob over channel names, and read `metadata.channel` and `metadata.pattern` to tell deliveries
   apart. Consult the Redis manual sections for the byte bounds, how a pattern matches, the
   metadata's nulls and unavailable header operations.
+- Choose Redis Pub/Sub only where losing and repeating messages is acceptable. Redis keeps nothing
+  for a subscription that is closed: a disconnect, an ownership handoff, a graceful shutdown and
+  intake that falls behind Redis's Pub/Sub output-buffer limit each lose what is published
+  meanwhile, and an emitter retries a `PUBLISH` answered later than the driver's 500 ms, which a
+  subscriber can then receive twice. The Redis sections of `Ingestors` and `Emitters` state each
+  window.
 - An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL` with `ON QUIESCE SUSPEND`. An emitter writes
   its request shape, `SEND SINGLE` or `SEND BATCH`, before `MODE ACK RETRY POLICY ...`. Treat
   `QUEUE` as a literal, case-preserving SQS name, and check `SQS CLIENT` keys against `Ingestors` →
@@ -530,6 +539,16 @@ current connection, retry and deadline limits.
   generators run once immediately; Prometheus first runs after one interval. Keep later work on
   the original schedule, coalesce missed periods without a catch-up burst, query Prometheus at the
   due instant, and use a fresh execution snapshot for returned data and generated routes.
+- An `HTTP REQUEST` ingestor sends its `METHOD` and `HEADERS` to its client's `endpoint` exactly as
+  written, path and query included, so declare one `HTTP CLIENT` for each polled resource; a client
+  an `HTTP REQUEST` emitter also uses must name an origin. Keep credentials in `secret.<name>` keys
+  read through `CLIENT SECRET`, never in a `HEADERS` literal. A status outside `2xx`, a redirect the
+  client does not follow, or a body above `MAX BODY SIZE` (`16MiB` when left out) fails the poll as
+  the ingestor's transient error, and the failed instant is not polled again; `204` delivers
+  nothing. A `gzip`, `deflate` or `br` response arrives decompressed and without its
+  `content-encoding` and `content-length` headers. Read `Ingestors` → `HTTP REQUEST` for the
+  request, responses, failures and the shared client keys, and `Emitters` → `HTTP client transport`
+  for redirects and proxies.
 - Every `PROMETHEUS CLIENT` sets `addr` to the API root, an `http` or `https` URL without a
   query string or fragment, and a positive `timeout_ms`. It sets no key beyond `tls_ca_file` and
   the paired `tls_cert_file` and `tls_key_file`; `CREATE PROMETHEUS CLIENT` refuses any other. It
@@ -552,8 +571,8 @@ current connection, retry and deadline limits.
 - Treat Kafka `NO ACK` emitter success as local librdkafka producer-queue admission. Even in
   `ATTACHED` mode, Nervix does not wait for a broker delivery receipt before completing its ACK
   share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces the
-  client's `delivery.timeout.ms` as the producer's delivery bound. The producer always reports every record, so `delivery.report.only.error` in a client's
-  `CONFIG` has no effect.
+  client's `delivery.timeout.ms` as the producer's delivery bound. The producer always requests
+  every delivery report; `CREATE KAFKA CLIENT` refuses `delivery.report.only.error` as Nervix-owned.
 - A `KAFKA TOPIC` emitter's `TIMESTAMP <expression>` is each record's Kafka create time: an exact,
   non-null, non-sensitive `DATETIME`, written as the millisecond that contains it. A time before
   `1970-01-01T00:00:00.001Z` rejects its record through `ON MESSAGE ERROR`. Read `Emitters` →

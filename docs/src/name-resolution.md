@@ -293,7 +293,7 @@ name again for every new connection it opens.
 | --- | --- | --- | --- |
 | Interconnect at startup: the node's own advertised endpoint, its bootstrap endpoint, and the recovered Raft members' endpoints | `PeerResolver`, which calls the resolver directly | The connection setup timeout, five seconds, for each lookup | [Where The Interconnect Resolves](./interconnect.md#where-the-interconnect-resolves) |
 | Interconnect: every pool connection to a discovered peer | `PeerResolver` inside each connection attempt | The attempt's five-second connection setup timeout | [Where The Interconnect Resolves](./interconnect.md#where-the-interconnect-resolves) |
-| HTTP polling and Prometheus sources, Sentry and OTEL HTTP emitters | Reqwest 0.13's `dns_resolver`, installed by the shared `HttpClientConfig`; it resolves the declared proxy's host instead of the service when an HTTP client declares a `proxy` | The client's `timeout_ms` for the whole request, and for HTTP polling for the redirects it follows too; required for HTTP polling, Prometheus and OTEL, otherwise the thirty-second hook budget when unset | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
+| HTTP polling and Prometheus sources, Sentry and OTEL HTTP emitters | Reqwest 0.13's `dns_resolver`, installed by the shared `HttpClientConfig`; it resolves the declared proxy's host instead of the service when an HTTP client declares a `proxy` | The client's `timeout_ms`, which each of these clients requires, for the whole request, and for HTTP polling for the redirects it follows too | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
 | Iceberg REST catalog and its OAuth token request | Reqwest 0.12's `dns_resolver` on the client given to `RestCatalogBuilder::with_client` | The thirty-second hook budget | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
 | Iceberg S3, GCS and Azure object storage and its credential providers | Reqwest 0.13's `dns_resolver` on the client the connector installs through OpenDAL's `HttpClientLayer`; one initialized operator survives table metadata refreshes | The storage client's `timeout_ms` bounds an operation or I/O call, DNS, connection and TLS included; without it, the thirty-second hook ceiling sits inside the operator's 60-second metadata/delete and 10-second read/write bounds | [DNS for HTTP and Iceberg](./connector-contract.md#dns-for-http-and-iceberg) |
 | HTTP request emitter | The connector resolves each request's target host itself, or its client's declared proxy's host | At most half of what is left of the attempt's one physical `timeout_ms` when each of its requests starts, whose rest bounds the address attempts, TLS, the proxy's tunnel and the request | [Request Preparation And Transport Ownership](./http-emitter-architecture.md#request-preparation-and-transport-ownership) |
@@ -432,7 +432,7 @@ Nervix selects each library's resolver deliberately. The locked versions and sel
 | Tonic | 0.13.1 | `connect_with_connector` over that `HttpConnector`, for native sessions |
 | Tonic, for OpenTelemetry | 0.14.6 | `connect_with_connector_lazy` over that `HttpConnector`, for OTEL gRPC emitters and the node's own trace exporter |
 | Lapin and `async-rs` | 4.12.0 and 0.8.12 | `hickory-dns` deliberately off: it resolves through one process-wide resolver built on first use from `/etc/resolv.conf`, which ignores the node's configuration and bounds and keeps name-server connections of the first Tokio runtime that used it. The connector hands Lapin an established transport through `Connection::connector` instead |
-| Redis | 1.7.1 | `AsyncConnectionConfig::set_dns_resolver` for pooled command connections; the Pub/Sub reader uses `parse_redis_value_async` on a stream the connector dialled itself |
+| Redis | 1.8.0 | `AsyncConnectionConfig::set_dns_resolver` for pooled command connections; the Pub/Sub reader uses `parse_redis_value_async` on a stream the connector dialled itself |
 | `rumqttc-next` | 0.34.0 | `MqttOptions::set_socket_connector` in place of the driver's `lookup_host` connector; its proxy and WebSocket transports are not selected |
 | MongoDB | 3.9.1 | The driver's `dns-resolver` feature is selected; Nervix admits explicit-seed `mongodb://` addresses and its pre-commit native parser performs no DNS lookup. Socket resolution remains under [Residual Resolution](#residual-resolution) |
 
@@ -654,7 +654,8 @@ Nervix does not guarantee:
   cache or bounds.
 - Authenticated or encrypted DNS.
 - That HTTP polling, Prometheus, Sentry, OTEL and Iceberg name the lookup failure in their
-  diagnostics.
+  diagnostics. HTTP polling names it today, among the transport causes it keeps beneath its
+  failure, but no scenario holds it to that.
 - That an established connection follows a changed answer before its owner ends it.
 
 ## Operator Diagnostics
@@ -683,7 +684,8 @@ describes.
 | Where | What shows the failure |
 | --- | --- |
 | RabbitMQ, Redis, MQTT, Syslog, WebSocket, ClickHouse and SQS, and the HTTP request emitter | `DESCRIBE INGESTOR` or `DESCRIBE EMITTER` shows the lookup failure on its `transient error:` line, with the host and the reason, such as `resolving 'rabbitmq.example.internal' failed: the name does not exist`. An SQS source looks its queue up when an instance resumes, and shows a lookup failure there on the same line |
-| HTTP polling, Prometheus, Sentry, OTEL and Iceberg | `DESCRIBE INGESTOR` or `DESCRIBE EMITTER` reports the failed request, export or catalog call, such as `OTEL gRPC export ended without an answer from the receiver`, without the lookup failure beneath it |
+| HTTP polling | `DESCRIBE INGESTOR` shows the failed request on its `transient error:` line, with the transport's causes beneath it and the lookup failure among them, such as `failed to read from http ingestor: failed to send HTTP ingestor request: error sending request: client error (Connect): dns error: error resolving DNS: resolving 'api.example.internal' failed: the name does not exist` |
+| Prometheus, Sentry, OTEL and Iceberg | `DESCRIBE INGESTOR` or `DESCRIBE EMITTER` reports the failed request, export or catalog call, such as `OTEL gRPC export ended without an answer from the receiver`, without the lookup failure beneath it |
 | The interconnect | `nervix_interconnect_connection_failures_total{reason="resolution"}` counts failed pool connection attempts by pool class, and each attempt is logged at `debug` as `interconnect pool connection failed` with the peer's node, endpoint, pool class and slot and an error reading `resolving <endpoint> failed: <reason>` |
 | Node startup | A recovered Raft member that does not resolve is logged at `warn` as `could not resolve a recovered Raft peer for gossip`; with recovered peer endpoints, an unresolved configured bootstrap host is logged at `warn` as `could not resolve the configured bootstrap host for gossip` and skipped. An own endpoint, or a bootstrap endpoint needed for first contact, fails startup as `failed to start cluster membership` |
 | The CLI | The command fails with `failed to connect to server` and prints its causes, the last of which is the lookup failure, such as `resolving 'nervix.example.internal' failed: the name does not exist` |

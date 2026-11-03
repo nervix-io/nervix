@@ -35,8 +35,13 @@ fence the archived union that holds it.
 Pulsar subscription generators draw both required owned creation positions, `EARLIEST` and
 `LATEST`, and provisioned subscriptions without a position. Statement generators mix typed
 `SET START AT` with shared ingestor operations. The Model, registry and consensus properties
-preserve those complete values. The `NERVIX MODEL NSE` registry signature and
-`raft_stream_emit_` consensus namespace identify this current Model layout before decoding.
+preserve those complete values.
+
+KAFKA TOPIC ingestor generators draw domain-owned offsets, with no position, and a consumer group
+with either required `START AT` position. Statement generators mix typed `SET START AT` with shared
+ingestor operations. The Model, registry and consensus properties preserve those complete values.
+The `NERVIX MODEL NSE` registry signature and `raft_stream_emit_` consensus namespace identify this
+current Model layout before decoding.
 
 MQTT TOPIC ingestor generators draw either session at QoS 0, 1 or 2 beside `NO ACK`, and the
 persistent session at QoS 1 or 2 beside an acknowledged mode, so every pairing the declaration
@@ -171,8 +176,9 @@ delegated configuration values through JSON/archive equality and public inspecti
 ## Client Configuration And Inspection
 
 `client-config-schema` includes omitted ClickHouse connection defaults, Redis command-pool
-lifetimes, Postgres pool keys and MQTT keep-alive and publish admission bounds, explicit typed TCP
-and pool intervals, lifetimes, checkout deadlines and borrow tests, and MQTT credentials whose
+lifetimes, Postgres pool and statement-deadline keys and MQTT keep-alive and publish admission
+bounds, explicit typed TCP and pool intervals, lifetimes, checkout deadlines and borrow tests,
+and MQTT credentials whose
 password public inspection redacts. `mqtt-client-config` separately converts every valid MQTT
 client configuration into its typed broker, transport, identity, credentials, keep-alive and
 admission bound. JSON and archive equality preserve the authored entries; the effective-default

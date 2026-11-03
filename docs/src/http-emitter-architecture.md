@@ -19,9 +19,9 @@ retains its qualification results.
 
 ## From Plexus to an active emitter
 
-The language parses `TO HTTP` and its ordered `METHOD`, `PATH`, `MODE ACK RETRY POLICY`, and body
-selection into semantic Models. The registry validates the complete candidate against the same
-domain's `HTTP CLIENT`, codec, exact expression types, available scopes, sensitivity, source
+The language parses the `HTTP REQUEST EMITTER` head and, after `TO <client>`, its ordered `METHOD`,
+`PATH`, `MODE ACK RETRY POLICY`, and body selection into semantic Models. The registry validates
+the complete candidate against the same domain's `HTTP CLIENT`, codec, exact expression types, available scopes, sensitivity, source
 branches, and error route. The decision layer lowers the validated model into a typed execution
 plan. A running data-plane task receives that plan; it does not read a Model or reparse Plexus.
 The server composes the HTTP connector with the emitter host. These conversions and their
@@ -30,11 +30,13 @@ installation boundary are described in [Execution Plans](./execution-plans.md).
 The emitter has one request/response mode, with an explicit retry policy and exactly one body choice:
 
 ```plexus,ignore
-TO HTTP <client>
-  METHOD <string_expression>
-  PATH <string_expression>
-  MODE ACK RETRY POLICY BACKOFF <duration> MAX <duration>
-  (ENCODE USING <codec> | WITHOUT BODY)
+CREATE HTTP REQUEST EMITTER <name>
+  FROM <relay>
+  TO <client>
+    METHOD <string_expression>
+    PATH <string_expression>
+    MODE ACK RETRY POLICY BACKOFF <duration> MAX <duration>
+    (ENCODE USING <codec> | WITHOUT BODY)
 ```
 
 `METHOD` and `PATH` are structured expressions, not client settings. HTTP `MODE ACK` has no ACK
@@ -300,7 +302,7 @@ the status line is `200`.
 | `200`–`299`, including `202` and `204` | Deliver exactly this source record when final headers are complete. `202` does not promise later endpoint processing. |
 | `408`, `425`, `429`, or `500`–`599` | Retain the request and all later work; retry after the host's wait. |
 | `401`, `403`, or `407` | Retain and retry, reporting an authentication or authorization infrastructure cause. |
-| Other `300`–`499`, or `101` | Reject only that record through `ON MESSAGE ERROR`, then continue after the policy completes. Redirect `Location` is never followed; `304` and `409` are not delivery. |
+| Other `300`–`499`, or `101` | Reject only that record through `ON MESSAGE ERROR`, then continue after the policy completes. A redirect the client does not follow is such a status, and its `Location` receives no request; `304` and `409` are not delivery. |
 | DNS, connection, TLS, send, timeout, malformed response, oversized head, or loss before complete final headers | Retain and retry as an infrastructure failure. |
 
 A delivered record leaves the pending set and is never included in a later local retry. A

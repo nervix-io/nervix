@@ -92,6 +92,16 @@ pub enum MqttTopicIngestorError {
     Subscribe,
     #[error("the MQTT broker refused the subscription")]
     SubscriptionRefused,
+    #[error(
+        "the {connector} broker granted QOS {granted} below requested QOS {requested}",
+        connector = ConnectorKind::Mqtt,
+        granted = granted.level(),
+        requested = requested.level()
+    )]
+    SubscriptionDowngraded {
+        requested: MqttQos,
+        granted: MqttQos,
+    },
     #[error("failed to receive an MQTT message")]
     Receive,
     #[error("the MQTT connection is closed")]
@@ -492,14 +502,15 @@ impl MqttTopicIngestorPlan {
         })
     }
 
-    /// Releases one retired input after the host stopped its execution. A clean connection also
-    /// clears a session left by an already-stopped or suspended ingestor, without restoring any
-    /// in-memory protocol state. Its ordinary connection budget bounds the entire cleanup.
+    /// Releases an instance's broker session when its input retires or its subscription was refused.
+    /// A clean connection clears a session left by a stopped or suspended ingestor, without
+    /// restoring in-memory protocol state. Its ordinary connection budget bounds the entire cleanup.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
-            lifecycle,
-            reason = "the host retires an obsolete input after its execution stopped"
+            recurring,
+            reason = "resume retries refused subscription cleanup and teardown releases stopped \
+                      input sessions"
         )
     )]
     pub async fn retire(
@@ -678,17 +689,28 @@ impl MqttTopicIngestorPlan {
                         })?;
                 }
                 Ok(Event::Incoming(Incoming::SubAck(suback))) => {
-                    let granted = suback.return_codes.iter().all(|code| {
-                        let SubscribeReasonCode::Success(_) = code else {
-                            return false;
+                    // One SUBSCRIBE requests exactly this one filter.
+                    let [SubscribeReasonCode::Success(granted)] = suback.return_codes.as_slice()
+                    else {
+                        return Err(Report::new(MqttTopicIngestorError::SubscriptionRefused)
+                            .attach_printable(format!("{suback:?}")));
+                    };
+                    if *granted < self.qos {
+                        let requested = match self.qos {
+                            QoS::AtMostOnce => MqttQos::Qos0,
+                            QoS::AtLeastOnce => MqttQos::Qos1,
+                            QoS::ExactlyOnce => MqttQos::Qos2,
                         };
-                        true
-                    });
-                    if granted {
-                        return Ok(());
+                        let granted = match granted {
+                            QoS::AtMostOnce => MqttQos::Qos0,
+                            QoS::AtLeastOnce => MqttQos::Qos1,
+                            QoS::ExactlyOnce => MqttQos::Qos2,
+                        };
+                        let refusal =
+                            MqttTopicIngestorError::SubscriptionDowngraded { requested, granted };
+                        return Err(Report::new(refusal));
                     }
-                    return Err(Report::new(MqttTopicIngestorError::SubscriptionRefused)
-                        .attach_printable(format!("{suback:?}")));
+                    return Ok(());
                 }
                 Ok(Event::Incoming(_) | Event::Outgoing(_) | Event::Auth(_)) => {}
                 Err(error) => {
@@ -766,12 +788,20 @@ enum Gathered {
     Cancelled,
 }
 
+/// One instance's connection phase. A refused grant cannot reuse its broker session until the
+/// existing retirement exchange has completed; dropping a running connection preserves no such debt.
+enum MqttSourceConnection {
+    Disconnected,
+    RetiringSubscription,
+    Running(Box<MqttConnection>),
+}
+
 /// One MQTT ingestor instance: its connection, absent while suspended or reconnecting, and the
 /// publishes the host rejected that it delivers again before reading its connection.
 pub struct MqttTopicIngestor {
     plan: MqttTopicIngestorPlan,
     instance_index: u64,
-    connection: Option<MqttConnection>,
+    connection: MqttSourceConnection,
     replay: VecDeque<Publish>,
 }
 
@@ -780,7 +810,9 @@ impl MqttTopicIngestor {
     /// rejected publish, whose packet identifiers belong to the session that ends here. A persistent
     /// session delivers them again on resume.
     fn disconnect(&mut self) {
-        self.connection = None;
+        if let MqttSourceConnection::Running(_) = &self.connection {
+            self.connection = MqttSourceConnection::Disconnected;
+        }
         self.replay.clear();
     }
 
@@ -889,13 +921,13 @@ impl IngestorConnector for MqttTopicIngestor {
         Ok(Self {
             plan: plan.clone(),
             instance_index,
-            connection: None,
+            connection: MqttSourceConnection::Disconnected,
             replay: VecDeque::new(),
         })
     }
 
     fn needs_resume(&mut self) -> bool {
-        self.connection.is_none()
+        !matches!(self.connection, MqttSourceConnection::Running(_))
     }
 
     /// Suspension disconnects while the broker retains a persistent session, so what arrives
@@ -910,15 +942,26 @@ impl IngestorConnector for MqttTopicIngestor {
             return Err(Report::new(conflict.clone())
                 .change_context(IngestorError::Resume { connector: MQTT }));
         }
-        if self.connection.is_none() {
+        if let MqttSourceConnection::RetiringSubscription = self.connection {
+            self.plan
+                .retire(self.instance_index)
+                .await
+                .change_context(IngestorError::Resume { connector: MQTT })?;
+            self.connection = MqttSourceConnection::Disconnected;
+        }
+        if let MqttSourceConnection::Disconnected = self.connection {
             let mut connection = self
                 .plan
                 .client(self.instance_index)
                 .change_context(IngestorError::Resume { connector: MQTT })?;
-            self.plan
-                .establish_subscription(&mut connection)
-                .await
-                .change_context(IngestorError::Resume { connector: MQTT })?;
+            if let Err(error) = self.plan.establish_subscription(&mut connection).await {
+                if let Some(MqttTopicIngestorError::SubscriptionDowngraded { .. }) =
+                    error.downcast_ref::<MqttTopicIngestorError>()
+                {
+                    self.connection = MqttSourceConnection::RetiringSubscription;
+                }
+                return Err(error.change_context(IngestorError::Resume { connector: MQTT }));
+            }
             let UnstartedConnection {
                 client,
                 eventloop,
@@ -932,14 +975,14 @@ impl IngestorConnector for MqttTopicIngestor {
             } else {
                 Some(keep_alive)
             };
-            self.connection = Some(MqttConnection::start(
+            self.connection = MqttSourceConnection::Running(Box::new(MqttConnection::start(
                 client,
                 eventloop,
                 self.plan.acknowledgement,
                 keep_alive,
                 admission,
                 self.plan.read_ahead_dropped.clone(),
-            ));
+            )));
         }
         Ok(IngestorResume::Ready)
     }
@@ -963,10 +1006,10 @@ impl BrokerIngestorConnector for MqttTopicIngestor {
         if let Some(messages) = self.replayed_batch(request.max_messages) {
             return Ok(IngestorBatch::Messages(messages));
         }
-        let Some(connection) = self.connection.as_mut() else {
+        let MqttSourceConnection::Running(connection) = &mut self.connection else {
             return Ok(IngestorBatch::ResumeRequired);
         };
-        match Self::read_batch(connection, request, cancellation).await {
+        match Self::read_batch(connection.as_mut(), request, cancellation).await {
             Ok(batch) => Ok(batch),
             Err(error) => {
                 // A read that loses its connection drops it, and with it every publish the read
@@ -985,7 +1028,7 @@ impl BrokerIngestorConnector for MqttTopicIngestor {
         let IngestorAcknowledgement::Manual { .. } = self.plan.acknowledgement else {
             return Ok(());
         };
-        let Some(connection) = self.connection.as_mut() else {
+        let MqttSourceConnection::Running(connection) = &mut self.connection else {
             return Err(Report::new(MqttTopicIngestorError::Disconnected)
                 .change_context(IngestorError::Acknowledge { connector: MQTT }));
         };
@@ -1005,9 +1048,9 @@ impl BrokerIngestorConnector for MqttTopicIngestor {
     /// A publish whose connection ended belongs to a session the broker delivers again once the
     /// ingestor resumes, and no other connection can reject it, so its rejection fails.
     async fn reject(&mut self, positions: &[Self::Position]) -> IngestorResult<()> {
-        let ended = match self.connection.as_ref() {
-            Some(connection) => connection.has_ended(),
-            None => true,
+        let ended = match &self.connection {
+            MqttSourceConnection::Running(connection) => connection.has_ended(),
+            MqttSourceConnection::Disconnected | MqttSourceConnection::RetiringSubscription => true,
         };
         if ended {
             self.disconnect();

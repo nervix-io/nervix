@@ -104,9 +104,8 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("word", "nx_word"),
 ];
 
-/// Placeholders that stand for a free-form expression region: the enclosing parser swallows tokens
-/// up to a boundary and reads them with the expression grammar, so completion inside them is not
-/// grammar-derived and the walker has to supply a body itself.
+/// Expression bodies and semantic references whose shortest complete continuation needs more
+/// than one name. The expression grammar owns each body; the walker supplies one complete unit.
 const FREE_FORM_FILLERS: &[(&str, &str)] = &[
     ("correlate_expression", "left.nx_field = right.nx_field"),
     ("default_assignments", "nx_field = 1"),
@@ -114,6 +113,9 @@ const FREE_FORM_FILLERS: &[(&str, &str)] = &[
     ("fifo_group_expression", "'nx_group'"),
     ("inherit_targets", "ALL"),
     ("invocations", "nx_udf()"),
+    ("ref:expression_invocation", "nx_udf()"),
+    ("ref:expression_target", "nx_out = 1"),
+    ("ref:expression_udf", "nx_udf()"),
     ("reorder_by", "input.nx_field"),
     ("routing_key_expression", "input.nx_field"),
     ("set_assignments", "nx_out = 1"),
@@ -223,10 +225,15 @@ impl Materializer {
             SuggestionClass::Keyword
             | SuggestionClass::Punctuation
             | SuggestionClass::StringLiteral => Ok(Materialized::verbatim(label)),
-            SuggestionClass::Reference => Ok(Materialized::verbatim(&synthetic_name(
-                label.trim_start_matches("ref:"),
-                occurrence,
-            ))),
+            SuggestionClass::Reference => {
+                if let Some(body) = self.free_form.get(label) {
+                    return Ok(Materialized::free_form(body));
+                }
+                Ok(Materialized::verbatim(&synthetic_name(
+                    label.trim_start_matches("ref:"),
+                    occurrence,
+                )))
+            }
             SuggestionClass::Placeholder => self.fill_placeholder(label, occurrence),
         }
     }

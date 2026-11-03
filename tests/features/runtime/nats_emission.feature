@@ -18,11 +18,11 @@ Feature: NATS emission
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}', 'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
         FROM kafka_ingress TOPIC 'stream_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'stream_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'stream_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -95,11 +95,11 @@ Feature: NATS emission
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RELAY rejections SCHEMA rejection UNBRANCHED;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}', 'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
         FROM kafka_ingress TOPIC 'outside_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'outside_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'outside_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -153,11 +153,11 @@ Feature: NATS emission
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}', 'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
         FROM kafka_ingress TOPIC 'lost_ack_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'lost_ack_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'lost_ack_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -637,12 +637,11 @@ Feature: NATS emission
       CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
         FROM kafka_ingress TOPIC 'jetstream_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'jetstream_boundary_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'jetstream_boundary_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec

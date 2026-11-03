@@ -35,7 +35,7 @@ direct-value sections. Nervix validates the entity's declared limits and exact m
 `CREATE` and `ALTER`; correct a refused declaration before starting the domain.
 For MQTT sources, read [Ingestors → MQTT](../../../docs/src/ingestors.md#mqtt) before promising
 delivery during downstream stalls; it distinguishes QoS 0 overflow, acknowledged capacity and
-the counters that expose each outcome.
+the counters that expose each outcome, and the refusal of a broker grant below the declared QoS.
 
 For NATS publication, choose `NATS SUBJECT EMITTER` with `MODE NO ACK` for Core NATS, or
 `NATS STREAM EMITTER` with a provisioned `STREAM`, a literal `SUBJECT` captured by that stream,
@@ -54,7 +54,9 @@ Ingestors section for the exact clause order, host admission and recovery limits
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and
-completion status messages.
+completion status messages. For connector expression completion, including filters, HTTP request
+expressions, ALTER constructions, metadata fields and entity-specific header functions, follow
+the CLI's Completion section.
 Read the Ingestors and Emitters chapters for `SHOW INGESTORS`, `SHOW EMITTERS`, and `DESCRIBE`;
 their inspection contracts distinguish effective options from canonical `SHOW CREATE` configuration.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
@@ -283,11 +285,19 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   whether polling is suspended or buffered; withholding work does not pause or re-anchor the
   cadence. Connector timeouts, retries, backoff, and cancellation remain physical.
 - For HTTP REQUEST polling, `metadata.polled_at` is the scheduled instant and `metadata.status`
-  is the successful HTTP status. A `204 No Content` response emits no row. `read_header` retains
-  non-ASCII UTF-8 values; invalid UTF-8 header values are omitted and counted in
-  `nervix_ingestor_header_values_dropped_total`. Read the
-  [HTTP REQUEST ingestor contract](../../../docs/src/ingestors.md#http-request) for its declaration
-  and header model.
+  is the successful HTTP status. A `204 No Content` response emits no row, and any other status
+  outside `2xx`, a redirect the client does not follow included, fails the poll; a failed instant
+  is not polled again. `read_header` retains non-ASCII UTF-8 values; invalid UTF-8 header values
+  are omitted and counted in `nervix_ingestor_header_values_dropped_total`. A `gzip`, `deflate` or
+  `br` response arrives decompressed, without its `content-encoding` and `content-length`
+  headers, and `MAX BODY SIZE` counts the decompressed body. Read the
+  [HTTP REQUEST ingestor contract](../../../docs/src/ingestors.md#http-request) for its
+  declaration, header model and failures.
+- For RABBITMQ QUEUE, `metadata.timestamp` reads the AMQP timestamp as whole seconds. A publisher
+  that writes milliseconds there sends an instant no `DATETIME` holds, so every message is refused
+  wherever a route or `TIMESTAMP AT` reads the field; check the producer's unit before choosing
+  `TIMESTAMP AT metadata.timestamp`. `metadata.exchange` is `''` for the default exchange. Read the
+  [RabbitMQ ingestor contract](../../../docs/src/ingestors.md#rabbitmq) for every field.
 - Treat domain execution time as one snapshot per accepted unit of work. Every expression in that
   unit uses the same instant, including filters, construction, keys, correlation and window
   programs, inferencer mappings, emitter `VALUES` and SQS FIFO groups, and subscription filters.
@@ -493,8 +503,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - For HTTP polling, keep a credential out of the statement: `SHOW CREATE` prints a `HEADERS` literal.
   Declare a `secret.<name>` key on the `HTTP` client and write
   `'authorization' = CLIENT SECRET 'secret.<name>'`; see
-  [HTTP REQUEST](../../../docs/src/ingestors.md#http-request). Change `METHOD`, `HEADERS` or
-  `MAX BODY SIZE` with `ALTER HTTP REQUEST INGESTOR … SET FROM <complete body>`.
+  [HTTP REQUEST](../../../docs/src/ingestors.md#http-polling-requests). Change `METHOD`, `HEADERS` or
+  `MAX BODY SIZE` with `ALTER HTTP REQUEST INGESTOR … SET FROM <complete body>`. A poll goes to the
+  client's `endpoint` exactly as written, path and query included, so declare one client for each
+  polled resource; a client an `HTTP REQUEST` emitter also uses must name an origin, and
+  [`HTTP CLIENT`](../../../docs/src/ingestors.md#http-client) lists the keys both directions share.
 - For an HTTP emitter, write `CREATE HTTP REQUEST EMITTER <name> FROM <relay> TO <client> METHOD <string_expression> PATH
   <string_expression> MODE ACK RETRY POLICY BACKOFF <duration> MAX <duration>` followed by exactly
   one of `ENCODE USING <codec>` or `WITHOUT BODY`. Do not add an ACK window, `ACK TIMEOUT`,
@@ -562,7 +575,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   TLS-file interface, certificate and key must be supplied together, and TLS files require
   `verify-full`. A `POSTGRES TABLE` names `'Orders'` or `'sales.Orders'`, each part sent with its
   case kept; `ON CONFLICT (...) DO UPDATE` needs a target and a mapped column outside it, and
-  `MAX SIZE` is at most `1073741822B`. Read
+  `MAX SIZE` is at most `1073741822B`. Keep its optional statement `timeout_ms` separate from
+  `pool_acquire_timeout_ms`; read their bounds and retry semantics in
   [Emitters → Postgres](../../../docs/src/emitters.md#postgres).
 - Give a `RABBITMQ` client an `amqp://` or `amqps://` `addr` that names a host and no port 0; Nervix
   refuses any other address before commit. Mounted `tls_ca_file`, `tls_cert_file` and

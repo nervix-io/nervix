@@ -13,7 +13,7 @@ use nervix_connector::{
     IngestorConnector, IngestorMessage, IngestorReadCancellation, IngestorResume,
     ParsedRetryPolicy,
 };
-use nervix_models::{ClientConfigEntry, KafkaTopicName};
+use nervix_models::{ClientConfigEntry, IngestStartPosition, KafkaTopicName};
 use nervix_primitives::time::timeout;
 use rdkafka::{
     config::ClientConfig,
@@ -53,14 +53,14 @@ pub(super) fn cluster() -> MockCluster<'static, DefaultProducerContext> {
     cluster
 }
 
-/// The plan of a ingestor in the test group, whose offsets `commit` commits.
+/// The plan of a ingestor in the test group declared `START AT EARLIEST`, whose offsets `commit`
+/// commits.
 pub(super) fn plan(
     cluster: &MockCluster<'static, DefaultProducerContext>,
     commit: KafkaGroupCommit,
 ) -> KafkaTopicIngestorPlan {
     let entries = [
         ("bootstrap.servers", cluster.bootstrap_servers()),
-        ("auto.offset.reset", "earliest".to_string()),
         ("auto.commit.interval.ms", DRIVER_CADENCE_MS.to_string()),
     ];
     let config = entries
@@ -77,6 +77,7 @@ pub(super) fn plan(
         offset_mode: KafkaTopicIngestorOffsetMode::ConsumerGroup {
             group_id: GROUP.to_string(),
             commit,
+            start_at: IngestStartPosition::Earliest,
         },
     }
 }

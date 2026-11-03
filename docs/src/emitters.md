@@ -304,7 +304,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Capability | Declaration |
 | --- | --- |
 | Reference | HTTP client |
-| Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |
+| Locator and validation rule | Not offered: The client's endpoint names the origin, and each record's PATH expression names its target beneath it; PATH is a request option rather than an external-name locator. |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `METHOD 'POST'` (expression); required<br>`PATH '/events'` (expression); required |
 | Headers | `write_header`; `sorted_by_name`, lowercase names: one value per name, the last one written for it; names in ascending byte order; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
@@ -327,16 +327,17 @@ See the [HTTP REQUEST capability and mirror reference](connector-capabilities.md
 the expression. `MODE ACK` has no acknowledgement window or `ACK TIMEOUT`, and `NO ACK` is not
 available. The ordinary route-local `FLUSH` clause is required.
 
-The referenced client must be a `HTTP CLIENT` in the same domain. Its `endpoint` is an
-`http://` or `https://` origin with a host and optional port, and no credentials, non-root path,
-query or fragment. It requires a positive, schedulable `timeout_ms`; the emitter's `METHOD` is its
-own expression. HTTPS retains certificate and hostname verification.
+The referenced client must be an `HTTP CLIENT` in the same domain, and
+[`HTTP CLIENT`](ingestors.md#http-client) describes every key it declares for polling and emitting
+alike. An emitter's client names an origin as its `endpoint`: an `http://` or `https://` URL with a
+host and optional port, and no credentials, path beyond `/`, query or fragment. It requires a
+positive, schedulable `timeout_ms`. HTTPS retains certificate and hostname verification.
 The optional `tls_cert_file` and `tls_key_file` settings must be supplied together, and mounted TLS
 files use the client's pinned resource version. The optional `follow_redirects` and `proxy`
 settings mean for the emitter what they mean for HTTP polling, as
 [HTTP client transport](#http-client-transport) describes. The client's `secret.<name>` keys are
-for [polling headers](ingestors.md#http-request) and the emitter sends none of them. Validation
-does not probe the destination.
+for [polling headers](ingestors.md#http-polling-requests) and the emitter sends none of them.
+Validation does not probe the destination.
 
 Method, path and `write_header` name and value expressions must each be exact, non-null `STRING`
 values. Request expressions read the original `input` and, with a codec, finalized `output` and
@@ -490,16 +491,18 @@ An `HTTP CLIENT` means the same transport for HTTP polling and for the HTTP emit
 HTTP through maintained implementations, Reqwest for polling and hyper for the emitter, over
 HTTP/2 when the endpoint's TLS negotiates it and HTTP/1.1 otherwise, and:
 
+- `timeout_ms` is the one deadline of a request and every redirect it follows. A poll's request
+  runs within it until the whole response body has been read, and an emitted request until its
+  final response headers are complete, as [HTTP requests](#http-requests) describes.
 - Without `follow_redirects`, or with `follow_redirects = false`, a redirect answer is the
   response: an emitted record is rejected with its status, and a poll fails with it.
 - With `follow_redirects = true`, a `301`, `302`, `307` or `308` answer, and a `303` answer to a
   `GET` or `HEAD`, whose one `Location` names the client's own origin, the same scheme, host and
   port, sends the same request there again: the same method, headers and body, never turning a
   `POST` into a `GET`. A relative `Location` is resolved against the request it answers, and its
-  fragment is dropped. One request follows at most 10 redirects, and every request of the chain
-  shares its one `timeout_ms`. A `Location` on another origin or carrying credentials, an answer
-  with no `Location` or with several, a `303` to any other method, which was handled where it was
-  sent, and the answer to the tenth repeat are the response.
+  fragment is dropped. One request follows at most 10 redirects. A `Location` on another origin or
+  carrying credentials, an answer with no `Location` or with several, a `303` to any other method,
+  which was handled where it was sent, and the answer to the tenth repeat are the response.
 - `proxy` names an `http` or `https` proxy that every request of the client goes through. The node
   resolves only the proxy's host; an `http` target is sent to the proxy in absolute form, and an
   `https` target tunnels through it with `CONNECT`, after which TLS still verifies the configured
@@ -1174,9 +1177,18 @@ CREATE [IF NOT EXISTS] <kind> CLIENT <name>
 
 Transport-specific expectations:
 
-- `KAFKA`: pass-through to librdkafka, except `allow.auto.create.topics`, which `CREATE KAFKA CLIENT` refuses. The emitter's producer keeps librdkafka's producer default, so a broker that allows auto-creation creates a missing topic on the first publish; provision topics explicitly. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and optional `'ssl.certificate.location'` plus `'ssl.key.location'`.
+- `KAFKA`: requires `bootstrap.servers` and accepts one name per librdkafka property, with the
+  Nervix-owned keys refused at `CREATE`; see [Kafka client configuration](ingestors.md#kafka).
+  Other keys pass through after offline name and value validation. The producer keeps
+  librdkafka's topic auto-creation default, so a broker that permits it can create a missing topic
+  during producer metadata discovery. Provision output topics explicitly. Typically set
+  `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and optional
+  `'ssl.certificate.location'` plus `'ssl.key.location'`.
 - `RABBITMQ`: use `amqps://...` in `addr`; Nervix honors `tls_ca_file` and presents `tls_cert_file` with `tls_key_file` as its client certificate; see [RabbitMQ](./ingestors.md#rabbitmq).
-- `REDIS`: use `rediss://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
+- `REDIS`: use `rediss://...` in `addr`; Nervix trusts the host's trust store, or only
+  `tls_ca_file` when it is set, and presents `tls_cert_file` with `tls_key_file` as its client
+  certificate. A plaintext `redis://` address reads none of the three files; see
+  [Redis Pub/Sub](#redis-pubsub).
 - `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`. A plaintext `mqtt://` address reads no TLS file, so `CREATE MQTT CLIENT` refuses all three with it.
 - `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
@@ -1280,7 +1292,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | records the producer queues under ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, holds back what fills it<br>records the producer queues under NO ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |
 | Network waits | a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, delivery.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT`<br>destroying a producer, for its polling thread and the reports of the records its purge failed: driver default, 100 ms poll, then a 500 ms flush |
-| Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>message.max.bytes 1000000<br>A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through ON MESSAGE ERROR.<br>A producer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes rust-rdkafka's 100 ms poll or 500 ms flush, and librdkafka then joins its threads, a broker thread still resolving a name included. |
+| Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. MODE ACK sets delivery.timeout.ms from ACK TIMEOUT.<br>message.max.bytes 1000000<br>A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through ON MESSAGE ERROR.<br>A producer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes rust-rdkafka's 100 ms poll or 500 ms flush, and librdkafka then joins its threads, a broker thread still resolving a name included. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-emit).
@@ -1338,10 +1350,11 @@ whose payload exceeds the entire `queue.buffering.max.kbytes` capacity is reject
 `ON MESSAGE ERROR`, with its payload size and the capacity in bytes. This queue capacity counts
 the payload alone; `message.max.bytes` separately bounds the encoded Kafka record.
 
-The producer keeps librdkafka's topic auto-creation default. A broker that permits it can therefore
-create a missing topic on the first publish, even though Nervix's consumers disable auto-creation
-and `CREATE KAFKA CLIENT` refuses `allow.auto.create.topics`. Provision output topics explicitly;
-the consumer's no-creation guarantee does not extend to the producer.
+The producer keeps librdkafka's topic auto-creation default. A broker that permits it can create a
+missing topic during producer metadata discovery, before the first record is written. Nervix's
+consumers disable auto-creation, and `CREATE KAFKA CLIENT` refuses `allow.auto.create.topics`.
+Provision output topics explicitly; the consumer's no-creation guarantee does not extend to the
+producer.
 
 When the emitter stops, it flushes what the producer still queues, in both modes and
 regardless of `linger.ms`: a `STOP`, an alteration or ownership move that replaces the emitter, and
@@ -1677,8 +1690,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the command pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
-| Network waits | checking out a connection, a new one's name resolution, connection, TLS and Redis setup included: `connect_timeout_ms`; 30s when omitted<br>the answer to a PUBLISH: driver default, 500 ms |
-| Driver limits | None declared. |
+| Network waits | checking out a connection, the PING that tests it and a new one's name resolution, connection, TLS and Redis setup included: `connect_timeout_ms`; 30s when omitted<br>the answer to the checkout's PING and to the PUBLISH: driver default, 500 ms |
+| Driver limits | A payload above the server's proto-max-bulk-len is rejected, and Redis then closes the connection that sent it. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
 
 See the [REDIS PUBSUB capability and mirror reference](connector-capabilities.md#redis-pubsub-emit).
@@ -1691,18 +1704,41 @@ carry application attributes. `BATCH` is optional; the emitter learns no additio
 from Redis, whose `proto-max-bulk-len` refusal follows the ordinary record-error policy.
 
 Redis Pub/Sub has no subscriber delivery acknowledgment. The awaited `PUBLISH` response confirms
-server acceptance only. A record-specific server rejection follows `ON MESSAGE ERROR`; connection
-failures retry the undelivered work. A `REDIS CLIENT` declares its connection-pool bounds; see
-[Database Client Connection Pools](database-client-pools.md).
-A publish checks a command connection out within the client's `connect_timeout_ms`. The client's
-`pool_idle_timeout_ms` and `pool_max_lifetime_ms`, 10 and 30 minutes by default, retire a command
-connection that sat idle or grew old; see
+server acceptance only.
+
+Nervix tells a rejected record from a failed publish by the text of Redis's error reply: a reply
+that contains `Protocol error: invalid bulk length` or `string exceeds maximum allowed size`
+rejects that record through `ON MESSAGE ERROR`. Redis answers a payload above its
+`proto-max-bulk-len` with the first and then closes the connection that sent it; the pool replaces
+that connection at its next checkout. Every other error reply, such as an ACL's `NOPERM` refusal,
+`OOM` or a replica's `READONLY`, and every connection failure fails the publish as transient: the
+emitter retries the undelivered records on its `RETRY POLICY` for as long as Redis keeps refusing
+them.
+
+A `REDIS CLIENT` declares its connection-pool bounds; see
+[Database Client Connection Pools](database-client-pools.md). Every publish checks a command
+connection out of the client's pool and returns it once Redis answers. The pool first tests the
+connection it hands over with a `PING`, so each publish takes two round trips; a connection that
+fails the test is closed, and the checkout takes another one or opens a new one. Checking out,
+that test and opening a new connection share the client's `connect_timeout_ms`, 30 seconds by
+default. Redis must answer each command on a command connection, the `PING` and the `PUBLISH`,
+within the driver's 500 ms, which no key changes. A `PUBLISH` answered later fails the publish as
+transient and is retried, although Redis may already have delivered it, so its subscribers can
+receive it twice.
+
+The client's `pool_idle_timeout_ms` and `pool_max_lifetime_ms`, 10 and 30 minutes by default,
+retire a command connection that sat idle or grew old; see
 [Connection lifetimes](database-client-pools.md#connection-lifetimes).
 Each physical pooled command connection resolves the `addr` hostname through the node's
 asynchronous DNS resolver when it opens. A replacement connection can use a changed DNS answer;
 an established connection stays open until Redis or the network closes it or the pool retires it.
-For `rediss://`, TLS still verifies the configured hostname and uses its configured CA and optional
-client identity.
+For `rediss://`, TLS still verifies the configured hostname. It trusts the host's trust store, or
+only the certificates in `tls_ca_file` when the client sets it, and presents `tls_cert_file` with
+`tls_key_file` as its client certificate; a plaintext `redis://` address reads none of these
+files. A command connection fails to open when part of the host's trust store cannot be read,
+where a Pub/Sub subscription logs a warning and continues. Neither connects with an address that
+carries the driver's `#insecure` fragment, although `CREATE REDIS CLIENT` accepts it; see
+[Redis Pub/Sub](ingestors.md#redis-pubsub).
 
 ### MQTT
 
@@ -2033,7 +2069,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
-| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
+| Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address, transport and optional verified TLS client subject; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | A batch is written as one frame within the frame limits below; general BATCH limits still apply. |
@@ -2874,9 +2910,9 @@ it to the column's declared type:
 | `DATETIME` | RFC 3339 timestamp text at UTC offset `+00:00` |
 | `ARRAY<T>`, `VEC<T>` | Recursive JSON text; `BYTES` elements are padded base64 and non-finite floats are `null` |
 
-A null binds as a `NULL` element. A mapping whose inferred type is none of these is refused at
-`CREATE`. A value the column's type cannot read from its text, such as `U64` above a `bigint`'s
-range, is a row Postgres rejects with its SQLSTATE.
+A typed null binds as a `NULL` element. A mapping without a supported concrete column type is
+refused at `CREATE` and `ALTER`; an untyped `NULL` cannot infer one. A value the column's type cannot
+read from its text, such as `U64` above a `bigint`'s range, is a row Postgres rejects with its SQLSTATE.
 
 Postgres emitters may include an insert conflict policy after `VALUES`:
 
@@ -2911,9 +2947,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
-| Network waits | a pool checkout: the wait for the pool, name resolution, connection, TLS, authentication and the borrow test: `pool_acquire_timeout_ms`; 30s when omitted<br>an insert and its metadata query: unbounded |
-| Driver limits | None declared. |
-| Stalled-peer checks | `STALLED PEER pool_acquire_timeout_ms` |
+| Network waits | a pool checkout: the wait for the pool, name resolution, connection, TLS, authentication and the borrow test: `pool_acquire_timeout_ms`; 30s when omitted<br>each catalog query and each insert: `timeout_ms`; unbounded when omitted<br>closing an interrupted query connection: driver default, SQLx close-on-drop timeout, 5 s |
+| Driver limits | timeout_ms accepts at most 2147483647 milliseconds, PostgreSQL's statement_timeout maximum.<br>Without timeout_ms, catalog queries and inserts have no Nervix response deadline. |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER pool_acquire_timeout_ms` |
 
 See the [POSTGRES TABLE capability and mirror reference](connector-capabilities.md#postgres-table-emit).
 <!-- connector-matrix:emit-postgres-table:end -->
@@ -2944,6 +2980,22 @@ CREATE POSTGRES CLIENT pg
     'addr' = 'postgresql://postgres:nervix@127.0.0.1:5432/postgres?sslmode=disable'
   };
 ```
+
+The optional client key `timeout_ms` bounds each catalog query and each INSERT separately. It is a
+positive whole number of milliseconds from `1` through `2147483647`, the maximum PostgreSQL accepts
+for `statement_timeout`; `CREATE CLIENT` refuses a value outside that range. Nervix sets that server
+option on every connection and also bounds the local wait for each query's response, so a peer
+that stops answering still ends the attempt. The key takes precedence over a `statement_timeout`
+in the URL's startup options, preserving its other driver options. Omitting the key sets no Nervix
+statement or response deadline.
+
+The independent `pool_acquire_timeout_ms` bounds checkout before a query starts. Each isolated
+row's INSERT gets its own statement bound; `timeout_ms` is not a deadline for the entire flush or
+its retries. A query timeout is a transient publish failure naming the key and its bound, and
+unresolved rows follow `RETRY POLICY`. After a local timeout the borrowed connection closes rather
+than returning a pending response to the idle pool; SQLx retains its pool permit through a graceful
+close of at most five seconds. A lost response does not prove an INSERT was not applied, so use a
+suitable idempotent conflict policy when retries must not duplicate rows.
 
 For TLS connections, use `sslmode=verify-full`, mount a TLS resource, and set `'tls_ca_file'` to the mounted CA path. `'tls_cert_file'` and `'tls_key_file'` supply a client identity and must be given together. TLS files require `sslmode=verify-full`.
 
@@ -3816,7 +3868,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; `NO ACK` retry after its channel or connection is lost before a write's round trip completes; either mode after a lost upstream ACK or attached sibling failure | Without `MANDATORY`, a message no binding routes is dropped by the broker and its record reported delivered; `NO ACK` can lose a record after the broker's channel has taken it; queue durability and message persistence remain broker policy | None |
 | SQS | Retry after an ambiguous `SendMessage` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; SQS retains its own at-least-once behavior | None |
 | MQTT | QoS 1 or 2 retry after an ambiguous handshake; any mode after a lost upstream ACK or attached sibling failure | QoS 0 can lose a record after client acceptance; later delivery follows the configured broker and session guarantees | None |
-| Redis Pub/Sub | Retry after Redis accepts `PUBLISH` but the Nervix ACK is lost, or after attached sibling failure | Any failure after detached relay acceptance; subscribers that are absent or disconnected miss the message | None |
+| Redis Pub/Sub | Retry after a `PUBLISH` whose answer missed the driver's 500 ms or was lost with its connection, which Redis may already have delivered; retry after Redis accepts `PUBLISH` but the Nervix ACK is lost, or after attached sibling failure | Any failure after detached relay acceptance; subscribers that are absent or disconnected miss the message | None |
 | ZeroMQ | Retry after socket send acceptance followed by lost ACK or attached sibling failure | Any failure after detached relay acceptance; socket send does not establish durable receiver storage | None |
 | Sentry | Retry after an ambiguous HTTP result, which sends the same envelope and `event_id` again; lost ACK; or attached sibling failure | Any failure after detached relay acceptance; an accepted event can still be subject to Sentry service policy | None |
 | OTEL | Retry after an ambiguous Export result, which resends the same request bytes; lost ACK; or attached sibling failure | Any failure after detached relay acceptance; `partial_success` acknowledges the whole request, so receiver-rejected records in that response are lost | None |

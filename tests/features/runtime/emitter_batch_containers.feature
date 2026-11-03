@@ -334,8 +334,7 @@ Feature: Emitter batch containers
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT kafka_main CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC EMITTER json_batches FROM events
         TO kafka_main TOPIC 'json_batches_{{test_id}}'
@@ -353,7 +352,7 @@ Feature: Emitter batch containers
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE KAFKA TOPIC INGESTOR json_batch_source
         FROM kafka_main TOPIC 'json_batches_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'nervix_cucumber_json_batches_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_json_batches_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING json_batch_codec
         TO echoed
@@ -365,7 +364,7 @@ Feature: Emitter batch containers
         ON GENERAL ERROR LOG;
       CREATE KAFKA TOPIC INGESTOR proto_batch_source
         FROM kafka_main TOPIC 'proto_batches_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'nervix_cucumber_proto_batches_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_proto_batches_{{test_id}}' START AT EARLIEST
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING proto_batch_reader
         TO echoed

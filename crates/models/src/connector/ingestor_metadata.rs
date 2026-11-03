@@ -27,17 +27,18 @@ use meticulous::ResultExt as _;
 use crate::{FieldName, ParseAsType, SchemaField};
 
 /// The exact type of one metadata field: a scalar the connector hands the host straight from its
-/// message.
+/// message, of the width and signedness its transport writes, never a wider or narrower one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IngestorMetadataType {
     String,
     Bytes,
     Bool,
+    U8,
     U16,
     U32,
-    U64,
     I32,
     I64,
+    U64,
     Datetime,
 }
 
@@ -48,11 +49,12 @@ impl IngestorMetadataType {
             Self::String => ParseAsType::String,
             Self::Bytes => ParseAsType::Bytes,
             Self::Bool => ParseAsType::Bool,
+            Self::U8 => ParseAsType::U8,
             Self::U16 => ParseAsType::U16,
             Self::U32 => ParseAsType::U32,
-            Self::U64 => ParseAsType::U64,
             Self::I32 => ParseAsType::I32,
             Self::I64 => ParseAsType::I64,
+            Self::U64 => ParseAsType::U64,
             Self::Datetime => ParseAsType::Datetime,
         }
     }
@@ -215,11 +217,12 @@ mod tests {
             (IngestorMetadataType::String, "STRING"),
             (IngestorMetadataType::Bytes, "BYTES"),
             (IngestorMetadataType::Bool, "BOOL"),
+            (IngestorMetadataType::U8, "U8"),
             (IngestorMetadataType::U16, "U16"),
             (IngestorMetadataType::U32, "U32"),
-            (IngestorMetadataType::U64, "U64"),
             (IngestorMetadataType::I32, "I32"),
             (IngestorMetadataType::I64, "I64"),
+            (IngestorMetadataType::U64, "U64"),
             (IngestorMetadataType::Datetime, "DATETIME"),
         ] {
             assert_eq!(ty.to_string(), expected);

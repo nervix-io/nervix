@@ -12,7 +12,7 @@ Feature: Schema type strictness
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
-        FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'strict_types' MODE NO ACK
+        FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'strict_types' START AT LATEST MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL

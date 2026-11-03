@@ -256,8 +256,8 @@ fn create_if_not_exists_completion_suggests_compound_keyword_without_leakage() {
 
 #[test]
 fn ingestor_mode_context_suggestions_do_not_leak_schema_keywords() {
-    let input =
-        "CREATE KAFKA TOPIC INGESTOR i FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' MODE ";
+    let input = "CREATE KAFKA TOPIC INGESTOR i FROM t TOPIC 'top' OFFSET BY CONSUMER GROUP 'g' \
+                 START AT LATEST MODE ";
     let suggestions = suggest_statement(input, input.len());
     assert!(suggestions.contains(&"ACK".to_string()));
     assert!(suggestions.contains(&"NO ACK".to_string()));
@@ -503,14 +503,12 @@ fn tolerant_conversion_body_does_not_change_route_completion_context() {
         suggest_statement(converted, converted.len())
     );
 
-    let unfinished_conditional =
-        "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET result = CASE WHEN ";
     let unfinished_conversion = "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET \
                                  result = TRY_CAST(input.raw AS ";
     assert_eq!(
-        suggest_statement(unfinished_conditional, unfinished_conditional.len()),
         suggest_statement(unfinished_conversion, unfinished_conversion.len()),
-        "an unfinished conversion offers what any unfinished expression offers"
+        Vec::<String>::new(),
+        "a conversion's type position is not an expression operand"
     );
 }
 
@@ -1512,7 +1510,7 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
                 FROM
                     kafka_main
                     TOPIC 'notifications'
-                    OFFSET BY CONSUMER GROUP 'nervix_consumer'
+                    OFFSET BY CONSUMER GROUP 'nervix_consumer' START AT LATEST
                     MODE ACK PARALLEL MAX 10 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
                 ON QUIESCE SUSPEND DECODE USING notification_kafka_message
                 TO notifications

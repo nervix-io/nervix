@@ -6,7 +6,7 @@
 //! - **Owns.** The earliest rejected record of each partition no commit has passed yet, and the
 //!   consumer context that starts each such partition at that record whenever the group assigns
 //!   it, so a reassignment never resumes it from a committed offset past an unacknowledged record
-//!   or from where the client's reset policy starts a partition without one.
+//!   or from where `START AT` places a partition without one.
 //! - **Depends on.** `rust-rdkafka`'s client and consumer contexts, its assignment calls and
 //!   topic partition lists, and the boundary's thread-blocking lock.
 //! - **Must not know.** The host, domain-owned offsets, how a commit reaches its coordinator, or
@@ -47,7 +47,7 @@ struct RejectedPartition {
 /// The earliest rejected record of each partition whose rejection no commit has passed yet.
 ///
 /// A consumer group resumes a partition it assigns from the group's committed offset, or, when the
-/// group committed none, from where the client's `auto.offset.reset` starts a partition. Neither is
+/// group committed none, from where its `START AT` places a partition. Neither is
 /// at a rejected record once the seek that rewound the partition is lost, which happens whenever
 /// the group revokes the partition before its records are read again: after the ingestor leaves and
 /// rejoins the group, and after its group session lapses. A floor outlives every such loss, until

@@ -31,12 +31,11 @@ Feature: Replica catch-up of branch-keyed state
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}',
-        'auto.offset.reset' = 'earliest'
+        'bootstrap.servers' = '{{kafka_addr}}'
       };
       CREATE KAFKA TOPIC INGESTOR metric_source
         FROM kafka_ingress TOPIC 'wasm_catch_up_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'wasm_catch_up_group_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'wasm_catch_up_group_{{test_id}}' START AT EARLIEST
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING metric_codec
