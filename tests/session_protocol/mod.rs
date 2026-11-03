@@ -429,6 +429,41 @@ async fn then_active_session_is_ended_for_violating_protocol(world: &mut Scenari
     );
 }
 
+#[when("the node serving the active session is stopped")]
+async fn when_node_serving_active_session_is_stopped(world: &mut ScenarioWorld) {
+    let node = world
+        .active_session_node
+        .clone()
+        .verified("the step that opened the active session recorded the node serving it");
+    world
+        .cluster_mut()
+        .stop_node(&node)
+        .await
+        .unwrap_or_else(|error| panic!("node '{node}' did not stop: {error}"));
+}
+
+#[then("the active session ends because its node is shutting down")]
+async fn then_active_session_ends_because_its_node_is_shutting_down(world: &mut ScenarioWorld) {
+    let session = active_session(world);
+    let status = session
+        .wait_until_ended(SESSION_END_TIMEOUT)
+        .await
+        .unwrap_or_else(|error| panic!("the session did not end: {error}"));
+    let ending = session.ending().cloned();
+    assert_eq!(
+        ending,
+        Some(SessionEndReason::ServerShuttingDown),
+        "the session must be told that its node is shutting down; it ended with {ending:?} and \
+         {status:?}"
+    );
+    assert_eq!(
+        status.code(),
+        tonic::Code::Ok,
+        "the call must end after the session's ending rather than fail with its connection: \
+         {status:?}"
+    );
+}
+
 #[when(expr = "the active session sends {int} bytes that are not a frame")]
 async fn when_active_session_sends_garbage(world: &mut ScenarioWorld, length: usize) {
     let garbage = bytes::Bytes::from(vec![0x5a_u8; length]);
