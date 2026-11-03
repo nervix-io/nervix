@@ -6,7 +6,7 @@
 //! - **Depends on.** The wire contract's outcomes and the vocabulary's transaction state.
 //! - **Must not know.** How a request is sent, retried or redirected.
 
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 
 use meticulous::ResultExt as _;
 use nervix_client_wire::{
@@ -69,11 +69,15 @@ pub struct ResourceUploadOutcome {
     pub identity: ResourceUploadIdentity,
     /// The installed version, or the version assigned before a failure, when there is one.
     pub version: Option<NonZeroU64>,
-    /// Whether the installation happened now or was recovered from an earlier attempt with the
-    /// same identity, when the resource was installed.
+    /// Whether the call that answered installed the version, `Executed`, or found it already
+    /// recorded under the same identity, `Recovered`, when the resource was installed.
     pub origin: Option<OutcomeOrigin>,
     /// Why the server failed the upload, when it did.
     pub failure: Option<UploadFailure>,
+    /// How many calls the upload opened, the one that answered included. Every call carries the
+    /// same identity and archive, so with more than one call a `Recovered` version can be the one
+    /// an earlier call of this same upload installed, rather than an earlier upload's.
+    pub calls: NonZeroU32,
 }
 
 impl CommandOutcome {
@@ -140,13 +144,19 @@ impl CommandOutcome {
         outcome
     }
 
-    /// The outcome of an upload whose reply the client checked against the identity it sent.
-    pub(crate) fn from_upload(reply: UploadReply, identity: ResourceUploadIdentity) -> Self {
+    /// The outcome of an upload whose reply the client checked against the identity it sent,
+    /// answering the last of the `calls` the upload opened.
+    pub(crate) fn from_upload(
+        reply: UploadReply,
+        identity: ResourceUploadIdentity,
+        calls: NonZeroU32,
+    ) -> Self {
         let mut resource_upload = ResourceUploadOutcome {
             identity,
             version: None,
             origin: None,
             failure: None,
+            calls,
         };
         let disposition = match reply.disposition {
             UploadDisposition::Installed {

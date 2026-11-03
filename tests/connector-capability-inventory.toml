@@ -533,6 +533,64 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "metadata.content_type"
+entity = "MQTT TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_metadata.feature", scenario = "An MQTT ingestor reads the delivered packet's topic, flags and MQTT 5 properties as metadata" },
+]
+
+[[capability]]
+capability = "metadata.correlation_data"
+entity = "MQTT TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_metadata.feature", scenario = "An MQTT ingestor reads the delivered packet's topic, flags and MQTT 5 properties as metadata" },
+]
+
+[[capability]]
+capability = "metadata.duplicate"
+entity = "MQTT TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_metadata.feature", scenario = "An MQTT ingestor reads the delivered packet's topic, flags and MQTT 5 properties as metadata" },
+  { feature = "tests/features/runtime/mqtt_metadata.feature", scenario = "A publish the broker delivers again reads metadata.duplicate as true" },
+]
+
+[[capability]]
+capability = "metadata.message_expiry"
+entity = "MQTT TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_metadata.feature", scenario = "An MQTT ingestor reads the delivered packet's topic, flags and MQTT 5 properties as metadata" },
+]
+
+[[capability]]
+capability = "metadata.qos"
+entity = "MQTT TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_metadata.feature", scenario = "An MQTT ingestor reads the delivered packet's topic, flags and MQTT 5 properties as metadata" },
+]
+
+[[capability]]
+capability = "metadata.response_topic"
+entity = "MQTT TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_metadata.feature", scenario = "An MQTT ingestor reads the delivered packet's topic, flags and MQTT 5 properties as metadata" },
+]
+
+[[capability]]
+capability = "metadata.retain"
+entity = "MQTT TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_metadata.feature", scenario = "An MQTT ingestor reads the delivered packet's topic, flags and MQTT 5 properties as metadata" },
+]
+
+[[capability]]
+capability = "metadata.topic"
+entity = "MQTT TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_metadata.feature", scenario = "An MQTT ingestor reads the delivered packet's topic, flags and MQTT 5 properties as metadata" },
+  { feature = "tests/features/runtime/mqtt_metadata.feature", scenario = "A wildcard MQTT ingestor routes each publish by the topic it was delivered on" },
+]
+
+[[capability]]
 capability = "BATCH"
 entity = "MYSQL TABLE EMITTER"
 scenarios = [
@@ -1387,10 +1445,19 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "MODE ACK PARALLEL"
+entity = "SQS QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_ingestion.feature", scenario = "SQS ACK PARALLEL takes up to its MAX of messages into one batch and deletes them with batch requests" },
+  { feature = "tests/features/runtime/sqs_ingestion.feature", scenario = "An SQS message its ingestor rejects returns on its RETRY POLICY instead of the queue's visibility timeout" },
+]
+
+[[capability]]
 capability = "MODE ACK SEQUENTIAL"
 entity = "SQS QUEUE INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/sqs_ingestion.feature", scenario = "SQS ingestor delivers JSON payloads to a subscribed relay" },
+  { feature = "tests/features/runtime/sqs_ingestion.feature", scenario = "An SQS message its ingestor rejects returns on its RETRY POLICY instead of the queue's visibility timeout" },
 ]
 
 [[capability]]

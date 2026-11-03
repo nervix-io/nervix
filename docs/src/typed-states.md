@@ -54,6 +54,11 @@ required, validates it there, and passes the resulting typed value to the next l
 the registry, execution plans, runtime, clients, and diagnostics from assigning different meanings
 to the same raw value.
 
+Materialized relay inspection requires the payload schema and resolved branching from its
+captured schedule. Incomplete scheduled metadata is an inspection failure, never an empty
+sensitivity set. The prepared sensitivity governs local, stored and remote record rendering;
+the declared unbranched variant has no concrete key to render.
+
 A backup cut's active phase is a typed state. Its completed phase measurements are an ordered
 sequence of typed phases and durations; an empty sequence means the first phase is still active.
 These task-owned measurements are volatile diagnostics and do not enter stored configuration,
@@ -87,6 +92,11 @@ the driver's milliseconds. Kafka's external unavailable encoding is resolved at 
 an out-of-range present timestamp is a typed conversion failure. Missing binary keys are `None`,
 empty keys remain present empty bytes, and the null-payload tombstone flag preserves the distinction
 from a present empty payload when both lend an empty slice to a codec.
+
+An MQTT publish keeps a property its publisher left unset distinct from one it set empty: an unset
+content type, response topic, correlation data or message expiry is absent and reads as a typed
+null, while an empty string, empty bytes or a zero expiry remain values. Absence comes from the
+packet, never from an encoding of the value.
 
 A paced poll message carries a typed metadata variant. HTTP polling supplies its response status
 and scheduled poll instant in that variant, while sources with no integration fields carry the

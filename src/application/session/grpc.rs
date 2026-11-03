@@ -254,6 +254,12 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for Upload {
                 .await
                 .map_err(GrpcAuthenticationError::status)?;
             let reply = service.serve_upload(user, request.into_inner()).await?;
+            #[cfg(feature = "testing")]
+            if service.loses_installed_upload_reply(&reply) {
+                return Err(Status::unavailable(
+                    "the reply to an upload call that installed its version was lost",
+                ));
+            }
             match reply.encode(&limits) {
                 Ok(frame) => Ok(Response::new(frame)),
                 Err(error) => Err(Status::internal(format!(

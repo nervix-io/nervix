@@ -45,6 +45,13 @@ const report = (line: string): void => {
 const hex = (bytes: Uint8Array): string =>
   Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 
+/** The leader endpoint carried by a typed redirect, absent while no leader is known. */
+class LeaderRedirect extends Error {
+  constructor(readonly consoleUri: string | null) {
+    super('the server redirected the session to its leader');
+  }
+}
+
 /** One session: a WebSocket carrying one frame per binary message. */
 class Exchange {
   private nextId = 0n;
@@ -121,7 +128,16 @@ class Exchange {
     if (!buffer.__has_identifier('NXSM')) {
       throw new Error('a server frame lacks the NXSM identifier');
     }
-    return wire.ServerMessage.getRootAsServerMessage(buffer);
+    const message = wire.ServerMessage.getRootAsServerMessage(buffer);
+    if (message.bodyType() === wire.ServerBody.SessionEnding) {
+      const ending = member(message.body(new wire.SessionEnding()) as wire.SessionEnding | null);
+      if (ending.reasonType() === wire.SessionEndReason.LeaderRedirect) {
+        const redirect = member(ending.reason(new wire.LeaderRedirect()) as wire.LeaderRedirect | null);
+        throw new LeaderRedirect(redirect.leader()?.webConsoleUri() ?? null);
+      }
+      throw new Error(`the session ended with ${wire.SessionEndReason[ending.reasonType()]}`);
+    }
+    return message;
   }
 
   /** Sends one ClientMessage and returns the reply that carries its request identity. */
@@ -135,7 +151,11 @@ class Exchange {
     wire.ClientMessage.addRequestType(builder, kind);
     wire.ClientMessage.addRequest(builder, body);
     builder.finish(wire.ClientMessage.endClientMessage(builder), 'NXCM');
-    this.socket.send(builder.asUint8Array());
+    // A closing socket may already have queued its typed ending. Read that frame to learn why it
+    // ended before the close event becomes a transport failure.
+    if (this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send(builder.asUint8Array());
+    }
     for (;;) {
       const message = await this.receive();
       if (message.bodyType() !== wire.ServerBody.Reply) {
@@ -198,60 +218,65 @@ function leaderWebsocketUri(webConsoleUri: string): string {
 }
 
 class Probe {
-  commands: Exchange;
-
-  constructor(readonly home: Exchange) {
-    this.commands = home;
-  }
+  constructor(public exchange: Exchange) {}
 
   /**
    * Runs one statement, following leader redirects with the same execution reference. An outcome
    * the server could not settle is a failure of the probe, never a success.
    */
-  async command(query: string): Promise<wire.CommandOutcome> {
-    const reference = crypto.randomUUID();
+  async command(query: string, reference = crypto.randomUUID()): Promise<wire.CommandOutcome> {
+    const attempts: string[] = [];
     for (let attempt = 0; attempt < 50; attempt += 1) {
-      const reply = await this.commands.request(wire.ClientRequest.CommandRequest, (builder) => {
-        const queryOffset = builder.createString(query);
-        const domain = builder.createString(target.domain);
-        const referenceOffset = builder.createString(reference);
-        wire.CommandRequest.startCommandRequest(builder);
-        wire.CommandRequest.addQuery(builder, queryOffset);
-        wire.CommandRequest.addDomain(builder, domain);
-        wire.CommandRequest.addExecutionReference(builder, referenceOffset);
-        return wire.CommandRequest.endCommandRequest(builder);
-      });
-      if (reply.bodyType() !== wire.ReplyBody.CommandOutcome) {
-        throw new Error(`a command was answered with ${wire.ReplyBody[reply.bodyType()]}`);
-      }
-      const outcome = member(reply.body(new wire.CommandOutcome()) as wire.CommandOutcome | null);
-      if (outcome.executionReference() !== reference) {
-        throw new Error('an outcome names another execution reference');
-      }
-      if (outcome.dispositionType() === wire.CommandDisposition.LeaderRedirect) {
-        const redirect = member(
-          outcome.disposition(new wire.LeaderRedirect()) as wire.LeaderRedirect | null,
-        );
-        const console = redirect.leader()?.webConsoleUri() ?? null;
-        if (console === null) {
-          // No leader is known yet, for example during an election.
+      attempts.push(reference);
+      try {
+        const reply = await this.exchange.request(wire.ClientRequest.CommandRequest, (builder) => {
+          const queryOffset = builder.createString(query);
+          const domain = builder.createString(target.domain);
+          const referenceOffset = builder.createString(reference);
+          wire.CommandRequest.startCommandRequest(builder);
+          wire.CommandRequest.addQuery(builder, queryOffset);
+          wire.CommandRequest.addDomain(builder, domain);
+          wire.CommandRequest.addExecutionReference(builder, referenceOffset);
+          return wire.CommandRequest.endCommandRequest(builder);
+        });
+        if (reply.bodyType() !== wire.ReplyBody.CommandOutcome) {
+          throw new Error(`a command was answered with ${wire.ReplyBody[reply.bodyType()]}`);
+        }
+        const outcome = member(reply.body(new wire.CommandOutcome()) as wire.CommandOutcome | null);
+        if (outcome.executionReference() !== reference) {
+          throw new Error('an outcome names another execution reference');
+        }
+        if (outcome.dispositionType() === wire.CommandDisposition.LeaderRedirect) {
+          const redirect = member(
+            outcome.disposition(new wire.LeaderRedirect()) as wire.LeaderRedirect | null,
+          );
+          throw new LeaderRedirect(redirect.leader()?.webConsoleUri() ?? null);
+        }
+        if (outcome.dispositionType() === wire.CommandDisposition.OutcomeUnknown) {
+          throw new Error("a command's outcome is unknown; the probe never reports it as settled");
+        }
+        if (!DISPOSITIONS.has(outcome.dispositionType())) {
+          throw new Error(`undeclared command disposition ${outcome.dispositionType()}`);
+        }
+        if (attempts.length > 1) {
+          report(`REDIRECT original=${attempts[0]} repeated=${attempts.at(-1)} outcome=${outcome.executionReference()}`);
+        }
+        return outcome;
+      } catch (error) {
+        if (!(error instanceof LeaderRedirect)) {
+          throw error;
+        }
+        let uri = target.websocketUri;
+        if (error.consoleUri === null) {
+          // A session ending has no reply; open another session after the election back-off.
           await new Promise((resolve) => setTimeout(resolve, 200));
-          continue;
+        } else {
+          uri = leaderWebsocketUri(error.consoleUri);
         }
-        const next = await Exchange.open(leaderWebsocketUri(console));
-        if (this.commands !== this.home) {
-          this.commands.close();
-        }
-        this.commands = next;
-        continue;
+        const next = await Exchange.open(uri);
+        this.exchange.close();
+        this.exchange = next;
       }
-      if (outcome.dispositionType() === wire.CommandDisposition.OutcomeUnknown) {
-        throw new Error("a command's outcome is unknown; the probe never reports it as settled");
-      }
-      if (!DISPOSITIONS.has(outcome.dispositionType())) {
-        throw new Error(`undeclared command disposition ${outcome.dispositionType()}`);
-      }
-      return outcome;
     }
     throw new Error('no leader accepted the command');
   }
@@ -423,9 +448,15 @@ function renderCells(
 }
 
 async function main(): Promise<void> {
-  const home = await Exchange.open(target.websocketUri);
-  const probe = new Probe(home);
+  const probe = new Probe(await Exchange.open(target.websocketUri));
 
+  const proof = await probe.command(
+    'CREATE SCHEMA redirect_proof (value U8);',
+    environment('NERVIX_PROBE_EXECUTION_REFERENCE'),
+  );
+  if (proof.dispositionType() !== wire.CommandDisposition.CommandCompleted) {
+    throw new Error(`the leader-only redirect proof failed: ${proof.message()}`);
+  }
   const operation = await probe.command(`SHOW CREATE RELAY ${target.relay};`);
   report(`OPERATION ${DISPOSITIONS.get(operation.dispositionType())}`);
 
@@ -441,6 +472,7 @@ async function main(): Promise<void> {
     `ERROR ${DISPOSITIONS.get(failed.dispositionType())} diagnostics=${failed.diagnosticsLength()} span=${span}`,
   );
 
+  const home = probe.exchange;
   const subscribe = (withType: boolean): Promise<wire.Reply> =>
     home.request(wire.ClientRequest.SubscribeRequest, (builder) => {
       const domain = builder.createString(target.domain);
@@ -581,9 +613,6 @@ async function main(): Promise<void> {
       break;
     default:
       throw new Error(`undeclared unsubscribe disposition ${closed.dispositionType()}`);
-  }
-  if (probe.commands !== home) {
-    probe.commands.close();
   }
   home.close();
   report('PASS');

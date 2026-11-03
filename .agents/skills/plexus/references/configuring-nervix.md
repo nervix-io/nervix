@@ -446,6 +446,9 @@ current connection, retry and deadline limits.
   retire; ordinary stop retains a persistent session. Read `Ingestors` → `MQTT` for identities,
   session lifetime, the separate raw-frame and admitted-publish bounds, oversized-payload counts
   and cleanup failures, and `Emitters` → `MQTT` for emitter identities.
+- For MQTT publish metadata, user properties through `read_header`, and what `metadata.retain` and
+  `metadata.message_expiry` can read, follow `Ingestors` → `MQTT`; convert
+  `metadata.correlation_data` explicitly before using it as text.
 - An `MQTT TOPIC` emitter writes its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, `NO ACK` only at
   `QOS 0` and `ACK` only at `QOS 1` or `QOS 2`. `SET MODE` stays within the written quality of
   service, and `SET TO` changes it. Read `Emitters` → `MQTT` for what each level completes on and
@@ -471,11 +474,12 @@ current connection, retry and deadline limits.
   meanwhile, and an emitter retries a `PUBLISH` answered later than the driver's 500 ms, which a
   subscriber can then receive twice. The Redis sections of `Ingestors` and `Emitters` state each
   window.
-- An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL` with `ON QUIESCE SUSPEND`. An emitter writes
-  its request shape, `SEND SINGLE` or `SEND BATCH`, before `MODE ACK RETRY POLICY ...`. Treat
-  `QUEUE` as a literal, case-preserving SQS name, and check `SQS CLIENT` keys against `Ingestors` →
-  `SQS`: `endpoint`, `region`, `access_key_id` and `secret_access_key` are required, and it
-  declares no proxy or client certificate keys. After `ENCODE USING`, an emitter may write
+- An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL`, or `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT
+  ...` with `n` at most 10, with `ON QUIESCE SUSPEND`. An emitter writes its request shape,
+  `SEND SINGLE` or `SEND BATCH`, before `MODE ACK RETRY POLICY ...`. Treat `QUEUE` as a literal,
+  case-preserving SQS name, and check `SQS CLIENT` keys against `Ingestors` → `SQS`: `endpoint`,
+  `region`, `access_key_id` and `secret_access_key` are required, and it declares no proxy or
+  client certificate keys. After `ENCODE USING`, an emitter may write
   `DELAY <whole seconds from 1s to 900s>` for a standard queue or `DEDUPLICATION ID <string_expression>`
   for a `.fifo` queue. Its `write_header` values may be `STRING`, an integer type or `BYTES`, sent
   as `String`, `Number` and `Binary` attributes; read `Emitters` → `SQS`.
@@ -641,7 +645,8 @@ Choose checks relevant to the configured graph:
 - `SHOW CREATE <kind> <name>;` confirms the stored canonical definition.
 - `DESCRIBE RELAY <relay>;` reports the relay owner and optional materialized-state replicas;
   `DESCRIBE RELAY <relay> WHERE (...);` is owner-authoritative for concrete branch state.
-- `SHOW RELAY <relay> MATERIALIZED STATE;` inspects materialized data and placement.
+- `SHOW RELAY <relay> MATERIALIZED STATE;` inspects materialized data and placement, masking
+  `SENSITIVE` payload fields and branch-key fields on both the owner and other nodes.
 - `DESCRIBE INGESTOR`, `DESCRIBE JUNCTION`, other processor-specific `DESCRIBE` commands, and
   `DESCRIBE EMITTER` inspect runtime state and edge metrics. `SHOW INGESTORS;` lists every ingestor
   with the connector and entity it reads (`from=<CONNECTOR> <ENTITY>`), its owner and state, and a
