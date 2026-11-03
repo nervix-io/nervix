@@ -522,12 +522,12 @@ General notes:
   `TIMESTAMP AT metadata.<field>` read; an ingestor that reads none visits no metadata values and
   builds no metadata columns
 - a message whose connector hands over a value its field's declared type cannot hold, such as a
-  `RABBITMQ QUEUE` AMQP timestamp after 2262-04-11, is refused once `FILTER WHERE` keeps it, wherever
-  a route or `TIMESTAMP AT` reads that field: every route's `ON MESSAGE ERROR` policy receives a
-  message error with code `validation` and operation `admit` that names `metadata.<field>` and
-  describes the value. The field never reads as null for it, and a field no program reads refuses
-  nothing. A `KAFKA TOPIC` record timestamp or an `SQS QUEUE` system attribute out of range fails
-  the read instead, as its reference states
+  `RABBITMQ QUEUE` AMQP timestamp after 2262-04-11 or a `KAFKA TOPIC` record timestamp before
+  1677-09-21 or after 2262-04-11, is refused once `FILTER WHERE` keeps it, wherever a route or
+  `TIMESTAMP AT` reads that field: every route's `ON MESSAGE ERROR` policy receives a message error
+  with code `validation` and operation `admit` that names `metadata.<field>` and describes the
+  value. The field never reads as null for it, and a field no program reads refuses nothing. An
+  `SQS QUEUE` system attribute out of range fails the read instead, as its reference states
 - supported sources expose transport headers through `read_header(name)` and `read_headers(name)`;
   header names may be any `STRING` expression, and these functions may be used in both top-level
   `FILTER WHERE` and per-route expressions
@@ -1300,8 +1300,17 @@ that instant exactly. The timestamp kind is `create_time` or `log_append_time`; 
 a timestamp has null timestamp and timestamp kind. `TIMESTAMP AT metadata.timestamp` uses that
 instant as the record's event time, while `TIMESTAMP NOW` uses the domain's execution time. An
 unavailable timestamp cannot satisfy `TIMESTAMP AT metadata.timestamp`; it never falls back to
-`NOW`. A present timestamp outside the signed Unix-nanosecond range fails the read with a typed
-conversion error.
+`NOW`. A present timestamp whose milliseconds name an instant before 1677-09-21 or after
+2262-04-11, which no `DATETIME` holds, such as microseconds a producer wrote where Kafka specifies
+milliseconds, keeps its record. Wherever a route or `TIMESTAMP AT` reads `metadata.timestamp`, the
+record is refused with a `validation` message error of operation `admit` that names the field and
+those milliseconds. Under an acknowledged mode, send each such route's `ON MESSAGE ERROR` to a
+relay: `LOG` negatively acknowledges the record, so the source reads it again before any later
+record. `metadata.timestamp_type` still reads its kind, and an ingestor that reads neither field
+ingests the record like any other. A topic whose `message.timestamp.after.max.ms` is shorter than
+such a timestamp's distance from the broker's clock refuses the record when it is produced, so it
+never reaches an ingestor; the setting's default in Kafka 3.9 is 9223372036854775807, which accepts
+it.
 
 A null Kafka value is a tombstone and reaches the codec as an empty payload with
 `metadata.tombstone = true`. An empty non-null value has `metadata.tombstone = false`. The codec

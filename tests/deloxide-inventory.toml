@@ -48,6 +48,16 @@ scenario = "Kafka broker event time makes historical windows due independently i
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "A real Kafka record whose CreateTime no DATETIME holds, between in-range neighbours, read under ACK SEQUENTIAL by ingestors that read metadata.timestamp in a route, through TIMESTAMP AT, only metadata.timestamp_type, or no metadata, on one and three nodes, through the source host's tracked ingestion, refusal and acknowledgement state. Driver polling and borrowed metadata visits are untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "scenario.kafka-record-timestamp-refusal"
+invariant = "A record whose timestamp no DATETIME holds is refused with a validation admit error naming metadata.timestamp exactly where a route or TIMESTAMP AT reads that field, is ingested with its timestamp kind everywhere else, and leaves its neighbours' ingestion unchanged."
+invocation = "scenarios"
+scenario = "A Kafka timestamp no DATETIME holds refuses its record only where metadata.timestamp is read"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Under scheduling stress: real-broker Kafka ingestion and ACK state in all three modes with every record metadata field read. Driver polling and borrowed metadata visits remain untracked."
 examples = 6
 feature = "tests/features/runtime/kafka_metadata.feature"
@@ -75,6 +85,16 @@ id = "stress.kafka-record-event-time"
 invariant = "TIMESTAMP AT metadata.timestamp uses the broker instant for each branch's duration window and preserves the row's fields."
 invocation = "stress-scenarios"
 scenario = "Kafka broker event time makes historical windows due independently in two branches"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a real Kafka record whose CreateTime no DATETIME holds, between in-range neighbours, read under ACK SEQUENTIAL by ingestors that read it in a route, through TIMESTAMP AT, only its kind, or no metadata, beside tracked ingestion, refusal and acknowledgement state. Driver polling and borrowed metadata visits remain untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "stress.kafka-record-timestamp-refusal"
+invariant = "A record whose timestamp no DATETIME holds is refused with a validation admit error naming metadata.timestamp exactly where a route or TIMESTAMP AT reads that field, is ingested with its timestamp kind everywhere else, and leaves its neighbours' ingestion unchanged."
+invocation = "stress-scenarios"
+scenario = "A Kafka timestamp no DATETIME holds refuses its record only where metadata.timestamp is read"
 selections = ["deloxide-stress"]
 
 [[workload]]
