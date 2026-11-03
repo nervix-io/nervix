@@ -430,24 +430,41 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "MODE QOS 0"
+capability = "MODE ACK"
+entity = "MQTT TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_emission.feature", scenario = "An attached MQTT <qos> emitter completes a record at <boundary>" },
+  { feature = "tests/features/runtime/mqtt_emission.feature", scenario = "An MQTT <qos> emitter sends again only the record its broker never answered" },
+]
+
+[[capability]]
+capability = "MODE NO ACK"
 entity = "MQTT TOPIC EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/emitter_batch_brokers.feature", scenario = "Every broker publishing mode carries one batch in one external message" },
+  { feature = "tests/features/runtime/mqtt_emission.feature", scenario = "An attached MQTT <qos> emitter completes a record at <boundary>" },
 ]
 
 [[capability]]
-capability = "MODE QOS 1 ACK"
+capability = "QOS 0"
 entity = "MQTT TOPIC EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/mqtt_emission.feature", scenario = "MQTT QoS 1 holds the input offset until PUBACK" },
+  { feature = "tests/features/runtime/mqtt_emission.feature", scenario = "An MQTT <qos> emitter in MODE <mode_name> publishes at that quality of service" },
 ]
 
 [[capability]]
-capability = "MODE QOS 2 ACK"
+capability = "QOS 1"
 entity = "MQTT TOPIC EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/mqtt_emission.feature", scenario = "An MQTT <mode> emitter sends again only the record its broker never answered" },
+  { feature = "tests/features/runtime/mqtt_emission.feature", scenario = "An MQTT <qos> emitter in MODE <mode_name> publishes at that quality of service" },
+]
+
+[[capability]]
+capability = "QOS 2"
+entity = "MQTT TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_emission.feature", scenario = "An MQTT <qos> emitter in MODE <mode_name> publishes at that quality of service" },
+  { feature = "tests/features/runtime/mqtt_emission.feature", scenario = "An attached MQTT QOS 2 emitter holds the input offset until PUBCOMP" },
 ]
 
 [[capability]]
@@ -785,6 +802,14 @@ capability = "STALLED PEER pool_acquire_timeout_ms"
 entity = "POSTGRES TABLE EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/stalled_peers.feature", scenario = "A Postgres emitter whose server never answers is reported within pool_acquire_timeout_ms" },
+]
+
+[[capability]]
+capability = "STALLED PEER timeout_ms"
+entity = "POSTGRES TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/postgres_timeouts.feature", scenario = "A Postgres emitter whose service stops answering is reported within timeout_ms on <nodes> nodes" },
+  { feature = "tests/features/runtime/postgres_timeouts.feature", scenario = "A Postgres insert blocked by a table lock times out and retries on <nodes> nodes" },
 ]
 
 [[capability]]
@@ -1406,6 +1431,24 @@ capability = "metadata.peer_addr"
 entity = "SYSLOG LISTENER INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/syslog_support.feature", scenario = "Syslog TCP intake accepts mixed RFC 6587 framing and exposes peer metadata" },
+]
+
+[[capability]]
+capability = "metadata.transport"
+entity = "SYSLOG LISTENER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "A Syslog UDP frame carries its transport and has no TLS peer" },
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "Syslog TCP frames carry their transport and have no TLS peer" },
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "A Syslog TLS frame exposes a peer only when the client certificate is verified" },
+]
+
+[[capability]]
+capability = "metadata.tls_peer"
+entity = "SYSLOG LISTENER INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "A Syslog UDP frame carries its transport and has no TLS peer" },
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "Syslog TCP frames carry their transport and have no TLS peer" },
+  { feature = "tests/features/runtime/syslog_metadata.feature", scenario = "A Syslog TLS frame exposes a peer only when the client certificate is verified" },
 ]
 
 [[capability]]

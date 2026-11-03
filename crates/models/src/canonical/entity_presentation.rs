@@ -621,7 +621,8 @@ impl EmitterEntity {
                 presentation.external_locator(entity.channel.as_str())
             }
             Self::Mqtt(MqttEmitter::Topic(entity)) => {
-                presentation.external_locator(entity.topic.as_str())
+                presentation.external_locator(entity.topic.as_str());
+                presentation.written_option("QOS", entity.qos.spelling().to_owned());
             }
             Self::Nats(NatsEmitter::Subject(entity)) => {
                 presentation.external_locator(entity.subject.as_str())

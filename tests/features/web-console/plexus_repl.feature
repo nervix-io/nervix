@@ -1,4 +1,35 @@
 Feature: Web console Plexus REPL
+  @connector_completion
+  Scenario Outline: Web console completes connector expressions from their declared scope
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".prompt-row" contains "{{domain}}"
+    When selector ".prompt-row input" is filled with "<prefix>"
+    Then selector ".suggestions" contains "<function>"
+
+    Examples:
+      | cluster_size | prefix                                                                                                                                                                             | function    |
+      | 1            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec FILTER WHERE read_                                                     | read_header |
+      | 1            | CREATE KAFKA TOPIC EMITTER e FROM incoming WHERE co                                                                                                                                | coalesce    |
+      | 1            | CREATE HTTP REQUEST EMITTER e FROM incoming TO client METHOD co                                                                                                                    | coalesce    |
+      | 1            | CREATE HTTP REQUEST EMITTER e FROM incoming TO client METHOD 'POST' PATH co                                                                                                        | coalesce    |
+      | 1            | ALTER HTTP ENDPOINT INGESTOR i ADD ROUTE TO outgoing SET value = read_                                                                                                             | read_header |
+      | 3            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec FILTER WHERE read_                                                     | read_header |
+      | 3            | CREATE KAFKA TOPIC EMITTER e FROM incoming WHERE co                                                                                                                                | coalesce    |
+      | 3            | CREATE HTTP REQUEST EMITTER e FROM incoming TO client METHOD co                                                                                                                    | coalesce    |
+      | 3            | CREATE HTTP REQUEST EMITTER e FROM incoming TO client METHOD 'POST' PATH co                                                                                                        | coalesce    |
+      | 3            | ALTER HTTP ENDPOINT INGESTOR i ADD ROUTE TO outgoing SET value = read_                                                                                                             | read_header |
+      | 1            | CREATE KAFKA TOPIC INGESTOR i FROM broker TOPIC 'events' OFFSET BY CONSUMER GROUP 'g' START AT EARLIEST MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec FILTER WHERE metadata.to | topic       |
+      | 1            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec FILTER WHERE coalesce(read_                                            | read_header |
+      | 3            | CREATE KAFKA TOPIC INGESTOR i FROM broker TOPIC 'events' OFFSET BY CONSUMER GROUP 'g' START AT EARLIEST MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec FILTER WHERE metadata.to | topic       |
+      | 3            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec FILTER WHERE coalesce(read_                                            | read_header |
+
   Scenario: Web console sends simple Plexus commands and renders responses
     Given a 3 node nervix cluster is started
     When the web console is opened on the leader node
@@ -346,6 +377,7 @@ Feature: Web console Plexus REPL
     When selector ".prompt-row input" is pressed with "Tab"
     Then selector ".prompt-row input" has value "SHOW CREATE"
 
+  @connector_completion
   Scenario: Web console completion replaces the word at the cursor and keeps the suffix
     Given a 1 node nervix cluster is started
     When the web console is opened on the leader node
@@ -414,6 +446,7 @@ Feature: Web console Plexus REPL
     Then selector ".suggestions" contains "value"
     And selector ".suggestions" does not contain "unrelated_field"
 
+  @connector_completion
   Scenario: Web console completes functions and scoped fields inside a route expression
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -436,6 +469,7 @@ Feature: Web console Plexus REPL
     Then selector ".suggestions" contains "value"
     And selector ".suggestions" does not contain "other_schema_field"
 
+  @connector_completion
   Scenario: Web console offers header functions only where the transport supports headers
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -445,7 +479,7 @@ Feature: Web console Plexus REPL
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
-    When selector ".prompt-row input" is filled with "CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_"
+    When selector ".prompt-row input" is filled with "CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec TO outgoing SET value = read_"
     Then selector ".suggestions" contains "read_header"
     And selector ".suggestions" contains "read_headers"
     When selector ".prompt-row input" is filled with "CREATE MQTT TOPIC INGESTOR source FROM broker TOPIC 'events' SESSION PERSISTENT QOS 1 MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_"

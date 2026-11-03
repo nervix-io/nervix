@@ -7,6 +7,7 @@
 //!   lifecycle operations.
 //! - **Depends on.** The connector ingestor contract and its client deadlines, connector-owned
 //!   Syslog configuration, execution-sensitive sockets, timers and channels, `memchr`, rustls,
+//!   X.509 client-subject inspection,
 //!   and a test-only accept fault channel supplied by the host.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
@@ -22,17 +23,17 @@
     )
 )]
 
-use std::{net::SocketAddr, num::NonZeroUsize};
+use std::num::NonZeroUsize;
 
 use async_trait::async_trait;
 use bytes::{BufMut as _, buf::Limit};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    BrokerIngestorConnector, ConfiguredDeadline, IngestMessageHeaders, IngestMessageMetadata,
-    IngestMetadataRow, IngestMetadataValues, IngestRowHeaders, IngestTransportPosition,
-    IngestorBatch, IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
-    IngestorReadCancellation, IngestorResult, IngestorResume, NoIngestHeaders,
+    BrokerIngestorConnector, ConfiguredDeadline, IngestMessageHeaders, IngestMetadataRow,
+    IngestRowHeaders, IngestTransportPosition, IngestorBatch, IngestorBatchRequest,
+    IngestorConnector, IngestorError, IngestorMessage, IngestorReadCancellation, IngestorResult,
+    IngestorResume, NoIngestHeaders,
 };
 use nervix_models::{ClientConfigEntry, SYSLOG_FRAME_LIMITS};
 use nervix_primitives::{
@@ -47,6 +48,9 @@ use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tracing::debug;
 
 use crate::config::{SyslogClientConfig, SyslogConfigError, SyslogDirection, SyslogProtocol};
+
+mod metadata;
+use metadata::SyslogPeer;
 
 #[cfg(feature = "testing")]
 mod listener_faults;
@@ -80,7 +84,7 @@ impl ConfiguredStreamAccept {
     async fn accept(
         &mut self,
         listener: &TcpListener,
-    ) -> error_stack::Result<(TcpStream, SocketAddr), SyslogListenerError> {
+    ) -> error_stack::Result<(TcpStream, std::net::SocketAddr), SyslogListenerError> {
         listener
             .accept()
             .await
@@ -153,16 +157,16 @@ impl ConnectionDeadlines {
 
 pub struct SyslogListenerIngestorMessage {
     payload: Vec<u8>,
-    peer_addr: SocketAddr,
+    peer: SyslogPeer,
     position: (),
     headers: NoIngestHeaders,
 }
 
 impl SyslogListenerIngestorMessage {
-    fn new(payload: Vec<u8>, peer_addr: SocketAddr) -> Self {
+    fn new(payload: Vec<u8>, peer: SyslogPeer) -> Self {
         Self {
             payload,
-            peer_addr,
+            peer,
             position: (),
             headers: NoIngestHeaders,
         }
@@ -186,26 +190,18 @@ impl IngestorMessage for SyslogListenerIngestorMessage {
 
     fn metadata(&self) -> IngestMetadataRow<'_> {
         IngestMetadataRow {
-            fields: self,
+            fields: &self.peer,
             headers: IngestRowHeaders::NONE,
             position: Some(IngestTransportPosition::Syslog {
-                peer: self.peer_addr,
+                peer: self.peer.address(),
             }),
         }
     }
 }
 
-/// The value of the metadata `SYSLOG LISTENER` declares: the peer the message arrived from, written
-/// in place rather than allocated per message.
-impl IngestMessageMetadata for SyslogListenerIngestorMessage {
-    fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
-        values.rendered(&self.peer_addr);
-    }
-}
-
 struct ReceivedSyslogFrame {
     payload: Vec<u8>,
-    peer_addr: SocketAddr,
+    peer: SyslogPeer,
 }
 
 /// What one receive took from a listener's transport.
@@ -275,6 +271,8 @@ enum SyslogConnectionError {
         #[source]
         source: std::io::Error,
     },
+    #[error("verified TLS client certificate subject cannot be decoded")]
+    TlsPeerCertificate,
     /// A wait of the connection ran out of the deadline a client key sets, which the frame beneath
     /// names: its TLS handshake, or its next bytes.
     #[error("connection ran out of its deadline")]
@@ -521,7 +519,7 @@ impl SyslogUdpListener {
         }
         Ok(SyslogReceived::Message(SyslogListenerIngestorMessage::new(
             self.datagram[..size].to_vec(),
-            peer_addr,
+            SyslogPeer::Udp(peer_addr),
         )))
     }
 }
@@ -558,9 +556,10 @@ impl SyslogStreamListener {
                         if let Some(acceptor) = connection_tls {
                             let stream =
                                 accept_tls(&acceptor, stream, deadlines.handshake).await?;
+                            let peer = SyslogPeer::verified_tls(peer_addr, stream.get_ref().1)?;
                             read_stream_connection(
                                 stream,
-                                peer_addr,
+                                peer,
                                 max_message_size,
                                 false,
                                 deadlines.idle,
@@ -571,7 +570,7 @@ impl SyslogStreamListener {
                         } else {
                             read_stream_connection(
                                 stream,
-                                peer_addr,
+                                SyslogPeer::Tcp(peer_addr),
                                 max_message_size,
                                 true,
                                 deadlines.idle,
@@ -588,7 +587,7 @@ impl SyslogStreamListener {
                     };
                     return Ok(SyslogReceived::Message(SyslogListenerIngestorMessage::new(
                         frame.payload,
-                        frame.peer_addr,
+                        frame.peer,
                     )));
                 }
                 joined = self.connections.join_next(), if !self.connections.is_empty() => {
@@ -632,7 +631,7 @@ async fn accept_tls(
 )]
 async fn read_stream_connection(
     mut stream: impl AsyncRead + Unpin,
-    peer_addr: SocketAddr,
+    peer: SyslogPeer,
     max_message_size: NonZeroUsize,
     allow_non_transparent: bool,
     idle: Option<ConfiguredDeadline>,
@@ -657,7 +656,7 @@ async fn read_stream_connection(
             if tx
                 .send(ReceivedSyslogFrame {
                     payload: frame,
-                    peer_addr,
+                    peer: peer.clone(),
                 })
                 .await
                 .is_err()

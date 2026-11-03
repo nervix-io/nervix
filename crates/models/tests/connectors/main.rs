@@ -394,7 +394,11 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
         },
         IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener) => IngestorDeclaration {
             headers: None,
-            metadata: &[("peer_addr", IngestorMetadataType::String)],
+            metadata: &[
+                ("peer_addr", IngestorMetadataType::String),
+                ("transport", IngestorMetadataType::String),
+                ("tls_peer", IngestorMetadataType::String),
+            ],
             every_node: true,
             reference: IngestorReferenceKind::Client(ConnectorKind::Syslog),
         },
@@ -712,9 +716,7 @@ fn emitter_declaration(kind: EmitterEntityKind) -> EmitterDeclaration {
         EmitterEntityKind::Redis(RedisEmitterEntity::PubSub)
         | EmitterEntityKind::ZeroMq(ZeroMqEmitterEntity::Push)
         | EmitterEntityKind::Syslog(SyslogEmitterEntity::Collector) => codec(None, &["NoAck"]),
-        EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => {
-            codec(None, &["MqttQos0", "MqttQos1", "MqttQos2"])
-        }
+        EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => codec(None, &["NoAck", "BrokerAck"]),
         EmitterEntityKind::Nats(NatsEmitterEntity::Subject) => codec(
             Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
             &["NoAck", "NatsJetStream"],
@@ -774,7 +776,7 @@ fn every_emitter_pair_declares_its_headers_codec_batching_and_publishing_modes()
         );
         for (name, mode) in publishing_modes() {
             assert_eq!(
-                declared.publishing_modes.contains(&mode),
+                declared.accepts_publishing_mode_kind(mode),
                 expected.modes.contains(&name.as_str()),
                 "{kind:?} {name}"
             );
@@ -818,11 +820,7 @@ fn an_emitter_states_what_its_pair_declares() {
                 entity.requires_batch_transformation(),
                 declared.requires_batch_transformation
             );
-            assert!(
-                declared
-                    .publishing_modes
-                    .contains(&entity.publishing().kind())
-            );
+            assert!(declared.accepts_publishing_mode_kind(entity.publishing().kind()));
             match entity.reference() {
                 EmitterReference::Client(EmitterClientReference { client, connector }) => {
                     assert_eq!(entity.client(), Some(client));

@@ -12,20 +12,7 @@ use syn::{
     visit::{self, Visit},
 };
 
-use super::{SourceError, SourceSite, arguments, fragment, test_only};
-
-/// Tooling and the four harness crates do not configure a running Nervix product.
-fn product(path: &str) -> bool {
-    !path.starts_with("tools/")
-        && ![
-            "crates/arbitrary/",
-            "crates/benchmark/",
-            "crates/model-harness/",
-            "crates/test-environment/",
-        ]
-        .iter()
-        .any(|prefix| path.starts_with(prefix))
-}
+use super::{SourceError, SourceSite, arguments, fragment, product, test_only};
 
 pub(super) fn scan(
     path: &str,

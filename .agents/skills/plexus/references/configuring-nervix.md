@@ -42,7 +42,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Emitter envelope clauses and `PROPERTIES`: timestamps, flags, delays, reply targets and message identities a transport carries beside each payload | `Emitters` → `Envelope clauses`, then `Connector Capabilities` |
 | MongoDB collection names and the lookup before each write, BSON field-name admission, native widths/date precision, conflict filters and upserts, write-concern outcomes, client URL configuration, the client database, paired TLS identity files, pool waits and driver deadlines | `Emitters` → `MongoDB`, `Database Client Connection Pools`, then `Connector Capabilities` |
 | MySQL table path parts, exact value bindings, duplicate-key actions, placeholder and packet limits, operation deadlines, TLS verification and identity file formats, URL lifetime settings and maintained pool minimums | `Emitters` → `MySQL`, `Database Client Connection Pools`, then `Connector Capabilities` → `MYSQL client` |
-| Postgres table path parts, conflict rules, the `sslmode` policy, TLS identity files, the checkout deadline, connection lifetimes and the borrow test | `Emitters` → `Postgres`, and `Database Client Connection Pools` |
+| Postgres table path parts, conflict rules, the `sslmode` policy, TLS identity files, statement versus checkout deadlines, connection lifetimes and the borrow test | `Emitters` → `Postgres`, and `Database Client Connection Pools` |
 | Sentry platform options, event defaults and limit, batch transformations, strict DSN/timeout configuration, the inherited HTTP transport, rejected versus retried statuses and retry hints | `Emitters` → `Sentry`, then `Connector Capabilities` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
@@ -214,7 +214,8 @@ current connection, retry and deadline limits.
   use only `MODE NO ACK` on a `SYSLOG LISTENER` ingestor and `NO ACK` on a syslog emitter,
   configure TLS identity for the client direction that consumes it, and set a key only one side
   reads, such as `framing` or `idle_timeout_ms`, only on a client that side uses; the SYSLOG
-  client reference in `Connector Capabilities` names those keys.
+  client reference in `Connector Capabilities` names those keys. Read `Common` → `Syslog` →
+  `Ingestor` for transport metadata and when a TLS connection exposes a verified client subject.
 - Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
   owner-buffer bound, not a per-branch or per-consumer bound; nonowner producer and remote consumer
   nodes each have one additional fixed dispatch slot.
@@ -379,9 +380,10 @@ current connection, retry and deadline limits.
   `EARLIEST` reads them and `LATEST` skips them. A partition the group holds an offset for ignores
   it. `CREATE KAFKA CLIENT` refuses `auto.offset.reset`, and `OFFSET BY DOMAIN` takes no `START AT`:
   in an unpaced domain a plain `START` reads what a partition retains and `START AT NOW` skips it.
-- A Kafka client never sets `allow.auto.create.topics`; `CREATE KAFKA CLIENT` refuses it. Provision each
-  topic a Kafka ingestor reads: an ingestor never creates its topic and reports it as missing until
-  it exists.
+- For Kafka's reserved client keys and offline configuration checks, follow `Ingestors` → `Kafka`
+  and `Connector Capabilities` → `KAFKA client`. Provision both input and output topics explicitly:
+  consumers disable auto-creation, while a producer's metadata request can let the broker create
+  an output topic under its own policy. Offline validation establishes no broker availability.
 - Every Kafka client writes each librdkafka property under the Apache Kafka Java client's name,
   such as `bootstrap.servers`, `linger.ms`, `acks`, `retries`, `compression.type` and
   `delivery.timeout.ms`, and writes no `topic.` prefixed key other than librdkafka's own
@@ -444,6 +446,10 @@ current connection, retry and deadline limits.
   retire; ordinary stop retains a persistent session. Read `Ingestors` → `MQTT` for identities,
   session lifetime, the separate raw-frame and admitted-publish bounds, oversized-payload counts
   and cleanup failures, and `Emitters` → `MQTT` for emitter identities.
+- An `MQTT TOPIC` emitter writes its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, `NO ACK` only at
+  `QOS 0` and `ACK` only at `QOS 1` or `QOS 2`. `SET MODE` stays within the written quality of
+  service, and `SET TO` changes it. Read `Emitters` → `MQTT` for what each level completes on and
+  for the persistent session a new client cannot take over.
 - An `MQTT CLIENT`'s `addr` is `mqtt://` or `mqtts://`, a host and a port, with no credentials,
   path or query: write `username` and `password` (redacted on inspection), `keep_alive_ms` in
   whole seconds and the source admission bound `max_packet_size` as their own keys, checked against
@@ -459,6 +465,12 @@ current connection, retry and deadline limits.
   glob over channel names, and read `metadata.channel` and `metadata.pattern` to tell deliveries
   apart. Consult the Redis manual sections for the byte bounds, how a pattern matches, the
   metadata's nulls and unavailable header operations.
+- Choose Redis Pub/Sub only where losing and repeating messages is acceptable. Redis keeps nothing
+  for a subscription that is closed: a disconnect, an ownership handoff, a graceful shutdown and
+  intake that falls behind Redis's Pub/Sub output-buffer limit each lose what is published
+  meanwhile, and an emitter retries a `PUBLISH` answered later than the driver's 500 ms, which a
+  subscriber can then receive twice. The Redis sections of `Ingestors` and `Emitters` state each
+  window.
 - An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL` with `ON QUIESCE SUSPEND`. An emitter writes
   its request shape, `SEND SINGLE` or `SEND BATCH`, before `MODE ACK RETRY POLICY ...`. Treat
   `QUEUE` as a literal, case-preserving SQS name, and check `SQS CLIENT` keys against `Ingestors` →
@@ -548,8 +560,8 @@ current connection, retry and deadline limits.
 - Treat Kafka `NO ACK` emitter success as local librdkafka producer-queue admission. Even in
   `ATTACHED` mode, Nervix does not wait for a broker delivery receipt before completing its ACK
   share. `ACK` waits for each record's delivery report, and its `ACK TIMEOUT` replaces the
-  client's `delivery.timeout.ms` as the producer's delivery bound. The producer always reports every record, so `delivery.report.only.error` in a client's
-  `CONFIG` has no effect.
+  client's `delivery.timeout.ms` as the producer's delivery bound. The producer always requests
+  every delivery report; `CREATE KAFKA CLIENT` refuses `delivery.report.only.error` as Nervix-owned.
 - A `KAFKA TOPIC` emitter's `TIMESTAMP <expression>` is each record's Kafka create time: an exact,
   non-null, non-sensitive `DATETIME`, written as the millisecond that contains it. A time before
   `1970-01-01T00:00:00.001Z` rejects its record through `ON MESSAGE ERROR`. Read `Emitters` →
@@ -740,7 +752,7 @@ Choose checks relevant to the configured graph:
   expiry outcomes.
 
 For a parse error, follow the reported expected token and compare clause order with the relevant
-public example. For an MQTT QoS or session-pairing refusal, use the underlined token and the
+public example. For an MQTT QoS, session or mode pairing refusal, use the underlined token and the
 connector's Ingestors or Emitters section to choose an accepted value or quiesce mode.
 For a validation error, trace exact types, declaration order, domain ownership,
 branch compatibility, construction completeness, and connector capabilities. For missing data,
