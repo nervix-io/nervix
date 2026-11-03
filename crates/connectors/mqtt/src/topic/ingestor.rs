@@ -798,8 +798,9 @@ enum Gathered {
     Cancelled,
 }
 
-/// One instance's connection phase. A refused grant cannot reuse its broker session until the
-/// existing retirement exchange has completed; dropping a running connection preserves no such debt.
+/// One instance's connection phase. A refused subscription or grant cannot reuse its broker session
+/// until the existing retirement exchange has completed; dropping a running connection preserves no
+/// such debt.
 enum MqttSourceConnection {
     Disconnected,
     RetiringSubscription,
@@ -965,8 +966,10 @@ impl IngestorConnector for MqttTopicIngestor {
                 .client(self.instance_index)
                 .change_context(IngestorError::Resume { connector: MQTT })?;
             if let Err(error) = self.plan.establish_subscription(&mut connection).await {
-                if let Some(MqttTopicIngestorError::SubscriptionDowngraded { .. }) =
-                    error.downcast_ref::<MqttTopicIngestorError>()
+                if let Some(
+                    MqttTopicIngestorError::SubscriptionRefused
+                    | MqttTopicIngestorError::SubscriptionDowngraded { .. },
+                ) = error.downcast_ref::<MqttTopicIngestorError>()
                 {
                     self.connection = MqttSourceConnection::RetiringSubscription;
                 }

@@ -109,6 +109,11 @@ impl ScriptedBroker {
         self.accept_answering(&[0x20, 0x03, 0x00, 0x00, 0x00]).await
     }
 
+    /// Resumes a persistent session, which can exist even after SUBACK refused its filter.
+    pub(crate) async fn accept_retained_session(&self) -> ScriptedConnection {
+        self.accept_answering(&[0x20, 0x03, 0x01, 0x00, 0x00]).await
+    }
+
     /// Accepts the client's connection and answers its CONNECT with a CONNACK that resumes no
     /// session and declares `maximum` as the largest packet the broker receives.
     pub(crate) async fn accept_declaring_packet_limit(&self, maximum: u32) -> ScriptedConnection {
@@ -203,13 +208,22 @@ impl ScriptedConnection {
 
     /// Reads the client's SUBSCRIBE and answers it with a SUBACK that grants the QoS `qos`.
     pub(crate) async fn grant_subscription_at(&mut self, qos: u8) {
+        self.answer_subscription(qos).await;
+    }
+
+    /// Refuses the requested filter with MQTT 5's Not Authorized reason code.
+    pub(crate) async fn refuse_subscription(&mut self) {
+        self.answer_subscription(0x87).await;
+    }
+
+    async fn answer_subscription(&mut self, reason: u8) {
         let (packet_type, body) = self.read_packet().await;
         assert_eq!(
             packet_type, SUBSCRIBE,
             "the client subscribes once connected"
         );
-        // SUBACK: the SUBSCRIBE's packet identifier, an empty property section, the granted QoS.
-        self.write(&[0x90, 0x04, body[0], body[1], 0, qos]).await;
+        // SUBACK: the SUBSCRIBE's packet identifier, an empty property section, and its reason.
+        self.write(&[0x90, 0x04, body[0], body[1], 0, reason]).await;
     }
 
     /// A QoS 1 PUBLISH to `events` under the packet identifier `packet_id`, carrying `payload`.
