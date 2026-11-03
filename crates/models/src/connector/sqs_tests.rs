@@ -52,7 +52,7 @@ fn queue_declarations_match_the_sequentially_acknowledged_transport() {
     // Every request is answered, so the emitter publishes in the shared request/response mode,
     // and its request shape is the SEND option.
     assert_eq!(
-        emit.publishing_modes,
+        emit.publishing_kinds(),
         &[EmitterPublishingModeKind::RequestAck]
     );
     assert_eq!(emit.body, EmitterBodyForm::Codec);
