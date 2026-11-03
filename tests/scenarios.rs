@@ -127,6 +127,7 @@ use crate::common::{
         ATTACHED_LINE, ClientProbe, OPENED_LINE, ProbeExercise, ProbeRuntime, ProbeTarget,
         SUBSCRIBED_LINE, corpus_report,
     },
+    client_wire_tls_cost::TransportCostServers,
     cluster::{
         AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, BrokerRecordTime, Cluster,
         CommandHold, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, HttpsPublishLoopOutcome,
@@ -659,6 +660,8 @@ struct ScenarioWorld {
     last_interconnect_attempt_error: Option<String>,
     server_process: Option<ServerProcess>,
     server_process_cluster: Option<ServerProcessCluster>,
+    /// The plaintext and TLS release servers the client-wire transport cost compares.
+    client_wire_transport_servers: Option<TransportCostServers>,
     /// The listeners whose ports another socket is to hold from the moment the next server process,
     /// or the bootstrap member of the next real-process cluster, draws them.
     server_process_held_ports: Option<StartupPorts>,
@@ -799,6 +802,10 @@ impl fmt::Debug for ScenarioWorld {
                 &self.last_interconnect_attempt_error,
             )
             .field("server_process", &self.server_process)
+            .field(
+                "client_wire_transport_servers",
+                &self.client_wire_transport_servers,
+            )
             .field("server_process_held_ports", &self.server_process_held_ports)
             .field("server_process_http_load", &self.server_process_http_load)
             .field("held_resource_upload", &self.held_resource_upload.is_some())
@@ -4602,14 +4609,33 @@ fn then_client_wire_baseline_artifact_exists(world: &mut ScenarioWorld) {
     );
 }
 
-#[when("the client-wire command transport cost is captured")]
-async fn when_client_wire_command_transport_cost_is_captured(world: &mut ScenarioWorld) {
-    let leader = current_leader_node(world).await;
-    let grpc_uri = world
-        .cluster()
-        .grpc_uri(&leader)
-        .expect("failed to resolve leader gRPC URI");
-    let artifact = crate::common::client_wire_tls_cost::capture(&grpc_uri, &world.domain)
+#[given(
+    "plaintext and TLS release nervix-server processes are started for the client-wire transport \
+     cost"
+)]
+async fn given_plaintext_and_tls_release_servers_are_started_for_client_wire_transport_cost(
+    world: &mut ScenarioWorld,
+) {
+    assert!(
+        world.client_wire_transport_servers.is_none(),
+        "a scenario starts one pair of transport cost servers"
+    );
+    let executable = std::env::var_os("NERVIX_CLIENT_WIRE_TLS_SERVER")
+        .verified("the client-wire TLS cost recipe supplies its release server executable");
+    initialize_scenario_identity(world);
+    let servers = TransportCostServers::start(PathBuf::from(executable))
+        .await
+        .unwrap_or_else(|error| panic!("{error:#}"));
+    world.client_wire_transport_servers = Some(servers);
+}
+
+#[when("the paired client-wire transport cost is captured")]
+async fn when_paired_client_wire_transport_cost_is_captured(world: &mut ScenarioWorld) {
+    let servers = world
+        .client_wire_transport_servers
+        .as_ref()
+        .verified("the preceding step started the transport cost servers");
+    let artifact = crate::common::client_wire_tls_cost::capture(servers)
         .await
         .unwrap_or_else(|error| panic!("client-wire transport cost failed: {error:#}"));
     world.placeholders.insert(
