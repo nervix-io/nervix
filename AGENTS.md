@@ -75,6 +75,43 @@ data still loads.
 The only permitted exceptions are an external contract where pass-through is the intentional public
 behavior, and a compatibility requirement the user states explicitly for the current change.
 
+## No Regressions
+
+A change never leaves Nervix worse than it found it. A regression is any property of the product
+that a change was not asked to change and leaves worse than before: behavior, correctness,
+guarantees, failure handling, performance, latency, resource use and its bounds, the number, size or
+layout of what the product writes, stores or sends, observability, or operability. A property counts
+whether it is public or internal, and whether or not a test, scenario, metric or document observes
+it.
+
+Knowingly introducing a regression is not allowed in any way. It is never a trade-off, a temporary
+state or a known limitation, and no justification makes it acceptable: not that the change is a
+port, refactor, move, extraction or migration; not that the contract, abstraction or design it
+targets cannot express the current behavior; not that the property is internal, minor, unobserved
+or outside the task's scope; and not that keeping it would make the change larger. Removing or
+changing behavior as the stated purpose of a change, under
+[Alpha Stability and Compatibility](#alpha-stability-and-compatibility), is not a regression. A
+degradation that only makes another goal easier to reach always is one, and no task description,
+epic plan or pull request can redefine it as a purpose.
+
+- A change that replaces a mechanism preserves every property of what it replaces, not only what
+  the existing tests assert. Passing tests prove only what they check. The change establishes the
+  rest, and its pull request names the properties it preserved beyond those tests and how it
+  verified them.
+- When the contract, abstraction or design a change targets cannot express what the current code
+  does, the change extends that target in the same change. It never gives up the property to fit
+  the target.
+- A regression a change introduces is fixed in that change before it lands. A task whose change
+  would deliver one is unfinished, however small the regression is.
+- A regression is never recorded instead of fixed. A leftover, follow-up task, known-limitation
+  note, code comment or documentation sentence that describes a degradation does not make it
+  acceptable; it only shows that it was known.
+- A regression that already exists is a defect, not a baseline. Work that meets one fixes it or
+  records it as a defect on ClickUp, and never builds on it, extends it or widens its effect.
+- When preserving one property appears to require degrading another, an agent does not choose
+  between them. It stops and reports the conflict to the human directing the session before it
+  writes the change.
+
 ## Architecture
 
 ### Language pipeline
@@ -645,7 +682,9 @@ Architecture debt is counted and only decreases. `just ratchet` owns the counts 
 baseline; see [Repository commands and documentation](#repository-commands-and-documentation).
 
 Mechanical moves and behavior changes never share a commit. A move-only commit is verified by the
-build and the existing tests, and nothing in it changes behavior.
+build and the existing tests, and nothing in it changes behavior. A port or migration that changes
+how code works preserves every property of what it replaces, including those no existing test
+observes; see [No Regressions](#no-regressions).
 
 ## Language and Model Invariants
 
