@@ -48,6 +48,16 @@ scenario = "Kafka broker event time makes historical windows due independently i
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "A real Kafka record whose CreateTime no DATETIME holds, between in-range neighbours, read under ACK SEQUENTIAL by ingestors that read metadata.timestamp in a route, through TIMESTAMP AT, only metadata.timestamp_type, or no metadata, on one and three nodes, through the source host's tracked ingestion, refusal and acknowledgement state. Driver polling and borrowed metadata visits are untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "scenario.kafka-record-timestamp-refusal"
+invariant = "A record whose timestamp no DATETIME holds is refused with a validation admit error naming metadata.timestamp exactly where a route or TIMESTAMP AT reads that field, is ingested with its timestamp kind everywhere else, and leaves its neighbours' ingestion unchanged."
+invocation = "scenarios"
+scenario = "A Kafka timestamp no DATETIME holds refuses its record only where metadata.timestamp is read"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Under scheduling stress: real-broker Kafka ingestion and ACK state in all three modes with every record metadata field read. Driver polling and borrowed metadata visits remain untracked."
 examples = 6
 feature = "tests/features/runtime/kafka_metadata.feature"
@@ -75,6 +85,116 @@ id = "stress.kafka-record-event-time"
 invariant = "TIMESTAMP AT metadata.timestamp uses the broker instant for each branch's duration window and preserves the row's fields."
 invocation = "stress-scenarios"
 scenario = "Kafka broker event time makes historical windows due independently in two branches"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a real Kafka record whose CreateTime no DATETIME holds, between in-range neighbours, read under ACK SEQUENTIAL by ingestors that read it in a route, through TIMESTAMP AT, only its kind, or no metadata, beside tracked ingestion, refusal and acknowledgement state. Driver polling and borrowed metadata visits remain untracked."
+examples = 2
+feature = "tests/features/runtime/kafka_metadata.feature"
+id = "stress.kafka-record-timestamp-refusal"
+invariant = "A record whose timestamp no DATETIME holds is refused with a validation admit error naming metadata.timestamp exactly where a route or TIMESTAMP AT reads that field, is ingested with its timestamp kind everywhere else, and leaves its neighbours' ingestion unchanged."
+invocation = "stress-scenarios"
+scenario = "A Kafka timestamp no DATETIME holds refuses its record only where metadata.timestamp is read"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "MQTT publishes through the real broker and the source host's tracked ingestion and ACK state, with every metadata field read in NO ACK and ACK SEQUENTIAL on one and three nodes. Driver polling and borrowed metadata visits are untracked."
+examples = 6
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "scenario.mqtt-publish-metadata"
+invariant = "Every delivered publish reads its own topic, flags and MQTT 5 properties, and a property its publisher left unset reads as null."
+invocation = "scenarios"
+scenario = "An MQTT ingestor reads the delivered packet's topic, flags and MQTT 5 properties as metadata"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Real wildcard deliveries routed by metadata.topic beside tracked ingestion state on one and three nodes. Driver polling and borrowed metadata visits are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "scenario.mqtt-publish-topic-routing"
+invariant = "A route over metadata.topic receives exactly the publishes delivered on its topic, under one wildcard filter."
+invocation = "scenarios"
+scenario = "A wildcard MQTT ingestor routes each publish by the topic it was delivered on"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Real MQTT 5 user properties read as headers beside tracked ingestion state on one and three nodes. Driver polling and borrowed header visits are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "scenario.mqtt-publish-user-properties"
+invariant = "read_header and read_headers find a publish's user properties in their written order with their repeats, and a name matches only its exact spelling."
+invocation = "scenarios"
+scenario = "An MQTT ingestor reads user properties as headers in the order the publisher wrote them"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A reset connection forces broker redelivery through the source host's tracked ACK, suspend and resume state on one and three nodes. Driver reconnection and network waits are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "scenario.mqtt-publish-redelivery"
+invariant = "A publish the broker delivers again after a lost connection reads metadata.duplicate as true, and its first delivery reads false."
+invocation = "scenarios"
+scenario = "A publish the broker delivers again reads metadata.duplicate as true"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "An ALTER held at its entity gate retains a publish in the source host's tracked quiesce state on one and three nodes, and its release replays it. Driver polling and retained metadata values are untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "scenario.mqtt-publish-quiesce-retention"
+invariant = "A publish a buffering quiesce retains reads its own metadata and user properties when the buffer replays it."
+invocation = "scenarios"
+scenario = "A publish a buffering quiesce retains keeps its metadata and user properties"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: real-broker MQTT ingestion and ACK state with every metadata field read. Driver polling and borrowed metadata visits remain untracked."
+examples = 6
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "stress.mqtt-publish-metadata"
+invariant = "Every delivered publish reads its own topic, flags and MQTT 5 properties, and a property its publisher left unset reads as null."
+invocation = "stress-scenarios"
+scenario = "An MQTT ingestor reads the delivered packet's topic, flags and MQTT 5 properties as metadata"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: wildcard deliveries routed by metadata.topic beside tracked ingestion state. Driver polling and borrowed metadata visits remain untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "stress.mqtt-publish-topic-routing"
+invariant = "A route over metadata.topic receives exactly the publishes delivered on its topic, under one wildcard filter."
+invocation = "stress-scenarios"
+scenario = "A wildcard MQTT ingestor routes each publish by the topic it was delivered on"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: real MQTT 5 user properties read as headers beside tracked ingestion state. Driver polling and borrowed header visits remain untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "stress.mqtt-publish-user-properties"
+invariant = "read_header and read_headers find a publish's user properties in their written order with their repeats, and a name matches only its exact spelling."
+invocation = "stress-scenarios"
+scenario = "An MQTT ingestor reads user properties as headers in the order the publisher wrote them"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a reset connection forces broker redelivery through tracked ACK, suspend and resume state. Driver reconnection and network waits remain untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "stress.mqtt-publish-redelivery"
+invariant = "A publish the broker delivers again after a lost connection reads metadata.duplicate as true, and its first delivery reads false."
+invocation = "stress-scenarios"
+scenario = "A publish the broker delivers again reads metadata.duplicate as true"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: an ALTER held at its entity gate retains and replays a publish through tracked quiesce state. Driver polling and retained metadata values remain untracked."
+examples = 2
+feature = "tests/features/runtime/mqtt_metadata.feature"
+id = "stress.mqtt-publish-quiesce-retention"
+invariant = "A publish a buffering quiesce retains reads its own metadata and user properties when the buffer replays it."
+invocation = "stress-scenarios"
+scenario = "A publish a buffering quiesce retains keeps its metadata and user properties"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -270,6 +390,7 @@ package = "nervix-scenarios"
 selections = ["deloxide", "deloxide-order"]
 tags = [
   "@kafka_record_metadata",
+  "@mqtt_metadata",
   "@pulsar_message_metadata",
   "@rabbitmq_metadata",
   "@restore_client_inspection",
@@ -335,6 +456,7 @@ tags = [
   "@forced_failover_delivery",
   "@mqtt_parallel_gather_at_quiesce",
   "@sqs_receive_at_quiesce",
+  "@sqs_parallel_batch",
   "@sqs_ingestor_receive_deadline",
   "@kept_ingestor_offsets",
   "@redis_subscription_backpressure",
@@ -3905,6 +4027,8 @@ workloads = [
 [[owner]]
 path = "src/runtime_ack.rs"
 workloads = [
+  "scenario.sqs-parallel-batch",
+  "stress.sqs-parallel-batch",
   "scenario.client-alter-drain",
   "scenario.shutdown-source-confirmation",
   "scenario.shutdown-source-confirmation-handoff",
@@ -4015,6 +4139,26 @@ id = "stress.sqs-receive-at-quiesce"
 invariant = "A receive in flight when its SQS ingestor quiesces completes, and its message with exact U32 receive_count and DATETIME sent_at reaches the relay without waiting for its visibility timeout, on one and three nodes."
 invocation = "stress-scenarios"
 scenario = "An SQS receive in flight when its ingestor quiesces delivers its message without waiting for the visibility timeout"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "An SQS ACK PARALLEL batch of ten messages that a stalled emitter holds in flight and that is then acknowledged as one batch, through public Plexus commands, including the tracked acknowledgement-tree locks the batch waits on. The SQS client, its receives, its batch deletions and the read's cancellation are outside the detector."
+examples = 2
+feature = "tests/features/runtime/sqs_ingestion.feature"
+id = "scenario.sqs-parallel-batch"
+invariant = "An SQS ACK PARALLEL MAX 10 ingestor holds ten messages in flight while their acknowledgements wait, and deletes them with batch requests once they are acknowledged, on one and three nodes."
+invocation = "scenarios"
+scenario = "SQS ACK PARALLEL takes up to its MAX of messages into one batch and deletes them with batch requests"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: an SQS ACK PARALLEL batch of ten messages that a stalled emitter holds in flight and that is then acknowledged as one batch, through public Plexus commands, including the tracked acknowledgement-tree locks the batch waits on. The SQS client, its receives, its batch deletions and the read's cancellation are outside the detector."
+examples = 2
+feature = "tests/features/runtime/sqs_ingestion.feature"
+id = "stress.sqs-parallel-batch"
+invariant = "An SQS ACK PARALLEL MAX 10 ingestor holds ten messages in flight while their acknowledgements wait, and deletes them with batch requests once they are acknowledged, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "SQS ACK PARALLEL takes up to its MAX of messages into one batch and deletes them with batch requests"
 selections = ["deloxide-stress"]
 
 [[workload]]

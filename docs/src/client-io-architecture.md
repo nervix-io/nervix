@@ -18,7 +18,7 @@ owners of their respective rules:
 | Source syntax, admission and source outcomes | [Ingestors](./ingestors.md#client-ingestors) |
 | Emitter syntax, construction, batching and graph ACK boundary | [Emitters](./emitters.md#client-emitters) |
 | Public attachments, subscriptions and clock observation | [Sessions](./sessions.md) |
-| Rust handles and shared binding | [Rust Client Library](./client-library.md#producers) and the [Client Implementation Manual](./client-implementation-manual.md#using-the-shared-binding) |
+| Rust handles and shared binding | [Rust Client Library](./client-library.md#producers) and the [Client Implementation Manual](./client-implementation-manual.md#using-the-shared-binding), with [its Python package rules](./client-implementation-manual.md#using-the-python-package) |
 | FlatBuffers, transport, correlation, cancellation and restoration | [Client Session Protocol](./client-session-protocol.md#producers) and the [Client Implementation Manual](./client-implementation-manual.md#producers) |
 | Model validation, typed revision construction and installation | [Execution Plans](./execution-plans.md) |
 | Native source/emitter composition and the common emitter host | [Connector Contract](./connector-contract.md#ingestor-boundary) |
@@ -334,9 +334,10 @@ the supported signatures, errors and examples.
 
 ### Shared C Binding And Buffer Lifetimes
 
-C, C++, Python, Java and Ruby hosts use the existing Rust binding through
-[`nervix_client.h`](https://github.com/nervix-io/nervix/blob/main/crates/client-ffi/include/nervix_client.h).
-It forwards to the same Rust handles and recovery owner. Its blocking calls belong on application
+C, C++, Java and Ruby hosts use the existing Rust binding through
+[`nervix_client.h`](https://github.com/nervix-io/nervix/blob/main/crates/client-ffi/include/nervix_client.h),
+and CPython hosts through its Python package, `nervix_client`. Both forward through the host session
+runtime to the same Rust handles and recovery owner. Its blocking calls belong on application
 threads, never a thread driving a Tokio runtime. Native data access is bulk column access or
 canonical IPC, without per-value language callbacks or row-map payloads.
 
@@ -368,6 +369,16 @@ the application's effect. [Manual B-12 through B-16](./client-implementation-man
 states these requirements, and the
 [conformance ledger](https://github.com/nervix-io/nervix/blob/main/tests/client-conformance-ledger.md)
 records the host probes and their limits.
+
+The Python package keeps the same contracts with Python's ownership. A `Batch`, `Delivery` or rows
+`Event` exports its stream or frame as a `memoryview` that keeps it alive, so no reference is
+retained or released by hand, and collecting a delivery settles nothing. Builder calls copy the
+host's buffers before returning. A `Batch` also exports itself through the Arrow PyCapsule
+interface, and `Producer.submit` imports Arrow data held to the producer's exact schema before
+anything is sent, so pyarrow and polars exchange batches without a copy and without converting
+types. Every wait releases the GIL; cancellation and deadlines behave as in the C ABI, and
+[Manual N-1 through N-5](./client-implementation-manual.md#using-the-python-package) state the
+host's requirements.
 
 ## Completion, Attempts And Replay
 
