@@ -1209,7 +1209,7 @@ ingestors and `HTTP REQUEST` emitters, and each key means the same for both:
 | `timeout_ms` | Yes | A positive whole number of milliseconds that bounds one request and the redirects it follows, as [Client Deadlines](#client-deadlines) defines. For a poll it covers name resolution, connection setup, TLS, the request and the whole response body, and for an emitted request everything up to its complete final response headers. |
 | `follow_redirects` | No | `true` follows a redirect to the client's own origin; `false`, or leaving the key out, makes a redirect the response. See [HTTP client transport](emitters.md#http-client-transport). |
 | `proxy` | No | An `http` or `https` URL with a host, naming the proxy that every request of the client goes through. User information in it is sent to the proxy alone, as `Basic` proxy credentials. |
-| `tls_ca_file` | No | A PEM certificate authority that HTTPS trusts in addition to the default roots: the platform's trust store for a poll, and the Mozilla roots Nervix ships together with the host's native roots for the emitter. |
+| `tls_ca_file` | No | PEM certificate authorities that HTTPS trusts in addition to the Mozilla roots Nervix ships and the host's native roots, for polling and emitting alike. |
 | `tls_cert_file`, `tls_key_file` | Together | The PEM certificate chain and private key the client presents to authenticate over HTTPS. |
 | `secret.<name>` | No | A confidential string the operator names after the `secret.` prefix. A polling header sends it through `CLIENT SECRET 'secret.<name>'`; an emitter sends none of them. |
 
@@ -2602,7 +2602,7 @@ Every key of a `PROMETHEUS CLIENT`'s `CONFIG` is Nervix's own:
 | --- | --- | --- |
 | `addr` | Yes | The root of the Prometheus HTTP API: an `http` or `https` URL with a host, whose path is the prefix the API is served under, such as `/monitoring` behind a reverse proxy. Each query is sent to `api/v1/query` beneath it, so the URL carries no query string and no fragment. |
 | `timeout_ms` | Yes | A positive whole number of milliseconds that bounds one query, as [Client Deadlines](#client-deadlines) defines. It covers name resolution, connection setup, TLS and the whole response. |
-| `tls_ca_file` | No | A PEM certificate authority that HTTPS trusts in addition to the platform's native roots. |
+| `tls_ca_file` | No | PEM certificate authorities that HTTPS trusts in addition to the Mozilla roots Nervix ships and the host's native roots. |
 | `tls_cert_file`, `tls_key_file` | Together | The PEM certificate chain and private key the client presents to authenticate over HTTPS. |
 
 `CREATE PROMETHEUS CLIENT` refuses a configuration that cannot configure a query source, and names the key:

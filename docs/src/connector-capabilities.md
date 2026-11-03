@@ -425,8 +425,8 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | BATCH | optional |  |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |  |
 | Batch transformation required | no |  |
-| Envelope | MANDATORY |  |
-| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Envelope | PERSISTENT<br>MANDATORY<br>TIMESTAMP occurred_at |  |
+| PROPERTIES keys and exact types | content_type: STRING<br>content_encoding: STRING<br>message_id: STRING<br>correlation_id: STRING<br>reply_to: STRING<br>expiration: STRING<br>priority: U8<br>type: STRING<br>app_id: STRING<br>user_id: STRING |  |
 | Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>messages the broker returns unrouted under MANDATORY, until the write that published them reads them: set by the messages of one write; when full, holds back what fills it |  |
 | Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open, confirm select and the queue check: `connect_timeout_ms`; 30s when omitted<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: `timeout_ms`; unbounded when omitted |  |
 | Driver limits | A frame above the negotiated frame_max ends the connection. |  |
@@ -446,8 +446,8 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | BATCH | optional |  |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |  |
 | Batch transformation required | no |  |
-| Envelope | MANDATORY |  |
-| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Envelope | PERSISTENT<br>MANDATORY<br>TIMESTAMP occurred_at |  |
+| PROPERTIES keys and exact types | content_type: STRING<br>content_encoding: STRING<br>message_id: STRING<br>correlation_id: STRING<br>reply_to: STRING<br>expiration: STRING<br>priority: U8<br>type: STRING<br>app_id: STRING<br>user_id: STRING |  |
 | Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>messages the broker returns unrouted under MANDATORY, until the write that published them reads them: set by the messages of one write; when full, holds back what fills it |  |
 | Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open, confirm select and the exchange check: `connect_timeout_ms`; 30s when omitted<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: `timeout_ms`; unbounded when omitted |  |
 | Driver limits | A frame above the negotiated frame_max ends the connection.<br>A routing key longer than the 255 bytes an AMQP short string carries is not sent; its record is rejected. |  |
@@ -714,7 +714,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |  |
-| Network waits | a pool checkout: the wait for the pool, name resolution, connection, TLS, authentication and the borrow test: `pool_acquire_timeout_ms`; 30s when omitted<br>each catalog query and each insert: `timeout_ms`; unbounded when omitted<br>closing an interrupted query connection: driver default, SQLx close-on-drop timeout, 5 s |  |
+| Network waits | a pool checkout: the wait for the pool, name resolution, connection, TLS, authentication and the borrow test: `pool_acquire_timeout_ms`; 30s when omitted<br>each catalog query and each insert: `timeout_ms`; unbounded when omitted<br>closing an interrupted query connection: driver default, SQLx close-on-drop timeout, 5 s<br>testing a connection returned to the pool, which keeps its place until the server answers: unbounded |  |
 | Driver limits | timeout_ms accepts at most 2147483647 milliseconds, PostgreSQL's statement_timeout maximum.<br>Without timeout_ms, catalog queries and inserts have no Nervix response deadline. |  |
 | Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER pool_acquire_timeout_ms` |  |
 

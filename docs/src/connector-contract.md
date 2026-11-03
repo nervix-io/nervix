@@ -349,7 +349,8 @@ each integration connects through it.
 
 Composition passes the resolver's handle into the HTTP polling and Prometheus source plans and into
 the HTTP request, Sentry, OTEL HTTP, and Iceberg emitter plans. The shared `HttpClientConfig` installs
-it on the Reqwest 0.13 clients of HTTP polling, Prometheus, Sentry and OTEL HTTP. The HTTP request
+it on the Reqwest 0.13 clients of HTTP polling, Prometheus, Sentry and OTEL HTTP. Their shared TLS
+trust and identity follow [HTTP client transport](#http-client-transport), as HTTP request emission does. The HTTP request
 emitter resolves each request's target host, or its client's declared proxy's host, itself, as its
 [request transport](#emitter-boundary) describes. Iceberg REST uses a separate Reqwest 0.12 client with that same resolver. Iceberg object
 storage uses OpenDAL 0.57 with a Reqwest 0.13 client that the connector builds with the node
@@ -404,6 +405,11 @@ one contract:
   names through the node resolver, never reads `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
   `NO_PROXY` or their lowercase forms, follows no redirect by itself, bounds each request by the
   client's `timeout_ms` where the client sets it, and presents the client's TLS trust and identity.
+  It obtains its preconfigured rustls client from `RustlsClientConfigProvider`, the same owner the
+  HTTP request emitter uses: bundled Mozilla roots plus native roots, with every certificate in
+  `tls_ca_file` added and the optional paired client certificate and key. An empty native store
+  does not prevent client construction. The HTTP builder advertises HTTP/2 and HTTP/1.1 through
+  ALPN; passing a preconfigured TLS client must not drop protocol negotiation.
   Reqwest's `gzip`, `deflate` and `brotli` features, which the OTEL connector selects and Cargo
   unifies across the server's build, make such a client ask for those encodings with
   `accept-encoding: gzip,deflate,br` unless its request writes that field, and decompress a
@@ -948,7 +954,7 @@ remain in their owning work records until that delivery.
 | Side | What the entity declares |
 | --- | --- |
 | Ingestor | Header reads, the typed metadata fields in their order, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits, and any alternative locators a body may write instead of it, each with its own keywords and name; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
-| Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which `KAFKA TOPIC` declares `TIMESTAMP`, `PULSAR TOPIC` declares `TIMESTAMP` and `DELIVER AFTER`, `SQS QUEUE` declares `DELAY` and `DEDUPLICATION ID`, the two RabbitMQ emitter entities declare `MANDATORY`, and no entity declares any other clause or key yet. |
+| Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which `KAFKA TOPIC` declares `TIMESTAMP`, `PULSAR TOPIC` declares `TIMESTAMP` and `DELIVER AFTER`, `SQS QUEUE` declares `DELAY` and `DEDUPLICATION ID`, the two RabbitMQ emitter entities declare `PERSISTENT`, `MANDATORY`, `TIMESTAMP` and their AMQP basic properties, and every entity refuses clauses and keys it does not declare. |
 | Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Every client declares its CONFIG key names, required or optional presence, value type, confidentiality, file role and Nervix or driver ownership, and which of its entities read each key: every ingestor and emitter that references the client, or only its ingestors or only its emitters. Only a client both sides reference declares a key for one side; a SYSLOG client does, and its connector takes the side a deadline key bounds a wait on from that declaration. The declaration explicitly names delegated property namespaces and reserved keys, the statement clause that sets a reserved key a statement owns, which its refusal names, and the other names its driver reads for one property: each pair of names with the one the client accepts, and a prefix the driver strips from a key before reading it, with the driver's own properties that begin with it. Validation, composed-grammar completion, public inspection and the generated key reference read this one schema. |
 
 Plexus client definitions start with `CREATE [IF NOT EXISTS] <CONNECTOR> CLIENT <name>`. The
@@ -1018,8 +1024,15 @@ with that keeper, rather than a bound on the complete maintenance pass or emitte
 The Postgres client schema declares its address as a driver URL whose scheme and `sslmode` Nervix
 owns: validation and the connector read the one TLS policy through the same declared option, and
 a missing, repeated or undeclared choice is a value-free refusal before storage. The TLS files are
-conditioned on `sslmode=verify-full` in that schema, and sqlx's offline parser checks every other
-query option before commit. Its table declaration admits one or two nonempty, case-preserving
+conditioned on `sslmode=verify-full` in that schema. Before commit, sqlx's offline parser refuses a
+value it cannot read for an option it knows, such as `port`, and ignores an option it does not
+know, logging a warning that names it. The driver fills what the URL leaves out from the node's
+environment, its `PG*` variables and password file, and under `verify-full` trusts its bundled
+`webpki-roots` set together with the certificates in `tls_ca_file`; the connector applies the
+client's TLS files over the URL's own `sslrootcert`, `sslcert` and `sslkey`. Every run of rows the
+host hands it starts with one catalog query for the mapped columns' declared types, and an insert
+is refused for its rows only for a SQLSTATE of class 21, 22 or 23; every other answer leaves the
+rows unresolved for the host to retry. Its table declaration admits one or two nonempty, case-preserving
 identifier parts, which the connector quotes separately in the insert and its catalog lookup. Its
 declared batch maximum is the largest protocol message the server reads, the same bound the
 statement divider keeps every insert within, and its conflict rule is the vocabulary's, which the
@@ -2545,7 +2558,9 @@ and INSERT response. Each query has a separate budget, independent of pool check
 whole flush or retry schedule. Omission sets no Nervix response deadline. A local timeout keeps
 `DeadlineElapsed` beneath the publish context and marks the interrupted connection to close instead
 of returning it idle. SQLx's five-second close-on-drop bound retains the pool permit through closing;
-the declaration names that driver-owned cleanup wait. SQLSTATE `57014` remains a transient canceled
+the declaration names that driver-owned cleanup wait. It also declares, as unbounded, the test SQLx
+runs on every connection returned to the pool, which keeps the connection's permit until the server
+answers it. SQLSTATE `57014` remains a transient canceled
 statement; when a deadline is configured the diagnostic names it without claiming that an operator
 cancellation proves it elapsed. An unanswered INSERT remains unresolved and can be retried even
 when its external outcome is unknown.
@@ -2960,6 +2975,13 @@ sequenceDiagram
   order. A return is never attributed to a later window or write, and an unmatched return fails
   the write. Size-refusal recovery cannot continue on a replacement channel while a positive
   mandatory answer still has an undecidable return outcome; the host retries that unresolved prefix.
+  The publisher converts each retained record envelope into its complete AMQP basic properties
+  before sending that message: persistence, whole-second timestamp, the declared string properties
+  and U8 priority, plus the independent header table. A nonrepresentable timestamp or string longer
+  than 255 bytes is a typed per-record refusal before transport. Timestamp zero is present, not
+  absent. Every retransmission on a replacement channel and every mandatory-return comparison
+  uses those same prepared properties. Host retries rebuild them from the original retained
+  envelope, whose expressions are never evaluated again.
   The broker answers no `NO ACK` message itself, so the emitter ends a `NO ACK`
   write with one round trip on its channel, which the broker answers only after it has taken every
   message written before it, and the answer delivers the write; a write costs that one round trip,

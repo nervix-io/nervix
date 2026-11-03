@@ -535,7 +535,7 @@ Feature: HTTP client transport contract
 
   @http_client_transport
   Scenario Outline: Both sides speak HTTP/2 to an endpoint whose TLS offers it on <cluster_size> nodes
-    Given HTTPS receiver "secure" is running with a certificate for "127.0.0.1" and offers HTTP/2
+    Given HTTPS receiver "secure" is running with a certificate for "127.0.0.1" and offers HTTP/2 with required client authentication
     And HTTP receiver "secure" answers requests for "/" with 'respond 200; header Content-Type: application/json; body {"user_id":42}'
     And HTTP receiver "secure" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -575,7 +575,9 @@ Feature: HTTP client transport contract
       CREATE HTTP CLIENT api MOUNT receiver_tls VERSION 1 CONFIG {
         'endpoint' = 'https://127.0.0.1:{{http_receiver_port.secure}}',
         'timeout_ms' = 5000,
-        'tls_ca_file' = '{{receiver_tls}}/ca.pem'
+        'tls_ca_file' = '{{receiver_tls}}/ca.pem',
+        'tls_cert_file' = '{{receiver_tls}}/client.pem',
+        'tls_key_file' = '{{receiver_tls}}/client-key.pem'
       };
       CREATE HTTP REQUEST INGESTOR poller FROM api METHOD 'GET' EVERY 1s
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING polled_codec
@@ -680,6 +682,40 @@ Feature: HTTP client transport contract
       [{"event_id":"1","payload":"one"}]
       """
     Then HTTP receiver "secure" eventually captures a request with request line "POST /events/1" over HTTP/2
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @http_client_transport
+  Scenario Outline: Both HTTP directions start without host TLS roots on <cluster_size> server processes
+    Given HTTP receiver "api" is running
+    And HTTP receiver "api" answers requests for "/" with 'respond 200; header Content-Type: application/json; body {"user_id":42}'
+    And HTTP receiver "api" answers unscripted requests with "respond 204"
+    And a <cluster_size> node nervix-server process cluster is started with an empty host TLS trust store
+    And the server process cluster is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA polled_event (user_id I64);
+      CREATE WIRE JSON SCHEMA polled_wire MODE STRICT (user_id integer);
+      CREATE CODEC polled_codec FROM WIRE JSON SCHEMA polled_wire TO SCHEMA polled_event;
+      CREATE RELAY polled SCHEMA polled_event UNBRANCHED;
+      CREATE HTTP CLIENT api CONFIG {
+        'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
+      };
+      CREATE HTTP REQUEST INGESTOR poller FROM api METHOD 'GET' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING polled_codec
+        TO polled INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP REQUEST EMITTER published FROM polled
+        TO api METHOD 'POST' PATH '/events'
+          MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s ENCODE USING polled_codec
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then HTTP receiver "api" eventually captures a request with request line "GET /"
+    And HTTP receiver "api" eventually captures a request with request line "POST /events"
 
     Examples:
       | cluster_size |

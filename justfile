@@ -288,11 +288,15 @@ test-capability-docs: build-web-console
         --package nervix-consensus --package nervix-dns --package nervix-recovery \
         --package nervix-simd-kernels --features nervix-server/testing --doc
 
+# Exercise scenario argument forwarding without compiling or starting dependencies.
+test-scenario-arguments:
+    python3 -m unittest scripts.tests.test_scenario_arguments
+
 test-scenarios *args: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    cargo test --package nervix-scenarios --test scenarios -- {{ args }}
+    cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
 # Qualify the real failed-step after hook; deliberate Cucumber failures stay failures.
 # This supervision check has its own verdict, outside ordinary coverage reports.
@@ -547,7 +551,7 @@ test-scenarios-reuse *args: tests-deps
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     export NERVIX_TESTCONTAINERS_MODE=reusable
-    cargo test --package nervix-scenarios --test scenarios -- {{ args }}
+    cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
 # Measure the public client protocol against a release nervix-server process.
 # The JSON report and raw Prometheus scrape record the workload, toolchain, hardware and limits.

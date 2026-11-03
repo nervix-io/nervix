@@ -1880,6 +1880,12 @@ retries, whatever code tonic reports for it. An answered status other than `INVA
 `RESOURCE_EXHAUSTED` or a code the OTLP specification lists as retryable is a misconfiguration
 failure, which the host does not retry.
 
+The shared HTTP client builder adds `HttpClientConfigError::Tls` above the
+`TlsClientConfigError` the common rustls configuration owner returns. HTTP polling, Prometheus,
+Sentry and OTEL HTTP therefore retain that owner's CA-file or client-identity classification
+instead of rebuilding the TLS failure from text. Native-root loading remains the TLS owner's
+diagnostic; its bundled roots still permit client construction when the native store is empty.
+
 An HTTP polling request whose response exceeds `MAX BODY SIZE` fails that poll with a typed
 `ResponseTooLarge` cause. DNS, connection, TLS, response-body and timeout failures retain their
 typed transport causes with the request URL removed. A non-`2xx` answer, a redirect the client
@@ -3335,13 +3341,20 @@ record. Renaming and grouping entity owners changes neither retry classification
 rendered at the boundary. The ingestor planner's input identity/kind errors cover client, endpoint
 and native schema references before composition.
 
+RabbitMQ emitter property preparation preserves a typed refusal until the per-record reporting
+boundary. A short-string failure keeps the driver's typed cause below the property name and byte
+count; a timestamp refusal names the requirement for nonnegative whole Unix seconds. Neither
+renders the property value. The publisher projects these reports into the record's message-error
+outcome before transport and continues with representable neighbours. A wrong property name or
+type at this connector boundary remains a typed contract refusal; normal statements are already
+checked against the entity's declaration and exact types at `CREATE` and `ALTER`.
+
 ## Ingestor Instancing Boundaries
 
 The registry owns typed `IngestorInstancingError` causes for unsupported instancing, missing or
-different construction partition structures, Kafka's required domain-offset mode and an unsafe
-in-place domain-offset unit-count change. The surrounding report identifies the domain and
-ingestor. Correct the declaration before activation; explicit source recreation establishes a new
-offset lifetime. Start planning separately validates the complete resolved unit declaration.
+different construction partition structures and Kafka's required domain-offset mode. The
+surrounding report identifies the domain and ingestor. Correct the declaration before activation.
+A count change uses the ownership-handoff preparation boundary to preserve the offset lifetime. Start planning separately validates the complete resolved unit declaration.
 `AlreadyRunning` and `IngestorNotRunning` name the exact source unit, allowing a sibling instance
 to start or stop independently.
 Per-unit DESCRIBE requests and status records preserve the unit selected by their caller.
