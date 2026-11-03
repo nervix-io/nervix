@@ -205,6 +205,7 @@ class InventoryTests(unittest.TestCase):
             "restore-installation-storage",
             "restore-staging-kept-measurement",
             "typed-report", "typed-source-contract", "typed-site-union", "typed-source-syntax", "typed-hidden-tunables",
+            "typed-non-aws-lc-crypto",
             "plexus-statement",
             "plexus-statement-text",
             "plexus-emitter-envelopes",
