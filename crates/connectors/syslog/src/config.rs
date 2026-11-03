@@ -70,15 +70,16 @@ pub enum SyslogFraming {
 }
 
 /// The Syslog clients whose waits one deadline key bounds.
+/// Scopes follow the shared deadline-key order so refusals keep that order too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display, strum::EnumIter)]
 pub enum SyslogDeadlineScope {
+    /// `timeout_ms`: the frames an emitter writes.
+    #[strum(to_string = "an emitter's frame writes")]
+    EmitterWrites,
     /// `connect_timeout_ms`: the connection an emitter opens, and the handshake a TLS listener
     /// completes with each connection it accepts.
     #[strum(to_string = "an emitter's connection or a TLS listener's handshake")]
     ConnectionOrTlsHandshake,
-    /// `timeout_ms`: the frames an emitter writes.
-    #[strum(to_string = "an emitter's frame writes")]
-    EmitterWrites,
     /// `idle_timeout_ms`: the connections a TCP or TLS listener reads.
     #[strum(to_string = "a TCP or TLS listener's connections")]
     ListenerConnections,
@@ -705,6 +706,29 @@ mod tests {
                 };
                 assert_eq!((*key, *scope), (case.key, case.scope), "{bystander:?}");
             }
+        }
+    }
+
+    #[test]
+    fn multiple_inapplicable_deadlines_follow_the_shared_key_order() {
+        for keys in [
+            ["connect_timeout_ms", "timeout_ms"],
+            ["timeout_ms", "connect_timeout_ms"],
+        ] {
+            let settings = entries(&[
+                ("protocol", "tcp"),
+                ("addr", "127.0.0.1:6514"),
+                (keys[0], "1000"),
+                (keys[1], "1000"),
+            ]);
+            let error = SyslogClientConfig::parse(&settings, SyslogDirection::Ingest)
+                .expect_err("neither deadline bounds a TCP listener wait");
+            let SyslogConfigError::InapplicableDeadlineKey { key, scope } = error.current_context()
+            else {
+                panic!("the listener must refuse an inapplicable deadline: {error:?}");
+            };
+            assert_eq!(*key, "timeout_ms");
+            assert_eq!(*scope, SyslogDeadlineScope::EmitterWrites);
         }
     }
 

@@ -954,7 +954,8 @@ for its `idle_timeout_ms`, ends with `DeadlineElapsed` beneath the listener's co
 That failure closes only the connection and is logged at debug level; it is never the ingestor's
 transient error. A Syslog client that sets a deadline key its direction and protocol never wait on
 is refused as `SyslogConfigError::InapplicableDeadlineKey`, naming the key and the clients it
-applies to.
+applies to. When several keys are inapplicable, the first refusal follows the shared deadline-key
+order, independently of the order of the client's entries.
 
 An MQTT client configuration the vocabulary cannot carry is refused as an
 `MqttClientConfigError`, which names the key without its value: an empty or NUL-bearing identity, a
