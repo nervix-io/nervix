@@ -462,6 +462,114 @@ async fn when_native_backup_wait_is_recovered(world: &mut ScenarioWorld, first_c
     world.last_backup = Some(recovered);
 }
 
+/// Starts a cluster backup in the background through a native client that connects to `server`
+/// with a retry budget of `retry_seconds` and waits `wait_seconds` for the backup's outcome, every
+/// reconnect included. Each domain's cut has `cut_seconds` from before its lease, so the budget
+/// covers every second the cut waits at its gate. It must end inside the client's wait, so a cut
+/// that expires reaches the scenario as the backup's own failure rather than as an uncertain wait.
+#[when(
+    expr = "a native client with a {int} second retry budget and a {int} second backup wait \
+            begins backing up the cluster with a {int} second cut budget through {string} into \
+            {string}"
+)]
+async fn when_native_backup_begins_through(
+    world: &mut ScenarioWorld,
+    retry_seconds: u64,
+    wait_seconds: u64,
+    cut_seconds: u64,
+    server: String,
+    file: String,
+) {
+    assert!(
+        world.background_native_backup.is_none(),
+        "a native backup is already running"
+    );
+    assert!(
+        cut_seconds < wait_seconds,
+        "an expired cut must reach the client inside its wait"
+    );
+    let archive = archive_path(world, &file);
+    let uri = expand_placeholders(world, &server);
+    let domain = client_domain(&world.domain);
+    let wait = Duration::from_secs(wait_seconds);
+    let mut options = client_connect_options(&uri).assured("the client is configured");
+    options.retry_timeout = Duration::from_secs(retry_seconds);
+    options.backup_wait_timeout = wait;
+    let backup = nervix_models::Backup {
+        scope: nervix_models::BackupScope::Cluster,
+        destination: archive.display().to_string(),
+        resources: nervix_models::BackupResources::Included,
+        capture: nervix_models::BackupCapture::Quiesced {
+            timeout: Some(Duration::from_secs(cut_seconds)),
+        },
+    };
+    // The client's connection is a call under its retry budget, so it runs off the runner, where a
+    // stalled runner cannot spend that budget.
+    let started = observe_off_the_runner(async move {
+        let client = Client::connect_with_options(&uri, domain, options)
+            .await
+            .assured("the native backup client connects");
+        let execution = client.prepare_execution(backup.to_canonical_plexus()).await;
+        let reference = execution.reference().clone();
+        let task = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
+            client.execute_prepared(&execution).await
+        }));
+        BackgroundNativeBackup {
+            reference,
+            archive,
+            wait,
+            task,
+        }
+    })
+    .await;
+    world.background_native_backup = Some(started);
+}
+
+/// The background native backup succeeded under the reference it was prepared with, through the
+/// session that replaced its interrupted one, and wrote an archive that verifies and holds the
+/// active domain.
+#[then("the native backup completes under its original execution reference")]
+async fn then_native_backup_completes(world: &mut ScenarioWorld) {
+    let backup = world
+        .background_native_backup
+        .take()
+        .assured("a preceding step started a native backup");
+    // The client's own wait bounds the outcome, and the bounds it keeps on each archive frame bound
+    // the download that follows; twice the wait covers both.
+    let observation = backup
+        .wait
+        .checked_mul(2)
+        .assured("a scenario's backup wait of minutes doubles within Duration's range");
+    assert!(
+        observation < SUITE_BUDGET,
+        "the backup must end inside the suite budget, so its scenario fails with its own reason"
+    );
+    let outcome = nervix_primitives::time::timeout(observation, backup.task)
+        .await
+        .assured("the native backup ends within its wait and its download")
+        .assured("the native backup task finishes")
+        .assured("the native backup outlasts its interrupted session");
+    assert!(outcome.succeeded(), "{}", outcome.message);
+    assert_eq!(
+        outcome.execution_reference.as_ref(),
+        Some(&backup.reference)
+    );
+    assert_eq!(
+        outcome.origin,
+        Some(nervix_client_core::OutcomeOrigin::Recovered),
+        "the new session recovers the execution its interrupted session admitted"
+    );
+    let description = described_archive(backup.archive).await;
+    let domain = scenario_domain(world, &world.domain);
+    assert!(
+        description
+            .domains
+            .iter()
+            .any(|entry| entry.record.domain == domain),
+        "the archive holds the active domain {domain}"
+    );
+}
+
 #[when("a cluster backup recovers its first cut's refused mutation lease release")]
 async fn when_backup_recovers_refused_mutation_release(world: &mut ScenarioWorld) {
     let archive = archive_path(world, "lease-release-recovered.nvxb");

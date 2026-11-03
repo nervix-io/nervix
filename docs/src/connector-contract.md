@@ -673,8 +673,8 @@ and the operation and attempt timeouts `timeout_ms` sets for every request of bo
 include the lookup; a receive's start after the long poll of at most one second it asks the service
 to hold it for. The client names static credentials, with `session_token` where they are temporary ones, and its
 region, so `aws-config` never consults the default credential or region chains that could reach
-IMDS, ECS, STS or SSO over HTTP. It still builds its SSO token chain, which SQS never asks for
-a token because it signs with SigV4; the loader receives the same HTTP client, so that chain would
+IMDS, ECS, STS or SSO over HTTP. It still builds its SSO token chain, which SQS never asks for a
+token, because it signs with SigV4; the loader receives the same HTTP client, so that chain would
 use the node resolver too.
 
 Both hooks give a lookup at most 30 seconds, like the Reqwest hooks; the client's own deadline
@@ -1103,17 +1103,22 @@ the pattern subscription's runtime scenario observes both metadata fields.
 
 `SQS QUEUE` shares one queue-name rule between ingestion and emission: 1 to 80 ASCII letters,
 digits, `-` and `_`, where a FIFO queue's name ends in `.fifo` within those 80 characters, passed
-through exactly as written. Its declaration permits `ACK SEQUENTIAL`, `ACK PARALLEL` with a
-window of at most the ten messages one receive returns, and `SUSPEND` for intake, since the queue
-keeps a message until the source deletes it, and `SINGLE` or `BATCH` for emission,
-where a `.fifo` queue requires `FIFO GROUP` and a standard queue refuses it. Message attributes are
-its headers in both directions, as `last_wins` exact names; the emitter declares no envelope and
-optional batching up to the 256 KiB SQS admits in one message. An SQS client declares only the keys
-its connections read, each in both directions: the required `endpoint`, `region`, `access_key_id`
-and `secret_access_key`, and the optional `session_token`, `timeout_ms`, which bounds every request,
-and `tls_ca_file`. An SQS connection trusts `tls_ca_file`, or the platform's roots without it, takes
-no proxy and presents no client certificate, so the client declares neither a proxy nor a
-client-identity key.
+through exactly as written. The ingestor declares `ACK SEQUENTIAL`, `ACK PARALLEL` with a window
+of at most the ten messages one receive returns, `INSTANCES`, and `SUSPEND` for intake, since the
+queue keeps a message until the source deletes it, and its typed metadata is the message identity,
+send and first-receive times, receive count, group and deduplication identifiers, sequence number
+and sender identifier. The emitter declares `MODE ACK` alone, a required `SEND SINGLE` or
+`SEND BATCH` request shape, and `FIFO GROUP`, which a `.fifo` queue requires and a standard queue
+refuses. The request shape is emit-only and the parallel receive ingest-only. Message attributes
+are its headers in both directions, as `last_wins` exact names: the ingestor reads each value as
+text, and the emitter writes a `STRING` as a `String`, an integer as a `Number` and `BYTES` as a
+`Binary` attribute. The emitter declares the `DELAY` and `DEDUPLICATION ID` envelope clauses, which
+the registry holds to a standard and a FIFO queue respectively, and optional batching up to the
+1 MiB SQS admits in one message. An SQS client declares only the keys its connections read, each
+in both directions: the required `endpoint`, `region`, `access_key_id` and `secret_access_key`, and
+the optional `session_token`, `timeout_ms`, which bounds every request, and `tls_ca_file`. An SQS
+connection trusts `tls_ca_file` alone, or the platform's roots without it, takes no proxy and
+presents no client certificate, so the client declares neither a proxy nor a client-identity key.
 The SQS-specific declaration tests, generated grammar conformance and one-/three-node public
 declaration scenarios qualify these facts together.
 
@@ -1437,9 +1442,10 @@ rather than a wider or narrower one, and it is absent where the message carries 
 that keeps a message whose transport value its field's type cannot hold hands that value over as
 unrepresentable, with its declared type and a description of the transport value, never a
 substitute value and never an absence: `RABBITMQ QUEUE` does so for an AMQP timestamp after
-2262-04-11, the last instant a `DATETIME` holds. `KAFKA TOPIC` and `SQS QUEUE` instead fail the read
-of a message whose timestamp is out of range, as their paragraphs below state, before any value is
-handed over.
+2262-04-11, the last instant a `DATETIME` holds, and `KAFKA TOPIC` for a record timestamp before
+1677-09-21 or after 2262-04-11. `SQS QUEUE` instead fails the read of a message whose system
+attribute timestamp is out of range, as its paragraph below states, before any value is handed
+over.
 A `STRING` such as a socket address may be written into the column in place instead of being
 allocated per message.
 A message that hands over another number of values than its entity declares, or a value of another
@@ -1472,15 +1478,19 @@ with the domain's routing, outside the source host.
 Kafka metadata borrows the record's key without allocating another byte sequence. Missing keys
 remain distinct from empty keys. Its timestamp is the exact instant of the driver's Unix
 milliseconds, with `create_time` or `log_append_time` as its kind; an unavailable timestamp has no
-instant or kind. A null value and an empty non-null value both lend an empty payload, but their
-tombstone flags differ. The codec decides whether an empty payload yields any rows. Every row
-that it yields shares the originating record's metadata and transport position. Kafka's
-`SUSPEND`-only quiesce declaration makes retained quiesce metadata unreachable for this entity.
-A present timestamp out of range is a typed source read failure, not an unrepresentable metadata
-value. If conversion fails after a valid prefix was gathered, the source returns that prefix and
-keeps one report for the next admitted read. A cancelled read leaves the report pending; no later
-record is taken while it is pending. The source declares this single-report bound beside its
-driver buffers.
+instant or kind. A present timestamp whose milliseconds name an instant before 1677-09-21 or after
+2262-04-11, which no `DATETIME` holds, is handed over as unrepresentable, described by those
+milliseconds, and its kind still reads as `create_time` or `log_append_time`. Reading the record
+never converts its timestamp: the message converts it only when the host visits its metadata, so
+such a record is read, acknowledged and positioned like any other. A null value and an empty
+non-null value both lend an empty payload, but their tombstone flags differ. The codec decides
+whether an empty payload yields any rows. Every row that it yields shares the originating record's
+metadata and transport position. Kafka's `SUSPEND`-only quiesce declaration makes retained quiesce
+metadata unreachable for this entity. A record at the last offset Kafka's signed offsets reach has
+no next position to acknowledge, which is a typed source read failure. If that failure follows a
+valid prefix gathered in the same read, the source returns that prefix and keeps one report for the
+next admitted read. A cancelled read leaves the report pending; no later record is taken while it
+is pending. The source declares this single-report bound beside its driver buffers.
 
 MQTT metadata and headers borrow the delivered packet the message owns, the one admission copied
 out of its frame, so the host copies them only when a quiesce buffer retains the message. The
@@ -2507,7 +2517,7 @@ Where it can learn that limit it measures the complete message and rejects a rec
 fit before writing it, with a reason naming the size and the limit, so the rejection follows the
 message error policy instead of failing the transport: the MQTT emitter measures the `PUBLISH` packet
 against the Maximum Packet Size of the broker's latest `CONNACK` and the largest packet MQTT can
-express, the SQS emitter counts attributes and the FIFO group against 256 KiB, and the Kafka producer,
+express, the SQS emitter counts attributes and the FIFO group against 1 MiB, and the Kafka producer,
 the NATS client and the Pulsar client check `message.max.bytes`, `max_payload` and the
 `maxMessageSize` of the connection's `CommandConnected` with the key, headers or message metadata
 they write. A limit the connector cannot learn stays with the destination, and the destination's own

@@ -522,12 +522,12 @@ General notes:
   `TIMESTAMP AT metadata.<field>` read; an ingestor that reads none visits no metadata values and
   builds no metadata columns
 - a message whose connector hands over a value its field's declared type cannot hold, such as a
-  `RABBITMQ QUEUE` AMQP timestamp after 2262-04-11, is refused once `FILTER WHERE` keeps it, wherever
-  a route or `TIMESTAMP AT` reads that field: every route's `ON MESSAGE ERROR` policy receives a
-  message error with code `validation` and operation `admit` that names `metadata.<field>` and
-  describes the value. The field never reads as null for it, and a field no program reads refuses
-  nothing. A `KAFKA TOPIC` record timestamp or an `SQS QUEUE` system attribute out of range fails
-  the read instead, as its reference states
+  `RABBITMQ QUEUE` AMQP timestamp after 2262-04-11 or a `KAFKA TOPIC` record timestamp before
+  1677-09-21 or after 2262-04-11, is refused once `FILTER WHERE` keeps it, wherever a route or
+  `TIMESTAMP AT` reads that field: every route's `ON MESSAGE ERROR` policy receives a message error
+  with code `validation` and operation `admit` that names `metadata.<field>` and describes the
+  value. The field never reads as null for it, and a field no program reads refuses nothing. An
+  `SQS QUEUE` system attribute out of range fails the read instead, as its reference states
 - supported sources expose transport headers through `read_header(name)` and `read_headers(name)`;
   header names may be any `STRING` expression, and these functions may be used in both top-level
   `FILTER WHERE` and per-route expressions
@@ -576,7 +576,9 @@ The `name` argument can be any expression that returns `STRING`. Both functions 
 - `NATS SUBJECT` exposes message headers
 - `PULSAR TOPIC` exposes message properties
 - `RABBITMQ QUEUE` exposes AMQP message headers, converting typed AMQP values to strings
-- `SQS QUEUE` exposes message attributes, converting string, number, and binary values to strings
+- `SQS QUEUE` exposes message attributes as text: a `String` or `Number` attribute's value as SQS
+  carries it, and a `Binary` attribute's bytes read as UTF-8, each invalid sequence replaced by
+  U+FFFD
 
 Each of these sources declares a [header model](./connector-contract.md#header-models), which
 `DESCRIBE INGESTOR` shows as its `headers:` line. The model decides what the two functions find:
@@ -652,7 +654,11 @@ Transport-specific schemes and keys:
   `tls_ca_file` when it is set, and presents `tls_cert_file` with `tls_key_file` as its client
   certificate. A plaintext `redis://` address reads none of the three files; see
   [Redis Pub/Sub](#redis-pubsub).
-- `SQS`: use an `https://...` `endpoint`. Nervix honors `tls_ca_file`, which is primarily useful for SQS-compatible local/test endpoints, and `CREATE SQS CLIENT` refuses a file that holds no certificate it could trust. An SQS connection presents no client certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and `tls_key_file`.
+- `SQS`: use an `https://...` `endpoint`. Nervix trusts the platform's native roots, or only
+  `tls_ca_file` when it is set, so a CA file written for an SQS-compatible local or test endpoint
+  does not also trust AWS's certificates. `CREATE SQS CLIENT` refuses a file that holds no
+  certificate it could trust. An SQS connection presents no client certificate, so
+  `CREATE SQS CLIENT` refuses `tls_cert_file` and `tls_key_file`; see [SQS](#sqs).
 - `SYSLOG`: select `'protocol' = 'tls'`. An ingestor requires `tls_cert_file` and
   `tls_key_file`; optional `tls_ca_file` enables required client-certificate verification.
 
@@ -1300,8 +1306,17 @@ that instant exactly. The timestamp kind is `create_time` or `log_append_time`; 
 a timestamp has null timestamp and timestamp kind. `TIMESTAMP AT metadata.timestamp` uses that
 instant as the record's event time, while `TIMESTAMP NOW` uses the domain's execution time. An
 unavailable timestamp cannot satisfy `TIMESTAMP AT metadata.timestamp`; it never falls back to
-`NOW`. A present timestamp outside the signed Unix-nanosecond range fails the read with a typed
-conversion error.
+`NOW`. A present timestamp whose milliseconds name an instant before 1677-09-21 or after
+2262-04-11, which no `DATETIME` holds, such as microseconds a producer wrote where Kafka specifies
+milliseconds, keeps its record. Wherever a route or `TIMESTAMP AT` reads `metadata.timestamp`, the
+record is refused with a `validation` message error of operation `admit` that names the field and
+those milliseconds. Under an acknowledged mode, send each such route's `ON MESSAGE ERROR` to a
+relay: `LOG` negatively acknowledges the record, so the source reads it again before any later
+record. `metadata.timestamp_type` still reads its kind, and an ingestor that reads neither field
+ingests the record like any other. A topic whose `message.timestamp.after.max.ms` is shorter than
+such a timestamp's distance from the broker's clock refuses the record when it is produced, so it
+never reaches an ingestor; the setting's default in Kafka 3.9 is 9223372036854775807, which accepts
+it.
 
 A null Kafka value is a tombstone and reaches the codec as an empty payload with
 `metadata.tombstone = true`. An empty non-null value has `metadata.tombstone = false`. The codec
@@ -2387,10 +2402,12 @@ See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sq
 `QUEUE` takes a string literal that SQS accepts as a queue name: 1 to 80 ASCII letters, digits,
 `-` and `_`, where a FIFO queue's name ends in `.fifo` and the suffix counts toward the 80. Nervix
 preserves its case in both directions, so `QUEUE 'Orders-EU_1.fifo'` reads exactly that queue. The
-ingestor reads a message's attributes through `read_header` and `read_headers`. It names
-`MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX <n> ...`, and `ON QUIESCE SUSPEND`, the delivery
-and quiesce modes it declares: the queue keeps each message until the source deletes it, so
-suspending loses nothing. An `ACK PARALLEL` window holds 1 to 10 messages, the most one SQS receive
+ingestor reads a message's attributes through `read_header` and `read_headers`, each value as text:
+a `String` or `Number` attribute's value exactly as SQS carries it, and a `Binary` attribute's bytes
+as UTF-8, with each invalid sequence replaced by U+FFFD, so binary data that is not UTF-8 text does
+not survive the read. It names `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX <n> ...`, and
+`ON QUIESCE SUSPEND`, the delivery and quiesce modes it declares: the queue keeps each message until
+the source deletes it, so suspending loses nothing. An `ACK PARALLEL` window holds 1 to 10 messages, the most one SQS receive
 returns, and `CREATE` refuses a larger one, as in `SQS ACK PARALLEL MAX must be between 1 and 10,
 found 11`.
 
@@ -2400,13 +2417,14 @@ The `SQS CLIENT` an ingestor or emitter names declares `endpoint`, `region`, `ac
 Every request is signed for `region` with `access_key_id` and `secret_access_key`, and carries
 `session_token` when those are temporary credentials. `SHOW CREATE CLIENT` and `DESCRIBE` print the
 three credentials as `********`. `timeout_ms` bounds every request of both directions, name
-resolution, connection setup, TLS and the answer included: an ingestor's queue lookup, each batch
-deletion and each batch visibility change, and each receive once its long poll of at most one
-second has passed, because a service with no message holds a receive for its long poll before it
-answers. Without `timeout_ms` those waits are unbounded. `CREATE SQS CLIENT` reads `tls_ca_file`
-before it commits the client, and refuses a file holding a section that is not a certificate, or no
-certificate at all, as `invalid client config key 'tls_ca_file'`: a client that trusted it alone
-could reach no service.
+resolution, connection setup, TLS and the answer included: the queue lookup of an ingestor or an
+emitter, each deletion, batch deletion and batch visibility change, each send, and each receive
+once its long poll of at most one second has passed, because a service with no message holds a
+receive for its long poll before it answers. Without `timeout_ms` those waits are unbounded, though
+connecting, its lookup included, still ends at the SDK's 3.1-second connect timeout.
+`CREATE SQS CLIENT` reads `tls_ca_file` before it commits the client, and refuses a file holding a
+section that is not a certificate, or no certificate at all, as
+`invalid client config key 'tls_ca_file'`: a client that trusted it alone could reach no service.
 
 Each receive requests SQS system attributes separately from the message attributes that
 `read_header` and `read_headers` read. Routes can read the following optional, non-sensitive

@@ -234,7 +234,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | SQS QUEUE | Compare `SQS QUEUE`: options, modes, headers, ingest metadata. Receiving uses a visibility timeout and deletion; publishing sends SEND SINGLE or SEND BATCH service requests, may declare a FIFO group, and writes typed message attributes and a per-message delay or deduplication id. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix. |
+| Entity | SQS QUEUE | Compare `SQS QUEUE`: options, modes, headers, ingest metadata. Receiving hides each message for the queue's visibility timeout, deletes it once it is acknowledged and makes it visible again at once when it is rejected; ACK PARALLEL MAX gathers up to ten messages from each receive and deletes them in batches, and this parallel receive is ingest-only. Publishing chooses its request shape with SEND SINGLE or SEND BATCH, which is emit-only, may declare a FIFO GROUP, and sets a per-message DELAY or DEDUPLICATION ID. Both directions treat message attributes as headers: an ingestor reads each value as text, while an emitter writes typed String, Number and Binary values. Both use the same quoted, case-preserving SQS queue names, including the .fifo suffix. |
 | Reference | SQS client |  |
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |  |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 10 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -526,7 +526,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | SQS QUEUE | Compare `SQS QUEUE`: options, modes, headers, emit envelope/properties. Receiving uses a visibility timeout and deletion; publishing sends SEND SINGLE or SEND BATCH service requests, may declare a FIFO group, and writes typed message attributes and a per-message delay or deduplication id. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix. |
+| Entity | SQS QUEUE | Compare `SQS QUEUE`: options, modes, headers, emit envelope/properties. Receiving hides each message for the queue's visibility timeout, deletes it once it is acknowledged and makes it visible again at once when it is rejected; ACK PARALLEL MAX gathers up to ten messages from each receive and deletes them in batches, and this parallel receive is ingest-only. Publishing chooses its request shape with SEND SINGLE or SEND BATCH, which is emit-only, may declare a FIFO GROUP, and sets a per-message DELAY or DEDUPLICATION ID. Both directions treat message attributes as headers: an ingestor reads each value as text, while an emitter writes typed String, Number and Binary values. Both use the same quoted, case-preserving SQS queue names, including the .fifo suffix. |
 | Reference | SQS client |  |
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |  |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |  |

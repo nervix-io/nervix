@@ -11,6 +11,7 @@ Feature: Process shutdown deadline
     And an authenticated upload of resource "held_archive" <progress> is held open on the server process
     When the server process receives SIGTERM
     Then the server process exits with status 0 within "60s" of the last signal
+    And the held resource upload ended with status "Unavailable"
     And the server process log contains "shutdown admission phase finished outcome=Completed"
     And the server process log contains "shutdown terminal-teardown phase finished outcome=Completed"
 
