@@ -288,11 +288,15 @@ test-capability-docs: build-web-console
         --package nervix-consensus --package nervix-dns --package nervix-recovery \
         --package nervix-simd-kernels --features nervix-server/testing --doc
 
+# Exercise scenario argument forwarding without compiling or starting dependencies.
+test-scenario-arguments:
+    python3 -m unittest scripts.tests.test_scenario_arguments
+
 test-scenarios *args: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    cargo test --package nervix-scenarios --test scenarios -- {{ args }}
+    cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
 # Qualify the real failed-step after hook; deliberate Cucumber failures stay failures.
 # This supervision check has its own verdict, outside ordinary coverage reports.
@@ -547,7 +551,7 @@ test-scenarios-reuse *args: tests-deps
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     export NERVIX_TESTCONTAINERS_MODE=reusable
-    cargo test --package nervix-scenarios --test scenarios -- {{ args }}
+    cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
 # Measure the public client protocol against a release nervix-server process.
 # The JSON report and raw Prometheus scrape record the workload, toolchain, hardware and limits.
@@ -610,6 +614,10 @@ test-package-lib package *args:
 # Qualify the pinned NATS driver's flush implementation through its own bounded stream tests.
 test-nats-driver checkout *args:
     CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/nats-driver") }} cargo test --manifest-path {{ quote(checkout + "/async-nats/Cargo.toml") }} --package async-nats --no-default-features --features aws-lc-rs,jetstream,server_2_10,server_2_11 --lib -- {{ args }}
+
+# Qualify the pinned Pulsar driver's metadata boundary with the product's enabled features.
+test-pulsar-driver checkout *args:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/pulsar-driver") }} cargo test --manifest-path {{ quote(checkout + "/Cargo.toml") }} --no-default-features --features compression,tokio-rustls-runtime --lib -- {{ args }}
 
 # Run the vocabulary settings' compiling and class-rejection API examples.
 test-settings:
