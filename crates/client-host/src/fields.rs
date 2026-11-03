@@ -59,9 +59,9 @@ enum Level {
 }
 
 impl Level {
-    /// The level a host's type and length name. Only a fixed-size list has a length.
-    fn from_host(field_type: i32, length: u32) -> Result<Self, Failure> {
-        match FieldType::from_host(field_type)?.kind() {
+    /// The level a type and length name. Only a fixed-size list has a length.
+    fn of(field_type: FieldType, length: u32) -> Result<Self, Failure> {
+        match field_type.kind() {
             TypeKind::List => {
                 if length != 0 {
                     return Err(Failure::invalid_argument(
@@ -158,7 +158,7 @@ impl Fields {
     pub fn add(
         &mut self,
         name: &str,
-        field_type: i32,
+        field_type: FieldType,
         length: u32,
         nullable: bool,
         sensitive: bool,
@@ -185,14 +185,14 @@ impl Fields {
             lists: Vec::new(),
             element: None,
         };
-        field.place(Level::from_host(field_type, length)?)?;
+        field.place(Level::of(field_type, length)?)?;
         self.fields.push(field);
         Ok(())
     }
 
     /// Adds the element of the innermost list of the last field.
-    pub fn element(&mut self, field_type: i32, length: u32) -> Result<(), Failure> {
-        let level = Level::from_host(field_type, length)?;
+    pub fn element(&mut self, field_type: FieldType, length: u32) -> Result<(), Failure> {
+        let level = Level::of(field_type, length)?;
         let Some(last) = self.fields.last_mut() else {
             return Err(Failure::invalid_argument(
                 "fields",

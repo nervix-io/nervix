@@ -37,6 +37,17 @@ Install:
 - Rust via `rustup`
 - `just` (latest release)
 - `zellij`
+- `uv`, which runs the repository's Python tools, and the CPython headers and shared library
+  (`python3-dev` on Debian and Ubuntu, or any CPython that `uv python install` provides), which
+  the tests of the Python package, `crates/client-python`, embed
+
+The Python package builds with maturin, which `just build-client-python` runs as
+`uvx --from maturin==1.16.0 maturin`, into an abi3 wheel for CPython 3.12 and later under
+`target/client-conformance/wheels`. The recipe installs the wheel and `pyarrow`, the probe's test
+dependency, into a CPython 3.12 environment at `target/client-conformance/python`, which uv
+downloads when no CPython 3.12 is installed. The package's own tests run with `cargo test` and embed
+the CPython that pyo3 finds on `PATH`, with its library's directory as the tests' run path, so an
+interpreter outside the loader's default path, such as pyenv's, runs them too.
 
 `just build-web-console` builds the console the server embeds. trunk uses a `wasm-bindgen` CLI
 from `PATH` when its version equals the one `Cargo.lock` locks, and otherwise downloads it from

@@ -10,7 +10,7 @@
 
 use std::mem::ManuallyDrop;
 
-use nervix_client_host::{Event, EventKind, Failure, Part, Schema};
+use nervix_client_host::{Event, EventKind, Failure, Schema};
 use nervix_primitives::sync::Arc;
 
 use crate::abi;
@@ -160,7 +160,7 @@ unsafe fn write_states(
             abi::output_slice(states, states_len, "states")?,
         )
     };
-    event.column_states(Part::from_host(part)?, column, states)
+    event.column_states(abi::part(part)?, column, states)
 }
 
 /// # Safety
@@ -195,7 +195,7 @@ unsafe fn write_fixed(
             abi::output_slice(values, values_len, "values")?,
         )
     };
-    event.column_fixed(Part::from_host(part)?, column, values)
+    event.column_fixed(abi::part(part)?, column, values)
 }
 
 /// # Safety
@@ -249,7 +249,7 @@ unsafe fn write_varlen(
     abi::require_out(data_len, "data_len")?;
     // SAFETY: the caller guarantees a live event.
     let event = unsafe { abi::handle(event, "event") }?;
-    let part = Part::from_host(part)?;
+    let part = abi::part(part)?;
     let needed = event.column_varlen_len(part, column)?;
     // SAFETY: `data_len` is non-null, and the caller guarantees it is writable.
     unsafe { abi::write(data_len, needed) };
@@ -303,7 +303,7 @@ unsafe fn write_cell(
     abi::require_out(value, "value")?;
     // SAFETY: the caller guarantees a live event.
     let event = unsafe { abi::handle(event, "event") }?;
-    let bytes = event.cell_varlen(Part::from_host(part)?, row, column)?;
+    let bytes = event.cell_varlen(abi::part(part)?, row, column)?;
     // SAFETY: the caller guarantees writable out-parameters.
     unsafe { abi::write_bytes(value, value_len, bytes) };
     Ok(())

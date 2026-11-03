@@ -55,7 +55,13 @@ unsafe fn write_added(
             abi::text(name, name_len, "name")?,
         )
     };
-    fields.add(name, field_type, length, nullable, sensitive)
+    fields.add(
+        name,
+        abi::field_type(field_type)?,
+        length,
+        nullable,
+        sensitive,
+    )
 }
 
 /// # Safety
@@ -77,7 +83,7 @@ pub unsafe extern "C" fn nx_fields_element(
 unsafe fn write_element(fields: *mut Fields, field_type: i32, length: u32) -> Result<(), Failure> {
     // SAFETY: the caller guarantees a live field list no other thread uses.
     let fields = unsafe { abi::handle_mut(fields, "fields") }?;
-    fields.element(field_type, length)
+    fields.element(abi::field_type(field_type)?, length)
 }
 
 /// # Safety

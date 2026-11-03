@@ -82,6 +82,12 @@ impl ClockEvent {
         Self { event }
     }
 
+    /// The event as the Rust client reported it, with what a host's accessors do not name, such
+    /// as the message and wait of a refused restoration.
+    pub fn domain_clock_event(&self) -> &DomainClockEvent {
+        &self.event
+    }
+
     pub fn kind(&self) -> ClockEventKind {
         match &self.event {
             DomainClockEvent::Observed(_) => ClockEventKind::State,

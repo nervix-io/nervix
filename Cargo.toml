@@ -307,6 +307,7 @@ members = [
   "crates/client-core",
   "crates/client-ffi",
   "crates/client-host",
+  "crates/client-python",
   "crates/client-wire",
   "crates/columnar-json",
   "crates/connector",
@@ -541,6 +542,7 @@ nervix-checkpoint-replication = { package = "nervix-checkpoint-replication", pat
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
 nervix-client-ffi = { package = "nervix-client-ffi", path = "crates/client-ffi" }
 nervix-client-host = { package = "nervix-client-host", path = "crates/client-host" }
+nervix-client-python = { package = "nervix-client-python", path = "crates/client-python" }
 nervix-client-wire = { package = "nervix-client-wire", path = "crates/client-wire" }
 nervix-columnar-json = { package = "nervix-columnar-json", path = "crates/columnar-json" }
 nervix-connector = { package = "nervix-connector", path = "crates/connector" }
@@ -623,6 +625,9 @@ prost = "0.13"
 prost-reflect = "0.15.3"
 prost-types = "0.13"
 protox = "0.8.0"
+# The Python package of the client: pyo3 on the stable ABI, built with maturin.
+pyo3 = { version = "0.30", default-features = false, features = ["macros"] }
+pyo3-build-config = "0.30"
 # 6.9.0 with the broker's announced maxMessageSize kept per connection, a larger message refused
 # before it is written, and a broker SendError resolved with its server error; acknowledgements
 # that wait for the broker's answer when a consumer enables ack receipts, and a negative

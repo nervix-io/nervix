@@ -11,8 +11,19 @@
 
 use std::{ptr, slice};
 
-use nervix_client_host::Failure;
+use nervix_client_host::{Failure, FieldType, Part};
 use nervix_primitives::sync::Arc;
+
+/// Reads a field type a host passed as an `nx_type`.
+pub(crate) fn field_type(field_type: i32) -> Result<FieldType, Failure> {
+    FieldType::from_repr(field_type)
+        .ok_or_else(|| Failure::invalid_argument("type", "is not an nx_type"))
+}
+
+/// Reads a part a host passed as an `nx_part`.
+pub(crate) fn part(part: i32) -> Result<Part, Failure> {
+    Part::from_repr(part).ok_or_else(|| Failure::invalid_argument("part", "is not an nx_part"))
+}
 
 /// Borrows a required UTF-8 argument.
 ///

@@ -27,13 +27,13 @@ impl Cancel {
     pub fn with_deadline(deadline: Duration) -> Result<Self, Failure> {
         if deadline > MAX_DEADLINE {
             return Err(Failure::invalid_argument(
-                "deadline_millis",
+                "deadline",
                 "exceeds the one-day limit",
             ));
         }
         let expires = Instant::now()
             .checked_add(deadline)
-            .ok_or_else(|| Failure::invalid_argument("deadline_millis", "overflows the clock"))?;
+            .ok_or_else(|| Failure::invalid_argument("deadline", "overflows the clock"))?;
         Ok(Self {
             token: CancellationToken::new(),
             deadline: Some(expires),

@@ -10,13 +10,10 @@
 use nervix_client_core::ClientConsumerLimits;
 use nervix_client_host::{
     Cancel, Consumer, Delivery, EndpointState, Failure, Fields, OpenRefusal, ReopenReason, Schema,
-    Session, Window, WindowKind,
+    Session, Window, WindowKind, credit, nanos,
 };
 
-use crate::{
-    abi,
-    producer::{credit, nanos},
-};
+use crate::abi;
 
 /// # Safety
 ///
@@ -280,10 +277,7 @@ unsafe fn closed(consumer: *const Consumer, cancel: *const Cancel) -> Result<(),
 /// other thread is using it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nx_consumer_free(consumer: *mut Consumer) {
-    if consumer.is_null() {
-        return;
-    }
-    // SAFETY: the header requires an unreleased consumer no other thread uses.
-    let consumer = unsafe { Box::from_raw(consumer) };
-    consumer.free();
+    // SAFETY: the header requires an unreleased consumer no other thread uses, or null. Dropping
+    // it releases it inside its session's runtime.
+    unsafe { abi::release(consumer) };
 }

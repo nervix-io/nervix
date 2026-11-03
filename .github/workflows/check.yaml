@@ -656,6 +656,15 @@ jobs:
             sudo apt-get install --yes --no-install-recommends zstd
           fi
 
+      # The Python package's unit tests embed the CPython 3.12 library the build job linked, which
+      # restoring the archive checks each executable can load.
+      - name: Install the CPython library
+        run: |
+          if ! ldconfig -p | grep -q 'libpython3\.12\.so\.1\.0'; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends libpython3.12t64
+          fi
+
       # The tests sync their storage below /tmp and the checkout. A single-use runner needs no crash
       # consistency, so those volumes drop their write barriers, as the build job's kache start step
       # drops them for its store.
@@ -837,12 +846,14 @@ jobs:
         with:
           node-version: "24"
 
+      # The Python package's unit tests embed CPython, so the unit tests link its library.
       - name: Install apt deps
         run: |
           sudo apt update
           sudo apt install -y \
             libcurl4-openssl-dev \
             protobuf-compiler \
+            python3-dev \
             zstd
 
       - name: Setup flatc
@@ -1490,11 +1501,11 @@ jobs:
             target/coverage-full/summary.md
           if-no-files-found: warn
 
-  # The cross-language client probes: C, C++, Python, Java and Ruby over the shared Rust binding,
-  # and independent Go and TypeScript implementations on Node.js and Bun. They need toolchains the
-  # suite job does not install and run a feature of their own, so they are a job of their own
-  # beside the suite rather than minutes added to its critical path. They run only for a pull
-  # request labeled `client-conformance`.
+  # The cross-language client probes: C, C++, Java and Ruby over the shared Rust binding's C ABI,
+  # CPython over its Python package, and independent Go and TypeScript implementations on Node.js and
+  # Bun. They need toolchains the suite job does not install and run a feature of their own, so they
+  # are a job of their own beside the suite rather than minutes added to its critical path. They run
+  # only for a pull request labeled `client-conformance`.
   client-conformance:
     name: client-conformance
     if: contains(github.event.pull_request.labels.*.name, 'client-conformance')
@@ -1577,6 +1588,11 @@ jobs:
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.3"
+
+      # `just build-client-python` runs maturin through uv and installs the Python package with
+      # pyarrow into a CPython 3.12 environment, which uv provides.
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
 
       - name: Install apt deps
         run: |

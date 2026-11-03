@@ -69,12 +69,6 @@ pub enum TypeKind {
 }
 
 impl FieldType {
-    /// Reads a type a host passed as an integer.
-    pub fn from_host(field_type: i32) -> Result<Self, Failure> {
-        Self::from_repr(field_type)
-            .ok_or_else(|| Failure::invalid_argument("type", "is not an nx_type"))
-    }
-
     /// The scalar this type names, or the kind of list it is.
     pub fn kind(self) -> TypeKind {
         match self {
@@ -165,13 +159,6 @@ impl<'a> TypeLevels<'a> {
 pub enum Part {
     Rows = 1,
     BranchKey = 2,
-}
-
-impl Part {
-    /// Reads a part a host passed as an integer.
-    pub fn from_host(part: i32) -> Result<Self, Failure> {
-        Self::from_repr(part).ok_or_else(|| Failure::invalid_argument("part", "is not an nx_part"))
-    }
 }
 
 /// A subscription's row schema, shared with the events that follow it.

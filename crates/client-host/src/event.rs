@@ -1,9 +1,9 @@
 //! A subscription event a host reads, and bulk access to the rows it carries.
 //!
-//! - **Owns.** The event kinds and cell states a host reads, and copying or borrowing the cells of
-//!   a batch column by column.
-//! - **Depends on.** The Rust client's subscription events, the wire contract's row views, and
-//!   the schema.
+//! - **Owns.** The event kinds and cell states a host reads, copying or borrowing the cells of a
+//!   batch column by column, and building a rows event's rows as one batch of its row fields.
+//! - **Depends on.** The Rust client's subscription events, the wire contract's row views, the
+//!   schema, and the batch builder.
 //! - **Must not know.** How events are routed or restored; the session decides that.
 //!
 //! A rows event owns the verified frame it was decoded from and nothing else, so holding one
@@ -12,15 +12,18 @@
 //! reading a cell the schema describes cannot fail.
 
 use arch_into::ArchInto as _;
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_core::{
     SubscriptionEvent,
     wire::{CellView, CellsView, RowBatchView},
 };
+use nervix_models::{ParseAsType, SchemaField};
 
 use crate::{
+    batch::Batch,
+    batch_builder::BatchBuilder,
     failure::{Failure, FailureKind},
-    schema::{FieldType, Part, Schema},
+    schema::{FieldType, Part, Schema, TypeLevels},
 };
 
 /// What a subscription event reports, with its stable values.
@@ -250,6 +253,33 @@ impl Event {
         })
     }
 
+    /// The cells of `column` of `part`, in row order: one per row, or the one cell of the branch
+    /// key.
+    pub fn cells(&self, part: Part, column: usize) -> Result<Vec<CellView<'_>>, Failure> {
+        let (cells, _) = self.column(part, column)?;
+        let mut collected = Vec::with_capacity(cells.len());
+        cells.for_each_cell(column, |_, cell| {
+            collected.push(cell);
+            Ok(())
+        })?;
+        Ok(collected)
+    }
+
+    /// The bytes a fixed-width column takes in native byte order: one width per cell.
+    pub fn fixed_len(&self, part: Part, column: usize) -> Result<usize, Failure> {
+        let (cells, field_type) = self.column(part, column)?;
+        let Some(width) = field_type.fixed_width() else {
+            return Err(Failure::new(
+                FailureKind::Type,
+                format!("column {column} holds {field_type:?}, which is not fixed-width"),
+            ));
+        };
+        cells
+            .len()
+            .checked_mul(width)
+            .ok_or_else(|| Failure::invalid_argument("column", "overflows"))
+    }
+
     /// Copies a fixed-width column in native byte order.
     pub fn column_fixed(
         &self,
@@ -431,5 +461,207 @@ impl Event {
                 format!("column {column} holds {other:?}, not STRING or BYTES"),
             )),
         }
+    }
+}
+
+/// One list level of a rows event's column, laid out the way a host builds a batch.
+enum ListLevel {
+    /// Variable-length lists: their offsets into the next level, starting at zero.
+    Variable(Vec<u64>),
+    /// Fixed-size lists, whose element count the type gives, so they have no offsets.
+    Fixed,
+}
+
+impl ListLevel {
+    /// The offsets of a variable-length level.
+    fn offsets_mut(&mut self) -> Option<&mut Vec<u64>> {
+        match self {
+            Self::Variable(offsets) => Some(offsets),
+            Self::Fixed => None,
+        }
+    }
+}
+
+/// One column of a rows event laid out the way a host builds a batch: its row states, every list
+/// level, and the values of its innermost level.
+struct ColumnLevels {
+    states: Vec<u8>,
+    /// The list levels of the column's type, from the outside in.
+    lists: Vec<ListLevel>,
+    fixed: Vec<u8>,
+    varlen_offsets: Vec<u64>,
+    varlen: Vec<u8>,
+}
+
+impl ColumnLevels {
+    /// The empty levels of a column of type `ty`.
+    fn of(ty: &ParseAsType) -> Self {
+        let mut lists = Vec::new();
+        let mut current = ty;
+        loop {
+            match current {
+                ParseAsType::Vec { element } => {
+                    lists.push(ListLevel::Variable(vec![0]));
+                    current = element;
+                }
+                ParseAsType::Array { element, .. } => {
+                    lists.push(ListLevel::Fixed);
+                    current = element;
+                }
+                _ => break,
+            }
+        }
+        Self {
+            states: Vec::new(),
+            lists,
+            fixed: Vec::new(),
+            varlen_offsets: vec![0],
+            varlen: Vec::new(),
+        }
+    }
+
+    /// Lays out one cell of `level`, whose type is `ty`. A cell without a value — a null or
+    /// withheld row — is an empty list, a fixed-size list of placeholder elements, or a zero
+    /// value, which only its row's state marks.
+    fn push(&mut self, level: usize, ty: &ParseAsType, cell: Option<CellView<'_>>) {
+        let next = level
+            .checked_add(1)
+            .assured("a type nests fewer lists than a usize counts");
+        match ty {
+            ParseAsType::Vec { element } => {
+                let mut items = 0_usize;
+                if let Some(CellView::List(elements)) = cell {
+                    for item in elements.iter() {
+                        self.push(next, element, Some(item));
+                        items = items.checked_add(1).assured(
+                            "a list's elements lie inside one frame, whose length is a usize",
+                        );
+                    }
+                }
+                let list = self
+                    .lists
+                    .get_mut(level)
+                    .assured("every list level of the type was laid out");
+                let offsets = list
+                    .offsets_mut()
+                    .assured("a variable-length level of the type was laid out with offsets");
+                let last = *offsets.last().assured("a level's offsets start with zero");
+                let items: u64 = items.arch_into();
+                let end = last
+                    .checked_add(items)
+                    .assured("a level's elements lie inside one frame, whose length is a usize");
+                offsets.push(end);
+            }
+            ParseAsType::Array { element, len } => {
+                if let Some(CellView::List(elements)) = cell {
+                    for item in elements.iter() {
+                        self.push(next, element, Some(item));
+                    }
+                    return;
+                }
+                for _ in 0..len.get() {
+                    self.push(next, element, None);
+                }
+            }
+            ParseAsType::U8
+            | ParseAsType::I8
+            | ParseAsType::U16
+            | ParseAsType::I16
+            | ParseAsType::U32
+            | ParseAsType::I32
+            | ParseAsType::U64
+            | ParseAsType::I64
+            | ParseAsType::Bool
+            | ParseAsType::String
+            | ParseAsType::Datetime
+            | ParseAsType::F32
+            | ParseAsType::F64
+            | ParseAsType::Bytes => self.push_value(ty, cell),
+        }
+    }
+
+    /// Lays out one value of a scalar level: its native-order bytes, or its text.
+    fn push_value(&mut self, ty: &ParseAsType, cell: Option<CellView<'_>>) {
+        match (FieldType::from(ty).fixed_width(), cell) {
+            (Some(width), Some(cell)) => {
+                let start = self.fixed.len();
+                let end = start
+                    .checked_add(width)
+                    .assured("a column's values lie inside one frame, whose length is a usize");
+                self.fixed.resize(end, 0);
+                let target = self
+                    .fixed
+                    .get_mut(start..end)
+                    .verified("the values were just extended by one width");
+                Event::write_fixed(cell, target)
+                    .verified("a conforming cell of a fixed-width field holds a fixed-width value");
+            }
+            (Some(width), None) => {
+                let end = self
+                    .fixed
+                    .len()
+                    .checked_add(width)
+                    .assured("a column's values lie inside one frame, whose length is a usize");
+                self.fixed.resize(end, 0);
+            }
+            (None, cell) => {
+                if let Some(value) = cell.and_then(Event::varlen) {
+                    self.varlen.extend_from_slice(value);
+                }
+                self.varlen_offsets.push(self.varlen.len().arch_into());
+            }
+        }
+    }
+}
+
+impl Event {
+    /// A rows event's rows as one batch of its row fields. A sensitive field may hold cells the
+    /// server withheld, so it is nullable in the batch, and a withheld cell is null there;
+    /// `column_states` tells it apart from a null.
+    pub fn rows_batch(&self) -> Result<Batch, Failure> {
+        let schema = self.schema()?;
+        let fields: Vec<SchemaField> = schema
+            .fields(Part::Rows)
+            .iter()
+            .map(|field| SchemaField {
+                optional: field.optional || field.sensitive,
+                ..field.clone()
+            })
+            .collect();
+        let rows = usize::try_from(self.row_count())
+            .assured("a rows event's rows were counted from a usize");
+        let mut builder = BatchBuilder::new(Schema::of_fields(fields.clone()), rows);
+        for (column, field) in fields.iter().enumerate() {
+            let (cells, _) = self.column(Part::Rows, column)?;
+            let mut levels = ColumnLevels::of(&field.ty);
+            cells.for_each_cell(column, |_, cell| {
+                let value = match cell {
+                    CellView::Null | CellView::Redacted => None,
+                    _ => Some(cell),
+                };
+                let state = match value {
+                    Some(_) => CellState::Value,
+                    None => CellState::Null,
+                };
+                levels.states.push(u8::from(state));
+                levels.push(0, &field.ty, value);
+                Ok(())
+            })?;
+            builder.states(column, &levels.states)?;
+            for (level, list) in levels.lists.iter().enumerate() {
+                if let ListLevel::Variable(offsets) = list {
+                    builder.offsets(column, level, offsets)?;
+                }
+            }
+            let innermost = levels.lists.len();
+            let scalar = TypeLevels::of(&field.ty).level(innermost)?;
+            match FieldType::from(scalar).fixed_width() {
+                Some(_) => builder.fixed(column, innermost, &levels.fixed)?,
+                None => {
+                    builder.varlen(column, innermost, &levels.varlen_offsets, &levels.varlen)?
+                }
+            }
+        }
+        builder.finish()
     }
 }

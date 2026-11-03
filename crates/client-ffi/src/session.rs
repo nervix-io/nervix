@@ -9,9 +9,9 @@
 
 use std::ptr;
 
-use nervix_client_core::DomainName;
+use nervix_client_core::{ConnectOptions, DomainName};
 use nervix_client_host::{
-    Cancel, ClockEvent, Credentials, DomainClock, Event, Execution, Failure, Outcome, Session,
+    Cancel, ClockEvent, DomainClock, Event, Execution, Failure, Outcome, Session,
 };
 
 use crate::abi;
@@ -79,9 +79,11 @@ unsafe fn write_connected(
             abi::optional_text(password, password_len, "password")?,
         )
     };
-    let credentials = match (username, password) {
-        (Some(username), Some(password)) => Some(Credentials { username, password }),
-        (None, None) => None,
+    let options = match (username, password) {
+        (Some(username), Some(password)) => {
+            ConnectOptions::default().with_basic_auth(username, password)
+        }
+        (None, None) => ConnectOptions::default(),
         (Some(_), None) | (None, Some(_)) => {
             return Err(Failure::invalid_argument(
                 "username",
@@ -91,7 +93,7 @@ unsafe fn write_connected(
     };
     // SAFETY: the caller guarantees a live token or null.
     let cancel = unsafe { cancel.as_ref() };
-    let session = Session::connect(server, domain, credentials, cancel)?;
+    let session = Session::connect(server, domain, options, cancel)?;
     // SAFETY: `out` is non-null, and the caller guarantees it is writable.
     unsafe { abi::write(out, abi::into_handle(session)) };
     Ok(())

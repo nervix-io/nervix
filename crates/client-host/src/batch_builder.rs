@@ -213,6 +213,21 @@ impl BatchBuilder {
         Ok(())
     }
 
+    /// Sets whether each row of `column` holds a value, from one flag per row: a row that holds
+    /// none is null, which only an optional field takes.
+    pub fn presence(&mut self, column: usize, present: &[bool]) -> Result<(), Failure> {
+        let mut states = Vec::with_capacity(present.len());
+        for present in present {
+            let state = if *present {
+                CellState::Value
+            } else {
+                CellState::Null
+            };
+            states.push(u8::from(state));
+        }
+        self.states(column, &states)
+    }
+
     /// Sets the offsets of the lists `level` of `column` holds into the level below it.
     pub fn offsets(&mut self, column: usize, level: usize, offsets: &[u64]) -> Result<(), Failure> {
         let checked = checked_offsets(offsets, "offsets")?;

@@ -7,36 +7,13 @@
 //! - **Must not know.** How a batch is admitted, sent again or restored; the Rust producer decides
 //!   all of it.
 
-use std::{
-    num::{NonZeroU32, NonZeroU64},
-    time::Duration,
-};
-
-use meticulous::ResultExt as _;
 use nervix_client_core::ClientProducerLimits;
 use nervix_client_host::{
     Admission, Batch, Cancel, EndpointState, Failure, Fields, OpenRefusal, Producer, ReopenReason,
-    Schema, Session, SubmissionOutcome, Window, WindowKind,
+    Schema, Session, SubmissionOutcome, Window, WindowKind, credit, nanos,
 };
 
 use crate::abi;
-
-/// The credit one endpoint asks for: how many batches and bytes may be outstanding at once.
-pub(crate) fn credit(batches: u32, bytes: u64) -> Result<(NonZeroU32, NonZeroU64), Failure> {
-    let Some(batches) = NonZeroU32::new(batches) else {
-        return Err(Failure::invalid_argument("batches", "must be positive"));
-    };
-    let Some(bytes) = NonZeroU64::new(bytes) else {
-        return Err(Failure::invalid_argument("bytes", "must be positive"));
-    };
-    Ok((batches, bytes))
-}
-
-/// A duration the wire carried, in nanoseconds.
-pub(crate) fn nanos(duration: Duration) -> u64 {
-    u64::try_from(duration.as_nanos())
-        .verified("the wire carries every endpoint duration as u64 nanoseconds")
-}
 
 /// # Safety
 ///
@@ -474,10 +451,7 @@ unsafe fn closed(producer: *const Producer, cancel: *const Cancel) -> Result<(),
 /// other thread is using it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nx_producer_free(producer: *mut Producer) {
-    if producer.is_null() {
-        return;
-    }
-    // SAFETY: the header requires an unreleased producer no other thread uses.
-    let producer = unsafe { Box::from_raw(producer) };
-    producer.free();
+    // SAFETY: the header requires an unreleased producer no other thread uses, or null. Dropping
+    // it releases it inside its session's runtime.
+    unsafe { abi::release(producer) };
 }

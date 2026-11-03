@@ -175,7 +175,8 @@ impl Batch {
         }
     }
 
-    pub(crate) fn record_batch(&self) -> &RecordBatch {
+    /// The batch's rows as Arrow data, in the canonical schema of its fields.
+    pub fn record_batch(&self) -> &RecordBatch {
         &self.batch
     }
 
@@ -290,6 +291,26 @@ impl Batch {
             *target = relative.arch_into();
         }
         Ok(())
+    }
+
+    /// The bytes the fixed-width values of `level` of `column` take in native byte order.
+    pub fn fixed_len(&self, column: usize, level: usize) -> Result<usize, Failure> {
+        let cells = self.level(column, level)?;
+        let field_type = FieldType::from(cells.ty);
+        let Some(width) = field_type.fixed_width() else {
+            return Err(Failure::new(
+                FailureKind::Type,
+                format!(
+                    "level {level} of column {column} holds {field_type:?}, which is not \
+                     fixed-width"
+                ),
+            ));
+        };
+        cells
+            .data
+            .len()
+            .checked_mul(width)
+            .ok_or_else(|| Failure::invalid_argument("values_len", "overflows"))
     }
 
     /// Copies the fixed-width values of `level` of `column` in native byte order.

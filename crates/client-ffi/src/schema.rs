@@ -5,7 +5,7 @@
 //! - **Depends on.** The shared schema and the C ABI boundary.
 //! - **Must not know.** Where the schema came from.
 
-use nervix_client_host::{Failure, FieldType, Part, Schema, TypeLevels};
+use nervix_client_host::{Failure, FieldType, Schema, TypeLevels};
 use nervix_models::ParseAsType;
 
 use crate::abi;
@@ -42,7 +42,7 @@ unsafe fn write_field_count(
     // SAFETY: the caller guarantees a live schema.
     let schema = unsafe { abi::handle(schema, "schema") }?;
     abi::require_out(count, "count")?;
-    let fields = schema.fields(Part::from_host(part)?);
+    let fields = schema.fields(abi::part(part)?);
     // SAFETY: `count` is non-null, and the caller guarantees it is writable.
     unsafe { abi::write(count, fields.len()) };
     Ok(())
@@ -89,7 +89,7 @@ unsafe fn write_field(
 ) -> Result<(), Failure> {
     // SAFETY: the caller guarantees a live schema.
     let schema = unsafe { abi::handle(schema, "schema") }?;
-    let field = schema.field(Part::from_host(part)?, index)?;
+    let field = schema.field(abi::part(part)?, index)?;
     // SAFETY: the caller guarantees writable out-parameters.
     unsafe {
         abi::write_bytes(name, name_len, field.name.as_str().as_bytes());
@@ -126,7 +126,7 @@ unsafe fn write_field_levels(
     abi::require_out(levels, "levels")?;
     // SAFETY: the caller guarantees a live schema.
     let schema = unsafe { abi::handle(schema, "schema") }?;
-    let field = schema.field(Part::from_host(part)?, index)?;
+    let field = schema.field(abi::part(part)?, index)?;
     // SAFETY: `levels` is non-null, and the caller guarantees it is writable.
     unsafe { abi::write(levels, TypeLevels::of(&field.ty).count()) };
     Ok(())
@@ -161,7 +161,7 @@ unsafe fn write_field_level(
 ) -> Result<(), Failure> {
     // SAFETY: the caller guarantees a live schema.
     let schema = unsafe { abi::handle(schema, "schema") }?;
-    let field = schema.field(Part::from_host(part)?, index)?;
+    let field = schema.field(abi::part(part)?, index)?;
     let ty = TypeLevels::of(&field.ty).level(level)?;
     // SAFETY: the caller guarantees writable out-parameters.
     unsafe {

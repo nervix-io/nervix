@@ -35,13 +35,6 @@ use crate::{
 /// and its reader, so a second thread only keeps a busy decoder from delaying a timer.
 const RUNTIME_THREADS: usize = 2;
 
-/// The credentials a session presents on every call.
-#[derive(Debug, Clone, Copy)]
-pub struct Credentials<'a> {
-    pub username: &'a str,
-    pub password: &'a str,
-}
-
 /// An open session, as the host holds it.
 pub struct Session {
     shared: Arc<SessionRuntime>,
@@ -69,11 +62,12 @@ impl Execution {
 }
 
 impl Session {
-    /// Opens a session on `server`, blocking the calling thread until it is open.
+    /// Opens a session on `server` with the Rust client's `options`, blocking the calling thread
+    /// until it is open.
     pub fn connect(
         server: &str,
         domain: Option<&str>,
-        credentials: Option<Credentials<'_>>,
+        options: ConnectOptions,
         cancel: Option<&Cancel>,
     ) -> Result<Self, Failure> {
         let domain = match domain {
@@ -85,10 +79,6 @@ impl Session {
             },
             None => None,
         };
-        let mut options = ConnectOptions::default();
-        if let Some(credentials) = credentials {
-            options = options.with_basic_auth(credentials.username, credentials.password);
-        }
         let runtime = nervix_primitives::unmodeled::runtime::Builder::new_multi_thread()
             .worker_threads(RUNTIME_THREADS)
             .thread_name("nervix-client")

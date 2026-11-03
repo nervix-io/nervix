@@ -503,6 +503,9 @@ name = "arrow-schema"
 version = "58.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8506ad465ebb9483bb6efa1e2e78a313549122c6dd67dc2f7087297b762eaede"
+dependencies = [
+ "bitflags 2.13.2",
+]
 
 [[package]]
 name = "arrow-select"
@@ -6777,15 +6780,35 @@ dependencies = [
  "arrow-array",
  "arrow-buffer",
  "arrow-data",
+ "arrow-schema",
+ "arrow-select",
+ "bolero",
  "bytes",
  "error-stack",
  "meticulous",
+ "nervix-arbitrary",
  "nervix-client-core",
  "nervix-models",
  "nervix-primitives",
  "nervix-recovery",
  "strum 0.26.3",
  "uuid",
+]
+
+[[package]]
+name = "nervix-client-python"
+version = "0.1.0-dev"
+dependencies = [
+ "arrow-array",
+ "meticulous",
+ "nervix-client-core",
+ "nervix-client-host",
+ "nervix-models",
+ "nervix-primitives",
+ "pyo3",
+ "pyo3-build-config",
+ "tonic 0.13.1",
+ "url",
 ]
 
 [[package]]
@@ -9744,6 +9767,63 @@ dependencies = [
  "uuid",
  "webpki-roots 1.0.11",
  "zstd",
+]
+
+[[package]]
+name = "pyo3"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "229ca13b8a15bb0d1487b81ab975bfcd97513416499a8312011b6036e42e0de4"
+dependencies = [
+ "libc",
+ "once_cell",
+ "portable-atomic",
+ "pyo3-build-config",
+ "pyo3-ffi",
+ "pyo3-macros",
+]
+
+[[package]]
+name = "pyo3-build-config"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70130e2b6dd1ee589a8788026a429561ca5c40fa7a2fa7914c2282eddae24700"
+dependencies = [
+ "target-lexicon",
+]
+
+[[package]]
+name = "pyo3-ffi"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e7ff73c555c286d212d4ce7e5fbda845a973c4f61bd5f160f5f2c3c2a04d1c4"
+dependencies = [
+ "libc",
+ "pyo3-build-config",
+]
+
+[[package]]
+name = "pyo3-macros"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c46d2e5862c7bb8207e3b639f713dda3c499933444784154c11d013c5a691b60"
+dependencies = [
+ "proc-macro2",
+ "pyo3-macros-backend",
+ "quote",
+ "syn 3.0.9",
+]
+
+[[package]]
+name = "pyo3-macros-backend"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38b89f066f2ae72a2aef52d1537ca2fcd104440ebfadee06e97aa90738a25b9b"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
 ]
 
 [[package]]

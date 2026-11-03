@@ -10,9 +10,11 @@ workspace = true
 
 [dependencies]
 arch-into = { workspace = true }
-arrow-array = { workspace = true }
+arrow-array = { workspace = true, features = ["ffi"] }
 arrow-buffer = { workspace = true }
 arrow-data = { workspace = true }
+arrow-schema = { workspace = true }
+arrow-select = { workspace = true }
 bytes = { workspace = true }
 error-stack = { workspace = true }
 meticulous = { workspace = true }
@@ -23,4 +25,6 @@ nervix-recovery = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
+bolero = { workspace = true }
+nervix-arbitrary = { workspace = true }
 uuid = { workspace = true }

@@ -1,9 +1,10 @@
 Feature: Cross-language client conformance
   Every client runtime reads the same rows, answers and failures through the finalized session
   protocol and prints the same report, so one expected report is the oracle for every language.
-  The shared Rust binding is driven from C, C++, Python, Java and Ruby, and in process through
-  its C ABI; Go over native gRPC and TypeScript on Node.js and Bun over the binary WebSocket are
-  independent implementations generated from the schema. Every binding host also attaches to a
+  The shared Rust binding is driven through its C ABI from C, C++, Java and Ruby and in process,
+  and from CPython through the Python package on the same host session runtime; Go over native
+  gRPC and TypeScript on Node.js and Bun over the binary WebSocket are independent implementations
+  generated from the schema. Every binding host also attaches to a
   paced domain clock that is already running, reads the clock the attach reported before it uses a
   tick, and keeps the generations a STOP and START and a restored session report apart. Every
   binding host also publishes typed Arrow batches through a client ingestor and consumes,
@@ -162,7 +163,7 @@ Feature: Cross-language client conformance
       | c++     | 3            |
 
     @client_conformance_toolchain @client_probe_python
-    Examples: CPython over the shared Rust binding
+    Examples: CPython over the Python package
       | runtime | cluster_size |
       | python  | 1            |
       | python  | 3            |
@@ -266,7 +267,7 @@ Feature: Cross-language client conformance
       | c++     | 3            | node-2      | node-1     |
 
     @client_conformance_toolchain @client_probe_python
-    Examples: CPython over the shared Rust binding
+    Examples: CPython over the Python package
       | runtime | cluster_size | clock_owner | entry_node |
       | python  | 1            | node-1      | node-1     |
       | python  | 3            | node-2      | node-1     |
@@ -496,7 +497,7 @@ Feature: Cross-language client conformance
       | c++     | 3            | VEC<STRING> | ARRAY<I16, 2, 2> | VEC<ARRAY<DATETIME, 2>> |
 
     @client_conformance_toolchain @client_probe_python
-    Examples: CPython over the shared Rust binding
+    Examples: CPython over the Python package
       | runtime | cluster_size | tags_type   | grid_type        | spans_type              |
       | python  | 1            | VEC<STRING> | ARRAY<I16, 2, 2> | VEC<ARRAY<DATETIME, 2>> |
       | python  | 3            | VEC<STRING> | ARRAY<I16, 2, 2> | VEC<ARRAY<DATETIME, 2>> |

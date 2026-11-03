@@ -3,15 +3,24 @@
 //! acknowledgement window.
 //!
 //! - **Owns.** The endpoint states, open refusals, reopen reasons and acknowledgement windows a
-//!   host reads, and how the Rust client's producer and consumer vocabulary reads as them.
+//!   host reads, how the Rust client's producer and consumer vocabulary reads as them, the credit
+//!   a host asks for, and the nanoseconds of an endpoint's durations.
 //! - **Depends on.** The Rust client's producer and consumer vocabulary.
 //! - **Must not know.** How an endpoint is opened, restored or closed; the producer and consumer
 //!   decide that.
 
+use std::{
+    num::{NonZeroU32, NonZeroU64},
+    time::Duration,
+};
+
+use meticulous::ResultExt as _;
 use nervix_client_core::{
     AckWindow, ClientProducerRefusal, ConsumerConnection, ConsumerReopenReason, ProducerConnection,
     ProducerReopenReason, wire::EmitterOpenRefusal,
 };
+
+use crate::failure::Failure;
 
 /// Whether an endpoint handle is attached, with its stable values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,4 +209,21 @@ impl From<AckWindow> for Window {
             },
         }
     }
+}
+
+/// The credit one endpoint asks for: how many batches and bytes may be outstanding at once.
+pub fn credit(batches: u32, bytes: u64) -> Result<(NonZeroU32, NonZeroU64), Failure> {
+    let Some(batches) = NonZeroU32::new(batches) else {
+        return Err(Failure::invalid_argument("batches", "must be positive"));
+    };
+    let Some(bytes) = NonZeroU64::new(bytes) else {
+        return Err(Failure::invalid_argument("bytes", "must be positive"));
+    };
+    Ok((batches, bytes))
+}
+
+/// A duration the wire carried, in nanoseconds.
+pub fn nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos())
+        .verified("the wire carries every endpoint duration as u64 nanoseconds")
 }
