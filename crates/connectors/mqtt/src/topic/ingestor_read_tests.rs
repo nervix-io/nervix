@@ -1051,6 +1051,140 @@ async fn every_downgraded_subscription_fails_before_the_ingestor_is_ready() {
 }
 
 #[nervix_primitives::test]
+async fn an_accepted_retained_subscription_delivers_its_queued_publish() {
+    let fixture = DnsFixture::start().await;
+    let broker = ScriptedBroker::start().await;
+    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
+    let (mut source, connection) = subscribed(&plan, &broker).await;
+    source
+        .suspend()
+        .await
+        .assured("the broker keeps the accepted persistent subscription");
+    drop(connection);
+    let retained_session = async {
+        let mut connection = broker.accept_retained_session().await;
+        connection.write_publish(17, &[91]).await;
+        connection
+    };
+    let (result, _connection) = timeout(OBSERVATION_BUDGET, async {
+        tokio::join!(source.resume(), retained_session)
+    })
+    .await
+    .assured("the accepted session resumes without another SUBSCRIBE");
+    result.assured("the accepted persistent subscription becomes ready at CONNACK");
+    let cancellation = IngestorReadCancellation::new();
+    let batch = timeout(
+        OBSERVATION_BUDGET,
+        source.next_batch(request(1, None), &cancellation),
+    )
+    .await
+    .assured("the queued publish reaches the resumed connection")
+    .assured("reading the accepted subscription succeeds");
+    assert_eq!(Read::of(batch), Read::Completed(vec![91]));
+}
+
+#[nervix_primitives::test]
+async fn a_refused_subscription_cannot_become_ready_from_a_retained_session() {
+    let fixture = DnsFixture::start().await;
+    let broker = ScriptedBroker::start().await;
+    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
+    let mut source = MqttTopicIngestor::open(&plan, 0)
+        .await
+        .assured("opening does not connect");
+    let refusal = async {
+        let mut connection = broker.accept().await;
+        connection.refuse_subscription().await;
+        connection
+    };
+    let (result, connection) = timeout(OBSERVATION_BUDGET, async {
+        tokio::join!(source.resume(), refusal)
+    })
+    .await
+    .assured("the scripted broker answers the subscription within the observation budget");
+    let error = result.expect_err("the broker explicitly refused the subscription");
+    assert!(matches!(
+        error.downcast_ref::<MqttTopicIngestorError>(),
+        Some(MqttTopicIngestorError::SubscriptionRefused)
+    ));
+    drop(connection);
+
+    // The peer retains the empty session after refusing SUBACK, then ends the retry connection.
+    // Cleanup must fail rather than admitting that session as an accepted subscription.
+    let retained_session = async {
+        let _connection = broker.accept_retained_session().await;
+    };
+    let (result, ()) = timeout(OBSERVATION_BUDGET, async {
+        tokio::join!(source.resume(), retained_session)
+    })
+    .await
+    .assured("the retained-session answer and closed peer end the retry within the budget");
+    assert!(
+        result.is_err(),
+        "a retained empty session cannot make a refused subscription ready"
+    );
+    assert!(source.needs_resume());
+    source
+        .suspend()
+        .await
+        .assured("suspension preserves pending subscription retirement");
+    assert!(matches!(
+        source.connection,
+        super::MqttSourceConnection::RetiringSubscription
+    ));
+}
+
+#[nervix_primitives::test]
+async fn a_refused_subscription_retires_before_a_new_grant() {
+    let fixture = DnsFixture::start().await;
+    let broker = ScriptedBroker::start().await;
+    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
+    let mut source = MqttTopicIngestor::open(&plan, 0)
+        .await
+        .assured("opening does not connect");
+    let refusal = async {
+        let mut connection = broker.accept().await;
+        connection.refuse_subscription().await;
+        connection
+    };
+    let (result, connection) = timeout(OBSERVATION_BUDGET, async {
+        tokio::join!(source.resume(), refusal)
+    })
+    .await
+    .assured("the scripted broker answers the subscription within the observation budget");
+    let error = result.expect_err("the broker explicitly refused the subscription");
+    assert!(matches!(
+        error.downcast_ref::<MqttTopicIngestorError>(),
+        Some(MqttTopicIngestorError::SubscriptionRefused)
+    ));
+    drop(connection);
+    source
+        .suspend()
+        .await
+        .assured("suspension preserves pending subscription retirement");
+
+    let cleanup_and_grant = async {
+        let mut cleanup = broker.accept_expiring_session().await;
+        let (packet_type, body) = cleanup.read_packet().await;
+        assert_eq!(
+            packet_type, 10,
+            "retirement unsubscribes the refused filter"
+        );
+        cleanup.write(&[0xb0, 4, body[0], body[1], 0, 0]).await;
+        cleanup.expect_session_expiry_zero().await;
+        let mut replacement = broker.accept().await;
+        replacement.grant_subscription().await;
+        replacement
+    };
+    let (result, _replacement) = timeout(OBSERVATION_BUDGET, async {
+        tokio::join!(source.resume(), cleanup_and_grant)
+    })
+    .await
+    .assured("retirement and a new subscription complete within the observation budget");
+    result.assured("an accepted replacement subscription becomes ready");
+    assert!(!source.needs_resume());
+}
+
+#[nervix_primitives::test]
 async fn a_downgraded_subscription_retires_its_session_before_another_attempt() {
     let fixture = DnsFixture::start().await;
     let broker = ScriptedBroker::start().await;
