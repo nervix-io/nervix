@@ -4,6 +4,7 @@ mod snapshot_receive;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt,
     fs::OpenOptions,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -91,8 +92,8 @@ use nervix_server::{
     },
 };
 use pulsar::{
-    ConsumerOptions as PulsarConsumerOptions, Pulsar, SubType as PulsarSubType, TokioExecutor,
-    consumer::InitialPosition as PulsarInitialPosition,
+    Authentication, ConsumerOptions as PulsarConsumerOptions, Pulsar, SubType as PulsarSubType,
+    TokioExecutor, consumer::InitialPosition as PulsarInitialPosition,
 };
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
@@ -122,8 +123,8 @@ use super::{
     command_recovery::LeaderRoutes,
     dependencies::{
         DependencyEndpoints, KAFKA_ADDR, MQTT_ADDR, NATS_ADDR, NATS_TLS_ADDR, PULSAR_ADDR,
-        PULSAR_ADMIN_ADDR, PULSAR_TLS_ADDR, RABBITMQ_ADDR, REDIS_ADDR, SQS_ENDPOINT,
-        SQS_TLS_ENDPOINT,
+        PULSAR_ADMIN_ADDR, PULSAR_AUTH_ADDR, PULSAR_AUTH_TOKEN, PULSAR_TLS_ADDR, RABBITMQ_ADDR,
+        REDIS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
     },
     kafka_group_member::ExternalKafkaGroupMember,
     nats_observer::NatsObserver,
@@ -881,6 +882,157 @@ impl LeaderWitness {
                 expired.last_output.map(|status| status.raw)
             ))),
         }
+    }
+}
+
+/// One leadership as a node reports it: the leader it names and the term it reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReportedLeadership {
+    leader: String,
+    term: u64,
+}
+
+impl ReportedLeadership {
+    /// Whether this is a leadership that a move which last asked `asked` has not asked yet. A
+    /// later term is a new leadership, and so is another leader in the same term, because OpenRaft
+    /// orders the candidates of one term by node identifier. A report of an earlier term is stale.
+    fn is_new_since(&self, asked: &ReportedLeadership) -> bool {
+        if self.term != asked.term {
+            return self.term > asked.term;
+        }
+        self.leader != asked.leader
+    }
+}
+
+impl fmt::Display for ReportedLeadership {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "'{}' in term {}", self.leader, self.term)
+    }
+}
+
+/// Moves leadership to one node and waits until that node reports itself the leader.
+///
+/// A transfer is a request, not a reservation of the next election. The leader stops sending
+/// heartbeats and the target campaigns at once, but every other voter's election timeout keeps
+/// running until the target's votes come back. Under load a granted vote's reply can miss the
+/// target's vote request deadline, or another voter's timeout can pass first, and that voter wins,
+/// even in the term the target campaigns in, because OpenRaft orders one term's candidates by node
+/// identifier. Raft is right to elect it, and nothing moves leadership on afterwards. A move
+/// therefore asks each leadership the target reports that is not its own, once, until the target
+/// leads. It never asks a target that already leads: a leader asked to transfer to itself stops its
+/// heartbeats and hands leadership to whichever follower's election timeout passes first.
+struct LeadershipMove {
+    fault_injection: FaultInjection,
+    target: LeaderWitness,
+}
+
+impl LeadershipMove {
+    /// Asks `from_node_id`, and then each new leadership the target reports, to transfer
+    /// leadership to the target, until the target reports itself the leader within `deadline`.
+    async fn complete(&self, from_node_id: &str, deadline: PhaseDeadline) -> io::Result<()> {
+        let target = self.target.node_id.as_str();
+        let mut repeated = Vec::new();
+        let first = self
+            .next_status(deadline, &repeated, |status| status.leadership().is_some())
+            .await?;
+        let first = first
+            .leadership()
+            .verified("the poll accepted the status because it names a leadership");
+        if first.leader == target {
+            return Ok(());
+        }
+        let mut asked = ReportedLeadership {
+            leader: from_node_id.to_string(),
+            term: first.term,
+        };
+        if asked.leader != target {
+            self.ask(&asked.leader);
+        }
+        loop {
+            let status = self
+                .next_status(deadline, &repeated, |status| {
+                    self.reports_target_or_new_since(status, &asked)
+                })
+                .await?;
+            let leadership = status
+                .leadership()
+                .verified("the poll accepted the status because it names a leadership");
+            if leadership.leader == target {
+                return Ok(());
+            }
+            eprintln!(
+                "leadership move to '{target}': {leadership} leads after {asked} was asked; \
+                 asking '{}' to transfer to '{target}'",
+                leadership.leader
+            );
+            self.ask(&leadership.leader);
+            repeated.push(leadership.clone());
+            asked = leadership;
+        }
+    }
+
+    /// Whether `status` names the target as the leader, or a leadership the move has not asked
+    /// since it asked `asked`.
+    fn reports_target_or_new_since(
+        &self,
+        status: &ClusterStatus,
+        asked: &ReportedLeadership,
+    ) -> bool {
+        let Some(leadership) = status.leadership() else {
+            return false;
+        };
+        leadership.leader == self.target.node_id || leadership.is_new_since(asked)
+    }
+
+    /// Asks `leader` to transfer leadership to the target.
+    fn ask(&self, leader: &str) {
+        self.fault_injection
+            .request_leadership_transfer(node_name(leader), node_name(&self.target.node_id));
+    }
+
+    /// Polls the target's status until `accepts` takes one, and otherwise names, once `deadline`
+    /// passes, the leaderships the move asked again in `repeated` and what the target last
+    /// reported.
+    async fn next_status<Accepts>(
+        &self,
+        deadline: PhaseDeadline,
+        repeated: &[ReportedLeadership],
+        accepts: Accepts,
+    ) -> io::Result<ClusterStatus>
+    where
+        Accepts: Fn(&ClusterStatus) -> bool,
+    {
+        let polled = deadline
+            .poll_until(
+                POLL_INTERVAL,
+                |phase| async move {
+                    let status = self.target.endpoint.cluster_status(phase).await?;
+                    Ok::<_, Report<StatusRequestError>>(ClusterStatus::parse(status))
+                },
+                accepts,
+            )
+            .await;
+        let expired = match polled {
+            Ok(status) => return Ok(status),
+            Err(expired) => expired,
+        };
+        let asked_again = repeated
+            .iter()
+            .map(ReportedLeadership::to_string)
+            .collect::<Vec<_>>();
+        let mut message = format!(
+            "node '{}' did not report itself the leader within {:?}; the move asked again after \
+             {asked_again:?}",
+            self.target.node_id,
+            deadline.elapsed()
+        );
+        if let Some(status) = expired.last_output {
+            message.push_str(&format!("\nlast status:\n{}", status.raw));
+        }
+        if let Some(failure) = expired.last_failure {
+            message.push_str(&format!("\nlast error: {failure:#}"));
+        }
+        Err(io::Error::other(message))
     }
 }
 
@@ -2384,6 +2536,18 @@ impl Cluster {
         publish_mqtt_with_qos(&self.dependencies, topic, payload, QoS::AtLeastOnce, true).await
     }
 
+    /// Publishes `payload` with the flags and MQTT 5 properties `options` name, and returns once
+    /// the broker answered what their QoS asks for.
+    pub(crate) async fn publish_mqtt_with_options(
+        &self,
+        topic: &str,
+        payload: &str,
+        options: PublishOptions,
+    ) -> io::Result<()> {
+        let (host, port) = dependency_host_port(&self.dependencies, MQTT_ADDR, 1883)?;
+        publish_mqtt_options_to_address(host, port, topic, payload, options).await
+    }
+
     /// Publishes `payload` at QoS 2 and returns once the broker completed its PUBCOMP exchange.
     pub(crate) async fn publish_mqtt_qos2(&self, topic: &str, payload: &str) -> io::Result<()> {
         publish_mqtt_with_qos(&self.dependencies, topic, payload, QoS::ExactlyOnce, true).await
@@ -2455,6 +2619,29 @@ impl Cluster {
 
     pub(crate) async fn publish_pulsar_tls(&self, topic: &str, payload: &str) -> io::Result<()> {
         publish_pulsar_tls(&self.dependencies, topic, payload).await
+    }
+
+    /// Publishes to the broker that authenticates its clients, with the token it accepts.
+    pub(crate) async fn publish_pulsar_auth(&self, topic: &str, payload: &str) -> io::Result<()> {
+        publish_pulsar_auth(&self.dependencies, topic, payload).await
+    }
+
+    /// Publishes `messages` to `topic` in order, each under its Pulsar key.
+    pub(crate) async fn publish_keyed_pulsar(
+        &self,
+        topic: &str,
+        messages: Vec<KeyedPulsarMessage>,
+    ) -> io::Result<()> {
+        publish_keyed_pulsar(&self.dependencies, topic, messages).await
+    }
+
+    /// Joins a subscription with a consumer of the scenario's own, as another application's would
+    /// be. The consumer acknowledges what it reads, and closes when its observer is dropped.
+    pub(crate) async fn hold_pulsar_consumer(
+        &self,
+        consumer: HeldPulsarConsumer<'_>,
+    ) -> io::Result<BrokerObserver> {
+        hold_pulsar_consumer(&self.dependencies, consumer).await
     }
 
     pub(crate) async fn limit_pulsar_topic_message_size(
@@ -2621,11 +2808,15 @@ impl Cluster {
         ensure_kafka_topic_partitions(&self.dependencies, topic, partitions).await
     }
 
-    /// Historical CreateTime records must survive the broker's retention scans.
+    /// Historical CreateTime records must survive the broker's retention scans, and the broker
+    /// keeps every CreateTime as its producer wrote it, however far after the broker's clock, so a
+    /// record whose timestamp no `DATETIME` holds reaches the topic whatever the broker's default.
     pub(crate) async fn create_kafka_metadata_topic(&self, topic: &str) -> io::Result<()> {
         let admin = kafka_admin_client(&self.dependencies)?;
+        let latest_create_time = i64::MAX.to_string();
         let definition = NewTopic::new(topic, 1, TopicReplication::Fixed(1))
             .set("message.timestamp.type", "CreateTime")
+            .set("message.timestamp.after.max.ms", &latest_create_time)
             .set("retention.ms", "-1")
             .set("retention.bytes", "-1");
         let options = AdminOptions::new().request_timeout(Some(Duration::from_secs(5)));
@@ -3128,14 +3319,19 @@ impl Cluster {
         observe_pulsar(&self.dependencies, topic).await
     }
 
-    /// Observes `topic` through a shared subscription, the only kind a broker holds a delayed
-    /// message back from.
+    /// Observes `topic` through a shared subscription, which a broker holds a delayed message back
+    /// from, as it does a key-shared one and unlike a failover or exclusive one.
     pub(crate) async fn observe_pulsar_shared(&self, topic: &str) -> io::Result<BrokerObserver> {
         observe_pulsar_shared(&self.dependencies, topic).await
     }
 
     pub(crate) async fn observe_pulsar_tls(&self, topic: &str) -> io::Result<BrokerObserver> {
         observe_pulsar_tls(&self.dependencies, topic).await
+    }
+
+    /// Observes a topic of the broker that authenticates its clients, with the token it accepts.
+    pub(crate) async fn observe_pulsar_auth(&self, topic: &str) -> io::Result<BrokerObserver> {
+        observe_pulsar_auth(&self.dependencies, topic).await
     }
 
     pub(crate) async fn observe_nats(&self, subject: &str) -> io::Result<BrokerObserver> {
@@ -3206,6 +3402,17 @@ impl Cluster {
     pub(crate) fn restore_gossip_for_node(&self, node_id: &str) {
         self.fault_injection
             .restore_gossip_for_node(&node_name(node_id));
+    }
+
+    /// Makes `node_id` refuse the next subscription interest visibility check it answers.
+    pub(crate) fn refuse_interest_visibility_on(&self, node_id: &str) {
+        self.fault_injection
+            .refuse_interest_visibility_on(node_name(node_id));
+    }
+
+    pub(crate) fn interest_visibility_refusal_delivered(&self, node_id: &str) -> bool {
+        self.fault_injection
+            .interest_visibility_refusal_delivered(&node_name(node_id))
     }
 
     pub(crate) async fn wait_for_health_response_pause(
@@ -3882,9 +4089,17 @@ impl Cluster {
             .ok_or_else(|| io::Error::other("cluster has no alternate node"))
     }
 
-    pub(crate) fn transfer_leadership(&self, from_node_id: &str, to_node_id: &str) {
-        self.fault_injection
-            .request_leadership_transfer(node_name(from_node_id), node_name(to_node_id));
+    /// Moves leadership from `from_node_id` to `to_node_id` and returns once `to_node_id` reports
+    /// itself the leader. The move asks again whenever another node wins the election a transfer
+    /// started; see [`LeadershipMove`].
+    pub(crate) async fn move_leadership(
+        &self,
+        from_node_id: &str,
+        to_node_id: &str,
+    ) -> io::Result<()> {
+        self.leadership_move(to_node_id)
+            .complete(from_node_id, PhaseDeadline::after(STATUS_WAIT_BUDGET))
+            .await
     }
 
     /// Moves leadership from `from_node_id` to `to_node_id` underneath the next persistent command
@@ -3899,26 +4114,55 @@ impl Cluster {
         to_node_id: &str,
     ) -> AbortOnDropHandle<io::Result<()>> {
         let from = node_name(from_node_id);
-        let to = node_name(to_node_id);
-        let successor = self.leader_witness(to_node_id);
-        let predecessor = self.leader_witness(from_node_id);
+        let from_node_id = from_node_id.to_string();
+        let successor_node_id = to_node_id.to_string();
+        let leadership_move = self.leadership_move(to_node_id);
+        let predecessor = self.leader_witness(&from_node_id);
         let fault_injection = self.fault_injection.clone();
         hold.arm(&fault_injection, from.clone());
         AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
             hold.reached(&fault_injection, &from).await;
-            fault_injection.request_leadership_transfer(from.clone(), to);
             let deadline = PhaseDeadline::after(STATUS_WAIT_BUDGET);
-            let elected = successor.reports_leader(deadline, &successor.node_id).await;
+            let elected = leadership_move.complete(&from_node_id, deadline).await;
             let known = match elected {
                 Ok(()) => {
                     predecessor
-                        .reports_leader(deadline, &successor.node_id)
+                        .reports_leader(deadline, &successor_node_id)
                         .await
                 }
                 Err(error) => Err(error),
             };
             hold.release(&fault_injection, &from);
             known
+        }))
+    }
+
+    /// A move of leadership to `to_node_id`, read through that node's own status.
+    fn leadership_move(&self, to_node_id: &str) -> LeadershipMove {
+        LeadershipMove {
+            fault_injection: self.fault_injection.clone(),
+            target: self.leader_witness(to_node_id),
+        }
+    }
+
+    /// Blocks consensus connectivity for `blocked_node_id` until `leader_node_id` reports itself
+    /// the leader, and then restores it. The returned task ends once the connectivity is restored:
+    /// with `Ok` when the leader was seen leading first, and otherwise, once the status wait budget
+    /// passed, with the status the leader last reported, after restoring the connectivity anyway.
+    pub(crate) fn block_consensus_connectivity_until_leading(
+        &self,
+        blocked_node_id: &str,
+        leader_node_id: &str,
+    ) -> AbortOnDropHandle<io::Result<()>> {
+        let blocked = node_name(blocked_node_id);
+        let leader = self.leader_witness(leader_node_id);
+        let fault_injection = self.fault_injection.clone();
+        fault_injection.block_consensus_connectivity(blocked.clone());
+        AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
+            let deadline = PhaseDeadline::after(STATUS_WAIT_BUDGET);
+            let led = leader.reports_leader(deadline, &leader.node_id).await;
+            fault_injection.restore_consensus_connectivity(&blocked);
+            led
         }))
     }
 
@@ -5212,6 +5456,7 @@ async fn publish_secure_websocket(
 struct ClusterStatus {
     raw: String,
     current_leader: Option<String>,
+    current_term: Option<u64>,
     raft_state: Option<String>,
     last_applied: Option<u64>,
     membership: BTreeMap<String, String>,
@@ -5221,6 +5466,7 @@ struct ClusterStatus {
 impl ClusterStatus {
     fn parse(raw: String) -> Self {
         let mut current_leader = None;
+        let mut current_term = None;
         let mut raft_state = None;
         let mut last_applied = None;
         let mut membership = BTreeMap::new();
@@ -5234,6 +5480,10 @@ impl ClusterStatus {
                 if trimmed != "(none)" {
                     current_leader = Some(trimmed.to_string());
                 }
+            }
+
+            if let Some(value) = line.strip_prefix("raft.current_term: ") {
+                current_term = value.trim().parse::<u64>().ok();
             }
 
             if let Some(value) = line.strip_prefix("raft.state: ") {
@@ -5279,6 +5529,7 @@ impl ClusterStatus {
         Self {
             raw,
             current_leader,
+            current_term,
             raft_state,
             last_applied,
             membership,
@@ -5288,6 +5539,14 @@ impl ClusterStatus {
 }
 
 impl ClusterStatus {
+    /// The leadership this status reports: the leader it names in the term it reports, when it
+    /// names both.
+    fn leadership(&self) -> Option<ReportedLeadership> {
+        let leader = self.current_leader.clone()?;
+        let term = self.current_term?;
+        Some(ReportedLeadership { leader, term })
+    }
+
     /// Whether the membership this status reports holds `node_id` as a voter.
     fn is_voter(&self, node_id: &str) -> bool {
         match self.membership.get(node_id) {
@@ -5398,6 +5657,17 @@ pub(crate) async fn publish_mqtt_to_address(
     qos: QoS,
     retain: bool,
 ) -> io::Result<()> {
+    let options = PublishOptions::new(qos).retain(retain);
+    publish_mqtt_options_to_address(host, port, topic, payload, options).await
+}
+
+async fn publish_mqtt_options_to_address(
+    host: String,
+    port: u16,
+    topic: &str,
+    payload: &str,
+    publish: PublishOptions,
+) -> io::Result<()> {
     let client_id = format!("nervix-cucumber-{}", Uuid::now_v7().as_simple());
     let options = MqttOptions::new(client_id, (host, port));
     let (client, mut eventloop) = AsyncClient::builder(options).capacity(16).build();
@@ -5414,7 +5684,7 @@ pub(crate) async fn publish_mqtt_to_address(
         // Runtime ingestors can still be attaching immediately after START. Retain the input on
         // its unique scenario topic, and keep driving until it is sent (QoS 0) or answered (QoS 1).
         let notice = client
-            .publish_tracked(topic, payload, PublishOptions::new(qos).retain(retain))
+            .publish_tracked(topic, payload, publish)
             .await
             .map_err(io::Error::other)?;
         notice
@@ -5835,7 +6105,7 @@ async fn publish_pulsar(
     topic: &str,
     payload: &str,
 ) -> io::Result<()> {
-    publish_pulsar_with_addr(dependencies.get(PULSAR_ADDR)?, None, topic, payload).await
+    publish_pulsar_with_addr(dependencies.get(PULSAR_ADDR)?, None, None, topic, payload).await
 }
 
 async fn publish_pulsar_tls(
@@ -5846,15 +6116,40 @@ async fn publish_pulsar_tls(
     publish_pulsar_with_addr(
         dependencies.get(PULSAR_TLS_ADDR)?,
         Some(dependencies.tls_ca_pem()?),
+        None,
         topic,
         payload,
     )
     .await
 }
 
+async fn publish_pulsar_auth(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    payload: &str,
+) -> io::Result<()> {
+    publish_pulsar_with_addr(
+        dependencies.get(PULSAR_AUTH_ADDR)?,
+        None,
+        Some(pulsar_token_authentication(dependencies)?),
+        topic,
+        payload,
+    )
+    .await
+}
+
+/// The credential the broker that authenticates its clients accepts.
+fn pulsar_token_authentication(dependencies: &DependencyEndpoints) -> io::Result<Authentication> {
+    Ok(Authentication {
+        name: "token".to_string(),
+        data: dependencies.get(PULSAR_AUTH_TOKEN)?.as_bytes().to_vec(),
+    })
+}
+
 async fn publish_pulsar_with_addr(
     addr: &str,
     ca_certificate_chain: Option<Vec<u8>>,
+    authentication: Option<Authentication>,
     topic: &str,
     payload: &str,
 ) -> io::Result<()> {
@@ -5865,6 +6160,9 @@ async fn publish_pulsar_with_addr(
             let mut builder = Pulsar::builder(addr, TokioExecutor);
             if let Some(ca_certificate_chain) = ca_certificate_chain.clone() {
                 builder = builder.with_certificate_chain(ca_certificate_chain);
+            }
+            if let Some(authentication) = authentication.clone() {
+                builder = builder.with_auth(authentication);
             }
             let pulsar: Pulsar<_> = builder.build().await.map_err(io::Error::other)?;
             let mut producer = pulsar
@@ -5905,6 +6203,46 @@ async fn publish_pulsar_with_addr(
             "failed to publish pulsar message to topic '{topic}'"
         ))
     }))
+}
+
+/// One message of a scenario's keyed publication: the Pulsar key a `KEY_SHARED` subscription routes
+/// by, and its payload.
+pub(crate) struct KeyedPulsarMessage {
+    pub(crate) key: String,
+    pub(crate) payload: String,
+}
+
+async fn publish_keyed_pulsar(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    messages: Vec<KeyedPulsarMessage>,
+) -> io::Result<()> {
+    let topic = pulsar_topic(topic);
+    let pulsar: Pulsar<_> = Pulsar::builder(dependencies.get(PULSAR_ADDR)?, TokioExecutor)
+        .build()
+        .await
+        .map_err(io::Error::other)?;
+    let mut producer = pulsar
+        .producer()
+        .with_topic(&topic)
+        .build()
+        .await
+        .map_err(io::Error::other)?;
+    for message in messages {
+        nervix_primitives::task::consume_budget().await;
+        let message = pulsar::producer::Message {
+            payload: message.payload.into_bytes(),
+            partition_key: Some(message.key),
+            ..Default::default()
+        };
+        producer
+            .send_non_blocking(message)
+            .await
+            .map_err(io::Error::other)?
+            .await
+            .map_err(io::Error::other)?;
+    }
+    Ok(())
 }
 
 /// Sets the `maxMessageSize` policy of an existing topic through the broker's admin API, and waits
@@ -6017,12 +6355,16 @@ async fn pulsar_subscription_backlog(
 }
 
 /// One subscription of a topic as the Pulsar admin API reports it: whether its cursor is
-/// durable, which a probe's non-durable cursor is not, and the names its consumers registered
-/// under.
+/// durable, which a probe's non-durable cursor is not, the type its consumers read it as, the names
+/// they registered under, the one the broker delivers to where the type has one, and how many
+/// messages each consumer was delivered, in the order of the broker's report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PulsarSubscriptionObservation {
     pub(crate) durable: bool,
+    pub(crate) subscription_type: Option<String>,
     pub(crate) consumer_names: Vec<String>,
+    pub(crate) active_consumer: Option<String>,
+    pub(crate) consumer_deliveries: Vec<u64>,
 }
 
 /// The subscription `subscription` of `topic` as the admin API's topic stats report it, absent
@@ -6060,19 +6402,27 @@ async fn pulsar_subscription(
         )));
     };
     let mut consumer_names = Vec::new();
+    let mut consumer_deliveries = Vec::new();
     for consumer in reported["consumers"].as_array().into_iter().flatten() {
-        let Some(name) = consumer["consumerName"].as_str() else {
+        let (Some(name), Some(delivered)) = (
+            consumer["consumerName"].as_str(),
+            consumer["msgOutCounter"].as_u64(),
+        ) else {
             return Err(io::Error::other(format!(
                 "the stats of Pulsar topic '{topic}' report a consumer of subscription \
-                 '{subscription}' without a name: {stats}"
+                 '{subscription}' without a name or a delivery count: {stats}"
             )));
         };
         consumer_names.push(name.to_string());
+        consumer_deliveries.push(delivered);
     }
     consumer_names.sort();
     Ok(Some(PulsarSubscriptionObservation {
         durable,
+        subscription_type: reported["type"].as_str().map(str::to_string),
         consumer_names,
+        active_consumer: reported["activeConsumerName"].as_str().map(str::to_string),
+        consumer_deliveries,
     }))
 }
 
@@ -7063,12 +7413,94 @@ pub(crate) async fn observe_kafka_through(
     Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
+/// An observer of what `consumer` reads, which it acknowledges. Dropping the observer drops the
+/// consumer, and the driver closes a consumer it drops.
+fn forward_pulsar_messages(
+    mut consumer: pulsar::Consumer<Vec<u8>, TokioExecutor>,
+) -> BrokerObserver {
+    let (payload_tx, payload_rx) = mpsc::channel(16);
+
+    let task = nervix_primitives::task::spawn(async move {
+        while let Some(message) = consumer.next().await {
+            let received_at = host_unix_millis();
+            nervix_primitives::task::consume_budget().await;
+            let Ok(message) = message else {
+                continue;
+            };
+            let metadata = message.metadata();
+            let times = PulsarMessageTimes {
+                event_time: metadata.event_time,
+                deliver_at: metadata.deliver_at_time,
+                published_at: metadata.publish_time,
+                received_at,
+            };
+            // Pulsar keeps message properties as an unordered map, so they are compared
+            // in name order.
+            let mut properties = message
+                .metadata()
+                .properties
+                .iter()
+                .map(|property| (property.key.clone(), property.value.clone()))
+                .collect::<Vec<_>>();
+            properties.sort();
+            let observed = BrokerMessage::from_bytes(&message.payload.data, properties)
+                .with_key(message.key())
+                .with_pulsar_times(times);
+            let _ = consumer.ack(&message).await;
+            if payload_tx.send(observed).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    BrokerObserver::forwarded(payload_rx, task)
+}
+
+/// A consumer of a scenario's own beside the ingestors it tests.
+pub(crate) struct HeldPulsarConsumer<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) topic: &'a str,
+    pub(crate) subscription: &'a str,
+    pub(crate) subscription_type: PulsarSubType,
+    /// The broker's priority level, where the consumer gives way to a consumer of the default
+    /// level 0.
+    pub(crate) priority_level: Option<i32>,
+}
+
+async fn hold_pulsar_consumer(
+    dependencies: &DependencyEndpoints,
+    consumer: HeldPulsarConsumer<'_>,
+) -> io::Result<BrokerObserver> {
+    let topic = pulsar_topic(consumer.topic);
+    let pulsar: Pulsar<_> = Pulsar::builder(dependencies.get(PULSAR_ADDR)?, TokioExecutor)
+        .build()
+        .await
+        .map_err(io::Error::other)?;
+    let mut options =
+        PulsarConsumerOptions::default().with_initial_position(PulsarInitialPosition::Earliest);
+    if let Some(priority_level) = consumer.priority_level {
+        options = options.with_priority_level(priority_level);
+    }
+    let held = pulsar
+        .consumer()
+        .with_topic(&topic)
+        .with_consumer_name(consumer.name)
+        .with_subscription(consumer.subscription)
+        .with_subscription_type(consumer.subscription_type)
+        .with_options(options)
+        .build::<Vec<u8>>()
+        .await
+        .map_err(io::Error::other)?;
+    Ok(forward_pulsar_messages(held))
+}
+
 async fn observe_pulsar(
     dependencies: &DependencyEndpoints,
     topic: &str,
 ) -> io::Result<BrokerObserver> {
     observe_pulsar_with_addr(
         dependencies.get(PULSAR_ADDR)?,
+        None,
         None,
         topic,
         PulsarSubType::Exclusive,
@@ -7083,6 +7515,7 @@ async fn observe_pulsar_shared(
     observe_pulsar_with_addr(
         dependencies.get(PULSAR_ADDR)?,
         None,
+        None,
         topic,
         PulsarSubType::Shared,
     )
@@ -7096,6 +7529,21 @@ async fn observe_pulsar_tls(
     observe_pulsar_with_addr(
         dependencies.get(PULSAR_TLS_ADDR)?,
         Some(dependencies.tls_ca_pem()?),
+        None,
+        topic,
+        PulsarSubType::Exclusive,
+    )
+    .await
+}
+
+async fn observe_pulsar_auth(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+) -> io::Result<BrokerObserver> {
+    observe_pulsar_with_addr(
+        dependencies.get(PULSAR_AUTH_ADDR)?,
+        None,
+        Some(pulsar_token_authentication(dependencies)?),
         topic,
         PulsarSubType::Exclusive,
     )
@@ -7113,6 +7561,7 @@ fn host_unix_millis() -> u64 {
 async fn observe_pulsar_with_addr(
     addr: &str,
     ca_certificate_chain: Option<Vec<u8>>,
+    authentication: Option<Authentication>,
     topic: &str,
     subscription_type: PulsarSubType,
 ) -> io::Result<BrokerObserver> {
@@ -7133,8 +7582,11 @@ async fn observe_pulsar_with_addr(
             if let Some(ca_certificate_chain) = ca_certificate_chain.clone() {
                 builder = builder.with_certificate_chain(ca_certificate_chain);
             }
+            if let Some(authentication) = authentication.clone() {
+                builder = builder.with_auth(authentication);
+            }
             let pulsar: Pulsar<_> = builder.build().await.map_err(io::Error::other)?;
-            let mut consumer = pulsar
+            let consumer = pulsar
                 .consumer()
                 .with_topic(&topic)
                 .with_subscription(&subscription)
@@ -7146,42 +7598,7 @@ async fn observe_pulsar_with_addr(
                 .build::<Vec<u8>>()
                 .await
                 .map_err(io::Error::other)?;
-            let (payload_tx, payload_rx) = mpsc::channel(16);
-
-            let task = nervix_primitives::task::spawn(async move {
-                while let Some(message) = consumer.next().await {
-                    let received_at = host_unix_millis();
-                    nervix_primitives::task::consume_budget().await;
-                    let Ok(message) = message else {
-                        continue;
-                    };
-                    let metadata = message.metadata();
-                    let times = PulsarMessageTimes {
-                        event_time: metadata.event_time,
-                        deliver_at: metadata.deliver_at_time,
-                        published_at: metadata.publish_time,
-                        received_at,
-                    };
-                    // Pulsar keeps message properties as an unordered map, so they are compared
-                    // in name order.
-                    let mut properties = message
-                        .metadata()
-                        .properties
-                        .iter()
-                        .map(|property| (property.key.clone(), property.value.clone()))
-                        .collect::<Vec<_>>();
-                    properties.sort();
-                    let observed = BrokerMessage::from_bytes(&message.payload.data, properties)
-                        .with_key(message.key())
-                        .with_pulsar_times(times);
-                    let _ = consumer.ack(&message).await;
-                    if payload_tx.send(observed).await.is_err() {
-                        break;
-                    }
-                }
-            });
-
-            Ok(BrokerObserver::forwarded(payload_rx, task))
+            Ok(forward_pulsar_messages(consumer))
         }
         .await;
 

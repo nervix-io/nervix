@@ -331,7 +331,7 @@ impl SessionShared {
                 match rejected.encode(self.limits()) {
                     Ok(delivery) => (delivery, QueuedReply::Rejection),
                     Err(error) => {
-                        warn!(%request_id, error = %error, "a session rejection does not fit a frame");
+                        warn!(%request_id, error = %format_args!("{error:#}"), "a session rejection does not fit a frame");
                         return QueuedReply::Nothing;
                     }
                 }
@@ -405,7 +405,7 @@ impl SessionShared {
         let ending = match (SessionEnding { reason }).encode(self.limits()) {
             Ok(frame) => Some(frame),
             Err(error) => {
-                warn!(error = %error, "a session ending does not fit a frame");
+                warn!(error = %format_args!("{error:#}"), "a session ending does not fit a frame");
                 None
             }
         };
@@ -585,7 +585,8 @@ impl SessionServiceImpl {
     /// The transport hands its frames in through `inbound` and receives every frame the session
     /// sends through `outbound`. When this returns, the session's subscriptions are stopped, its
     /// transaction binding is released or cleanly closed, and nothing sends on `outbound` any
-    /// more that matters to the client.
+    /// more that matters to the client. A session the stopping node ends lets go of `inbound` at
+    /// once, so its transport ends the call right after the ending rather than when this returns.
     pub(in crate::application) async fn run_session<S>(
         &self,
         user: UserName,
@@ -622,6 +623,7 @@ impl SessionServiceImpl {
             .spawn(events::run_session_events(shared.clone()));
 
         let mut closed_cleanly = false;
+        let mut node_stopping = false;
         loop {
             nervix_primitives::task::consume_budget().await;
             let item = nervix_primitives::select! {
@@ -629,6 +631,7 @@ impl SessionServiceImpl {
                 _ = shared.ended() => break,
                 _ = self.inner.admission_shutdown.cancelled() => {
                     shared.end(SessionEndReason::ServerShuttingDown);
+                    node_stopping = true;
                     break;
                 }
                 item = inbound.next() => item,
@@ -643,6 +646,7 @@ impl SessionServiceImpl {
                         _ = shared.ended() => break,
                         _ = self.inner.admission_shutdown.cancelled() => {
                             shared.end(SessionEndReason::ServerShuttingDown);
+                            node_stopping = true;
                             break;
                         }
                         accepted = accept_frame(&shared, &ordered_tx, frame) => accepted,
@@ -659,6 +663,12 @@ impl SessionServiceImpl {
             }
         }
 
+        if node_stopping {
+            // A stopping node reads nothing more from its clients. Letting go of the client's half
+            // now ends the transport's call or connection right after the ending, instead of once
+            // the work this session stopped waiting for has finished.
+            drop(inbound);
+        }
         shared.delivery.outbound.end(None);
         shared.abandon_in_flight();
         drop(ordered_tx);

@@ -27,15 +27,16 @@ Plexus properties preserve the metadata source distinctly from a payload field o
 and the same signature and namespace fence that shape.
 
 Pulsar subscription generators draw both required owned creation positions, `EARLIEST` and
-`LATEST`, and provisioned subscriptions without a position. Statement generators mix typed
-`SET START AT` with shared ingestor operations. The Model, registry and consensus properties
+`LATEST`, provisioned subscriptions without a position, and all four subscription types, with one
+instance for a type that reads through one consumer. Statement generators mix typed `SET START AT`
+and `SET TYPE` with shared ingestor operations. The Model, registry and consensus properties
 preserve those complete values.
 
 KAFKA TOPIC ingestor generators draw domain-owned offsets, with no position, and a consumer group
 with either required `START AT` position. Statement generators mix typed `SET START AT` with shared
 ingestor operations. The Model, registry and consensus properties preserve those complete values.
-The `NERVIX MQTT EMIT` registry signature and `raft_mqtt_emit_` consensus namespace identify this
-current Model layout before decoding.
+The `NERVIX SUB TYPES` registry signature and `raft_subscription_types_` consensus namespace
+identify this current Model layout before decoding.
 
 MQTT TOPIC ingestor generators draw either session at QoS 0, 1 or 2 beside `NO ACK`, and the
 persistent session at QoS 1 or 2 beside an acknowledged mode, so every pairing the declaration
@@ -164,15 +165,17 @@ dot-separated namespace, the storage backend and location, catalog reference and
 commit-size limit. Registry and Model archive properties compare those fields with the complete
 Model. The vocabulary owner separately checks namespace JSON/archive equality and backend
 conversions in `models-iceberg-declarations`; `client-config-schema` covers ordered owned and
-delegated configuration values through JSON/archive equality and public inspection.
+delegated configuration values through JSON/archive equality and public inspection. The same property
+includes MySQL pool keys with nonnegative idle milliseconds, whole-second maximum ages,
+defaulted acquire/maintenance intervals, and complete authored-value preservation.
 
 ## Client Configuration And Inspection
 
 `client-config-schema` includes omitted ClickHouse connection defaults, Redis command-pool
 lifetimes, Postgres pool and statement-deadline keys and MQTT keep-alive and publish admission
 bounds, explicit typed TCP and pool intervals, lifetimes, checkout deadlines and borrow tests,
-and MQTT credentials whose
-password public inspection redacts. `mqtt-client-config` separately converts every valid MQTT
+MQTT credentials whose password public inspection redacts, and a Pulsar token, which public
+inspection also redacts, beside its paired client certificate and key files. `mqtt-client-config` separately converts every valid MQTT
 client configuration into its typed broker, transport, identity, credentials, keep-alive and
 admission bound. JSON and archive equality preserve the authored entries; the effective-default
 projection preserves those entries and is idempotent, and public inspection remains idempotent.

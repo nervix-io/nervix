@@ -333,7 +333,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                 "installing admitted cluster runtime state"
             );
             if let Err(error) = registry.synchronize_cluster_schedule(&state.schedule) {
-                warn!(error = %error, "failed to synchronize registry from admitted cluster schedule");
+                warn!(error = %format_args!("{error:#}"), "failed to synchronize registry from admitted cluster schedule");
             }
             let runtime_application = admission
                 .apply_planned_cluster_state(runtime, local_node_id, &state)
@@ -2634,7 +2634,15 @@ mod tests {
              1 MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_",
         )
         .await;
-        assert!(mqtt.is_empty(), "{mqtt:?}");
+        assert_eq!(mqtt, vec!["read_header", "read_headers"]);
+        let redis = suggestion_values(
+            &service,
+            &subscriptions,
+            "CREATE REDIS PUBSUB INGESTOR source FROM broker CHANNEL 'events' MODE NO ACK ON \
+             QUIESCE DROP DECODE USING codec TO outgoing SET value = read_",
+        )
+        .await;
+        assert!(redis.is_empty(), "{redis:?}");
 
         let kafka = suggestion_values(
             &service,

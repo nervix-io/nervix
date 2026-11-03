@@ -7,12 +7,12 @@ Feature: Pulsar subscriptions belong to their declared owner
     And Pulsar subscription "preceding_{{test_id}}" of topic "preceding_{{test_id}}" is provisioned
     And Pulsar subscription "<replacement_subscription>" of topic "<replacement_topic>" is provisioned
     And a Pulsar domain graph reads through "{{pulsar_addr}}"
-    And Pulsar ingestor "events" reads subscription "preceding_{{test_id}}" of topic "preceding_{{test_id}}" declared "OWNED BY INGESTOR START AT EARLIEST"
+    And Pulsar ingestor "events" reads subscription "preceding_{{test_id}}" of topic "preceding_{{test_id}}" declared "OWNED BY INGESTOR START AT EARLIEST TYPE SHARED"
     Then within "30s" Pulsar subscription "preceding_{{test_id}}" of topic "preceding_{{test_id}}" has 1 consumer
     When these Plexus statements are executed
       """
       ALTER PULSAR TOPIC INGESTOR events
-        SET FROM broker TOPIC '<replacement_topic>' SUBSCRIPTION '<replacement_subscription>' OWNED BY INGESTOR START AT EARLIEST
+        SET FROM broker TOPIC '<replacement_topic>' SUBSCRIPTION '<replacement_subscription>' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 2s ON QUIESCE SUSPEND;
       """
     Then within "30s" Pulsar subscription "<replacement_subscription>" of topic "<replacement_topic>" has 1 consumer
@@ -32,7 +32,7 @@ Feature: Pulsar subscriptions belong to their declared owner
     And a <cluster_size> node nervix cluster is started
     And Pulsar subscription "retained_{{test_id}}" of topic "retained_{{test_id}}" is provisioned
     And a Pulsar domain graph reads through "{{pulsar_addr}}"
-    And Pulsar ingestor "events" reads subscription "retained_{{test_id}}" of topic "retained_{{test_id}}" declared "OWNED BY INGESTOR START AT EARLIEST"
+    And Pulsar ingestor "events" reads subscription "retained_{{test_id}}" of topic "retained_{{test_id}}" declared "OWNED BY INGESTOR START AT EARLIEST TYPE SHARED"
     Then within "30s" Pulsar subscription "retained_{{test_id}}" of topic "retained_{{test_id}}" has 1 consumer
     When these Plexus statements are executed
       """
@@ -60,7 +60,7 @@ Feature: Pulsar subscriptions belong to their declared owner
       """
       CREATE PULSAR CLIENT equivalent CONFIG { 'addr' = '{{pulsar_addr}}', 'namespace' = 'public/default' };
       ALTER PULSAR TOPIC INGESTOR events
-        SET FROM equivalent TOPIC 'persistent://public/default/retained_{{test_id}}' SUBSCRIPTION 'retained_{{test_id}}' <ownership> INSTANCES <instances>
+        SET FROM equivalent TOPIC 'persistent://public/default/retained_{{test_id}}' SUBSCRIPTION 'retained_{{test_id}}' <ownership> TYPE SHARED INSTANCES <instances>
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 2s ON QUIESCE SUSPEND;
       """
     Then within "30s" Pulsar subscription "retained_{{test_id}}" of topic "retained_{{test_id}}" holds 1 unacknowledged message
@@ -96,10 +96,10 @@ Feature: Pulsar subscriptions belong to their declared owner
     And a <cluster_size> node nervix cluster is started
     And the active domain is saved as placeholder "first_domain"
     And a Pulsar domain graph reads through "{{pulsar_addr}}"
-    And Pulsar ingestor "events" reads subscription "first_{{test_id}}" of topic "shared_{{test_id}}" declared "OWNED BY INGESTOR START AT EARLIEST"
+    And Pulsar ingestor "events" reads subscription "first_{{test_id}}" of topic "shared_{{test_id}}" declared "OWNED BY INGESTOR START AT EARLIEST TYPE SHARED"
     And the active domain is "second_{{test_id}}"
     And a Pulsar domain graph reads through "{{pulsar_addr}}"
-    And Pulsar ingestor "events" reads subscription "second_{{test_id}}" of topic "shared_{{test_id}}" declared "OWNED BY INGESTOR START AT EARLIEST"
+    And Pulsar ingestor "events" reads subscription "second_{{test_id}}" of topic "shared_{{test_id}}" declared "OWNED BY INGESTOR START AT EARLIEST TYPE SHARED"
     Then within "30s" Pulsar subscription "first_{{test_id}}" of topic "shared_{{test_id}}" is consumed by "{{first_domain}}~events-0"
     And within "30s" Pulsar subscription "second_{{test_id}}" of topic "shared_{{test_id}}" is consumed by "second_{{test_id}}~events-0"
     And Pulsar ingestors in domains "{{first_domain}}" and "second_{{test_id}}" both deliver what topic "shared_{{test_id}}" carries
@@ -115,11 +115,11 @@ Feature: Pulsar subscriptions belong to their declared owner
     Given Pulsar is running
     And a <cluster_size> node nervix cluster is started
     And a Pulsar domain graph reads through "{{pulsar_addr}}"
-    And Pulsar ingestor "events" reads subscription "owned_{{test_id}}" of topic "owned_{{test_id}}" declared "OWNED BY INGESTOR START AT EARLIEST"
+    And Pulsar ingestor "events" reads subscription "owned_{{test_id}}" of topic "owned_{{test_id}}" declared "OWNED BY INGESTOR START AT EARLIEST TYPE SHARED"
     Then within "30s" Pulsar subscription "owned_{{test_id}}" of topic "owned_{{test_id}}" has 1 consumer
     And within "30s" DESCRIBE INGESTOR "events" on the leader node contains
       """
-      options: SUBSCRIPTION 'owned_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST INSTANCES 1
+      options: SUBSCRIPTION 'owned_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED INSTANCES 1
       """
     When these Plexus statements are executed
       """
@@ -150,11 +150,11 @@ Feature: Pulsar subscriptions belong to their declared owner
     And a <cluster_size> node nervix cluster is started
     And Pulsar subscription "provisioned_{{test_id}}" of topic "provisioned_{{test_id}}" is provisioned
     And a Pulsar domain graph reads through "{{pulsar_addr}}"
-    And Pulsar ingestor "events" reads subscription "provisioned_{{test_id}}" of topic "provisioned_{{test_id}}" declared "PROVISIONED"
+    And Pulsar ingestor "events" reads subscription "provisioned_{{test_id}}" of topic "provisioned_{{test_id}}" declared "PROVISIONED TYPE SHARED"
     Then within "30s" Pulsar subscription "provisioned_{{test_id}}" of topic "provisioned_{{test_id}}" has 1 consumer
     And within "30s" DESCRIBE INGESTOR "events" on the leader node contains
       """
-      options: SUBSCRIPTION 'provisioned_{{test_id}}' PROVISIONED INSTANCES 1
+      options: SUBSCRIPTION 'provisioned_{{test_id}}' PROVISIONED TYPE SHARED INSTANCES 1
       """
     When these Plexus statements are executed
       """
@@ -170,7 +170,7 @@ Feature: Pulsar subscriptions belong to their declared owner
       """
       CREATE SUBSCRIPTION observed TO output;
       """
-    And Pulsar ingestor "events" reads subscription "provisioned_{{test_id}}" of topic "provisioned_{{test_id}}" declared "PROVISIONED"
+    And Pulsar ingestor "events" reads subscription "provisioned_{{test_id}}" of topic "provisioned_{{test_id}}" declared "PROVISIONED TYPE SHARED"
     Then the relay subscription receives a payload
       """
       "user_id":42
@@ -190,7 +190,7 @@ Feature: Pulsar subscriptions belong to their declared owner
       """
       CREATE SUBSCRIPTION observed TO output;
       """
-    And Pulsar ingestor "events" reads subscription "missing_{{test_id}}" of topic "missing_{{test_id}}" declared "PROVISIONED"
+    And Pulsar ingestor "events" reads subscription "missing_{{test_id}}" of topic "missing_{{test_id}}" declared "PROVISIONED TYPE SHARED"
     Then within "30s" DESCRIBE INGESTOR "events" on the leader node contains
       """
       transient error: PULSAR subscription 'missing_{{test_id}}' of topic 'persistent://public/default/missing_{{test_id}}' does not exist
@@ -226,7 +226,7 @@ Feature: Pulsar subscriptions belong to their declared owner
     And a stallable Pulsar endpoint is configured
     And a <cluster_size> node nervix cluster is started
     And a Pulsar domain graph reads through "{{pulsar_stallable_addr}}"
-    And Pulsar ingestor "events" reads subscription "unreachable_{{test_id}}" of topic "unreachable_{{test_id}}" declared "OWNED BY INGESTOR START AT EARLIEST"
+    And Pulsar ingestor "events" reads subscription "unreachable_{{test_id}}" of topic "unreachable_{{test_id}}" declared "OWNED BY INGESTOR START AT EARLIEST TYPE SHARED"
     Then within "30s" Pulsar subscription "unreachable_{{test_id}}" of topic "unreachable_{{test_id}}" has 1 consumer
     When these Plexus statements are executed
       """

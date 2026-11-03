@@ -49,7 +49,8 @@ Feature: Ingestor metrics
       {"user_id":42}
       {"user_id":43}
       """
-    When these Plexus commands are executed
+    When leadership is transferred to node "<leader>"
+    And these Plexus commands are executed on node "node-1"
       """
       DESCRIBE INGESTOR ingestor_metrics_source;
       """
@@ -141,9 +142,10 @@ Feature: Ingestor metrics
       """
 
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | leader |
+      | 1            | node-1 |
+      | 3            | node-1 |
+      | 3            | node-2 |
 
   @ingestor_payload_size
   Scenario Outline: Ingestor MAX BATCH SIZE counts Arrow payload bytes

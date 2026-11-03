@@ -92,11 +92,17 @@ and FIFO sequence numbers keep their textual representation. The shared metadata
 retained row and Arrow projection preserve the count as `U32` throughout its in-memory lifetime.
 
 A Kafka record keeps an unavailable timestamp distinct from its create-time and log-append-time
-variants. A present variant carries a validated signed-nanosecond timestamp converted exactly from
-the driver's milliseconds. Kafka's external unavailable encoding is resolved at this boundary;
-an out-of-range present timestamp is a typed conversion failure. Missing binary keys are `None`,
+variants. A present variant carries the driver's signed Unix milliseconds. They name a `Timestamp`
+exactly when a signed count of nanoseconds holds them, and are otherwise handed over as an
+unrepresentable value with their description, never a clamped instant, a substitute or an absence.
+Kafka's external unavailable encoding is resolved at this boundary. Missing binary keys are `None`,
 empty keys remain present empty bytes, and the null-payload tombstone flag preserves the distinction
 from a present empty payload when both lend an empty slice to a codec.
+
+An MQTT publish keeps a property its publisher left unset distinct from one it set empty: an unset
+content type, response topic, correlation data or message expiry is absent and reads as a typed
+null, while an empty string, empty bytes or a zero expiry remain values. Absence comes from the
+packet, never from an encoding of the value.
 
 A paced poll message carries a typed metadata variant. HTTP polling supplies its response status
 and scheduled poll instant in that variant, while sources with no integration fields carry the
@@ -109,6 +115,11 @@ owned cursor a creation policy or omit the position of a subscription Nervix cre
 the visual draft establish that choice before planning; the plan and connector retain it without
 defaulting a missing position. The [connector contract](./connector-contract.md#pulsar-subscription-ownership)
 owns creation and cursor retention.
+
+A Pulsar subscription's type is a required typed field of the subscription, with no default: a
+statement writes one of its four variants, and neither a Model nor a plan can leave the choice to
+the driver. The registry, not the type, refuses a single-consumer variant with more than one
+instance, because that rule holds only until partitioning defines instances for these types.
 
 The Pulsar emitter's running publishing choice keeps related state together: the `NO ACK` variant
 owns its pending receipt futures and an optional first driver failure; the `ACK` variant owns its
@@ -272,16 +283,16 @@ platform string; connector preparation uses it only when the codec's event omits
 A polled HTTP request's header holds a literal or names a client secret as two states of one enum,
 so a value cannot be both or neither, and the Model that names a secret holds its key and never its
 value.
-The registry's `NERVIX MQTT EMIT` archive signature identifies the current Model layout, including
-an owned Pulsar subscription's required start position, a Kafka consumer group's required start
-position, the required branch partition count, Sentry platform, an ingestor's
-`TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the session and
-quality of service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an
-MQTT TOPIC emitter writes beside its publishing mode, a `REDIS PUBSUB` ingestor's subscription,
-which is either a `CHANNEL` or a `PATTERN`, and that header state. Consensus's `raft_mqtt_emit_`
-keyspaces and current state metadata encoding identify its stored shapes. An unrecognized signature,
-namespace or encoding fails with the owning storage error and requires the stored data to be
-recreated.
+The registry's `NERVIX SUB TYPES` archive signature identifies the current Model layout, including a
+Pulsar subscription's required type, an owned Pulsar subscription's required start position, a Kafka
+consumer group's required start position, the required branch partition count, Sentry platform, an
+ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the
+receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of
+service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC
+emitter writes beside its publishing mode, a `REDIS PUBSUB` ingestor's subscription, which is either
+a `CHANNEL` or a `PATTERN`, and that header state. Consensus's `raft_subscription_types_` keyspaces
+and current state metadata encoding identify its stored shapes. An unrecognized signature, namespace
+or encoding fails with the owning storage error and requires the stored data to be recreated.
 
 ## Absence And Distinct States
 
@@ -521,9 +532,18 @@ configuration has one reserved-key declaration, shared by offline MySQL URL insp
 host's resolved-configuration refusal. Pool capacity remains the client's typed `POOL SIZE`
 bounds, with no competing URL setting.
 
-The MySQL shared pool and each borrowed connection retain an `Option<ConfiguredDeadline>`:
-absence means the client omitted an operation bound, while a present value has already passed
-the shared schedulable-deadline validation. Checkout, validation and insert failures keep typed
+Syslog iterates its own typed wait scopes, each of which names its shared `DeadlineKey`. The
+client declaration owns which direction reads the key, and the scope identifies the transports
+that perform the wait.
+
+The MySQL shared pool retains one required effective checkout deadline, read from the schema's
+defaulted `pool_acquire_timeout_ms`, and an optional operation deadline from `timeout_ms`.
+Each borrowed connection retains the optional operation bound; absence means no insert deadline.
+The pool chooses the shorter applicable checkout bound once, preserving its typed key. Maximum
+connection age is `Option<Duration>`: omission disables it. Zero idle duration is a genuine duration
+that immediately retires returned connections above the minimum, rather than absence. The
+vocabulary's millisecond value forms validate zero-inclusive lifetimes and whole-second maximum
+ages before those driver options are built. Checkout, validation and insert failures keep typed
 reports, including `DeadlineElapsed`, beneath their host contexts; a rendered reason is never
 the pool-borrow error's state. Paired identity-file presence is established by the client schema,
 then checked again when the driver options are constructed. The connector extends the parsed

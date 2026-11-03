@@ -23,15 +23,13 @@ mirror = "Consumption tracks replayable log offsets and consumer groups; ACK con
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."PULSAR TOPIC"]
-mirror = "Consumption declares subscription ownership and, when ingestor-owned, its EARLIEST or LATEST creation position; existing cursors prevail. Publication uses a producer receipt. Both directions use the same quoted, case-preserving Pulsar topic names."
+mirror = "Consumption declares subscription ownership and, when ingestor-owned, its EARLIEST or LATEST creation position, and the subscription's type; existing cursors prevail. Publication uses a producer receipt. Both directions use the same quoted, case-preserving Pulsar topic names."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."MQTT TOPIC"]
-emit_headers = "Subscription options select the session and inbound QoS, and the emitter's QOS option its outbound QoS. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation."
+emit_headers = "A publication carries its topic, payload and quality of service; this implementation writes no MQTT 5 user property on it."
 envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
-ingest_headers = "Subscription options select the session and inbound QoS, and the emitter's QOS option its outbound QoS. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation."
-metadata = "The current topic declaration exposes the payload and configured subscription, with no typed publish-property metadata namespace."
-mirror = "Subscription options select the session and inbound QoS, and the emitter's QOS option its outbound QoS. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation."
+mirror = "Subscription options select the session and inbound QoS, and the emitter's QOS option its outbound QoS. Ingestion reads a delivered publish's MQTT 5 properties and user properties; publication writes neither."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."NATS SUBJECT"]
@@ -65,7 +63,7 @@ metadata = "The driver exposes no peer identity on receive. Only frame 0 is inge
 mirror = "The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map."
 
 [entity."SQS QUEUE"]
-mirror = "Receiving uses a visibility timeout and deletion; publishing sends SEND SINGLE or SEND BATCH service requests, may declare a FIFO group, and writes typed message attributes and a per-message delay or deduplication id. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix."
+mirror = "Receiving hides each message for the queue's visibility timeout, deletes it once it is acknowledged and makes it visible again at once when it is rejected; ACK PARALLEL MAX gathers up to ten messages from each receive and deletes them in batches, and this parallel receive is ingest-only. Publishing chooses its request shape with SEND SINGLE or SEND BATCH, which is emit-only, may declare a FIFO GROUP, and sets a per-message DELAY or DEDUPLICATION ID. Both directions treat message attributes as headers: an ingestor reads each value as text, while an emitter writes typed String, Number and Binary values. Both use the same quoted, case-preserving SQS queue names, including the .fifo suffix."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."WEBSOCKETS CONNECTION"]
@@ -145,7 +143,7 @@ properties = "This entity declares no typed PROPERTIES block; any encoded record
 [entity."MYSQL TABLE"]
 emit_headers = "The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity."
 envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
-mirror = "The MySQL connector inserts mapped rows and handles declared conflicts; it declares no binlog or query ingestor."
+mirror = "The MySQL connector inserts mapped rows and handles declared conflicts; its client declares checkout, idle/max-age and minimum-maintenance policy. It declares no binlog or query ingestor."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."MONGODB COLLECTION"]

@@ -155,7 +155,7 @@ impl RuntimeAdmission {
                 Err(error) => {
                     if !reported_wait {
                         warn!(
-                            error = %error,
+                            error = %format_args!("{error:#}"),
                             "runtime execution is waiting for linearizable consensus catch-up"
                         );
                         reported_wait = true;

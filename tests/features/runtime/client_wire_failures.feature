@@ -27,6 +27,33 @@ Feature: Client wire failure regressions
       );
       """
 
+  # The forwarder stays stopped for twice the client's retry budget while the backup holds its
+  # cut, so the client reaches its server again only after that budget has passed. The backup's
+  # own wait covers every reconnect it makes, and the cut's budget covers the outage the cut waits
+  # through at its gate on a loaded runner.
+  @client_wire_backup_outage @deloxide_stress_restore
+  Scenario Outline: A native backup waits through an outage longer than its retry budget on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the gRPC endpoint of node "{{leader}}" is forwarded from fixture address "127.0.0.1"
+    And the backup cut for domain "{{domain}}" will pause before its capture
+    When a native client with a 20 second retry budget and a 300 second backup wait begins backing up the cluster with a 240 second cut budget through "{{forwarded_grpc}}" into "outage.nvxb"
+    Then the backup cut for domain "{{domain}}" has reached its pause
+    When the TCP forwarder at "127.0.0.1" stays stopped for 40 seconds and then restarts
+    And the backup cut pause for domain "{{domain}}" is released
+    Then the native backup completes under its original execution reference
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @client_wire_durable_admission
   Scenario: A command lost after durable admission is recovered by its request identity
     Given a 1 node nervix cluster is started
@@ -100,6 +127,120 @@ Feature: Client wire failure regressions
       | cluster_size |
       | 1            |
       | 3            |
+
+  @client_wire_held_recovery @command_reference_recovery
+  Scenario: A held BEGIN recovers its transaction binding after leadership moves during admission
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA held_record (value I64);
+      CREATE WIRE JSON SCHEMA held_wire MODE STRICT (value integer);
+      CREATE CODEC held_codec FROM WIRE JSON SCHEMA held_wire TO SCHEMA held_record;
+      CREATE RELAY held_records SCHEMA held_record UNBRANCHED;
+      CREATE VHOST held_edge held-binding-{{test_id}}.example.com;
+      CREATE ENDPOINT held_ingress ON held_edge PATH '/records' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR held_source
+        FROM held_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_codec
+        TO held_records INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "held_leader"
+    And a node other than placeholder "held_leader" is saved as placeholder "held_successor"
+    When these Plexus commands are executed on the active session
+      """
+      CREATE SUBSCRIPTION held_seen TO held_records;
+      """
+    And http payload is posted to node "{{held_leader}}" with host "held-binding-{{test_id}}.example.com" path "/records"
+      """
+      {"value":1}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      {"value":1}
+      """
+    Given leadership moves from node "{{held_leader}}" to node "{{held_successor}}" under its next durably admitted command
+    When these Plexus commands are executed on the active session
+      """
+      BEGIN;
+      """
+    Then the leadership move under the durably admitted command completed
+    When this Plexus command request is executed on the leader node
+      """
+      SHOW TRANSACTIONS;
+      """
+    Then the only open transaction id is saved as placeholder "held_transaction"
+    When these Plexus commands are executed on the active session
+      """
+      CREATE RESOURCE held_binding_resource;
+      COMMIT;
+      """
+    Then transaction "{{held_transaction}}" eventually has state "COMMITTED"
+    When this Plexus command request is executed on the leader node
+      """
+      DESCRIBE RESOURCE held_binding_resource;
+      """
+    Then the last command output contains
+      """
+      resource: held_binding_resource
+      """
+    When http payload is posted to node "{{held_successor}}" with host "held-binding-{{test_id}}.example.com" path "/records"
+      """
+      {"value":2}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      {"value":2}
+      """
+
+  @client_wire_held_recovery @command_reference_recovery
+  Scenario: A held REVERT recovers its original transaction after leadership moves during admission
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the active session
+      """
+      BEGIN;
+      CREATE RESOURCE reverted_binding_resource;
+      """
+    When this Plexus command request is executed on the leader node
+      """
+      SHOW TRANSACTIONS;
+      """
+    Then the only transaction id is saved as placeholder "reverted_transaction"
+    Then the current leader node is saved as placeholder "held_leader"
+    And a node other than placeholder "held_leader" is saved as placeholder "held_successor"
+    Given leadership moves from node "{{held_leader}}" to node "{{held_successor}}" under its next durably admitted command
+    When these Plexus commands are executed on the active session
+      """
+      REVERT;
+      """
+    Then the leadership move under the durably admitted command completed
+    And transaction "{{reverted_transaction}}" eventually has state "REVERTED"
+    When these Plexus commands are executed on the active session
+      """
+      BEGIN;
+      CREATE RESOURCE subsequent_binding_resource;
+      COMMIT;
+      """
+    When this Plexus command request is executed on the leader node
+      """
+      DESCRIBE RESOURCE subsequent_binding_resource;
+      """
+    Then the last command output contains
+      """
+      resource: subsequent_binding_resource
+      """
+    When these Plexus commands fail with "resource 'reverted_binding_resource' does not exist"
+      """
+      DESCRIBE RESOURCE reverted_binding_resource;
+      """
 
   @client_wire_lost_begin
   Scenario Outline: Replaying a BEGIN whose response was lost returns the original transaction
@@ -231,7 +372,7 @@ Feature: Client wire failure regressions
       resource: leader_batch_resource
       """
 
-  @client_wire_transaction_batch_finalization_recovery
+  @client_wire_transaction_batch_finalization_recovery @client_wire_probe_recovery @command_reference_recovery
   Scenario: A committed transaction batch keeps its one outcome when leadership moves while each attempt records it
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -243,6 +384,7 @@ Feature: Client wire failure regressions
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
     Given command finalization on node "{{old_leader}}" pauses before its outcome is recorded
     And command finalization on node "{{new_leader}}" pauses before its outcome is recorded
+    And the leader refuses the admission of execution reference "finalized-batch-{{test_id}}" as a leader whose lease lapsed
     When the active session begins this Plexus command request with execution reference "finalized-batch-{{test_id}}" in the background
       """
       BEGIN;
@@ -251,6 +393,7 @@ Feature: Client wire failure regressions
       COMMIT;
       """
     Then the command finalization pause on node "{{old_leader}}" is reached
+    And the leader refused the admission of execution reference "finalized-batch-{{test_id}}" as a leader whose lease lapsed
     When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
     Then node "{{new_leader}}" eventually reports leader "{{new_leader}}"
     When the command finalization pause on node "{{old_leader}}" is released
@@ -291,6 +434,82 @@ Feature: Client wire failure regressions
     And the last command output contains
       """
       state=COMMITTED
+      """
+
+  @client_wire_applying_probe_recovery
+  Scenario: A committed transaction batch reaches its finalization gates after an applying lease refusal
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA applying_event (key I64);
+      CREATE RELAY applying_input SCHEMA applying_event UNBRANCHED;
+      START;
+      """
+    Then the current leader node is saved as placeholder "applying_leader"
+    And a node other than placeholder "applying_leader" is saved as placeholder "applying_successor"
+    Given command finalization on node "{{applying_leader}}" pauses before its outcome is recorded
+    And command finalization on node "{{applying_successor}}" pauses before its outcome is recorded
+    And the leader refuses the next model publication in domain "{{domain}}" and the pause release after it with "a lapsed leader lease"
+    When the active session begins this Plexus command request with execution reference "applying-batch-{{test_id}}" in the background
+      """
+      BEGIN;
+      ALTER SCHEMA applying_event ADD FIELD note STRING OPTIONAL;
+      CREATE RESOURCE applying_batch_resource;
+      COMMIT;
+      """
+    Then the command finalization pause on node "{{applying_leader}}" is reached
+    And the refusal of the model publication in domain "{{domain}}" and of its pause release was delivered
+    And the transaction targeted by execution reference "applying-batch-{{test_id}}" is saved as placeholder "applying_transaction"
+    When leadership is transferred from node "{{applying_leader}}" to node "{{applying_successor}}"
+    Then node "{{applying_successor}}" eventually reports leader "{{applying_successor}}"
+    When the command finalization pause on node "{{applying_leader}}" is released
+    Then the background command request reports an unknown outcome because leadership moved
+    And the command finalization pause on node "{{applying_successor}}" is reached
+    When leadership is transferred from node "{{applying_successor}}" to node "{{applying_leader}}"
+    Then node "{{applying_leader}}" eventually reports leader "{{applying_leader}}"
+    When the command finalization pause on node "{{applying_successor}}" is released
+    And this Plexus command request with execution reference "applying-batch-{{test_id}}" is executed on the leader node
+      """
+      BEGIN;
+      ALTER SCHEMA applying_event ADD FIELD note STRING OPTIONAL;
+      CREATE RESOURCE applying_batch_resource;
+      COMMIT;
+      """
+    Then the last command request succeeded
+    When this Plexus command request with execution reference "applying-batch-{{test_id}}" is executed on the leader node
+      """
+      BEGIN;
+      ALTER SCHEMA applying_event ADD FIELD note STRING OPTIONAL;
+      CREATE RESOURCE applying_batch_resource;
+      COMMIT;
+      """
+    Then the last command request succeeded
+    And transaction "{{applying_transaction}}" eventually has state "COMMITTED"
+    When this Plexus command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA applying_event;
+      """
+    Then the last command output contains
+      """
+      note STRING OPTIONAL
+      """
+    When this Plexus command request is executed on the leader node
+      """
+      DESCRIBE RESOURCE applying_batch_resource;
+      """
+    Then the last command output contains
+      """
+      resource: applying_batch_resource
+      """
+    When this Plexus command request is executed on the leader node
+      """
+      SHOW TRANSACTIONS;
+      """
+    Then the last command output contains
+      """
+      id={{applying_transaction}}
       """
 
   @client_wire_transaction_batch_restart

@@ -70,7 +70,7 @@ struct AcquisitionPass {
     report: Arc<Mutex<CompilerReport>>,
 }
 
-impl_lint_pass!(AcquisitionPass => [SYNC_ACQUISITION, LIFECYCLE_CALL, UNKNOWN_EFFECT, INVALID_CONTRACT, errors::BARE_ERROR_SIGNATURE, errors::DISCARDED_OUTCOME, errors::BARE_PANIC, errors::REPLACED_ERROR, architecture::MODEL_IN_DATA_PLANE, architecture::PARSER_DEPENDENCY, architecture::CLUSTER_AWAIT, architecture::NODE_IDENTITY, architecture::INSTALLED_STATE, architecture::STATE_CONTRACT, api::CLAMPED_ARITHMETIC, api::COMBINATOR_CONTROL_FLOW]);
+impl_lint_pass!(AcquisitionPass => [SYNC_ACQUISITION, LIFECYCLE_CALL, UNKNOWN_EFFECT, INVALID_CONTRACT, errors::BARE_ERROR_SIGNATURE, errors::DISCARDED_OUTCOME, errors::BARE_PANIC, errors::REPLACED_ERROR, errors::PARTIAL_REPORT_FIELD, architecture::MODEL_IN_DATA_PLANE, architecture::PARSER_DEPENDENCY, architecture::CLUSTER_AWAIT, architecture::NODE_IDENTITY, architecture::INSTALLED_STATE, architecture::STATE_CONTRACT, api::CLAMPED_ARITHMETIC, api::COMBINATOR_CONTROL_FLOW]);
 
 /// Why a span has no authored source location.
 enum Exclusion {
@@ -487,6 +487,15 @@ impl<'tcx> LateLintPass<'tcx> for AcquisitionPass {
             expression.hir_id,
             matches!(expression.kind, ExprKind::Closure(..)),
         );
+        // A tracing macro supplies the `display` call around a field's authored value, so the
+        // field is governed where its value was written.
+        if let Some(value) = self.errors.displayed_report(cx, expression) {
+            let written = self.errors.field_value_span(value);
+            if self.authored(cx, written) {
+                self.errors
+                    .partial_report_field(cx, value, written, &mut self.flow);
+            }
+        }
         if self.authored(cx, expression.span) {
             self.architecture.expression(cx, expression, &mut self.flow);
             self.errors.expression(cx, expression, &mut self.flow);
@@ -687,6 +696,7 @@ impl Callbacks for Analysis {
                 errors::DISCARDED_OUTCOME,
                 errors::BARE_PANIC,
                 errors::REPLACED_ERROR,
+                errors::PARTIAL_REPORT_FIELD,
                 architecture::MODEL_IN_DATA_PLANE,
                 architecture::PARSER_DEPENDENCY,
                 architecture::CLUSTER_AWAIT,
@@ -827,6 +837,7 @@ fn main() -> anyhow::Result<()> {
                 "-Wnervix::discarded_outcome",
                 "-Wnervix::bare_panic",
                 "-Wnervix::replaced_error",
+                "-Wnervix::partial_report_field",
                 "-Wnervix::model_in_data_plane",
                 "-Wnervix::parser_dependency",
                 "-Wnervix::cluster_await",

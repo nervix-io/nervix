@@ -209,6 +209,8 @@ pub enum ClientConfigValue {
     UnsignedInteger,
     PositiveInteger,
     Milliseconds,
+    NonnegativeMilliseconds,
+    WholeSecondsMilliseconds,
     TcpKeepaliveMilliseconds,
     Url(&'static [&'static str]),
     /// A URL with one of these schemes that names a host and a nonzero port and nothing else: no
@@ -232,6 +234,10 @@ impl ClientConfigValue {
             Self::UnsignedInteger => "unsigned integer",
             Self::PositiveInteger => "positive integer",
             Self::Milliseconds => "positive, schedulable whole milliseconds",
+            Self::NonnegativeMilliseconds => "nonnegative, schedulable whole milliseconds",
+            Self::WholeSecondsMilliseconds => {
+                "positive, schedulable whole seconds written in milliseconds"
+            }
             Self::TcpKeepaliveMilliseconds => {
                 "whole seconds from 1000 through 32767000 milliseconds"
             }
@@ -278,6 +284,19 @@ impl ClientConfigValue {
         self != Self::PositiveInteger || count != 0
     }
 
+    /// Zero has a duration meaning for the nonnegative millisecond kind, including decimal zero
+    /// written with leading zeroes.
+    fn is_zero_milliseconds(value: &str) -> bool {
+        !value.is_empty() && value.bytes().all(|byte| byte == b'0')
+    }
+
+    /// Whether a parsed interval fits the whole-second kind, including the socket option's bound
+    /// when that kind describes TCP keepalive.
+    fn admits_whole_seconds(self, interval: Duration) -> bool {
+        interval.subsec_nanos() == 0
+            && (self != Self::TcpKeepaliveMilliseconds || interval <= MAX_TCP_KEEPALIVE)
+    }
+
     fn validate(self, key: &str, value: &str) -> Result<(), Report<ClientConfigSchemaError>> {
         let invalid = || ClientConfigSchemaError::InvalidValue {
             key: key.to_string(),
@@ -299,14 +318,15 @@ impl ClientConfigValue {
                     return Err(Report::new(invalid()));
                 }
             }
-            Self::Milliseconds => {
+            Self::NonnegativeMilliseconds if Self::is_zero_milliseconds(value) => {}
+            Self::Milliseconds | Self::NonnegativeMilliseconds => {
                 ClientDeadline::parse(value).change_context(invalid())?;
             }
-            Self::TcpKeepaliveMilliseconds => {
+            Self::WholeSecondsMilliseconds | Self::TcpKeepaliveMilliseconds => {
                 let interval = ClientDeadline::parse(value)
                     .change_context(invalid())?
                     .duration();
-                if interval.subsec_nanos() != 0 || interval > MAX_TCP_KEEPALIVE {
+                if !self.admits_whole_seconds(interval) {
                     return Err(Report::new(invalid()));
                 }
             }
@@ -356,6 +376,8 @@ impl ClientConfigValue {
             | Self::UnsignedInteger
             | Self::PositiveInteger
             | Self::Milliseconds
+            | Self::NonnegativeMilliseconds
+            | Self::WholeSecondsMilliseconds
             | Self::TcpKeepaliveMilliseconds
             | Self::DriverUrl(_)
             | Self::DriverAddress

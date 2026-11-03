@@ -132,6 +132,26 @@ pub(crate) enum RecoveryMode {
     TransportOnlyIfClosed,
 }
 
+/// When a session recovery stops reconnecting.
+#[derive(Clone, Copy)]
+pub(crate) enum RecoveryDeadline {
+    /// The client's retry budget, counted from when the recovery starts to reconnect.
+    RetryBudget,
+    /// The deadline of the call the recovery serves, which every redirect and reconnect of that
+    /// call shares.
+    Call(Instant),
+}
+
+impl RecoveryDeadline {
+    /// The instant a recovery that starts to reconnect now gives up at.
+    fn gives_up_at(self, connector: &GrpcConnector) -> Instant {
+        match self {
+            Self::RetryBudget => Instant::now() + connector.retry_timeout(),
+            Self::Call(deadline) => deadline,
+        }
+    }
+}
+
 /// How the client serves a query.
 #[derive(Debug, Clone)]
 enum StatementRoute {
@@ -175,6 +195,16 @@ impl StatementRoute {
         match self {
             Self::Backup(_) => connector.backup_wait_timeout(),
             _ => connector.retry_timeout(),
+        }
+    }
+
+    /// When a session recovery made for this route's call, ending at `call`, gives up. A backup's
+    /// wait is one deadline that every redirect and reconnect of the backup shares; any other call
+    /// recovers within the retry budget, which is also what bounds the call itself.
+    fn recovery_deadline(&self, call: Instant) -> RecoveryDeadline {
+        match self {
+            Self::Backup(_) => RecoveryDeadline::Call(call),
+            _ => RecoveryDeadline::RetryBudget,
         }
     }
 
@@ -519,7 +549,7 @@ impl Client {
         }
         let result = nervix_primitives::time::timeout_at(
             deadline,
-            self.execute_prepared_within_budget(execution),
+            self.execute_prepared_within_budget(execution, deadline),
         )
         .await;
         let outcome = match result {
@@ -579,8 +609,9 @@ impl Client {
     async fn execute_prepared_within_budget(
         &self,
         execution: &ExecutionHandle,
+        deadline: Instant,
     ) -> error_stack::Result<CommandOutcome, ClientError> {
-        let outcome = self.execute_with_redirects(execution).await?;
+        let outcome = self.execute_with_redirects(execution, deadline).await?;
         self.record_commit_basis(&outcome).await;
         if let Some(transaction) = outcome.transaction.clone() {
             self.adopt_transaction_status(transaction).await;
@@ -691,7 +722,13 @@ impl Client {
                     let body = match self.request(request, None, None).await {
                         Ok(body) => body,
                         Err(report) if report.current_context().retryable_session_failure() => {
-                            match self.recover_session(RecoveryMode::IfClosed).await? {
+                            match self
+                                .recover_session(
+                                    RecoveryMode::IfClosed,
+                                    RecoveryDeadline::RetryBudget,
+                                )
+                                .await?
+                            {
                                 SessionRecovery::Ready => continue,
                                 SessionRecovery::Unavailable => return Err(report),
                             }
@@ -709,7 +746,8 @@ impl Client {
                     };
                     match Routing::for_inspection(&outcome) {
                         Routing::Redirect(leader) if Self::retries_remain(attempt) => {
-                            self.follow_leader(leader).await?;
+                            self.follow_leader(leader, RecoveryDeadline::RetryBudget)
+                                .await?;
                         }
                         Routing::AwaitElection if Self::await_retry(attempt).await => {}
                         _ => {
@@ -738,16 +776,23 @@ impl Client {
         }
     }
 
+    /// Executes a command until it has an outcome to report, following redirects and recovering
+    /// lost sessions on the way. The call it serves ends at `deadline`.
     async fn execute_with_redirects(
         &self,
         execution: &ExecutionHandle,
+        deadline: Instant,
     ) -> error_stack::Result<CommandOutcome, ClientError> {
+        let recovery = execution.route.recovery_deadline(deadline);
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
             nervix_primitives::task::consume_budget().await;
             let outcome = match self.execute_once(execution).await {
                 Ok(outcome) => outcome,
                 Err(report) if report.current_context().retryable_session_failure() => {
-                    match self.recover_session(RecoveryMode::IfClosed).await? {
+                    match self
+                        .recover_session(RecoveryMode::IfClosed, recovery)
+                        .await?
+                    {
                         SessionRecovery::Ready => continue,
                         SessionRecovery::Unavailable => return Err(report),
                     }
@@ -760,7 +805,7 @@ impl Client {
                     self.restore_transaction_binding().await?;
                 }
                 Routing::Detached => return Ok(outcome),
-                Routing::Redirect(leader) => self.follow_leader(leader).await?,
+                Routing::Redirect(leader) => self.follow_leader(leader, recovery).await?,
                 Routing::AwaitElection | Routing::AwaitOutcome
                     if Self::await_retry(attempt).await => {}
                 Routing::AwaitElection | Routing::AwaitOutcome => return Ok(outcome),
@@ -1080,8 +1125,11 @@ impl Client {
             let body = match self.request(request, None, None).await {
                 Ok(body) => body,
                 Err(report) if report.current_context().retryable_session_failure() => {
-                    match Box::pin(self.recover_session(RecoveryMode::TransportOnlyIfClosed))
-                        .await?
+                    match Box::pin(self.recover_session(
+                        RecoveryMode::TransportOnlyIfClosed,
+                        RecoveryDeadline::RetryBudget,
+                    ))
+                    .await?
                     {
                         SessionRecovery::Ready => continue,
                         SessionRecovery::Unavailable => return Err(report),
@@ -1209,7 +1257,10 @@ impl Client {
                 Err(report) if report.current_context().retryable_session_failure() => {
                     let recovered = nervix_primitives::time::timeout_at(
                         deadline,
-                        Box::pin(self.recover_session(RecoveryMode::IfClosed)),
+                        Box::pin(self.recover_session(
+                            RecoveryMode::IfClosed,
+                            RecoveryDeadline::RetryBudget,
+                        )),
                     )
                     .await
                     .map_err(|_| Report::new(ClientError::RetryDeadline))??;
@@ -1313,7 +1364,10 @@ impl Client {
                         .desired
                         .has_acknowledged_desired()
                     {
-                        match self.recover_session(RecoveryMode::IfClosed).await? {
+                        match self
+                            .recover_session(RecoveryMode::IfClosed, RecoveryDeadline::RetryBudget)
+                            .await?
+                        {
                             SessionRecovery::Ready => continue,
                             SessionRecovery::Unavailable => {
                                 return Err(report.change_context(ClientError::SessionClosed));
@@ -1439,7 +1493,9 @@ impl Client {
                 let exchange = self.inner.exchange.lock().await.requests();
                 let open = exchange.pending.lock().is_open();
                 if !open {
-                    let recovered = self.recover_session(RecoveryMode::IfClosed).await?;
+                    let recovered = self
+                        .recover_session(RecoveryMode::IfClosed, RecoveryDeadline::RetryBudget)
+                        .await?;
                     if let SessionRecovery::Unavailable = recovered {
                         return Err(Report::new(ClientError::SessionClosed));
                     }
@@ -1466,7 +1522,13 @@ impl Client {
                     match self.clock_request_once(&request).await {
                         Ok(body) => return Ok(body),
                         Err(report) if report.current_context().retryable_session_failure() => {
-                            match self.recover_session(RecoveryMode::IfClosed).await? {
+                            match self
+                                .recover_session(
+                                    RecoveryMode::IfClosed,
+                                    RecoveryDeadline::RetryBudget,
+                                )
+                                .await?
+                            {
                                 SessionRecovery::Ready => {}
                                 SessionRecovery::Unavailable => return Err(report),
                             }
@@ -1603,8 +1665,13 @@ impl Client {
     }
 
     /// Moves the session to the leader at `leader`, so the request that needs it can be sent
-    /// again there.
-    pub(crate) async fn follow_leader(&self, leader: &Url) -> error_stack::Result<(), ClientError> {
+    /// again there. When the leader cannot be reached, the session is recovered on the servers the
+    /// client knows until `deadline`.
+    pub(crate) async fn follow_leader(
+        &self,
+        leader: &Url,
+        deadline: RecoveryDeadline,
+    ) -> error_stack::Result<(), ClientError> {
         self.inner
             .connector
             .validate_server(leader)
@@ -1612,7 +1679,10 @@ impl Client {
         self.inner.servers.lock().await.remember(leader);
         match self.reconnect(leader).await {
             Ok(()) => self.restore_transaction_binding().await,
-            Err(report) => match self.recover_session(RecoveryMode::Replace).await? {
+            Err(report) => match self
+                .recover_session(RecoveryMode::Replace, deadline)
+                .await?
+            {
                 SessionRecovery::Ready => Ok(()),
                 SessionRecovery::Unavailable => Err(report),
             },
@@ -1671,10 +1741,12 @@ impl Client {
         restoration.follow();
     }
 
-    /// Reconnects a lost session and attaches its transaction again.
+    /// Reconnects a lost session and attaches its transaction again. Reconnecting gives up at
+    /// `deadline`.
     pub(crate) async fn recover_session(
         &self,
         mode: RecoveryMode,
+        deadline: RecoveryDeadline,
     ) -> error_stack::Result<SessionRecovery, ClientError> {
         let recovered = 'recovery: {
             let _reconnect_guard = self.inner.reconnect_lock.lock().await;
@@ -1688,7 +1760,7 @@ impl Client {
             {
                 self.inner.servers.lock().await.remember(&endpoint);
             }
-            let deadline = Instant::now() + self.inner.connector.retry_timeout();
+            let deadline = deadline.gives_up_at(&self.inner.connector);
             let mut delay = Self::LEADER_ELECTION_RETRY_DELAY;
             let mut last_error = None;
             loop {

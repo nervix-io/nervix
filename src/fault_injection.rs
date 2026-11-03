@@ -58,6 +58,7 @@ mod entity_drain;
 mod entity_drain_tests;
 mod execution;
 mod handoff_gate_link;
+mod interest_visibility;
 mod live_view_gap;
 #[cfg(test)]
 mod live_view_gap_tests;
@@ -97,6 +98,7 @@ use entity_drain::ForcedEntityDrainTimeout;
 pub(crate) use entity_drain::ObservedEntityDrain;
 use execution::NodeExecution;
 use handoff_gate_link::HandoffGateLink;
+use interest_visibility::InterestVisibilityRefusal;
 use live_view_gap::{LiveViewGap, LiveViewGapState};
 use materialized_reads::DelayedMaterializedReads;
 use model_publication::ModelPublicationRefusal;
@@ -173,6 +175,9 @@ struct FaultInjectionState {
     /// so the public regression verifies that its construction failures actually happened.
     refused_runtime_installations:
         DashMap<ClusterNodeName, RuntimeInstallationRefusals, RandomState>,
+    /// One-shot, node-local refusals of the next subscription interest visibility check a node
+    /// answers, each keeping whether it was delivered so a scenario proves the refusal happened.
+    refused_interest_visibility: DashMap<ClusterNodeName, InterestVisibilityRefusal, RandomState>,
     wasm_reset_publication_authority_losses:
         DashMap<DomainName, WasmResetPublicationAuthorityLoss, RandomState>,
     failed_wasm_reset_publications: DashMap<DomainName, WasmResetPublicationFailure, RandomState>,
@@ -531,6 +536,7 @@ impl Default for FaultInjection {
                 stalled_emitter_connectors: DashMap::default(),
                 failed_schedule_publications: DashMap::default(),
                 refused_runtime_installations: DashMap::default(),
+                refused_interest_visibility: DashMap::default(),
                 wasm_reset_publication_authority_losses: DashMap::default(),
                 failed_wasm_reset_publications: DashMap::default(),
                 failed_entity_gate_engagements: DashMap::default(),
