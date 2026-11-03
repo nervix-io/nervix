@@ -333,6 +333,20 @@ For test runs:
 just test
 ```
 
+To run one named scenario, quote its name or regular expression as one shell argument:
+
+```bash
+just test-scenarios --input tests/features/tools/cli_session.feature \
+    --name '^CLI completion uses UTF-8 byte edits after Unicode text$' --concurrency 4 --retry 0
+```
+
+`test-scenarios` and `test-scenarios-reuse` forward each argument unchanged. Quote an input glob
+such as `'tests/features/runtime/{first,second}.feature'` so the scenario runner expands it.
+Pass each option and its value separately; a quoted string containing several options stays one
+argument. `test-scenarios-reuse` accepts the same selections and keeps dependency containers for
+the next run. `just test-scenario-arguments` checks both recipes without compiling Rust or
+starting services.
+
 For representation properties and sanitizer fuzzing, see
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md). The focused entry points are
 `just test-bolero [filter]`, `just fuzz-list` and
