@@ -476,8 +476,9 @@ impl<'a> EmitterPublishing<'a> {
     }
     pub fn ack_timeout(self) -> Option<&'a str> {
         match self {
-            Self::ClientAck { ack_timeout, .. }
-            | Self::BrokerAck { ack_timeout, .. } => Some(ack_timeout),
+            Self::ClientAck { ack_timeout, .. } | Self::BrokerAck { ack_timeout, .. } => {
+                Some(ack_timeout)
+            }
             Self::NoAck { .. } | Self::RequestAck { .. } => None,
         }
     }
