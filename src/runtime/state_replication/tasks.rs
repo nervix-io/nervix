@@ -231,6 +231,7 @@ impl Runtime {
                 }
                 let placement = state.read().placement().clone();
                 runtime.wait_for_slow_last_write(&placement).await;
+                let _initializers = state.read().start_coordination().capture_guard().await;
                 match flush_latest_snapshot(&state, &store) {
                     Ok(Some(lsm)) => {
                         let offsets = state.read();

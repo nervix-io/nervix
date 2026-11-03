@@ -251,7 +251,7 @@ mod tests {
                     client: named("kafka"),
                     topic: named("events"),
                     offset_mode,
-                    instances: nervix_models::IngestorInstances::Count(nonzero!(1u16)),
+                    instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                     mode: KafkaIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Suspend,
                 })),

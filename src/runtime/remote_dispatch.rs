@@ -378,6 +378,10 @@ impl RemoteDispatcher {
         self.cluster.local_incarnation()
     }
 
+    pub(super) fn is_live_node_identity(&self, identity: &ClusterNodeIdentity) -> bool {
+        self.cluster.live_node_incarnation(identity.node_id()) == Some(identity.incarnation())
+    }
+
     /// A registration numbered in this process that names this run of the node, so its resolution
     /// can only ever resolve the entry registered under it here.
     fn registration(&self, ack_id: u64) -> RemoteAckRegistration {

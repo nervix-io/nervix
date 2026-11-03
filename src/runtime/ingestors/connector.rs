@@ -79,7 +79,7 @@ impl IngestorSpec {
     pub(in crate::runtime) fn instance_index(&self) -> u64 {
         match self.unit {
             Unit::Single => 0,
-            Unit::Instance(index) => u64::from(index),
+            Unit::Instance(index) => index,
             Unit::Partition(_) => {
                 unreachable!("an ingestor plan declares Single or Instance units")
             }
@@ -656,7 +656,7 @@ impl RuntimeIngestorHost {
             delivery_stop,
             instance_index: match spec.unit {
                 Unit::Single => 0,
-                Unit::Instance(index) => u64::from(index),
+                Unit::Instance(index) => index,
                 Unit::Partition(_) => unreachable!("source hosts run ingestor units"),
             },
             readiness: spec.readiness,

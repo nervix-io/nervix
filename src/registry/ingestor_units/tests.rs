@@ -84,7 +84,7 @@ fn one_instance_exposes_its_single_execution_and_several_instances_keep_distinct
         Some(named("node-2"))
     );
 
-    let multiple_graph = graph(IngestorInstances::Count(nonzero!(3u16)), false);
+    let multiple_graph = graph(IngestorInstances::Count(nonzero!(3u64)), false);
     let schedule = multiple_graph.schedule_for_domain(
         &named("instances"),
         &[owner],
@@ -99,7 +99,7 @@ fn one_instance_exposes_its_single_execution_and_several_instances_keep_distinct
 
 #[test]
 fn independent_instances_spread_primaries_and_keep_their_own_replicas() {
-    let graph = graph(IngestorInstances::Count(nonzero!(3u16)), false);
+    let graph = graph(IngestorInstances::Count(nonzero!(3u64)), false);
     let nodes = [named("node-1"), named("node-2"), named("node-3")];
     let schedule =
         graph.schedule_for_domain(&named("instances"), &nodes, 1, PlacementPolicy::Neutral);
@@ -134,7 +134,7 @@ fn per_partition_groups_bind_only_the_corresponding_instance_and_relay_unit() {
         );
         let relay = NodeUnitRef::new(
             NodeRef::new(ModelKind::Relay, named::<ModelName>("events")),
-            Unit::Partition(index),
+            Unit::Partition(u32::try_from(index).expect("the four fixture partitions fit u32")),
         );
         assert_eq!(
             groups.groups[groups.by_member[&source]]
@@ -175,7 +175,7 @@ fn per_partition_groups_bind_only_the_corresponding_instance_and_relay_unit() {
 
 #[test]
 fn whole_entity_colocation_joins_every_declared_unit() {
-    let graph = graph(IngestorInstances::Count(nonzero!(3u16)), false);
+    let graph = graph(IngestorInstances::Count(nonzero!(3u64)), false);
     let groups = UnitPlacementGroups::decide(
         &graph,
         &[vec![
@@ -185,19 +185,4 @@ fn whole_entity_colocation_joins_every_declared_unit() {
     );
     assert_eq!(groups.groups.len(), 1);
     assert_eq!(groups.groups[0].len(), 4);
-}
-
-#[test]
-fn kafka_domain_offsets_keep_their_unit_layout_until_explicit_recreation() {
-    let before = graph(IngestorInstances::Count(nonzero!(3u16)), false);
-    let unchanged = graph(IngestorInstances::Count(nonzero!(3u16)), false);
-    validate_unit_layout_transition(&named("instances"), &before, &unchanged)
-        .expect("the same units retain their offsets");
-    let resized = graph(IngestorInstances::Count(nonzero!(4u16)), false);
-    let error = validate_unit_layout_transition(&named("instances"), &before, &resized)
-        .expect_err("a count change needs a new offset lifetime");
-    assert!(matches!(
-        error.downcast_ref::<IngestorInstancingError>(),
-        Some(IngestorInstancingError::KafkaLayoutChange)
-    ));
 }

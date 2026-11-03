@@ -25,7 +25,7 @@
 use std::{
     borrow::Cow,
     cmp::Ordering,
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     num::NonZeroU64,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -2559,6 +2559,73 @@ pub struct RuntimeMetricsSnapshot {
     histograms: Vec<MetricHistogramSnapshot>,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "a disjoint metric-history join refuses a repeated series identity before \
+                  publication"
+    )
+)]
+pub(crate) enum MetricSnapshotMergeError {
+    #[error("intake checkpoints contain the same counter series more than once")]
+    DuplicateCounter,
+    #[error("intake checkpoints contain the same histogram series more than once")]
+    DuplicateHistogram,
+}
+
+impl RuntimeMetricsSnapshot {
+    pub(crate) fn units(&self) -> BTreeSet<Unit> {
+        self.counters
+            .iter()
+            .map(|series| series.key.unit)
+            .chain(self.histograms.iter().map(|series| series.key.unit))
+            .collect()
+    }
+
+    /// Keep complete series, including their original instance and physical-node identities.
+    /// A retired instance's history has one checkpoint owner until that instance is declared again.
+    pub(crate) fn select_instances(mut self, index: u64, count: NonZeroU64) -> Self {
+        let selected =
+            |unit| matches!(unit, Unit::Instance(origin) if origin % count.get() == index);
+        self.counters.retain(|series| selected(series.key.unit));
+        self.histograms.retain(|series| selected(series.key.unit));
+        self
+    }
+
+    pub(crate) fn merge_disjoint(
+        snapshots: impl IntoIterator<Item = Self>,
+    ) -> Result<Self, MetricSnapshotMergeError> {
+        let mut merged = Self::default();
+        for snapshot in snapshots {
+            merged.counters.extend(snapshot.counters);
+            merged.histograms.extend(snapshot.histograms);
+        }
+        merged
+            .counters
+            .sort_by(|left, right| left.key.cmp(&right.key));
+        merged
+            .histograms
+            .sort_by(|left, right| left.key.cmp(&right.key));
+        if merged
+            .counters
+            .windows(2)
+            .any(|pair| pair[0].key == pair[1].key)
+        {
+            return Err(MetricSnapshotMergeError::DuplicateCounter);
+        }
+        if merged
+            .histograms
+            .windows(2)
+            .any(|pair| pair[0].key == pair[1].key)
+        {
+            return Err(MetricSnapshotMergeError::DuplicateHistogram);
+        }
+        Ok(merged)
+    }
+}
+
 #[cfg(test)]
 impl RuntimeMetricsSnapshot {
     /// Up to three counter and three histogram series with any key text, any elapsed time and
@@ -4055,6 +4122,33 @@ impl RuntimeMetrics {
         }
     }
 
+    /// Withdraw a frozen layout before its disjoint prepared unit checkpoints are installed.
+    pub(crate) fn remove_ingestor_metrics(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        physical_node: Option<&ClusterNodeName>,
+    ) {
+        let target = ModelName::from(ingestor);
+        let units = self
+            .series
+            .counters
+            .iter()
+            .map(|entry| entry.key().clone())
+            .chain(
+                self.series
+                    .histograms
+                    .iter()
+                    .map(|entry| entry.key().clone()),
+            )
+            .filter(|key| key_matches_unit(key, domain, "INGESTOR", &target, key.unit))
+            .map(|key| key.unit)
+            .collect::<BTreeSet<_>>();
+        for unit in units {
+            self.remove_ingestor_unit(domain, ingestor, unit, physical_node);
+        }
+    }
+
     pub fn prometheus_text(&self) -> String {
         self.series.prometheus.text()
     }
@@ -4084,12 +4178,35 @@ impl RuntimeMetrics {
         target: &ModelName,
         unit: Unit,
     ) -> RuntimeMetricsSnapshot {
+        self.snapshot_global_selected(domain, kind, target, |candidate| candidate == unit)
+    }
+
+    pub(crate) fn snapshot_global_units(
+        &self,
+        domain: &DomainName,
+        kind: ModelKind,
+        target: &ModelName,
+        units: &BTreeSet<Unit>,
+    ) -> RuntimeMetricsSnapshot {
+        self.snapshot_global_selected(domain, kind, target, |unit| units.contains(&unit))
+    }
+
+    fn snapshot_global_selected(
+        &self,
+        domain: &DomainName,
+        kind: ModelKind,
+        target: &ModelName,
+        includes_unit: impl Fn(Unit) -> bool,
+    ) -> RuntimeMetricsSnapshot {
         let target_kind = kind.as_str().to_ascii_uppercase();
         let mut counters = self
             .series
             .counters
             .iter()
-            .filter(|entry| key_matches_unit(entry.key(), domain, &target_kind, target, unit))
+            .filter(|entry| {
+                includes_unit(entry.key().unit)
+                    && key_matches_unit(entry.key(), domain, &target_kind, target, entry.key().unit)
+            })
             .map(|entry| entry.value().to_snapshot(entry.key().clone()))
             .collect::<Vec<_>>();
         counters.sort_by(|left, right| left.key.cmp(&right.key));
@@ -4098,7 +4215,8 @@ impl RuntimeMetrics {
             .histograms
             .iter()
             .filter(|entry| {
-                key_matches_unit(entry.key(), domain, &target_kind, target, unit)
+                includes_unit(entry.key().unit)
+                    && key_matches_unit(entry.key(), domain, &target_kind, target, entry.key().unit)
                     && entry.value().was_observed()
             })
             .map(|entry| entry.value().to_snapshot(entry.key().clone()))
@@ -4356,6 +4474,7 @@ impl RuntimeMetrics {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn describe_global_unit(
         &self,
         domain: &DomainName,
@@ -4365,6 +4484,18 @@ impl RuntimeMetrics {
     ) -> Vec<String> {
         self.describe_global_matching(kind, |key| {
             key_matches_unit(key, domain, kind, target, unit)
+        })
+    }
+
+    pub(crate) fn describe_global_units(
+        &self,
+        domain: &DomainName,
+        kind: &str,
+        target: &ModelName,
+        units: &BTreeSet<Unit>,
+    ) -> Vec<String> {
+        self.describe_global_matching(kind, |key| {
+            units.contains(&key.unit) && key_matches_unit(key, domain, kind, target, key.unit)
         })
     }
 
@@ -5698,6 +5829,58 @@ impl ClientEmitterSeries {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bolero_instance_layouts_preserve_complete_metric_history() {
+        use nervix_arbitrary::{Arbitrary, Domain};
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(2048)
+            .for_each(|bytes: &[u8]| {
+                let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
+                let mut snapshot = RuntimeMetricsSnapshot::generated(&mut arbitrary);
+                for (index, series) in snapshot.counters.iter_mut().enumerate() {
+                    series.key.unit =
+                        Unit::Instance(arbitrary.entropy().boundary_biased(0..=u64::MAX));
+                    series.key.metric = format!("counter_{index}");
+                }
+                for (index, series) in snapshot.histograms.iter_mut().enumerate() {
+                    series.key.unit =
+                        Unit::Instance(arbitrary.entropy().boundary_biased(0..=u64::MAX));
+                    series.key.metric = format!("histogram_{index}");
+                }
+                snapshot
+                    .counters
+                    .sort_by(|left, right| left.key.cmp(&right.key));
+                snapshot
+                    .histograms
+                    .sort_by(|left, right| left.key.cmp(&right.key));
+                let expected = rkyv::to_bytes::<rkyv::rancor::Error>(&snapshot)
+                    .assured("the bounded current metric history encodes")
+                    .to_vec();
+                for count in [arbitrary.entropy().boundary_biased(1..=5), 1, 4, 2, 5] {
+                    let count = NonZeroU64::new(count).assured("the generated layout is positive");
+                    let slices = (0..count.get())
+                        .map(|index| snapshot.clone().select_instances(index, count));
+                    snapshot = RuntimeMetricsSnapshot::merge_disjoint(slices)
+                        .assured("each complete series has exactly one checkpoint owner");
+                    let actual = rkyv::to_bytes::<rkyv::rancor::Error>(&snapshot)
+                        .assured("the joined metric history encodes");
+                    assert_eq!(
+                        actual.as_slice(),
+                        expected.as_slice(),
+                        "instance and physical-node labels, counter values, all floating-point \
+                         bits, rates, times and histogram buckets survive every layout"
+                    );
+                }
+                if !snapshot.counters.is_empty() || !snapshot.histograms.is_empty() {
+                    assert!(
+                        RuntimeMetricsSnapshot::merge_disjoint([snapshot.clone(), snapshot])
+                            .is_err(),
+                        "a repeated history is refused instead of double counted"
+                    );
+                }
+            });
+    }
     use super::*;
 
     #[test]

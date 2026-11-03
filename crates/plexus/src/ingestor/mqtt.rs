@@ -401,7 +401,7 @@ mod tests {
         assert_eq!(source.topic.as_str(), filter);
         assert_eq!(
             source.instances,
-            nervix_models::IngestorInstances::Count(nonzero_ext::nonzero!(2u16))
+            nervix_models::IngestorInstances::Count(nonzero_ext::nonzero!(2u64))
         );
     }
 

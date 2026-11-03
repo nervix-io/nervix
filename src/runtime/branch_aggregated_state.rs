@@ -5,7 +5,7 @@
 
 use error_stack::ResultExt as _;
 use nervix_checkpoint_replication::CheckpointReplication;
-use nervix_models::ClusterNodeName;
+use nervix_models::{ClusterNodeName, Unit};
 use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
@@ -236,6 +236,12 @@ pub(super) struct BranchAggregatedRuntimeStateSnapshot {
 }
 
 #[derive(Debug)]
+struct BranchAggregatedCheckpoint {
+    captured: Option<PersistedRuntimeStateEntry>,
+    units: std::collections::BTreeSet<Unit>,
+}
+
+#[derive(Debug)]
 #[cfg_attr(
     nervix_lint,
     nervix::context(
@@ -252,7 +258,7 @@ pub(super) struct ReplicatedBranchAggregatedState {
     pub(super) last_persisted_lsm: AtomicU64,
     /// A revision selects its bytes once. Elapsed metric fields cannot change its descriptor,
     /// stream or persisted payload when another request captures that same revision.
-    snapshot: nervix_primitives::sync::blocking::Mutex<Option<PersistedRuntimeStateEntry>>,
+    snapshot: nervix_primitives::sync::blocking::Mutex<BranchAggregatedCheckpoint>,
     /// What each replica reported holding and the offer of the newest snapshot to them while this
     /// node aggregates the metrics, and the owner's announcements while it replicates them.
     replication: CheckpointReplication,
@@ -275,10 +281,12 @@ impl ReplicatedBranchAggregatedState {
     ) -> error_stack::Result<Self, RuntimePersistenceError> {
         let mut current_lsm = 0;
         let mut last_persisted_lsm = 0;
+        let mut units = std::collections::BTreeSet::from([placement.unit]);
         if let Some(initial) = initial.as_ref() {
             current_lsm = initial.lsm;
             last_persisted_lsm = initial.lsm;
             let snapshot = decode_branch_aggregated_snapshot(&initial.payload)?;
+            units.extend(snapshot.metrics.units());
             metrics.apply_global_unit_snapshot(
                 &placement.domain,
                 placement.kind,
@@ -294,13 +302,20 @@ impl ReplicatedBranchAggregatedState {
             )),
             current_lsm: LsmSequence::restored(current_lsm),
             last_persisted_lsm: AtomicU64::new(last_persisted_lsm),
-            snapshot: nervix_primitives::sync::blocking::Mutex::new(initial),
+            snapshot: nervix_primitives::sync::blocking::Mutex::new(BranchAggregatedCheckpoint {
+                captured: initial,
+                units,
+            }),
             replication: CheckpointReplication::new(),
         })
     }
 
     pub(super) fn primary_node(&self) -> Option<ClusterNodeName> {
         self.roles.read().primary_node.clone()
+    }
+
+    pub(super) fn metric_units(&self) -> std::collections::BTreeSet<Unit> {
+        self.snapshot.lock().units.clone()
     }
 
     pub(super) fn rebind_roles(&self, roles: StateReplicationRoles) {
@@ -375,24 +390,24 @@ impl ReplicatedBranchAggregatedState {
         // The revision is read first, so an update whose metrics this snapshot misses has a newer
         // revision than the one the snapshot is stamped with.
         let lsm = self.current_lsm.current();
-        if let Some(snapshot) = captured.as_ref()
+        if let Some(snapshot) = captured.captured.as_ref()
             && snapshot.lsm == lsm
         {
             return Ok(snapshot.clone());
         }
         let snapshot = BranchAggregatedRuntimeStateSnapshot {
-            metrics: metrics.snapshot_global_unit(
+            metrics: metrics.snapshot_global_units(
                 &self.placement.domain,
                 self.placement.kind,
                 &self.placement.identifier,
-                self.placement.unit,
+                &captured.units,
             ),
         };
         let snapshot = PersistedRuntimeStateEntry {
             lsm,
             payload: encode_branch_aggregated_snapshot(&snapshot)?,
         };
-        *captured = Some(snapshot.clone());
+        captured.captured = Some(snapshot.clone());
         Ok(snapshot)
     }
 
@@ -412,6 +427,8 @@ impl ReplicatedBranchAggregatedState {
     ) -> error_stack::Result<(), RuntimePersistenceError> {
         let mut captured = self.snapshot.lock();
         let snapshot = decode_branch_aggregated_snapshot(payload)?;
+        captured.units = snapshot.metrics.units();
+        captured.units.insert(self.placement.unit);
         metrics.apply_global_unit_snapshot(
             &self.placement.domain,
             self.placement.kind,
@@ -420,7 +437,7 @@ impl ReplicatedBranchAggregatedState {
             snapshot.metrics,
         );
         self.current_lsm.adopt(lsm);
-        *captured = Some(PersistedRuntimeStateEntry {
+        captured.captured = Some(PersistedRuntimeStateEntry {
             lsm,
             payload: payload.to_vec(),
         });
@@ -453,6 +470,8 @@ impl ReplicatedBranchAggregatedState {
             return Ok(());
         }
         let decoded = decode_branch_aggregated_snapshot(&snapshot.payload)?;
+        captured.units = decoded.metrics.units();
+        captured.units.insert(self.placement.unit);
         metrics.apply_global_unit_snapshot(
             &self.placement.domain,
             self.placement.kind,
@@ -463,7 +482,7 @@ impl ReplicatedBranchAggregatedState {
         self.current_lsm.adopt(snapshot.lsm);
         self.last_persisted_lsm
             .store(snapshot.lsm, Ordering::SeqCst);
-        *captured = Some(snapshot);
+        captured.captured = Some(snapshot);
         Ok(())
     }
 }

@@ -157,3 +157,8 @@ path of the inventory until that path moves onto AWS-LC: password authentication
 MongoDB, Postgres and MySQL drivers, SQS and object-storage request signing, RabbitMQ PKCS#12
 client identities and Parquet encryption in Iceberg. Non-security uses, the register's entries and
 the inventory's non-security rows, are not refused.
+
+Runtime checkpoint digests also identify retained Kafka start offers and immutable pending-seed
+projections. Their purpose is non-security content checking: detecting changed, truncated or
+mismatched transfer bodies inside authenticated node requests. The existing checkpoint digest
+owner computes and verifies them under bounded execution and memory admission.

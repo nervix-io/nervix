@@ -11,10 +11,13 @@
     nervix::layer(decisions, reason = "owns the decisions boundary declared above")
 )]
 
-use std::{collections::BTreeSet, num::NonZeroU16};
+use std::{
+    collections::BTreeSet,
+    num::{NonZeroU16, NonZeroU64},
+};
 
 use error_stack::Report;
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     BranchSelection, CreateIngestor, DomainName, IngestorEntity, IngestorEntityKind,
     IngestorInstances, IngestorInstancingCapability, KafkaIngestor, KafkaOffsetMode, ModelIndex,
@@ -31,11 +34,6 @@ pub(crate) enum IngestorInstancingError {
     #[error("{entity} INSTANCES PER PARTITION requires OFFSET BY DOMAIN")]
     KafkaOffsets { entity: IngestorEntityKind },
     #[error(
-        "Kafka domain-offset instance layout cannot change in place; explicitly recreate the \
-         ingestor before changing its unit count"
-    )]
-    KafkaLayoutChange,
-    #[error(
         "INSTANCES PER PARTITION requires constructing routes to one branch partition structure"
     )]
     MissingConstruction,
@@ -46,44 +44,11 @@ pub(crate) enum IngestorInstancingError {
     DifferentStructure { relay: RelayName },
 }
 
-/// Offset tables are unit-owned. A count change requires an explicit source lifetime boundary,
-/// rather than assigning the same broker partition to a unit that never committed its position.
-pub(in crate::registry) fn validate_unit_layout_transition(
-    domain: &DomainName,
-    current: &super::graph::ActiveGraph,
-    candidate: &super::graph::ActiveGraph,
-) -> Result<(), Report<RegistryError>> {
-    let keeps_domain_offsets = |node: &super::graph::ActiveNode| {
-        matches!(node.config.as_ref(), nervix_models::Model::Ingestor(ingestor)
-        if matches!(ingestor.input.transport_entity(), Some(IngestorEntity::Kafka(KafkaIngestor::Topic(source))) if source.offset_mode == KafkaOffsetMode::Domain))
-    };
-    for before in current
-        .graph
-        .node_weights()
-        .filter(|node| keeps_domain_offsets(node))
-    {
-        let Some(after) = candidate.node(before.kind, &before.identifier) else {
-            continue;
-        };
-        if keeps_domain_offsets(after) && before.placement_units() != after.placement_units() {
-            return Err(
-                Report::new(IngestorInstancingError::KafkaLayoutChange).change_context(
-                    RegistryError::IngestorInstancing {
-                        domain: domain.clone(),
-                        ingestor: nervix_models::IngestorName::from(&before.identifier),
-                    },
-                ),
-            );
-        }
-    }
-    Ok(())
-}
-
 /// The complete unit declaration after reference and structural validation.
 #[derive(Debug, Clone)]
 pub(in crate::registry) enum IngestorUnits {
     Single,
-    Instances(NonZeroU16),
+    Instances(NonZeroU64),
     PerPartition {
         count: NonZeroU16,
         relays: Vec<RelayName>,
@@ -166,11 +131,10 @@ impl IngestorUnits {
     pub(in crate::registry) fn units(&self) -> Vec<Unit> {
         let count = match self {
             Self::Single => return vec![Unit::Single],
-            Self::Instances(count) | Self::PerPartition { count, .. } => count.get(),
+            Self::Instances(count) => count.get(),
+            Self::PerPartition { count, .. } => u64::from(count.get()),
         };
-        (0..count)
-            .map(|index| Unit::Instance(u32::from(index)))
-            .collect()
+        (0..count).map(|index| Unit::Instance(index)).collect()
     }
 
     /// The exact relay units with which this source instance must move.
@@ -178,10 +142,13 @@ impl IngestorUnits {
         let (Self::PerPartition { count, relays }, Unit::Instance(index)) = (self, unit) else {
             return Vec::new();
         };
+        if index >= u64::from(count.get()) {
+            return Vec::new();
+        }
         let relay_unit = if count.get() == 1 {
             Unit::Single
         } else {
-            Unit::Partition(index)
+            Unit::Partition(u32::try_from(index).assured("a constructed partition index fits u32"))
         };
         relays
             .iter()

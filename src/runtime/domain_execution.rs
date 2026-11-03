@@ -245,7 +245,7 @@ impl RelayUnitRef {
 
     /// Every unit of `relay`, as one contiguous range of an ordered map keyed by relay unit.
     fn units_of(relay: &RelayName) -> std::ops::RangeInclusive<Self> {
-        Self::new(relay.clone(), Unit::Single)..=Self::new(relay.clone(), Unit::Instance(u32::MAX))
+        Self::new(relay.clone(), Unit::Single)..=Self::new(relay.clone(), Unit::Instance(u64::MAX))
     }
 }
 

@@ -28,7 +28,7 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, ack_timeout, boxed_choice, byte_size_lit, duration_lit, kw, kw_phrase2,
-        nonzero_u16_value, parallel_ack_window, retry_policy, sequential_ack_window,
+        nonzero_u64_value, parallel_ack_window, retry_policy, sequential_ack_window,
     },
 };
 
@@ -89,7 +89,7 @@ pub(super) fn ack_parallel<'src>()
 /// The instancing body the entity declares after `INSTANCES`.
 pub(super) fn instances<'src, S: IngestorEntityModel>()
 -> impl Parser<'src, &'src [Token], IngestorInstances, extra::Err<ParseError<'src>>> + Clone {
-    let count = nonzero_u16_value("instance_count", "instances must be greater than 0")
+    let count = nonzero_u64_value("instance_count", "instances must be greater than 0")
         .map(IngestorInstances::Count);
     let capability = S::KIND.capabilities().instancing;
     let grammar = match capability {

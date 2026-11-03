@@ -49,7 +49,7 @@ async fn a_terminating_destination_refuses_to_prepare_a_planned_handoff() {
         ),
         base_schedule_fingerprint: [1; 32],
         target_schedule_fingerprint: [2; 32],
-        checkpoints: Vec::new(),
+        input: nervix_interconnect::OwnershipHandoffInput::Unit(Vec::new()),
     };
 
     // Before it terminates, the destination goes on to validate the request and refuses it for

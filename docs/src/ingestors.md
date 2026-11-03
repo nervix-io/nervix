@@ -1455,6 +1455,7 @@ disk staging and transfer chunks, so checkpoint length is independent of the Bul
 Offset recovery details:
 
 - `START AT <timestamp>` and `START AT NOW` apply once per domain start generation across all instances. The first initialization persists the resolved partition positions and the applied generation together before reading. Quiescence, reconnects, rebalances, ownership changes and restarts in that generation resume acknowledged positions; they do not apply the timestamp again. A new partition without a recorded position starts at that generation's original timestamp. A later explicit `START AT` begins a new generation and replaces the positions again.
+- A delayed instance receives the same explicit-start cut after reconnect, placement or a plain `START`; pending positions retain the explicit generation even when the domain's current generation advances. Its own positions become durable before its adoption is confirmed.
 - persisted per-partition offsets are clamped to the partition's currently available Kafka watermark range on reassignment
 - in a generation begun with plain `START`, a partition without a stored domain offset starts in a paced domain at its first record at or after the domain's current logical time, or at its end as it stood before that lookup when it has no such record yet; in an unpaced domain it starts at its earliest retained record, so a plain `START` reads what the topic retains and `START AT NOW` is how an unpaced domain skips it
 - the instance that takes such a partition up records its start as the partition's domain offset before it reads, so a reconnect resumes the partition there instead of placing it again past records the instance has not acknowledged
@@ -3224,7 +3225,7 @@ The following entities declare `INSTANCES`; presence and defaults follow the voc
 form. The six broker entities in the table declare `PerPartition`. Polling, connection, listener,
 and client-producer entities declare `Single`.
 
-`INSTANCES <n>` accepts 1 through 65,535. Nervix schedules each global index `0..n-1` as an
+`INSTANCES <n>` accepts every positive 64-bit count (1 through 18,446,744,073,709,551,615). Nervix schedules each global index `0..n-1` as an
 independent execution unit with its own primary, replicas, readiness, intake buffer, ACK roots,
 branch lifecycle and metric checkpoints. Eligible nodes share the primary work; when fewer nodes
 are available, several instances can run on one node. A hard whole-entity colocation rule can
@@ -3242,8 +3243,10 @@ topology epochs are separate features.
 
 For Kafka, `PER PARTITION` requires `OFFSET BY DOMAIN`. Each unit owns the offsets of the topic
 partitions dealt to its global index, and commits through the originator on that unit's primary.
-Changing a domain-offset ingestor's unit count in place is refused, including when a branch
-partition-count change would resize it. Commit a drop of the ingestor, then recreate it to establish a new offset lifetime. Changing the broker topic's partition set with a fixed instance count retains its existing
+Changing a domain-offset ingestor's unit count preserves its recorded positions while running or
+stopped. Nervix drains the affected units and prepares their redistributed state on the new
+primaries and replicas before publishing the layout. A failed preparation retains the preceding
+layout. Changing the broker topic's partition set with a fixed instance count retains its existing
 rebalance and checkpoint contract.
 
 `DESCRIBE INGESTOR <name>` reports every instance with its node, running state and readiness.
@@ -3251,7 +3254,9 @@ rebalance and checkpoint contract.
 source-specific intake metrics carry the `instance` label; see
 [Metrics And Observability](metrics-and-observability.md#metric-labels). Moving or stopping one
 instance ends its exact source lifetime and leaves sibling source tasks, ACK roots and readiness
-handles installed.
+handles installed. A count change retains complete metric histories exactly once, with their
+original instance and physical-node labels. A retired instance's history remains visible while
+one of the current units owns its checkpoint.
 
 The instances of a `KAFKA TOPIC` ingestor under `OFFSET BY CONSUMER GROUP` are members of one group
 and share its `START AT`: whichever instance takes a partition the group holds no usable offset for

@@ -3733,6 +3733,12 @@ workloads = [
   "scenario.window-metrics-relocation",
   "stress.window-metrics-drain",
   "stress.window-metrics-relocation",
+    "scenario.ingestor-instance-layout-01",
+    "stress.ingestor-instance-layout-01",
+    "scenario.ingestor-instance-layout-02",
+    "stress.ingestor-instance-layout-02",
+    "scenario.ingestor-instance-layout-03",
+    "stress.ingestor-instance-layout-03",
 ]
 
 [[owner]]
@@ -3777,6 +3783,12 @@ workloads = [
   "stress.branch-state-resume",
   "stress.branch-state-stale-coordinator",
   "stress.restore-generation",
+    "scenario.ingestor-instance-layout-01",
+    "stress.ingestor-instance-layout-01",
+    "scenario.ingestor-instance-layout-02",
+    "stress.ingestor-instance-layout-02",
+    "scenario.ingestor-instance-layout-03",
+    "stress.ingestor-instance-layout-03",
 ]
 
 [[owner]]
@@ -3819,6 +3831,12 @@ workloads = [
   "stress.wasm-kafka-restore",
   "scenario.backup-parked-wait-slow-reads",
   "stress.backup-parked-wait-slow-reads",
+    "scenario.ingestor-instance-layout-01",
+    "stress.ingestor-instance-layout-01",
+    "scenario.ingestor-instance-layout-02",
+    "stress.ingestor-instance-layout-02",
+    "scenario.ingestor-instance-layout-03",
+    "stress.ingestor-instance-layout-03",
 ]
 
 [[owner]]
@@ -3877,6 +3895,12 @@ workloads = [
   "stress.shutdown-terminating-destination",
   "scenario.shutdown-unactivated-handoff",
   "stress.shutdown-unactivated-handoff",
+    "scenario.ingestor-instance-layout-01",
+    "stress.ingestor-instance-layout-01",
+    "scenario.ingestor-instance-layout-02",
+    "stress.ingestor-instance-layout-02",
+    "scenario.ingestor-instance-layout-03",
+    "stress.ingestor-instance-layout-03",
 ]
 
 [[owner]]
@@ -3993,6 +4017,12 @@ workloads = [
   "stress.diagnostic-nodes",
   "stress.memory-pressure-pause",
   "stress.shutdown-kafka-handoff",
+    "scenario.ingestor-instance-layout-01",
+    "stress.ingestor-instance-layout-01",
+    "scenario.ingestor-instance-layout-02",
+    "stress.ingestor-instance-layout-02",
+    "scenario.ingestor-instance-layout-03",
+    "stress.ingestor-instance-layout-03",
 ]
 
 [[owner]]
@@ -4124,6 +4154,12 @@ workloads = [
   "stress.restore-staging-quota",
   "stress.branch-state-large",
   "stress.wasm-large-handoff",
+    "scenario.ingestor-instance-layout-01",
+    "stress.ingestor-instance-layout-01",
+    "scenario.ingestor-instance-layout-02",
+    "stress.ingestor-instance-layout-02",
+    "scenario.ingestor-instance-layout-03",
+    "stress.ingestor-instance-layout-03",
 ]
 
 [[owner]]
@@ -4859,4 +4895,64 @@ id = "stress.ingestor-instance-14"
 invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
 invocation = "stress-scenarios"
 scenario = "Pulsar partition-following instances share their partition owners on <nodes> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production instance-layout gates, quiesce, final checkpoint capture, native state preparation and activation, branch lifecycle and metrics, and the state store. Broker transport, asynchronous startup coordination and registry discovery are untracked; the startup freeze and pending-seed races have production-owner Shuttle checks."
+examples = 2
+feature = "tests/features/runtime/ingestor_instance_layout.feature"
+id = "scenario.ingestor-instance-layout-01"
+invariant = "The canonical future-start cut stays durable while stopped, newly placed units resume their exact partitions, and each published payload arrives once."
+invocation = "scenarios"
+scenario = "Newly placed instances retain a canonical future start through STOP and START on <nodes> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production instance-layout gates, quiesce, final checkpoint capture, native state preparation and activation, branch lifecycle and metrics, and the state store. Broker transport, asynchronous startup coordination and registry discovery are untracked; the startup freeze and pending-seed races have production-owner Shuttle checks."
+examples = 2
+feature = "tests/features/runtime/ingestor_instance_layout.feature"
+id = "stress.ingestor-instance-layout-01"
+invariant = "The canonical future-start cut stays durable while stopped, newly placed units resume their exact partitions, and each published payload arrives once."
+invocation = "stress-scenarios"
+scenario = "Newly placed instances retain a canonical future start through STOP and START on <nodes> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production instance-layout gates, quiesce, final checkpoint capture, native state preparation and activation, branch lifecycle and metrics, and the state store. Broker transport, asynchronous startup coordination and registry discovery are untracked; the startup freeze and pending-seed races have production-owner Shuttle checks."
+examples = 2
+feature = "tests/features/runtime/ingestor_instance_layout.feature"
+id = "scenario.ingestor-instance-layout-02"
+invariant = "A stopped source can publish a changed instance count across its selected owners without opening a broker consumer."
+invocation = "scenarios"
+scenario = "A stopped domain-offset source changes its unit count on <nodes> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production instance-layout gates, quiesce, final checkpoint capture, native state preparation and activation, branch lifecycle and metrics, and the state store. Broker transport, asynchronous startup coordination and registry discovery are untracked; the startup freeze and pending-seed races have production-owner Shuttle checks."
+examples = 2
+feature = "tests/features/runtime/ingestor_instance_layout.feature"
+id = "stress.ingestor-instance-layout-02"
+invariant = "A stopped source can publish a changed instance count across its selected owners without opening a broker consumer."
+invocation = "stress-scenarios"
+scenario = "A stopped domain-offset source changes its unit count on <nodes> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production instance-layout gates, quiesce, final checkpoint capture, native state preparation and activation, branch lifecycle and metrics, and the state store. Broker transport, asynchronous startup coordination and registry discovery are untracked; the startup freeze and pending-seed races have production-owner Shuttle checks."
+examples = 2
+feature = "tests/features/runtime/ingestor_instance_layout.feature"
+id = "scenario.ingestor-instance-layout-03"
+invariant = "Growing and shrinking the instance layout preserves each acknowledged Kafka position and the complete metric history through live and stopped transitions."
+invocation = "scenarios"
+scenario = "A domain-offset source retains acknowledged positions through live and stopped layout changes on <nodes> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production instance-layout gates, quiesce, final checkpoint capture, native state preparation and activation, branch lifecycle and metrics, and the state store. Broker transport, asynchronous startup coordination and registry discovery are untracked; the startup freeze and pending-seed races have production-owner Shuttle checks."
+examples = 2
+feature = "tests/features/runtime/ingestor_instance_layout.feature"
+id = "stress.ingestor-instance-layout-03"
+invariant = "Growing and shrinking the instance layout preserves each acknowledged Kafka position and the complete metric history through live and stopped transitions."
+invocation = "stress-scenarios"
+scenario = "A domain-offset source retains acknowledged positions through live and stopped layout changes on <nodes> nodes"
 selections = ["deloxide-stress"]

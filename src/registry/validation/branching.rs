@@ -1541,7 +1541,7 @@ mod tests {
                                             start_at: nervix_models::IngestStartPosition::Earliest,
                                         },
                                         instances: nervix_models::IngestorInstances::Count(
-                                            nonzero!(1u16),
+                                            nonzero!(1u64),
                                         ),
                                         mode: KafkaIngestMode::AckSequential {
                                             timeout: "30s".to_string(),

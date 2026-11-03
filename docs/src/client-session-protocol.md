@@ -94,6 +94,10 @@ client, binding and browser; those build choices change no wire contract.
 
 ## Wire Format
 
+An instance placement identity carries an unsigned 64-bit index in the `PlacementUnit` union;
+partition indices remain unsigned 32-bit values. Client encoders and decoders preserve the full
+instance index when reporting transaction impact and execution placement.
+
 ### One Schema, Eight Frame Roots
 
 `crates/client-wire/schema/session.fbs` declares every shape of the public boundary, once. Eight

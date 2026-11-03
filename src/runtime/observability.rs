@@ -360,13 +360,17 @@ impl Runtime {
             unit,
             branch_key: None,
         };
-        if let Err(error) = self.refresh_branch_aggregated_metrics_for_unit(&placement) {
-            warn!(domain = domain.as_str(), ingestor = ingestor.as_str(), ?unit, error = %format_args!("{error:#}"),
-                "failed to refresh ingestor unit metrics before describe");
-        }
+        let units = match self.refresh_branch_aggregated_metrics_for_unit(&placement) {
+            Ok(units) => units,
+            Err(error) => {
+                warn!(domain = domain.as_str(), ingestor = ingestor.as_str(), ?unit, error = %format_args!("{error:#}"),
+                    "failed to refresh ingestor unit metrics before describe");
+                BTreeSet::from([unit])
+            }
+        };
         self.inner
             .metrics
-            .describe_global_unit(domain, "INGESTOR", &identifier, unit)
+            .describe_global_units(domain, "INGESTOR", &identifier, &units)
     }
 
     /// Read the current generation's checkpoints without taking ownership or advancing their
@@ -612,12 +616,21 @@ impl Runtime {
     fn refresh_branch_aggregated_metrics_for_unit(
         &self,
         placement: &RuntimeStatePlacement,
-    ) -> error_stack::Result<(), RuntimePersistenceError> {
+    ) -> error_stack::Result<BTreeSet<Unit>, RuntimePersistenceError> {
+        let state = self
+            .inner
+            .replicated_branch_aggregated_states
+            .get(placement)
+            .map(|state| state.value().clone());
+        let mut units = state.as_ref().map_or_else(
+            || BTreeSet::from([placement.unit]),
+            |state| state.metric_units(),
+        );
         let Some(store) = &self.inner.state_store else {
-            return Ok(());
+            return Ok(units);
         };
         let Some(snapshot) = store.latest_snapshot(placement)? else {
-            return Ok(());
+            return Ok(units);
         };
         if let Some(state) = self
             .inner
@@ -625,22 +638,26 @@ impl Runtime {
             .get(placement)
         {
             state.restore_persisted_snapshot(&self.inner.metrics, snapshot)?;
-        } else if !self.inner.metrics.has_global_unit_measurements(
-            &placement.domain,
-            placement.kind,
-            &placement.identifier,
-            placement.unit,
-        ) {
+            units.extend(state.metric_units());
+        } else {
             let decoded = decode_branch_aggregated_snapshot(&snapshot.payload)?;
-            self.inner.metrics.apply_global_unit_snapshot(
+            units.extend(decoded.metrics.units());
+            if !self.inner.metrics.has_global_unit_measurements(
                 &placement.domain,
                 placement.kind,
                 &placement.identifier,
                 placement.unit,
-                decoded.metrics,
-            );
+            ) {
+                self.inner.metrics.apply_global_unit_snapshot(
+                    &placement.domain,
+                    placement.kind,
+                    &placement.identifier,
+                    placement.unit,
+                    decoded.metrics,
+                );
+            }
         }
-        Ok(())
+        Ok(units)
     }
 
     /// The latest decode rejection the ingestor `key` names published on this node.

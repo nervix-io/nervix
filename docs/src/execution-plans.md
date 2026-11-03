@@ -58,7 +58,16 @@ requires the complete declared unit set before a plan can run. The runtime regis
 quiesce controls, ACK roots, readiness and status under `DomainNodeUnitRef`; `AlreadyRunning` names
 that exact unit. Each source owns its route runtimes and `BranchLru`/`BranchAggregated` placements.
 Schedule application stops lost units, rebinds retained state originators and starts gained units
-without rebuilding unaffected sibling intake tasks.
+without rebuilding unaffected sibling intake tasks. A changed ingestor unit set is one layout
+transition: each preceding unit contributes one persisted frozen cut. The coordinator retains
+its checkpoint descriptors and asks the source to project those exact bytes for each target,
+without checkpointing the full source again. Every target primary and replica receives prepared
+state before publication. Installation stops and joins the preceding intake
+layout before activating those cuts, including units retained on the same node. Kafka assignments
+are dealt for the target count in the same committed schedule. Offset joins retain the newest
+canonical start, prefer the actual preceding owner's progress over a pending seed, and retain
+seeds for an instance that had not initialized. Metric series retain their complete origin labels
+and values, with one checkpoint owner for each historical instance.
 
 The source digest identifies which schedule produced the installed revision. A planned change
 also carries its predecessor digest, so an incremental application is attempted only when the

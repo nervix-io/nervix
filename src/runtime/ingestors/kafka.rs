@@ -76,6 +76,10 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
             None
         };
         let state = self.state.current();
+        self.runtime
+            .synchronize_kafka_start(&state, generation)
+            .await
+            .change_context(KafkaDomainOffsetError::Read)?;
         let missing_partition_timestamp = match last_start {
             nervix_models::DomainStartPoint::Resume => self
                 .runtime
@@ -91,21 +95,6 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
                         schedule,
                     });
                 }
-                // A failed first initialization may have published the start in memory before
-                // its persistence or replica wait failed. Retry that durability boundary before
-                // this unit resumes after its first attempt applied the start.
-                let checkpoint = state
-                    .read()
-                    .latest_snapshot()
-                    .change_context(KafkaDomainOffsetError::Read)?;
-                self.runtime
-                    .persist_kafka_offset_snapshot(
-                        &state.persistence(),
-                        checkpoint.lsm,
-                        &checkpoint.payload,
-                    )
-                    .await
-                    .change_context(KafkaDomainOffsetError::Read)?;
                 Some(timestamp)
             }
             nervix_models::DomainStartPoint::Now { .. } => {
@@ -149,7 +138,7 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
         }
         let state = self.state.current();
         self.runtime
-            .reset_domain_kafka_offsets(&state, generation, positions)
+            .propose_kafka_start(&state, generation, positions)
             .await
             .change_context(KafkaDomainOffsetError::Reset)
     }

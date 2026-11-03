@@ -67,7 +67,10 @@ fn bolero_scheduled_units_round_trip_through_current_storage_shape() {
             }
             let base = node.single_unit().clone();
             let ordinal = u32::from(arbitrary.entropy().byte());
-            for unit in [Unit::Partition(ordinal), Unit::Instance(ordinal)] {
+            for unit in [
+                Unit::Partition(ordinal),
+                Unit::Instance(arbitrary.entropy().boundary_biased(0..=u64::MAX)),
+            ] {
                 if arbitrary.entropy().flag() {
                     let mut placement = base.clone();
                     placement.primary_node = Some(named("node-b"));

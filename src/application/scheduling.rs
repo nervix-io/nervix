@@ -2101,6 +2101,22 @@ impl SessionServiceImpl {
         for node in schedule.nodes.values_mut() {
             if let Some(existing_node) = existing.nodes.get(&node.identity()) {
                 node.kafka_partition_schedule = existing_node.kafka_partition_schedule.clone();
+                if node.units.keys().ne(existing_node.units.keys())
+                    && let Some(previous) = &node.kafka_partition_schedule
+                {
+                    let count = NonZeroU64::new(
+                        u64::try_from(node.units.len()).assured("unit counts fit u64"),
+                    )
+                    .verified("a scheduled intake has at least one unit");
+                    node.kafka_partition_schedule = Some(KafkaPartitionSchedule::new(
+                        count,
+                        previous.observed_partitions.clone(),
+                        previous
+                            .rebalance_epoch
+                            .checked_add(1)
+                            .assured("a cluster cannot publish 2^64 partition rebalances"),
+                    ));
+                }
                 node.continue_wasm_state_generations_of(existing_node);
             }
         }

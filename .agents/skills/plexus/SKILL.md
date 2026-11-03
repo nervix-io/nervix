@@ -98,7 +98,7 @@ contracts.
 For Kafka domain offsets, retain the documented native checkpoint quorum budget and at-least-once
 retry boundary when explaining source recovery.
 For intake parallelism, read [Ingestors → Instancing](../../../docs/src/ingestors.md#instancing).
-Kafka, Pulsar, RabbitMQ, SQS, NATS and MQTT declare `INSTANCES <1..65535>` and
+Kafka, Pulsar, RabbitMQ, SQS, NATS and MQTT declare `INSTANCES <positive-u64>` and
 `INSTANCES PER PARTITION`. Fixed counts are independent globally indexed placement units; the
 partition form colocates instance `p` with constructed relay partition `p` and requires one key
 structure across constructing routes. Kafka requires `OFFSET BY DOMAIN` for that form. A

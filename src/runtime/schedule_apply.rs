@@ -483,15 +483,33 @@ impl Runtime {
             };
             let desired_local_units = desired_node.units_executing_on(local_node_id);
             if entity.kind == ModelKind::Ingestor {
+                let layout_replaced = self
+                    .inner
+                    .executions
+                    .get(domain)
+                    .and_then(|execution| {
+                        execution
+                            .revision
+                            .nodes
+                            .get(entity)
+                            .map(|before| before.units.keys().ne(desired_node.units.keys()))
+                    })
+                    .unwrap_or(false);
                 for unit in previous_local_units.difference(&desired_local_units) {
-                    self.stop_ingestor_unit(domain, &IngestorName::from(&entity.identifier), *unit)
+                    let key = DomainNodeUnitRef::new(entity.in_domain(domain), *unit);
+                    if !layout_replaced || self.inner.ingestors.contains_key(&key) {
+                        self.stop_ingestor_unit(
+                            domain,
+                            &IngestorName::from(&entity.identifier),
+                            *unit,
+                        )
                         .await
                         .change_context_lazy(build)?;
-                    self.inner.metrics.remove_ingestor_unit(
+                    }
+                    self.withdraw_ingestor_unit_metrics(
                         domain,
                         &IngestorName::from(&entity.identifier),
                         *unit,
-                        Some(local_node_id),
                     );
                 }
             }
@@ -896,6 +914,8 @@ impl Runtime {
             return Err(Report::new(ExecutionBuildError::GateFenceTimeout).change_context(build()));
         }
         self.force_flush_domain(domain);
+
+        Box::pin(self.stop_replaced_ingestor_layouts(domain, Some(&revision))).await?;
 
         // Materialized relay state uses a start-version-qualified schema fingerprint. Install the
         // desired fingerprints before constructing state so the post-swap stale-state purge does

@@ -825,11 +825,6 @@ impl Registry {
                 return Err(err);
             }
         };
-        super::ingestor_units::validate_unit_layout_transition(
-            domain,
-            &current_state.graph,
-            &domain_state.graph,
-        )?;
         let models_to_persist = candidate
             .iter()
             .filter_map(|(key, model)| match current_models.get(key) {
@@ -925,11 +920,6 @@ impl Registry {
         }
 
         let domain_state = DomainState::build(domain, &candidate)?;
-        super::ingestor_units::validate_unit_layout_transition(
-            domain,
-            &current_state.graph,
-            &domain_state.graph,
-        )?;
         let drops_in_batch = current_models
             .nodes()
             .filter(|key| !candidate.contains(key))
@@ -1546,7 +1536,7 @@ fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
 }
 
 // The header identifies the current persisted Model shape before archive decoding.
-const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX INPUT CFG";
+const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX INPUT U64";
 
 #[cfg(test)]
 #[cfg_attr(

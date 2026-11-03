@@ -177,7 +177,7 @@ impl EmptyRelayHandoffFixture {
                 entity: self.entity.clone(),
                 base_schedule_fingerprint: self.base_schedule_fingerprint,
                 target_schedule_fingerprint: self.target_schedule_fingerprint,
-                checkpoints: Vec::new(),
+                input: nervix_interconnect::OwnershipHandoffInput::Unit(Vec::new()),
             })
             .await
             .expect("ownership handoff preparation should persist");
@@ -1968,13 +1968,6 @@ fn kafka_offset_state_roundtrips_partition_schedule_through_fjall() {
     store
         .persist_latest_snapshot(&placement, offset_lsm, &offset_payload)
         .expect("offset snapshot should persist");
-    let (schedule_lsm, schedule_payload) = originator
-        .update_partition_schedule("notifications", nonzero!(2u64), vec![0, 1])
-        .expect("schedule should update")
-        .expect("schedule snapshot should be produced");
-    store
-        .persist_latest_snapshot(&placement, schedule_lsm, &schedule_payload)
-        .expect("schedule snapshot should persist");
 
     let restored = Arc::new(
         ReplicatedKafkaOffsetState::new(
@@ -1988,16 +1981,6 @@ fn kafka_offset_state_roundtrips_partition_schedule_through_fjall() {
     let read = ReplicatedKafkaOffsetState::read(&restored);
     assert_eq!(read.next_offset("notifications", 0), Some(12));
     assert_eq!(read.next_offset("notifications", 1), Some(18));
-    assert_eq!(
-        read.describe_topic("notifications"),
-        Some(KafkaDomainOffsetDescribe {
-            topic: "notifications".to_string(),
-            instances: 2,
-            observed_partitions: vec![0, 1],
-            rebalance_epoch: 0,
-            instance_assignments: vec![vec![0], vec![1]],
-        })
-    );
 }
 
 #[test]

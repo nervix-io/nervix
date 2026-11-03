@@ -93,6 +93,70 @@ pub(super) struct RetiringIngestorInput {
 }
 
 impl Runtime {
+    /// Finish every source of a replaced layout before installing any of its prepared state.
+    /// Native checkpoints retain the complete history; current owners republish disjoint series.
+    pub(super) async fn stop_replaced_ingestor_layouts(
+        &self,
+        domain: &DomainName,
+        desired: Option<&ExecutionRevision>,
+    ) -> error_stack::Result<(), RuntimeError> {
+        let layouts = match (self.inner.executions.get(domain), desired) {
+            (Some(existing), Some(desired)) => existing
+                .revision
+                .nodes
+                .iter()
+                .filter_map(|(identity, before)| {
+                    let after = desired.nodes.get(identity)?;
+                    (identity.kind == ModelKind::Ingestor
+                        && before.units.keys().ne(after.units.keys()))
+                    .then(|| IngestorName::from(&identity.identifier))
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        for ingestor in layouts {
+            self.stop_ingestor(domain, &ingestor).await?;
+            let dispatcher = self.inner.remote_dispatcher.load_full();
+            self.inner.metrics.remove_ingestor_metrics(
+                domain,
+                &ingestor,
+                dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+            );
+        }
+        Ok(())
+    }
+
+    pub(super) fn withdraw_ingestor_unit_metrics(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        unit: Unit,
+    ) {
+        let placement = RuntimeStatePlacement {
+            domain: domain.clone(),
+            state: RuntimeState::BranchAggregated,
+            kind: ModelKind::Ingestor,
+            identifier: ModelName::from(ingestor),
+            unit,
+            branch_key: None,
+        };
+        let state = self
+            .inner
+            .replicated_branch_aggregated_states
+            .get(&placement)
+            .map(|state| state.value().clone());
+        let units = state.map_or_else(|| BTreeSet::from([unit]), |state| state.metric_units());
+        let dispatcher = self.inner.remote_dispatcher.load_full();
+        for unit in units {
+            self.inner.metrics.remove_ingestor_unit(
+                domain,
+                ingestor,
+                unit,
+                dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+            );
+        }
+    }
+
     /// Snapshots obsolete local inputs before the installed execution is withdrawn. A stopped
     /// domain retains its plans, so retirement also works when no source task is running.
     pub(super) fn retiring_ingestor_inputs(
@@ -717,7 +781,7 @@ mod tests {
                                             )
                                             .expect("valid topic filter"),
                                             instances: nervix_models::IngestorInstances::Count(
-                                                nonzero!(2u16),
+                                                nonzero!(2u64),
                                             ),
                                             session: MqttSession::Clean,
                                             qos: MqttQos::Qos0,
@@ -847,7 +911,7 @@ mod tests {
                                 client,
                                 topic: nervix_models::MqttTopicFilter::parse("notifications")
                                     .expect("valid topic filter"),
-                                instances: nervix_models::IngestorInstances::Count(nonzero!(1u16)),
+                                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                                 session: MqttSession::Persistent,
                                 qos: MqttQos::Qos1,
                                 mode: MqttIngestMode::AckSequential {

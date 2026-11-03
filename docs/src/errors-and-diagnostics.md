@@ -2105,6 +2105,13 @@ replica diagnostic prints that cause chain. Cancellation or failed conversion pu
 partial table, and an assignment-token refusal keeps a delayed transfer from overwriting a
 promoted owner. A commit that lacks its required replica acknowledgement still reports the
 existing quorum deadline; catch-up retries do not turn that deadline into a successful commit.
+Kafka start coordination preserves typed admission, native conversion, memory and bulk-transfer
+causes through its reporting boundary. A frozen unit reports its exact placement, and a
+coordination deadline names the domain, source and unit. The current node incarnation, ownership
+fingerprint and originating assignment fence stale work. A count transition refuses incomplete
+source inventories, foreign partition ownership and repeated metric identities before preparing
+target state; a failed preparation cannot publish a partial layout.
+
 A stopping node's `stopping_node_drain` request answers with outcomes of its own instead, because
 its only subject is the authenticated sender: completed or failed, each with the leader's report for
 the sender's log, or not the leader, which sends the sender to the leader it observes next. A node

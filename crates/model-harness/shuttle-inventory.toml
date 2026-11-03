@@ -200,6 +200,8 @@ checks = [
   "runtime::ingestors::connector::shuttle_tests::shuttle_request_ingestor_observes_engagement_during_dispatch",
   "runtime::kafka_offset_state::tests::shuttle_checks::shuttle_a_committed_offset_proceeds_while_the_assignment_barrier_is_held",
   "runtime::kafka_offset_state::tests::shuttle_checks::shuttle_instances_apply_a_generation_start_once_without_rewinding_commits",
+  "runtime::kafka_offset_state::tests::shuttle_checks::shuttle_pending_start_seeds_survive_commits_acknowledgements_and_late_candidates",
+  "runtime::kafka_start::shuttle_checks::shuttle_a_start_racing_ownership_capture_finishes_before_the_cut_or_is_refused",
   "runtime::kafka_offset_state::tests::shuttle_checks::shuttle_a_replica_acknowledgement_racing_the_quorum_wait_is_never_missed",
   "runtime::local_drain::shuttle_tests::shuttle_a_batch_a_consumer_takes_while_a_drain_observes_is_never_missing_from_it",
   "runtime::local_drain::shuttle_tests::shuttle_a_batch_its_owner_hands_on_while_a_drain_observes_is_never_missing_from_it",

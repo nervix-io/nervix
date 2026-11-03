@@ -53,6 +53,36 @@ impl EntityGatePlan {
         moved_units: impl IntoIterator<Item = NodeUnitRef>,
     ) -> Self {
         let mut affected = BTreeSet::from_iter(moved_units);
+        // A new intake layout consumes every former unit, including units absent from the target.
+        // Those sources must remain frozen until all target primaries and replicas hold their cut.
+        if let (Some(current), Some(desired)) = (current, desired) {
+            let layouts = affected
+                .iter()
+                .map(|unit| unit.node.clone())
+                .collect::<BTreeSet<_>>();
+            for identity in layouts {
+                if identity.kind != ModelKind::Ingestor {
+                    continue;
+                }
+                if let (Some(before), Some(after)) =
+                    (current.nodes.get(&identity), desired.nodes.get(&identity))
+                    && before.units.keys().ne(after.units.keys())
+                {
+                    affected.extend(
+                        before
+                            .units
+                            .keys()
+                            .map(|unit| NodeUnitRef::new(identity.clone(), *unit)),
+                    );
+                    affected.extend(
+                        after
+                            .units
+                            .keys()
+                            .map(|unit| NodeUnitRef::new(identity.clone(), *unit)),
+                    );
+                }
+            }
+        }
         loop {
             let prior_len = affected.len();
             for schedule in [current, desired].into_iter().flatten() {

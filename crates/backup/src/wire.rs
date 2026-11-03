@@ -11,6 +11,34 @@
 
 use rkyv::{Archive, Deserialize, Serialize};
 
+/// The archive owns its ordinal widths independently of the vocabulary's in-memory layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
+pub(crate) enum UnitWire {
+    Single,
+    Partition(u32),
+    Instance(u64),
+}
+
+impl From<nervix_models::Unit> for UnitWire {
+    fn from(unit: nervix_models::Unit) -> Self {
+        match unit {
+            nervix_models::Unit::Single => Self::Single,
+            nervix_models::Unit::Partition(index) => Self::Partition(index),
+            nervix_models::Unit::Instance(index) => Self::Instance(index),
+        }
+    }
+}
+
+impl From<UnitWire> for nervix_models::Unit {
+    fn from(unit: UnitWire) -> Self {
+        match unit {
+            UnitWire::Single => Self::Single,
+            UnitWire::Partition(index) => Self::Partition(index),
+            UnitWire::Instance(index) => Self::Instance(index),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
 pub(crate) struct ManifestWire {
     pub(crate) format_major: u16,
@@ -186,7 +214,7 @@ pub(crate) struct NodeNameWire(pub(crate) String);
 pub(crate) struct WasmStateDescriptorWire {
     pub(crate) domain: String,
     pub(crate) entity: String,
-    pub(crate) unit: nervix_models::Unit,
+    pub(crate) unit: UnitWire,
     pub(crate) schema: [u8; 32],
     pub(crate) branch_fingerprint: Option<[u8; 32]>,
     pub(crate) branch: Option<Vec<StateField>>,
@@ -198,7 +226,7 @@ pub(crate) struct WasmStateDescriptorWire {
 pub(crate) struct KafkaOffsetsWire {
     pub(crate) domain: String,
     pub(crate) entity: String,
-    pub(crate) unit: nervix_models::Unit,
+    pub(crate) unit: UnitWire,
     pub(crate) schema: [u8; 32],
     pub(crate) revision: u64,
     pub(crate) applied_start_generation: Option<u64>,
@@ -217,7 +245,7 @@ pub(crate) struct BranchLifecycleWire {
     pub(crate) domain: String,
     pub(crate) owner_kind: String,
     pub(crate) entity: String,
-    pub(crate) unit: nervix_models::Unit,
+    pub(crate) unit: UnitWire,
     pub(crate) schema: [u8; 32],
     pub(crate) revision: u64,
     pub(crate) branches: Vec<BranchLifecycleEntryWire>,

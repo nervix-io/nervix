@@ -263,6 +263,7 @@ mod ingestor_start;
 mod ingestors;
 mod kafka_offset_state;
 mod kafka_offset_transfer;
+mod kafka_start;
 mod local_drain;
 mod lookup_hash_map;
 mod lsm_sequence;

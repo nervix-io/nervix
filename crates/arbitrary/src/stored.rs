@@ -127,7 +127,7 @@ impl Arbitrary<'_> {
         match self.entropy.byte() % 3 {
             0 => nervix_models::Unit::Single,
             1 => nervix_models::Unit::Partition(self.unit_index()),
-            _ => nervix_models::Unit::Instance(self.unit_index()),
+            _ => nervix_models::Unit::Instance(self.entropy.boundary_biased(0..=u64::MAX)),
         }
     }
 

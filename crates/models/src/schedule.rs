@@ -84,7 +84,7 @@ pub type ScheduledNodes = IndexMap<NodeRef, ScheduledNode>;
 pub enum Unit {
     Single,
     Partition(u32),
-    Instance(u32),
+    Instance(u64),
 }
 
 impl Unit {
@@ -568,9 +568,9 @@ impl ScheduledNode {
         match (config, branching) {
             (Model::Relay(_), Some(branching)) => branching.units(),
             (Model::Ingestor(ingestor), _) => match ingestor.input.instances() {
-                Some(crate::IngestorInstances::Count(count)) => (0..count.get())
-                    .map(|index| Unit::Instance(u32::from(index)))
-                    .collect(),
+                Some(crate::IngestorInstances::Count(count)) => {
+                    (0..count.get()).map(Unit::Instance).collect()
+                }
                 _ => vec![Unit::Single],
             },
             _ => vec![Unit::Single],

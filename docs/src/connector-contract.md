@@ -1375,7 +1375,7 @@ domain offsets all read those same plans; none of them reads the ingestor's Mode
 ingestor binds its codec, node filter, routes and branched entrypoints against the installed domain
 surfaces and parses its declared acknowledgement before any connector instance opens, so a start
 that fails leaves nothing running.
-Instance-capable entities declare `Count(NonZeroU16)` or `PerPartition` in the vocabulary. The
+Instance-capable entities declare `Count(NonZeroU64)` or `PerPartition` in the vocabulary. The
 registry resolves that declaration into exact `Unit::Instance(i)` placements and per-unit start
 plans; `Single` entities retain `Unit::Single`. Each host opens only its plan's global index.
 Connector configuration still carries the total count where the transport needs it. A handoff
@@ -1384,8 +1384,12 @@ changes one unit's primary and state originator without restarting its siblings.
 The vocabulary declares `Single | Instances | PerPartition` once per entity. Grammar, validation,
 console drafts, inspection and capability exports consume that declaration. Per-partition sources
 bind instance `p` to each constructing destination's partition `p`; Kafka requires domain offsets.
-All constructing routes agree on key fields and partition count. Registry validation refuses a
-Kafka domain-offset unit-count change in place: explicit recreation starts a new offset lifetime.
+All constructing routes agree on key fields and partition count. A count change freezes the
+complete preceding intake layout, captures and persists each source unit once, and projects
+those exact checkpoints into disjoint target slices. It redistributes positions and complete metric
+histories and prepares every target primary and replica before committing the replacement. A retained unit on
+the same physical node takes that prepared state too. Ordinary ownership moves still leave
+unaffected sibling intake tasks running.
 
 A source plan combines connector-specific settings, validated capabilities, and the host's ACK
 policy. Capabilities state whether header reads are available, whether quiesce is supported, the
@@ -2807,7 +2811,13 @@ sequenceDiagram
   instances. A later resume uses recorded positions and the original timestamp for an unrecorded
   partition. The reset and a retry after interrupted persistence complete their persistence and
   replica boundary before the source polls. Native replication and backups preserve the exact
-  optional applied-start generation.
+  optional applied-start generation. Instance zero retains the canonical cut's pending positions;
+  each other instance persists its own slice before acknowledging adoption. Its pending slice is
+  then released. A delayed initializer can adopt these positions after a plain start advances the
+  domain generation. The canonical start remains distinct from subsequent per-unit progress.
+  Cold startup admission shares a mutex with ownership capture and the final offset write; a
+  captured or stopped unit cannot admit a later initialization. The complete start-coordination
+  request, including its mutex wait, has a sixty-second deadline.
   After submitting an explicit start, the connector rereads the host's canonical positions and
   assigns from them before polling. A late initializer's independently resolved timestamp lookup
   cannot substitute its own positions for the start another instance already accepted.

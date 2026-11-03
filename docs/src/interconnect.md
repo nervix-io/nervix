@@ -1603,6 +1603,22 @@ round trips rather than 640. Each side admits the whole captured or received all
 `restore_metadata`, up to a 256 MiB checkpoint transfer bound. The replica checks the stream's
 declared length, received length and digest before the checkpoint can reach its assignment-fenced
 installation and stable-storage acknowledgement.
+An ingestor layout handoff captures each preceding unit once. Later projection requests carry
+that frozen cut's descriptors; the source verifies their scope, revision, length and digest before
+describing the target slice. Receivers fetch the slice through the same bounded bulk path.
+
+Kafka start coordination uses a Commands request bounded to sixty seconds. It carries the
+source's node incarnation, lifecycle generation and complete ownership fingerprint, with a
+descriptor for a retained candidate. Candidate revisions belong to the offered body. Candidate
+and pending-seed bytes travel through the Snapshot bulk subquota under the existing transfer
+limit and memory admission. Instance zero selects and persists one canonical start before
+answering another unit. A recipient persists and replicates its slice before acknowledging it.
+Pending seed descriptions carry the coordinator's conservative native revision and explicit-start
+generation. An unchanged slice remains readable across newer commits to the coordinator's own
+partitions; its generation, length and digest must still match. Admission checks the current unit
+layout and originating assignment before and after capture. An ended offer, changed generation,
+changed body or superseded assignment fails the transfer.
+
 Debug events name the placement, revision and declared length when streaming and after verification,
 without logging checkpoint bytes. A branch checkpoint listing request names the entity's branch
 lifecycle placement and the cursor the replica's previous listing

@@ -64,7 +64,7 @@ pub struct MaterializedIdentitiesRecord {
 struct DescriptorWire {
     domain: String,
     entity: String,
-    unit: Unit,
+    unit: crate::wire::UnitWire,
     schema: [u8; 32],
     revision: u64,
     fence: u64,
@@ -77,14 +77,14 @@ struct DescriptorWire {
 struct IdentitiesWire {
     domain: String,
     entity: String,
-    unit: Unit,
+    unit: crate::wire::UnitWire,
     group: u32,
     identities: Vec<MaterializedRecordIdentity>,
 }
 
 impl ArchiveRecord for MaterializedRelayDescriptor {
     const KIND: RecordKind = RecordKind::MaterializedRelayDescriptor;
-    const VERSION: u16 = 2;
+    const VERSION: u16 = 3;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         encode_record(
@@ -93,7 +93,7 @@ impl ArchiveRecord for MaterializedRelayDescriptor {
             &DescriptorWire {
                 domain: self.domain.as_str().to_string(),
                 entity: self.entity.as_str().to_string(),
-                unit: self.unit,
+                unit: self.unit.into(),
                 schema: *self.schema.as_digest(),
                 revision: self.revision,
                 fence: self.fence,
@@ -124,7 +124,7 @@ impl ArchiveRecord for MaterializedRelayDescriptor {
                     field: "entity",
                 })
             })?,
-            unit: wire.unit,
+            unit: wire.unit.into(),
             schema: SchemaFingerprint::from_digest(wire.schema),
             revision: wire.revision,
             fence: wire.fence,
@@ -137,7 +137,7 @@ impl ArchiveRecord for MaterializedRelayDescriptor {
 
 impl ArchiveRecord for MaterializedIdentitiesRecord {
     const KIND: RecordKind = RecordKind::MaterializedIdentities;
-    const VERSION: u16 = 2;
+    const VERSION: u16 = 3;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         let bytes = encode_record(
@@ -146,7 +146,7 @@ impl ArchiveRecord for MaterializedIdentitiesRecord {
             &IdentitiesWire {
                 domain: self.domain.as_str().to_string(),
                 entity: self.entity.as_str().to_string(),
-                unit: self.unit,
+                unit: self.unit.into(),
                 group: self.group,
                 identities: self.identities.clone(),
             },
@@ -190,7 +190,7 @@ impl ArchiveRecord for MaterializedIdentitiesRecord {
                     field: "entity",
                 })
             })?,
-            unit: wire.unit,
+            unit: wire.unit.into(),
             group: wire.group,
             identities: wire.identities,
         })
@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn materialized_record_counts_and_branch_keys_are_validated() {
         let descriptor = DescriptorWire {
-            unit: nervix_models::Unit::Single,
+            unit: crate::wire::UnitWire::Single,
             domain: "tenant".into(),
             entity: "state".into(),
             schema: [1; 32],
@@ -354,8 +354,12 @@ mod tests {
             record_count: 0,
             groups: 1,
         };
-        let bytes = encode_record(MaterializedRelayDescriptor::KIND, 1, &descriptor)
-            .assured("the current malformed count encodes");
+        let bytes = encode_record(
+            MaterializedRelayDescriptor::KIND,
+            MaterializedRelayDescriptor::VERSION,
+            &descriptor,
+        )
+        .assured("the current malformed count encodes");
         assert!(MaterializedRelayDescriptor::decode("descriptor.rkyv", &bytes).is_err());
         for branch in [
             Some(Vec::new()),
@@ -365,7 +369,7 @@ mod tests {
             }]),
         ] {
             let record = IdentitiesWire {
-                unit: nervix_models::Unit::Single,
+                unit: crate::wire::UnitWire::Single,
                 domain: "tenant".into(),
                 entity: "state".into(),
                 group: 0,
@@ -377,8 +381,12 @@ mod tests {
                     },
                 }],
             };
-            let bytes = encode_record(MaterializedIdentitiesRecord::KIND, 1, &record)
-                .assured("the bounded current malformed identity encodes");
+            let bytes = encode_record(
+                MaterializedIdentitiesRecord::KIND,
+                MaterializedIdentitiesRecord::VERSION,
+                &record,
+            )
+            .assured("the bounded current malformed identity encodes");
             assert!(MaterializedIdentitiesRecord::decode("identities.rkyv", &bytes).is_err());
         }
     }

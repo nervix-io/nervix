@@ -60,7 +60,7 @@ pub(super) fn generated_unit(arbitrary: &mut Arbitrary<'_>) -> nervix_models::Un
     match arbitrary.entropy().byte() % 3 {
         0 => nervix_models::Unit::Single,
         1 => nervix_models::Unit::Partition(u32::from(arbitrary.entropy().byte())),
-        _ => nervix_models::Unit::Instance(u32::from(arbitrary.entropy().byte())),
+        _ => nervix_models::Unit::Instance(arbitrary.entropy().boundary_biased(0..=u64::MAX)),
     }
 }
 
@@ -84,6 +84,8 @@ fn separate_units_of_one_entity_have_distinct_state_keys() {
         nervix_models::Unit::Partition(0),
         nervix_models::Unit::Partition(1),
         nervix_models::Unit::Instance(0),
+        nervix_models::Unit::Instance(u64::from(u32::MAX) + 1),
+        nervix_models::Unit::Instance(u64::MAX),
     ] {
         placement.unit = unit;
         let key = placement.as_storage_key();

@@ -89,7 +89,7 @@ mod tests {
         assert_eq!(source.queue.as_str(), queue);
         assert_eq!(
             source.instances,
-            nervix_models::IngestorInstances::Count(nonzero_ext::nonzero!(2u16))
+            nervix_models::IngestorInstances::Count(nonzero_ext::nonzero!(2u64))
         );
     }
 

@@ -262,17 +262,23 @@ platform string; connector preparation uses it only when the codec's event omits
 A polled HTTP request's header holds a literal or names a client secret as two states of one enum,
 so a value cannot be both or neither, and the Model that names a secret holds its key and never its
 value.
-The registry's `NERVIX INPUT CFG` archive signature identifies the current Model layout, including
+The registry's `NERVIX INPUT U64` archive signature identifies the current Model layout, including
 an owned Pulsar subscription's required start position, a Kafka consumer group's required start
 position, the required 16-bit branch partition count, typed ingestor instancing, Sentry platform,
 an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape,
 the session and quality of service an MQTT TOPIC ingestor writes beside its delivery mode, the
 quality of service an MQTT TOPIC emitter writes beside its publishing mode, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a
-`PATTERN`, and that header state. Consensus's `raft_input_unit_` keyspaces and current state
+`PATTERN`, and that header state. Consensus's `raft_intake_unit_` keyspaces and current state
 metadata encoding identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule. The runtime state store's
-`unit-labelled-metric-checkpoint-segments` format identifies the checkpoints it keeps, including the
-unit every branch-aggregated metric series carries. An unrecognized signature, namespace or
+`wide-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the
+unsigned 64-bit instance identity and the unit every branch-aggregated metric series carries.
+Fixed intake counts remain `NonZeroU64`; branch partition counts remain `NonZeroU16`. The
+client placement union carries an instance index as an unsigned 64-bit value. Backup format
+major `4` and its unit-bearing record versions own a primitive unit encoding with a 32-bit
+partition ordinal and a 64-bit instance ordinal. The native `NervixKafkaState` checkpoint contains
+positions and an optional applied explicit-start generation. Pending canonical starts and
+subsequent unit-owned progress use that current shape. An unrecognized signature, namespace or
 encoding fails with the owning storage error and requires the stored data to be recreated.
 
 ## Absence And Distinct States
@@ -1172,7 +1178,7 @@ deadline before constructing settings; the installed settings hold a duration wi
 
 ## Intake Unit And Gate Identity
 
-An instancing declaration is `Count(NonZeroU16)` or `PerPartition`; entity capabilities admit the
+An instancing declaration is `Count(NonZeroU64)` or `PerPartition`; entity capabilities admit the
 forms before placement. A resolved source unit uses the shared `NodeUnitRef` and
 `DomainNodeUnitRef` identities throughout plans, runtime registrations and durable state placement.
 There is no node-local index conversion. A source's readiness is one scalar whose retirement ends

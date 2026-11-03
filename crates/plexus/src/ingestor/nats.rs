@@ -88,7 +88,7 @@ mod tests {
         assert_eq!(source.queue_group.as_str(), "Readers-EU");
         assert_eq!(
             source.instances,
-            nervix_models::IngestorInstances::Count(nonzero_ext::nonzero!(2u16))
+            nervix_models::IngestorInstances::Count(nonzero_ext::nonzero!(2u64))
         );
     }
 

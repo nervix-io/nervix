@@ -277,6 +277,7 @@ impl Runtime {
         // Their futures stay indirect to bound this coordinator's debug poll frame.
         let retiring =
             self.retiring_ingestor_inputs(domain, revision.as_deref(), Some(local_node_id));
+        Box::pin(self.stop_replaced_ingestor_layouts(domain, revision.as_deref())).await?;
         Box::pin(self.stop_domain_ingestors(domain)).await;
         for retirement in retiring.into_values() {
             nervix_primitives::task::consume_budget().await;

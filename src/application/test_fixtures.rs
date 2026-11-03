@@ -368,7 +368,7 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
                     client: named("kafka_main"),
                     topic: named("notifications"),
                     offset_mode: KafkaOffsetMode::Domain,
-                    instances: nervix_models::IngestorInstances::Count(nonzero!(1u16)),
+                    instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                     mode: nervix_models::KafkaIngestMode::AckSequential {
                         timeout: "5s".to_string(),
                         retry_policy: nervix_models::RetryPolicy {

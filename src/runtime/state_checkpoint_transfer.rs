@@ -67,6 +67,12 @@ enum CheckpointTransferError {
     DigestMismatch { lsm: u64 },
 }
 
+pub(super) struct DescribedStateCheckpoint {
+    pub(super) snapshot: PersistedRuntimeStateEntry,
+    pub(super) descriptor: StateSnapshotEnvelope,
+    pub(super) reservation: nervix_execution::Reservation,
+}
+
 impl Runtime {
     /// Hash a captured checkpoint on the bounded bulk CPU workers. The capture and the charge
     /// move together so an async request does not hash a whole guest save on its runtime worker.
@@ -75,6 +81,17 @@ impl Runtime {
         placement: &RuntimeStatePlacement,
         snapshot: PersistedRuntimeStateEntry,
     ) -> error_stack::Result<StateSnapshotEnvelope, StateReplicationError> {
+        Ok(self
+            .describe_retained_state_checkpoint(placement, snapshot)
+            .await?
+            .descriptor)
+    }
+
+    pub(super) async fn describe_retained_state_checkpoint(
+        &self,
+        placement: &RuntimeStatePlacement,
+        snapshot: PersistedRuntimeStateEntry,
+    ) -> error_stack::Result<DescribedStateCheckpoint, StateReplicationError> {
         let capture = || StateReplicationError::Capture {
             placement: placement.clone(),
         };
@@ -94,16 +111,21 @@ impl Runtime {
             .change_context_lazy(capture)?;
         self.inner
             .executor
-            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+            .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
                 let mut hasher = blake3::Hasher::new();
                 for chunk in snapshot.payload.chunks(64 * 1024) {
                     cancellation.check()?;
                     hasher.update(chunk);
                 }
-                Ok::<_, nervix_execution::Cancelled>(StateSnapshotEnvelope {
+                let descriptor = StateSnapshotEnvelope {
                     lsm: snapshot.lsm,
                     length,
                     digest: *hasher.finalize().as_bytes(),
+                };
+                Ok::<_, nervix_execution::Cancelled>(DescribedStateCheckpoint {
+                    snapshot,
+                    descriptor,
+                    reservation: charge,
                 })
             })
             .await
@@ -135,13 +157,30 @@ impl Runtime {
                 _ => None,
             });
         let snapshot = match (request.read, committed_wasm) {
+            (StateCheckpointRead::KafkaStartOffer, _) => {
+                let bytes = self
+                    .offered_kafka_start_bytes(&placement, request.lsm)
+                    .map_err(StreamHandlerError::with_cause)?;
+                return self.stream_checkpoint_bytes(&placement, request.lsm, bytes);
+            }
+            (
+                StateCheckpointRead::KafkaStartSeed {
+                    generation,
+                    selection,
+                },
+                _,
+            ) => Some(
+                self.kafka_start_seed_checkpoint(&placement, generation, selection)
+                    .await
+                    .map_err(StreamHandlerError::with_cause)?,
+            ),
             (_, Some(snapshot)) => Some(snapshot),
             (StateCheckpointRead::Published, None) => self
                 .answer_state_sync_request(admitted, request.lsm.checked_sub(1))
                 .await
                 .map_err(StreamHandlerError::with_cause)?,
-            (StateCheckpointRead::HandoffCapture, None) => self
-                .answer_state_sync_request(
+            (StateCheckpointRead::HandoffCapture | StateCheckpointRead::IngestorUnits(_), None) => {
+                self.answer_state_sync_request(
                     StateReplicationRequest {
                         placement: admitted.placement,
                         state: None,
@@ -149,13 +188,27 @@ impl Runtime {
                     request.lsm.checked_sub(1),
                 )
                 .await
-                .map_err(StreamHandlerError::with_cause)?,
+                .map_err(StreamHandlerError::with_cause)?
+            }
         };
-        let Some(snapshot) = snapshot.filter(|snapshot| snapshot.lsm == request.lsm) else {
+        let Some(snapshot) = snapshot.filter(|snapshot| {
+            if matches!(request.read, StateCheckpointRead::KafkaStartSeed { .. }) {
+                snapshot.lsm >= request.lsm
+            } else {
+                snapshot.lsm == request.lsm
+            }
+        }) else {
             return Err(Report::new(StreamHandlerError::new(format!(
                 "{placement} no longer holds checkpoint revision {}",
                 request.lsm
             ))));
+        };
+        let snapshot = match request.read {
+            StateCheckpointRead::IngestorUnits(selection) => self
+                .project_ingestor_unit_checkpoint(&placement, snapshot, selection)
+                .await
+                .map_err(StreamHandlerError::with_cause)?,
+            _ => snapshot,
         };
         let length = u64::try_from(snapshot.payload.len()).assured("checkpoint length fits in u64");
         if length > MAX_CHECKPOINT_BYTES {
@@ -172,7 +225,25 @@ impl Runtime {
             .charge_owned(MemoryClass::RestoreMetadata, snapshot.payload)
             .await
             .map_err(StreamHandlerError::with_cause)?;
-        tracing::debug!(%placement, lsm = request.lsm, length, "streaming runtime checkpoint");
+        self.stream_checkpoint_bytes(&placement, request.lsm, bytes)
+    }
+
+    fn stream_checkpoint_bytes(
+        &self,
+        placement: &RuntimeStatePlacement,
+        lsm: u64,
+        bytes: nervix_execution::ChargedBytes,
+    ) -> Result<StreamingResponse, Report<StreamHandlerError>> {
+        let length = u64::try_from(bytes.len()).assured("checkpoint length fits u64");
+        if length > MAX_CHECKPOINT_BYTES {
+            return Err(StreamHandlerError::with_cause(Report::new(
+                CheckpointTransferError::TooLarge {
+                    length,
+                    maximum: MAX_CHECKPOINT_BYTES,
+                },
+            )));
+        }
+        tracing::debug!(%placement, lsm, length, "streaming runtime checkpoint");
         let chunk_bytes = usize::try_from(self.inner.executor.limits().bulk_chunk_bytes.as_u64())
             .assured("the configured bulk chunk size fits this host's address space")
             .max(1);
@@ -198,6 +269,22 @@ impl Runtime {
         descriptor: &StateSnapshotEnvelope,
         read: StateCheckpointRead,
     ) -> error_stack::Result<PersistedRuntimeStateEntry, StateReplicationError> {
+        self.fetch_state_checkpoint_charged(target, placement, descriptor, read)
+            .await
+            .map(|(snapshot, _charge)| snapshot)
+    }
+
+    /// A layout join retains each admitted allocation until its bounded merge has consumed it.
+    pub(super) async fn fetch_state_checkpoint_charged(
+        &self,
+        target: &ClusterNodeName,
+        placement: &RuntimeStatePlacement,
+        descriptor: &StateSnapshotEnvelope,
+        read: StateCheckpointRead,
+    ) -> error_stack::Result<
+        (PersistedRuntimeStateEntry, nervix_execution::Reservation),
+        StateReplicationError,
+    > {
         let failure = || StateReplicationError::Request {
             target: target.clone(),
             placement: placement.clone(),
@@ -221,6 +308,62 @@ impl Runtime {
                 placement: placement.clone(),
             })
         })?;
+        if target == dispatcher.local_node_id() && !matches!(read, StateCheckpointRead::Published) {
+            let snapshot = match read {
+                StateCheckpointRead::KafkaStartOffer => {
+                    let bytes = self.offered_kafka_start_bytes(placement, descriptor.lsm)?;
+                    PersistedRuntimeStateEntry {
+                        lsm: descriptor.lsm,
+                        payload: bytes.as_ref().to_vec(),
+                    }
+                }
+                StateCheckpointRead::KafkaStartSeed {
+                    generation,
+                    selection,
+                } => {
+                    self.kafka_start_seed_checkpoint(placement, generation, selection)
+                        .await?
+                }
+                _ => self
+                    .stored_runtime_state_snapshot(placement)
+                    .change_context_lazy(failure)?
+                    .filter(|snapshot| snapshot.lsm == descriptor.lsm)
+                    .ok_or_else(|| {
+                        Report::new(CheckpointTransferError::Truncated {
+                            lsm: descriptor.lsm,
+                            described: descriptor.length,
+                            received: 0,
+                        })
+                        .change_context(failure())
+                    })?,
+            };
+            let snapshot = match read {
+                StateCheckpointRead::IngestorUnits(selection) => self
+                    .project_ingestor_unit_checkpoint(placement, snapshot, selection)
+                    .await
+                    .change_context_lazy(failure)?,
+                _ => snapshot,
+            };
+            let mut described = self
+                .describe_retained_state_checkpoint(placement, snapshot)
+                .await?;
+            let revision_matches = if matches!(read, StateCheckpointRead::KafkaStartSeed { .. }) {
+                described.descriptor.lsm >= descriptor.lsm
+            } else {
+                described.descriptor.lsm == descriptor.lsm
+            };
+            if !revision_matches
+                || described.descriptor.length != descriptor.length
+                || described.descriptor.digest != descriptor.digest
+            {
+                return Err(Report::new(CheckpointTransferError::DigestMismatch {
+                    lsm: descriptor.lsm,
+                })
+                .change_context(failure()));
+            }
+            described.snapshot.lsm = descriptor.lsm;
+            return Ok((described.snapshot, described.reservation));
+        }
         let mut body = dispatcher
             .request_stream(
                 target,
@@ -240,7 +383,7 @@ impl Runtime {
             })
             .change_context(failure()));
         }
-        let _admission = self
+        let admission = self
             .inner
             .executor
             .reserve(MemoryClass::RestoreMetadata, descriptor.length.max(1))
@@ -276,9 +419,12 @@ impl Runtime {
             .change_context(failure()));
         }
         tracing::debug!(%placement, target = %target, lsm = descriptor.lsm, length = descriptor.length, "verified runtime checkpoint stream");
-        Ok(PersistedRuntimeStateEntry {
-            lsm: descriptor.lsm,
-            payload,
-        })
+        Ok((
+            PersistedRuntimeStateEntry {
+                lsm: descriptor.lsm,
+                payload,
+            },
+            admission,
+        ))
     }
 }

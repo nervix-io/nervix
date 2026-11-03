@@ -1088,7 +1088,8 @@ enum DomainStart {
         offsets: BTreeMap<i32, i64>,
         unrecorded: BTreeSet<i32>,
     },
-    /// A new start point places every partition of the topic, replacing the domain offsets.
+    /// A new start point places every topic partition in one canonical cut before any instance
+    /// consumes its assigned slice.
     Reset { offsets: BTreeMap<i32, i64> },
 }
 
@@ -1111,9 +1112,13 @@ impl DomainStart {
                 Self::resume(consumer, scheduled, positions, &unrecorded_start, budget)
             }
             KafkaDomainOffsetStart::At(timestamp) => {
-                let partitions = scheduled.partitions.iter().copied().collect();
-                let offsets =
-                    offsets_at(consumer, scheduled.topic, &partitions, timestamp, budget)?;
+                let offsets = offsets_at(
+                    consumer,
+                    scheduled.topic,
+                    &scheduled.partitions.iter().copied().collect(),
+                    timestamp,
+                    budget,
+                )?;
                 Ok(Self::Reset { offsets })
             }
         }

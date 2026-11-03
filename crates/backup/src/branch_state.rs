@@ -108,7 +108,7 @@ pub struct DelayedHistogramRemoval {
 struct DeduplicatorDescriptorWire {
     domain: String,
     entity: String,
-    unit: Unit,
+    unit: crate::wire::UnitWire,
     schema: [u8; 32],
     branch_fingerprint: Option<[u8; 32]>,
     branch: Option<Vec<StateField>>,
@@ -121,7 +121,7 @@ struct DeduplicatorDescriptorWire {
 struct WindowDescriptorWire {
     domain: String,
     entity: String,
-    unit: Unit,
+    unit: crate::wire::UnitWire,
     schema: [u8; 32],
     model: [u8; 32],
     branch_fingerprint: Option<[u8; 32]>,
@@ -157,7 +157,7 @@ struct DelayedRemovalWire {
 
 impl ArchiveRecord for DeduplicatorStateDescriptor {
     const KIND: RecordKind = RecordKind::DeduplicatorStateDescriptor;
-    const VERSION: u16 = 2;
+    const VERSION: u16 = 3;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         encode_record(
@@ -166,7 +166,7 @@ impl ArchiveRecord for DeduplicatorStateDescriptor {
             &DeduplicatorDescriptorWire {
                 domain: self.domain.as_str().to_string(),
                 entity: self.entity.as_str().to_string(),
-                unit: self.unit,
+                unit: self.unit.into(),
                 schema: *self.schema.as_digest(),
                 branch_fingerprint: self
                     .branch_fingerprint
@@ -191,7 +191,7 @@ impl ArchiveRecord for DeduplicatorStateDescriptor {
         Ok(Self {
             domain: parse_domain(path, &wire.domain)?,
             entity: parse_entity(path, &wire.entity)?,
-            unit: wire.unit,
+            unit: wire.unit.into(),
             schema: SchemaFingerprint::from_digest(wire.schema),
             branch_fingerprint: wire.branch_fingerprint.map(BranchKeyFingerprint::new),
             branch: wire.branch,
@@ -204,7 +204,7 @@ impl ArchiveRecord for DeduplicatorStateDescriptor {
 
 impl ArchiveRecord for WindowStateDescriptor {
     const KIND: RecordKind = RecordKind::WindowStateDescriptor;
-    const VERSION: u16 = 2;
+    const VERSION: u16 = 3;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         let mut rows = Vec::with_capacity(self.rows.len());
@@ -224,7 +224,7 @@ impl ArchiveRecord for WindowStateDescriptor {
             &WindowDescriptorWire {
                 domain: self.domain.as_str().to_string(),
                 entity: self.entity.as_str().to_string(),
-                unit: self.unit,
+                unit: self.unit.into(),
                 schema: *self.schema.as_digest(),
                 model: *self.model.as_digest(),
                 branch_fingerprint: self
@@ -288,7 +288,7 @@ impl ArchiveRecord for WindowStateDescriptor {
         Ok(Self {
             domain: parse_domain(path, &wire.domain)?,
             entity: parse_entity(path, &wire.entity)?,
-            unit: wire.unit,
+            unit: wire.unit.into(),
             schema: SchemaFingerprint::from_digest(wire.schema),
             model: WindowModelDigest::from_digest(wire.model),
             branch_fingerprint: wire.branch_fingerprint.map(BranchKeyFingerprint::new),

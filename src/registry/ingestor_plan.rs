@@ -568,19 +568,16 @@ impl IngestorStartPlan {
         let valid_units = match ingestor.input.instances() {
             None => scheduled.units.len() == 1 && scheduled.units.contains_key(&Unit::Single),
             Some(nervix_models::IngestorInstances::Count(count)) => {
-                scheduled.units.len() == usize::from(count.get())
-                    && (0..count.get()).all(|index| {
-                        scheduled
-                            .units
-                            .contains_key(&Unit::Instance(u32::from(index)))
-                    })
+                u64::try_from(scheduled.units.len()).ok() == Some(count.get())
+                    && (0..count.get())
+                        .all(|index| scheduled.units.contains_key(&Unit::Instance(index)))
             }
             Some(nervix_models::IngestorInstances::PerPartition) => {
                 !scheduled.units.is_empty()
                     && scheduled.units.len() <= usize::from(u16::MAX)
                     && (0..scheduled.units.len()).all(|index| {
                         scheduled.units.contains_key(&Unit::Instance(
-                            u32::try_from(index).assured("a bounded unit count fits u32"),
+                            u64::try_from(index).assured("an allocated unit count fits u64"),
                         ))
                     })
             }
@@ -1366,7 +1363,7 @@ mod tests {
                     group: named("nervix"),
                     start_at: nervix_models::IngestStartPosition::Earliest,
                 },
-                instances: nervix_models::IngestorInstances::Count(nonzero!(1u16)),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: KafkaIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Suspend,
             })),
@@ -1397,7 +1394,7 @@ mod tests {
                 client: named("upstream"),
                 topic: named("events"),
                 subscription: pulsar_subscription(),
-                instances: nervix_models::IngestorInstances::Count(nonzero!(1u16)),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: PulsarIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Suspend,
             })),
@@ -1425,7 +1422,7 @@ mod tests {
                 client: named("upstream"),
                 topic: nervix_models::MqttTopicFilter::parse("events/#")
                     .expect("valid topic filter"),
-                instances: nervix_models::IngestorInstances::Count(nonzero!(1u16)),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 session: MqttSession::Clean,
                 qos: MqttQos::Qos0,
                 mode: MqttIngestMode::NoAck,
@@ -1457,7 +1454,7 @@ mod tests {
                 client: named("upstream"),
                 subject: named("events"),
                 queue_group: named("nervix"),
-                instances: nervix_models::IngestorInstances::Count(nonzero!(1u16)),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: nervix_models::NatsIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Drop,
             })),
@@ -1491,7 +1488,7 @@ mod tests {
             source: IngestorEntity::RabbitMq(RabbitMqIngestor::Queue(RabbitMqQueueIngestor {
                 client: named("upstream"),
                 queue: named("events"),
-                instances: nervix_models::IngestorInstances::Count(nonzero!(1u16)),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: rabbitmq_mode(),
                 quiesce: IngestQuiesceMode::Suspend,
             })),
@@ -1600,7 +1597,7 @@ mod tests {
             source: IngestorEntity::Sqs(SqsIngestor::Queue(SqsQueueIngestor {
                 client: named("upstream"),
                 queue: named("events"),
-                instances: nervix_models::IngestorInstances::Count(nonzero!(1u16)),
+                instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                 mode: sqs_mode(),
                 quiesce: IngestQuiesceMode::Suspend,
             })),
@@ -1837,7 +1834,7 @@ mod tests {
             client: named("upstream"),
             topic: named("events"),
             offset_mode: KafkaOffsetMode::Domain,
-            instances: nervix_models::IngestorInstances::Count(nonzero!(2u16)),
+            instances: nervix_models::IngestorInstances::Count(nonzero!(2u64)),
             mode: KafkaIngestMode::NoAck,
             quiesce: IngestQuiesceMode::Suspend,
         }));

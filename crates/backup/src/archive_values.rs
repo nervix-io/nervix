@@ -160,7 +160,7 @@ impl<'a> Values<'a> {
         {
             0 => Unit::Single,
             1 => Unit::Partition(ordinal),
-            _ => Unit::Instance(ordinal),
+            _ => Unit::Instance(self.0.entropy().boundary_biased(0..=u64::MAX)),
         }
     }
 

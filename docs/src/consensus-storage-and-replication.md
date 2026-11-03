@@ -456,9 +456,9 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The dedicated database owns exactly four current keyspaces: `raft_input_unit_logs`,
-`raft_input_unit_meta`, `raft_input_unit_state`, and
-`raft_input_unit_snapshots`. Opening it validates the complete keyspace namespace before
+The dedicated database owns exactly four current keyspaces: `raft_intake_unit_logs`,
+`raft_intake_unit_meta`, `raft_intake_unit_state`, and
+`raft_intake_unit_snapshots`. Opening it validates the complete keyspace namespace before
 reading any records. This namespace identifies the current Model shape, including an owned Pulsar
 subscription's required start position, a Kafka consumer group's required start position, the
 serialized Sentry platform field, an ingestor's

@@ -548,7 +548,7 @@ impl IngestorEntityDraft {
         if value.eq_ignore_ascii_case("PER PARTITION") {
             return Ok(nervix_models::IngestorInstances::PerPartition);
         }
-        let count = value.parse::<NonZeroU16>().map_err(|cause| {
+        let count = value.parse::<NonZeroU64>().map_err(|cause| {
             Report::new(cause).change_context(IngestorEntityDraftError::Instances)
         })?;
         Ok(nervix_models::IngestorInstances::Count(count))
@@ -817,7 +817,7 @@ pub(super) enum IngestorEntityDraftError {
     UpgradeHeaders,
     #[error("EVERY must be a positive domain-clock duration")]
     Every,
-    #[error("INSTANCES must be a count from 1 to 65535 or PER PARTITION")]
+    #[error("INSTANCES must be a positive 64-bit count or PER PARTITION")]
     Instances,
     #[error("Choose Kafka offset ownership")]
     Offset,
@@ -1114,6 +1114,26 @@ mod tests {
             error.current_context(),
             &super::IngestorEntityDraftError::ChannelAndPattern
         );
+    }
+
+    #[test]
+    fn an_instance_draft_preserves_the_full_positive_64_bit_count() {
+        for count in [1, 65_536, u64::from(u32::MAX) + 1, u64::MAX] {
+            let mut draft = complete(IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic));
+            draft.instances = count.to_string();
+            assert_eq!(
+                draft
+                    .instances()
+                    .assured("the complete positive count is accepted"),
+                nervix_models::IngestorInstances::Count(
+                    NonZeroU64::new(count).assured("each boundary is positive")
+                )
+            );
+            let entity = draft
+                .build()
+                .assured("the complete form preserves the count");
+            assert_eq!(filled_from(&entity).instances, count.to_string());
+        }
     }
 
     fn complete(kind: IngestorEntityKind) -> IngestorEntityDraft {

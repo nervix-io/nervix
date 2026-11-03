@@ -87,7 +87,7 @@ const STATE_SCHEMA_KEY_MARKER: u8 = b's';
     nervix_lint,
     nervix::constant(fixed, reason = "unit identity is part of the stored key format")
 )]
-const STATE_UNIT_KEY_MARKER: u8 = b'u';
+const STATE_UNIT_KEY_MARKER: u8 = b'U';
 
 fn append_unit_key(key: &mut Vec<u8>, unit: Unit) {
     key.push(0);
@@ -2339,24 +2339,34 @@ fn stored_placement(key: &[u8]) -> Result<StoredPlacement, Report<RuntimePersist
     if key.get(unit_start) != Some(&STATE_UNIT_KEY_MARKER) {
         return Err(StoredStateIssue::KeyUnitMarker.decode_failure());
     }
+    let tag = key.get(unit_start + 1).copied();
+    let ordinal_bytes = match tag {
+        Some(0 | 1) => 4,
+        Some(2) => 8,
+        _ => return Err(StoredStateIssue::KeyUnitInvalid.decode_failure()),
+    };
     let unit_end = unit_start
-        .checked_add(7)
-        .verified("an index into an allocated key leaves room for a seven-byte unit segment");
+        .checked_add(3 + ordinal_bytes)
+        .verified("the checked unit segment fits an allocated key");
     let unit_segment = key
         .get(unit_start..unit_end)
         .ok_or_else(|| StoredStateIssue::KeyUnitTruncated.decode_failure())?;
-    if unit_segment[6] != 0 {
+    if unit_segment[2 + ordinal_bytes] != 0 {
         return Err(StoredStateIssue::KeyUnitSeparator.decode_failure());
     }
-    let ordinal = u32::from_be_bytes(
-        unit_segment[2..6]
-            .try_into()
-            .verified("the checked unit segment contains four ordinal bytes"),
-    );
-    let unit = match (unit_segment[1], ordinal) {
-        (0, 0) => Unit::Single,
-        (1, partition) => Unit::Partition(partition),
-        (2, instance) => Unit::Instance(instance),
+    let ordinal = &unit_segment[2..2 + ordinal_bytes];
+    let unit = match tag {
+        Some(0) if ordinal == [0; 4] => Unit::Single,
+        Some(1) => Unit::Partition(u32::from_be_bytes(
+            ordinal
+                .try_into()
+                .verified("a partition ordinal has four bytes"),
+        )),
+        Some(2) => Unit::Instance(u64::from_be_bytes(
+            ordinal
+                .try_into()
+                .verified("an instance ordinal has eight bytes"),
+        )),
         _ => return Err(StoredStateIssue::KeyUnitInvalid.decode_failure()),
     };
     let lifetime_start = unit_end;

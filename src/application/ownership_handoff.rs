@@ -41,7 +41,7 @@ use nervix_models::{
     NodeUnitRef, OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
     OwnershipTransition, ScheduledNode, Unit,
 };
-use nervix_primitives::time::sleep;
+use nervix_primitives::{sync::StdArc, time::sleep};
 use tracing::{debug, info, warn};
 
 use super::{
@@ -247,9 +247,41 @@ pub(in crate::application) struct PlannedOwnershipMove {
     pub(in crate::application) destination: ClusterNodeName,
     replicas: Vec<ClusterNodeName>,
     promoted_replica: bool,
+    input: PlannedOwnershipInput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PlannedOwnershipInput {
+    Unit,
+    IngestorUnits(StdArc<PlannedIngestorUnitLayout>),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PlannedIngestorUnitLayout {
+    sources: Vec<(Unit, ClusterNodeName)>,
+    count: std::num::NonZeroU64,
+    schema_fingerprint: nervix_models::SchemaFingerprint,
+    kafka_offsets: bool,
 }
 
 impl PlannedOwnershipMove {
+    fn source_nodes(&self) -> Vec<&ClusterNodeName> {
+        match &self.input {
+            PlannedOwnershipInput::Unit => vec![&self.former_owner],
+            PlannedOwnershipInput::IngestorUnits(layout) => {
+                layout.sources.iter().map(|(_, node)| node).collect()
+            }
+        }
+    }
+
+    fn preparation_nodes(&self) -> Vec<&ClusterNodeName> {
+        let mut nodes = vec![&self.destination];
+        if matches!(&self.input, PlannedOwnershipInput::IngestorUnits(_)) {
+            nodes.extend(self.replicas.iter());
+        }
+        nodes
+    }
+
     fn belongs_to_committed_transition(
         &self,
         schedule: &nervix_models::DomainSchedule,
@@ -614,7 +646,61 @@ pub(in crate::application) fn planned_ownership_moves(
         let Some(current_node) = current.nodes.get(identity) else {
             continue;
         };
+        let layout = if identity.kind == nervix_models::ModelKind::Ingestor
+            && current_node.units.keys().ne(planned_node.units.keys())
+            && current_node
+                .units
+                .keys()
+                .all(|unit| matches!(unit, Unit::Instance(_)))
+            && planned_node
+                .units
+                .keys()
+                .all(|unit| matches!(unit, Unit::Instance(_)))
+        {
+            let sources = current_node
+                .units
+                .iter()
+                .map(|(unit, placement)| placement.primary_node.clone().map(|owner| (*unit, owner)))
+                .collect::<Option<Vec<_>>>();
+            sources
+                .filter(|sources| !sources.is_empty())
+                .map(|sources| {
+                    StdArc::new(PlannedIngestorUnitLayout {
+                        sources,
+                        count: std::num::NonZeroU64::new(
+                            u64::try_from(planned_node.units.len()).assured("unit counts fit u64"),
+                        )
+                        .verified("a scheduled ingestor has a nonempty instance layout"),
+                        schema_fingerprint: planned_node.schema_fingerprint,
+                        kafka_offsets: planned_node
+                            .ownership_state_components()
+                            .contains(&nervix_models::OwnershipStateComponent::KafkaOffsets),
+                    })
+                })
+        } else {
+            None
+        };
         for (unit_id, planned_unit) in &planned_node.units {
+            if let Some(layout) = &layout {
+                let Some(destination) = &planned_unit.primary_node else {
+                    continue;
+                };
+                let former_owner = current_node
+                    .units
+                    .get(unit_id)
+                    .and_then(|unit| unit.primary_node.clone())
+                    .unwrap_or_else(|| layout.sources[0].1.clone());
+                moves.push(PlannedOwnershipMove {
+                    entity: identity.clone(),
+                    unit: *unit_id,
+                    former_owner,
+                    destination: destination.clone(),
+                    replicas: planned_unit.replica_nodes().into_iter().cloned().collect(),
+                    promoted_replica: false,
+                    input: PlannedOwnershipInput::IngestorUnits(layout.clone()),
+                });
+                continue;
+            }
             let Some(current_unit) = current_node.units.get(unit_id) else {
                 continue;
             };
@@ -634,6 +720,7 @@ pub(in crate::application) fn planned_ownership_moves(
                 destination: destination.clone(),
                 replicas: planned_unit.replica_nodes().into_iter().cloned().collect(),
                 promoted_replica: current_unit.assigned_nodes.contains(destination),
+                input: PlannedOwnershipInput::Unit,
             });
         }
     }
@@ -788,27 +875,23 @@ impl SessionServiceImpl {
     ) -> OwnershipHandoffResult<()> {
         let current = self.live_node_incarnations().await;
         for moved in &handoff.moves {
-            nervix_primitives::task::consume_budget().await;
-            let source = *handoff
-                .node_incarnations
-                .get(&moved.former_owner)
-                .verified("every planned former owner has a bound incarnation");
-            Self::verify_ownership_handoff_node_incarnation(
-                &current,
-                &moved.former_owner,
-                source,
-                "source",
-            )?;
-            let destination = *handoff
-                .node_incarnations
-                .get(&moved.destination)
-                .verified("every planned destination has a bound incarnation");
-            Self::verify_ownership_handoff_node_incarnation(
-                &current,
-                &moved.destination,
-                destination,
-                "destination",
-            )?;
+            for node in moved
+                .source_nodes()
+                .into_iter()
+                .chain(moved.preparation_nodes())
+            {
+                nervix_primitives::task::consume_budget().await;
+                let expected = *handoff
+                    .node_incarnations
+                    .get(node)
+                    .verified("every handoff participant has a bound incarnation");
+                Self::verify_ownership_handoff_node_incarnation(
+                    &current,
+                    node,
+                    expected,
+                    "participant",
+                )?;
+            }
         }
         Ok(())
     }
@@ -959,29 +1042,31 @@ impl SessionServiceImpl {
             }
         }
         let node_incarnations = self.available_node_incarnations().await;
-        if let Some(moved) = moves
+        if let Some(source) = moves
             .iter()
-            .find(|moved| !node_incarnations.contains_key(&moved.former_owner))
+            .flat_map(PlannedOwnershipMove::source_nodes)
+            .find(|source| !node_incarnations.contains_key(*source))
         {
             return Err(Report::new(DomainAlterError::EntityGate {
                 domain: domain.clone(),
                 operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
                 reason: format!(
                     "former owner '{}' is unavailable before ownership handoff",
-                    moved.former_owner
+                    source
                 ),
             }));
         }
-        if let Some(moved) = moves
+        if let Some(destination) = moves
             .iter()
-            .find(|moved| !node_incarnations.contains_key(&moved.destination))
+            .flat_map(PlannedOwnershipMove::preparation_nodes)
+            .find(|destination| !node_incarnations.contains_key(*destination))
         {
             return Err(Report::new(DomainAlterError::EntityGate {
                 domain: domain.clone(),
                 operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
                 reason: format!(
                     "destination node '{}' is unavailable before ownership handoff",
-                    moved.destination
+                    destination
                 ),
             }));
         }
@@ -1006,7 +1091,7 @@ impl SessionServiceImpl {
             ownership_handoff_gate_participants(current, planned, &affected_entities, relays);
         let former_owners = moves
             .iter()
-            .map(|moved| moved.former_owner.clone())
+            .flat_map(|moved| moved.source_nodes().into_iter().cloned())
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
@@ -1089,23 +1174,23 @@ impl SessionServiceImpl {
             domain,
             target_schedule_fingerprint,
         );
+        let mut captured_units = BTreeMap::new();
         for moved in &moves {
             nervix_primitives::task::consume_budget().await;
             let capture = nervix_primitives::time::timeout_at(
                 preparation_deadline,
-                self.capture_ownership_handoff_state(
+                self.capture_planned_ownership_input(
                     &coordination,
                     &operation_id,
                     domain,
                     moved,
-                    *node_incarnations
-                        .get(&moved.former_owner)
-                        .verified("every former owner was found in live gossip above"),
+                    &node_incarnations,
                     base_schedule_fingerprint,
+                    &mut captured_units,
                 ),
             )
             .await;
-            let checkpoints = match capture {
+            let input = match capture {
                 Ok(Ok(checkpoints)) => checkpoints,
                 Ok(Err(reason)) => {
                     self.discard_attempted_ownership_handoff_preparations(&mut preparations)
@@ -1154,24 +1239,28 @@ impl SessionServiceImpl {
             preparations.record_attempt(moved);
             let result = nervix_primitives::time::timeout_at(
                 preparation_deadline,
-                self.prepare_ownership_handoff_state(RemotePrepareOwnershipHandoffStateRequest {
-                    coordination: coordination.clone(),
-                    operation_id: operation_id.clone(),
-                    source: moved.former_owner.clone(),
-                    destination: moved.destination.clone(),
-                    source_incarnation: *node_incarnations
-                        .get(&moved.former_owner)
-                        .verified("every former owner was found in live gossip above"),
-                    destination_incarnation: *node_incarnations
-                        .get(&moved.destination)
-                        .verified("every destination was found in live gossip above"),
-                    domain: domain.clone(),
-                    unit: moved.unit,
-                    entity: moved.entity.clone(),
-                    base_schedule_fingerprint,
-                    target_schedule_fingerprint,
-                    checkpoints,
-                }),
+                self.prepare_planned_ownership_input(
+                    moved,
+                    &node_incarnations,
+                    RemotePrepareOwnershipHandoffStateRequest {
+                        coordination: coordination.clone(),
+                        operation_id: operation_id.clone(),
+                        source: moved.former_owner.clone(),
+                        destination: moved.destination.clone(),
+                        source_incarnation: *node_incarnations
+                            .get(&moved.former_owner)
+                            .verified("every former owner was found in live gossip above"),
+                        destination_incarnation: *node_incarnations
+                            .get(&moved.destination)
+                            .verified("every destination was found in live gossip above"),
+                        domain: domain.clone(),
+                        unit: moved.unit,
+                        entity: moved.entity.clone(),
+                        base_schedule_fingerprint,
+                        target_schedule_fingerprint,
+                        input,
+                    },
+                ),
             )
             .await;
             match result {
@@ -1291,6 +1380,127 @@ impl SessionServiceImpl {
         Ok(Some(handoff))
     }
 
+    async fn capture_planned_ownership_input(
+        &self,
+        coordination: &CoordinationIdentity,
+        operation_id: &str,
+        domain: &DomainName,
+        moved: &PlannedOwnershipMove,
+        incarnations: &BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
+        base_schedule_fingerprint: [u8; 32],
+        captured_units: &mut BTreeMap<
+            NodeUnitRef,
+            Vec<nervix_interconnect::OwnershipHandoffCheckpoint>,
+        >,
+    ) -> OwnershipHandoffResult<nervix_interconnect::OwnershipHandoffInput> {
+        use nervix_interconnect::{
+            IngestorUnitSelection, OwnershipHandoffInput, OwnershipHandoffSelection,
+            OwnershipHandoffSource,
+        };
+        let incarnation = |node: &ClusterNodeName| {
+            *incarnations
+                .get(node)
+                .verified("every handoff participant has a bound incarnation")
+        };
+        match &moved.input {
+            PlannedOwnershipInput::Unit => Ok(OwnershipHandoffInput::Unit(
+                self.capture_ownership_handoff_state(
+                    coordination,
+                    operation_id,
+                    domain,
+                    moved,
+                    incarnation(&moved.former_owner),
+                    base_schedule_fingerprint,
+                    OwnershipHandoffSelection::Unit,
+                )
+                .await?,
+            )),
+            PlannedOwnershipInput::IngestorUnits(layout) => {
+                let selection = IngestorUnitSelection {
+                    unit: moved.unit,
+                    count: layout.count,
+                };
+                let mut sources = Vec::with_capacity(layout.sources.len());
+                for (unit, node) in &layout.sources {
+                    let mut source = moved.clone();
+                    source.unit = *unit;
+                    source.former_owner = node.clone();
+                    let key = NodeUnitRef::new(moved.entity.clone(), *unit);
+                    if !captured_units.contains_key(&key) {
+                        let checkpoints = self
+                            .capture_ownership_handoff_state(
+                                coordination,
+                                operation_id,
+                                domain,
+                                &source,
+                                incarnation(node),
+                                base_schedule_fingerprint,
+                                OwnershipHandoffSelection::Unit,
+                            )
+                            .await?;
+                        captured_units.insert(key.clone(), checkpoints);
+                    }
+                    let captured = captured_units
+                        .get(&key)
+                        .verified("the frozen source cut was captured above")
+                        .clone();
+                    let checkpoints = self
+                        .capture_ownership_handoff_state(
+                            coordination,
+                            operation_id,
+                            domain,
+                            &source,
+                            incarnation(node),
+                            base_schedule_fingerprint,
+                            OwnershipHandoffSelection::IngestorUnits {
+                                selection,
+                                checkpoints: captured,
+                            },
+                        )
+                        .await?;
+                    sources.push(OwnershipHandoffSource {
+                        node: node.clone(),
+                        incarnation: incarnation(node),
+                        unit: *unit,
+                        checkpoints,
+                    });
+                }
+                Ok(OwnershipHandoffInput::IngestorUnits {
+                    selection,
+                    schema_fingerprint: layout.schema_fingerprint,
+                    kafka_offsets: layout.kafka_offsets,
+                    recipient: moved.destination.clone(),
+                    recipient_incarnation: incarnation(&moved.destination),
+                    sources,
+                })
+            }
+        }
+    }
+
+    async fn prepare_planned_ownership_input(
+        &self,
+        moved: &PlannedOwnershipMove,
+        incarnations: &BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
+        request: RemotePrepareOwnershipHandoffStateRequest,
+    ) -> OwnershipHandoffResult<()> {
+        for node in moved.preparation_nodes() {
+            let mut request = request.clone();
+            if let nervix_interconnect::OwnershipHandoffInput::IngestorUnits {
+                recipient,
+                recipient_incarnation,
+                ..
+            } = &mut request.input
+            {
+                *recipient = node.clone();
+                *recipient_incarnation = *incarnations
+                    .get(node)
+                    .verified("every preparation recipient has a bound incarnation");
+            }
+            self.prepare_ownership_handoff_state(request).await?;
+        }
+        Ok(())
+    }
+
     async fn capture_ownership_handoff_state(
         &self,
         coordination: &CoordinationIdentity,
@@ -1299,6 +1509,7 @@ impl SessionServiceImpl {
         moved: &PlannedOwnershipMove,
         source_incarnation: ClusterNodeIncarnation,
         base_schedule_fingerprint: [u8; 32],
+        selection: nervix_interconnect::OwnershipHandoffSelection,
     ) -> OwnershipHandoffResult<Vec<nervix_interconnect::OwnershipHandoffCheckpoint>> {
         Self::verify_ownership_handoff_node_incarnation(
             &self.live_node_incarnations().await,
@@ -1330,12 +1541,13 @@ impl SessionServiceImpl {
             return self
                 .inner
                 .runtime
-                .capture_ownership_handoff_state(
+                .capture_selected_ownership_handoff_state(
                     coordination,
                     domain,
                     &moved.entity,
                     moved.unit,
                     base_schedule_fingerprint,
+                    selection,
                 )
                 .await;
         }
@@ -1353,6 +1565,7 @@ impl SessionServiceImpl {
                     unit: moved.unit,
                     entity: moved.entity.clone(),
                     base_schedule_fingerprint,
+                    selection,
                 },
             )
             .await
@@ -1375,11 +1588,79 @@ impl SessionServiceImpl {
         }))
     }
 
+    fn verify_handoff_preparation_sources(
+        request: &RemotePrepareOwnershipHandoffStateRequest,
+        scheduled: &ScheduledNode,
+        incarnations: &BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
+    ) -> OwnershipHandoffResult<()> {
+        let (recipient, incarnation) = request.recipient();
+        Self::verify_ownership_handoff_node_incarnation(
+            incarnations,
+            recipient,
+            incarnation,
+            "recipient",
+        )?;
+        let sources = match &request.input {
+            nervix_interconnect::OwnershipHandoffInput::Unit(_) => {
+                vec![(request.unit, &request.source)]
+            }
+            nervix_interconnect::OwnershipHandoffInput::IngestorUnits {
+                selection,
+                sources,
+                ..
+            } => {
+                let units = sources
+                    .iter()
+                    .map(|source| source.unit)
+                    .collect::<BTreeSet<_>>();
+                if request.entity.kind != nervix_models::ModelKind::Ingestor
+                    || selection.unit != request.unit
+                    || !matches!(selection.unit, Unit::Instance(index) if index < selection.count.get())
+                    || units.len() != sources.len()
+                    || units != scheduled.units.keys().copied().collect()
+                    || !sources.iter().any(|source| source.node == request.source)
+                {
+                    return Err(OwnershipHandoffError::participant(
+                        "intake source inventory does not match the committed layout",
+                    ));
+                }
+                for source in sources {
+                    Self::verify_ownership_handoff_node_incarnation(
+                        incarnations,
+                        &source.node,
+                        source.incarnation,
+                        "source",
+                    )?;
+                }
+                sources
+                    .iter()
+                    .map(|source| (source.unit, &source.node))
+                    .collect()
+            }
+        };
+        for (unit, source) in sources {
+            if scheduled
+                .unit(unit)
+                .and_then(|unit| unit.primary_node.as_ref())
+                != Some(source)
+            {
+                return Err(OwnershipHandoffError::participant(format!(
+                    "{} '{}'{} is no longer owned by source node '{}'",
+                    request.entity.kind.as_str(),
+                    request.entity.identifier.as_str(),
+                    unit.label_suffix(),
+                    source,
+                )));
+            }
+        }
+        Ok(())
+    }
+
     async fn prepare_ownership_handoff_state(
         &self,
         request: RemotePrepareOwnershipHandoffStateRequest,
     ) -> OwnershipHandoffResult<()> {
-        if request.destination == *self.inner.consensus.local_node_id() {
+        if request.recipient().0 == self.inner.consensus.local_node_id() {
             self.refuse_handoff_destination_while_terminating().await?;
         }
         self.verify_ownership_handoff_coordinator(&request.coordination)
@@ -1411,20 +1692,8 @@ impl SessionServiceImpl {
                     request.entity.identifier.as_str()
                 ))
             })?;
-        let unit_primary = match scheduled.unit(request.unit) {
-            Some(unit) => unit.primary_node.as_ref(),
-            None => None,
-        };
-        if unit_primary != Some(&request.source) {
-            return Err(OwnershipHandoffError::participant(format!(
-                "{} '{}'{} is no longer owned by source node '{}'",
-                request.entity.kind.as_str(),
-                request.entity.identifier.as_str(),
-                request.unit.label_suffix(),
-                request.source
-            )));
-        }
-        if request.destination == *self.inner.consensus.local_node_id() {
+        Self::verify_handoff_preparation_sources(&request, &scheduled, &current_incarnations)?;
+        if request.recipient().0 == self.inner.consensus.local_node_id() {
             let _operation = self.inner.ownership_handoff_operations.lock().await;
             self.verify_ownership_handoff_coordinator(&request.coordination)
                 .await?;
@@ -1434,7 +1703,7 @@ impl SessionServiceImpl {
                 .prepare_ownership_handoff_state(request)
                 .await;
         }
-        let destination = request.destination.clone();
+        let destination = request.recipient().0.clone();
         let response = self
             .inner
             .interconnect
@@ -1468,13 +1737,34 @@ impl SessionServiceImpl {
                 entity: moved.entity.clone(),
                 base_schedule_fingerprint: handoff.base_schedule_fingerprint,
                 target_schedule_fingerprint: handoff.target_schedule_fingerprint,
+                participant: nervix_interconnect::OwnershipHandoffParticipant::Destination,
             };
-            self.confirm_ownership_handoff_on_node(
-                &moved.former_owner,
-                request.clone(),
-                handoff.preparation_deadline,
-            )
-            .await?;
+            let sources = match &moved.input {
+                PlannedOwnershipInput::Unit => vec![(moved.unit, moved.former_owner.clone())],
+                PlannedOwnershipInput::IngestorUnits(layout) => layout.sources.clone(),
+            };
+            let mut grouped = BTreeMap::<ClusterNodeName, Vec<Unit>>::new();
+            for (unit, node) in sources {
+                grouped.entry(node).or_default().push(unit);
+            }
+            for (node, units) in grouped {
+                let mut confirmation = request.clone();
+                confirmation.participant =
+                    nervix_interconnect::OwnershipHandoffParticipant::Source {
+                        incarnation: *handoff
+                            .node_incarnations
+                            .get(&node)
+                            .verified("every source has a bound incarnation"),
+                        node: node.clone(),
+                        units,
+                    };
+                self.confirm_ownership_handoff_on_node(
+                    &node,
+                    confirmation,
+                    handoff.preparation_deadline,
+                )
+                .await?;
+            }
             nervix_primitives::task::consume_budget().await;
             self.confirm_ownership_handoff_on_node(
                 &moved.destination,
@@ -1527,11 +1817,21 @@ impl SessionServiceImpl {
         request: RemoteConfirmOwnershipHandoffStateRequest,
     ) -> OwnershipHandoffResult<()> {
         let local_node = self.inner.consensus.local_node_id();
-        if local_node == &request.source {
+        if let nervix_interconnect::OwnershipHandoffParticipant::Source {
+            node,
+            incarnation,
+            units,
+        } = &request.participant
+        {
+            if local_node != node || units.is_empty() {
+                return Err(OwnershipHandoffError::participant(
+                    "source confirmation reached the wrong node or names no source units",
+                ));
+            }
             Self::verify_ownership_handoff_node_incarnation(
                 &self.live_node_incarnations().await,
                 local_node,
-                request.source_incarnation,
+                *incarnation,
                 "source",
             )?;
             let schedule = self.inner.consensus.current_schedule().await;
@@ -1555,31 +1855,34 @@ impl SessionServiceImpl {
                     request.entity.identifier.as_str()
                 ))
             })?;
-            if !scheduled
-                .units
-                .get(&request.unit)
-                .is_some_and(|unit| unit.is_primary_on(&request.source))
-            {
-                return Err(OwnershipHandoffError::participant(format!(
-                    "{} '{}' is no longer owned by source node '{}'",
-                    request.entity.kind.as_str(),
-                    request.entity.identifier.as_str(),
-                    request.source
-                )));
-            }
             let entity = nervix_models::DomainNodeRef::node_in(
-                request.domain,
+                request.domain.clone(),
                 request.entity.kind,
-                request.entity.identifier,
+                request.entity.identifier.clone(),
             );
-            if !self.inner.runtime.ownership_handoff_unit_is_frozen_by(
-                &nervix_models::DomainNodeUnitRef::new(entity, request.unit),
-                &request.coordination,
-            ) {
-                return Err(OwnershipHandoffError::participant(format!(
-                    "source node '{}' no longer holds the ownership handoff freeze",
-                    request.source
-                )));
+            for unit in units {
+                if !scheduled
+                    .units
+                    .get(unit)
+                    .is_some_and(|unit| unit.is_primary_on(node))
+                {
+                    return Err(OwnershipHandoffError::participant(format!(
+                        "{} '{}'{} is no longer owned by source node '{}'",
+                        request.entity.kind.as_str(),
+                        request.entity.identifier.as_str(),
+                        unit.label_suffix(),
+                        node,
+                    )));
+                }
+                if !self.inner.runtime.ownership_handoff_unit_is_frozen_by(
+                    &nervix_models::DomainNodeUnitRef::new(entity.clone(), *unit),
+                    &request.coordination,
+                ) {
+                    return Err(OwnershipHandoffError::participant(format!(
+                        "source node '{}' no longer holds the ownership handoff freeze",
+                        node,
+                    )));
+                }
             }
             return Ok(());
         }
@@ -1608,7 +1911,28 @@ impl SessionServiceImpl {
         domain: &DomainName,
         moved: &PlannedOwnershipMove,
     ) -> OwnershipHandoffResult<()> {
-        if moved.destination == *self.inner.consensus.local_node_id() {
+        for node in moved.preparation_nodes() {
+            self.discard_ownership_handoff_preparation_at(
+                coordination,
+                operation_id,
+                domain,
+                moved,
+                node,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn discard_ownership_handoff_preparation_at(
+        &self,
+        coordination: &CoordinationIdentity,
+        operation_id: &str,
+        domain: &DomainName,
+        moved: &PlannedOwnershipMove,
+        node: &ClusterNodeName,
+    ) -> OwnershipHandoffResult<()> {
+        if node == self.inner.consensus.local_node_id() {
             return self
                 .inner
                 .runtime
@@ -1624,7 +1948,7 @@ impl SessionServiceImpl {
         self.inner
             .interconnect
             .request(
-                &moved.destination,
+                node,
                 RemoteDiscardOwnershipHandoffStateRequest {
                     coordination: coordination.clone(),
                     operation_id: operation_id.to_string(),
@@ -1836,7 +2160,7 @@ impl SessionServiceImpl {
                     #[cfg(feature = "testing")]
                     let response_pause_domain = request.domain.clone();
                     let result: OwnershipHandoffResult<_> = async {
-                        if request.destination != *service.inner.consensus.local_node_id() {
+                        if request.recipient().0 != service.inner.consensus.local_node_id() {
                             return Err(OwnershipHandoffError::participant(format!(
                                 "ownership handoff for {} '{}' targets node '{}' but reached '{}'",
                                 request.entity.kind.as_str(),
@@ -1881,19 +2205,11 @@ impl SessionServiceImpl {
                                     request.entity.identifier.as_str()
                                 ))
                             })?;
-                        let unit_primary = match scheduled.unit(request.unit) {
-                            Some(unit) => unit.primary_node.as_ref(),
-                            None => None,
-                        };
-                        if unit_primary != Some(&request.source) {
-                            return Err(OwnershipHandoffError::participant(format!(
-                                "{} '{}'{} is no longer owned by source node '{}'",
-                                request.entity.kind.as_str(),
-                                request.entity.identifier.as_str(),
-                                request.unit.label_suffix(),
-                                request.source
-                            )));
-                        }
+                        Self::verify_handoff_preparation_sources(
+                            &request,
+                            &scheduled,
+                            &current_incarnations,
+                        )?;
                         let _operation = service.inner.ownership_handoff_operations.lock().await;
                         service
                             .verify_ownership_handoff_coordinator(&request.coordination)

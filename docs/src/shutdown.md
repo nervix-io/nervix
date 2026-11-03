@@ -1501,6 +1501,12 @@ live retains its host task, readiness and ACK roots. Per-partition intake moves 
 relay partition component. Whole-domain shutdown still selects every current unit, including
 retained work from a source whose live registration has already ended.
 
+Kafka initialization shares cold admission with the exact unit's ownership capture and final
+offset write. Stopping refuses new initialization; the final writer waits for an initialization
+already admitted to finish or reach its deadline before capturing the final state. Pending
+canonical positions survive in the same native checkpoint as the explicit-start generation. A
+plain resume transfers a delayed unit's pending positions before it begins polling.
+
 The ending loop closes its transport before its readiness is retired. MQTT input retirement
 compares the logical input once and selects only the global indices ending on this node. Forced
 node loss retains the transport's declared replay and duplicate limits; instance placement does

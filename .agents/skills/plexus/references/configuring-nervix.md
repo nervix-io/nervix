@@ -186,7 +186,7 @@ bound PULL ingestor with connecting PUSH peers when a peer can restart: a connec
 does not detect or recover a lost peer. Read the ZeroMQ sections of Ingestors and Emitters for the
 current connection, retry and deadline limits.
 
-- Choose fixed `INSTANCES <1..65535>` or `INSTANCES PER PARTITION` only for an entity whose
+- Choose fixed `INSTANCES <positive-u64>` or `INSTANCES PER PARTITION` only for an entity whose
   instancing capability permits it. Kafka, Pulsar, RabbitMQ, SQS, NATS and MQTT support both.
   Each global index has its own primary, readiness, ACK roots and state. Partition-following
   sources require at least one constructing route and the same ordered key fields and partition

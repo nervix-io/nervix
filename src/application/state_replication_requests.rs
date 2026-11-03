@@ -15,8 +15,8 @@
 use error_stack::ResultExt as _;
 use nervix_interconnect::{
     BranchCheckpointListingRequest, BranchCheckpointListingResponse, DescribeKafkaOffsets,
-    FetchStateCheckpoint, RemoteOperationFailure, RemoteOperationSubject, StateSyncRequest,
-    StateSyncResponse, SyncKafkaOffsets,
+    FetchStateCheckpoint, KafkaStartRequest, RemoteOperationFailure, RemoteOperationSubject,
+    StateSyncRequest, StateSyncResponse, SyncKafkaOffsets,
 };
 
 use super::{AppError, session_service::SessionServiceImpl};
@@ -27,6 +27,24 @@ impl SessionServiceImpl {
     pub(super) fn register_state_replication_interconnect_handlers(
         &self,
     ) -> error_stack::Result<(), AppError> {
+        let kafka_start_service = self.clone();
+        self.inner
+            .interconnect
+            .register_handler::<KafkaStartRequest, _, _>(move |_context, request| {
+                let service = kafka_start_service.clone();
+                async move {
+                    let subject = RemoteOperationSubject::state(&request.placement);
+                    service
+                        .inner
+                        .runtime
+                        .answer_kafka_start(request)
+                        .await
+                        .map_err(|error| {
+                            RemoteOperationFailure::failed(subject, format!("{error:#}"))
+                        })
+                }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
         let describe_kafka_offsets_service = self.clone();
         self.inner
             .interconnect

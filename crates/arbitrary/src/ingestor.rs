@@ -203,9 +203,9 @@ impl Arbitrary<'_> {
         if self.entropy.flag() {
             nervix_models::IngestorInstances::PerPartition
         } else {
-            let count = self.entropy.pick([1u16, 2, 3, 4]);
+            let count = self.entropy.pick([1u64, 2, 3, 4]);
             nervix_models::IngestorInstances::Count(
-                std::num::NonZeroU16::new(count).assured("every declared count choice is positive"),
+                std::num::NonZeroU64::new(count).assured("every declared count choice is positive"),
             )
         }
     }
@@ -222,9 +222,9 @@ impl Arbitrary<'_> {
         };
         let instances = match offset_mode {
             KafkaOffsetMode::ConsumerGroup { .. } => {
-                let count = self.entropy.pick([1u16, 2, 3, 4]);
+                let count = self.entropy.pick([1u64, 2, 3, 4]);
                 nervix_models::IngestorInstances::Count(
-                    std::num::NonZeroU16::new(count)
+                    std::num::NonZeroU64::new(count)
                         .assured("every declared count choice is positive"),
                 )
             }

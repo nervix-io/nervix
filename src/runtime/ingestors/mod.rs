@@ -377,7 +377,7 @@ mod tests {
                     client: named("broker"),
                     topic: named("events"),
                     offset_mode: nervix_models::KafkaOffsetMode::Domain,
-                    instances: nervix_models::IngestorInstances::Count(nonzero_ext::nonzero!(3u16)),
+                    instances: nervix_models::IngestorInstances::Count(nonzero_ext::nonzero!(3u64)),
                     mode: nervix_models::KafkaIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Suspend,
                 },
@@ -391,7 +391,7 @@ mod tests {
         for index in [2, 0] {
             let connector = FakeIngestorPlan::new(
                 [(
-                    u64::from(index),
+                    index,
                     Ok(FakeIngestor::empty(Arc::new(Mutex::new(
                         IngestorObservations::default(),
                     )))),

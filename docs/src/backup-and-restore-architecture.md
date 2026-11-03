@@ -92,6 +92,17 @@ then the version for exact equality, copies the payload into an aligned buffer a
 bytecheck before it reads a value, and then validates each vocabulary value in the record's
 conversion. A changed shape therefore fails at its header instead of validating as garbage.
 
+Kafka unit checkpoints include the explicit-start generation and both committed positions and
+any canonical start positions still awaiting adoption. Those pending positions remain on
+instance zero until their recipient has persisted its slice. Backup publication fences cover
+selection, adoption and seed release. Restore retains the pending cut, so a delayed unit can
+resume it after the lifecycle advances. Count redistribution prepares the newest canonical
+generation and each actual owner's progress on every target primary and replica.
+
+The current archive uses format major `4`. Each unit-bearing record owns its primitive encoding:
+`Single`, a 32-bit partition ordinal, or a 64-bit instance ordinal. Its record version fences the
+shape before decoding.
+
 ### Layout And Verification
 
 The writer lays an archive out completely before it writes a byte: every section's length and
@@ -105,7 +116,7 @@ A reader verifies an archive as a stream, without seeking:
 
 1. The first header must be the regular `manifest.rkyv` entry within the 64 MiB record limit;
    anything else is refused before the manifest is read.
-2. The manifest must hold archive format major version `3`, valid domain names, no duplicate path,
+2. The manifest must hold archive format major version `4`, valid domain names, no duplicate path,
    and a known record kind for every record section.
 3. Every following entry must be the next section the manifest names, with that exact length,
    within its content kind's bound, and with that digest once its bytes are drained. A missing,

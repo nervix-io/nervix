@@ -17,7 +17,7 @@ async fn instance_metric_has_numeric_values(
     metric: String,
     direction: String,
     relay: String,
-    instance: u32,
+    instance: u64,
     #[step] step: &Step,
 ) {
     let output = world
@@ -32,7 +32,7 @@ async fn instance_metric_has_numeric_values(
 }
 
 struct UnitPlacements {
-    owners: BTreeMap<u32, String>,
+    owners: BTreeMap<u64, String>,
 }
 
 impl UnitPlacements {
@@ -60,7 +60,7 @@ impl UnitPlacements {
             let Some(index) = unit.strip_prefix(prefix) else {
                 continue;
             };
-            let Ok(index) = index.parse::<u32>() else {
+            let Ok(index) = index.parse::<u64>() else {
                 panic!("a public instance unit has an unsigned index: {status}");
             };
             let Some(owner) = fields.get("owner") else {
@@ -75,7 +75,7 @@ impl UnitPlacements {
         Self { owners }
     }
 
-    fn assert_spread(&self, instances: u32, owners: usize, status: &str) {
+    fn assert_spread(&self, instances: u64, owners: usize, status: &str) {
         let actual = self.owners.keys().copied().collect::<BTreeSet<_>>();
         let expected = (0..instances).collect::<BTreeSet<_>>();
         assert_eq!(
@@ -103,7 +103,7 @@ impl UnitPlacements {
 )]
 async fn then_cluster_status_lists_ingestor_instances(
     world: &mut ScenarioWorld,
-    instances: u32,
+    instances: u64,
     ingestor: String,
     owners: usize,
 ) {
@@ -222,7 +222,7 @@ async fn wait_for_only_affected_instance_owners_to_move(
         .filter_map(|(key, owner)| {
             let index = key
                 .strip_prefix(&format!("{prefix}_"))?
-                .parse::<u32>()
+                .parse::<u64>()
                 .ok()?;
             Some((index, owner.clone()))
         })
@@ -271,7 +271,7 @@ async fn wait_for_only_affected_instance_owners_to_move(
     }
 }
 
-fn ready_instance_owners(output: &str) -> BTreeMap<u32, String> {
+fn ready_instance_owners(output: &str) -> BTreeMap<u64, String> {
     let mut owners = BTreeMap::new();
     for line in output.lines() {
         let Some(line) = line.trim().strip_prefix("instance ") else {
@@ -280,7 +280,7 @@ fn ready_instance_owners(output: &str) -> BTreeMap<u32, String> {
         let Some((index, fields)) = line.split_once(':') else {
             continue;
         };
-        let Ok(index) = index.parse::<u32>() else {
+        let Ok(index) = index.parse::<u64>() else {
             continue;
         };
         let fields = fields

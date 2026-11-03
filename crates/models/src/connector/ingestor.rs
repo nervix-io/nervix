@@ -70,8 +70,8 @@ impl IngestorInstancingCapability {
     }
 }
 
-/// The intake units an instance-capable source declares. Each unit allocates schedule and
-/// placement state, so counts are bounded to 65,535, like direct branch partitions.
+/// The intake units an instance-capable source declares. Fixed counts retain their full-width
+/// positive count; a partition declaration takes the constructed branch's cardinality.
 #[derive(
     Debug,
     Clone,
@@ -85,12 +85,12 @@ impl IngestorInstancingCapability {
     RkyvDeserialize,
 )]
 pub enum IngestorInstances {
-    Count(NonZeroU16),
+    Count(NonZeroU64),
     PerPartition,
 }
 
 impl IngestorInstances {
-    pub const ONE: Self = Self::Count(NonZeroU16::MIN);
+    pub const ONE: Self = Self::Count(NonZeroU64::MIN);
 
     pub const fn choice(self) -> &'static str {
         match self {

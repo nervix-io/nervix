@@ -159,7 +159,7 @@ mod tests {
         assert_eq!(source.topic.as_str(), topic);
         assert_eq!(
             source.instances,
-            nervix_models::IngestorInstances::Count(nonzero_ext::nonzero!(2u16))
+            nervix_models::IngestorInstances::Count(nonzero_ext::nonzero!(2u64))
         );
     }
 
@@ -361,19 +361,19 @@ mod tests {
     }
 
     #[test]
-    fn instancing_accepts_a_bounded_count_or_the_complete_partition_phrase() {
+    fn instancing_accepts_full_width_counts_or_the_complete_partition_phrase() {
         let text = statement("orders", DOMAIN_OFFSETS, SEQUENTIAL);
         let partitioned = text.replace("INSTANCES 2", "INSTANCES PER PARTITION");
         assert_eq!(
             created_source(&partitioned).instances,
             nervix_models::IngestorInstances::PerPartition
         );
-        let bounded = text.replace("INSTANCES 2", "INSTANCES 65535");
+        let bounded = text.replace("INSTANCES 2", "INSTANCES 18446744073709551615");
         assert_eq!(
             created_source(&bounded).instances,
-            nervix_models::IngestorInstances::Count(std::num::NonZeroU16::MAX)
+            nervix_models::IngestorInstances::Count(std::num::NonZeroU64::MAX)
         );
-        for invalid in ["0", "65536", "PER"] {
+        for invalid in ["0", "18446744073709551616", "PER"] {
             assert!(
                 created_model(&text.replace("INSTANCES 2", &format!("INSTANCES {invalid}")))
                     .is_none()
