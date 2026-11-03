@@ -161,7 +161,7 @@ impl ProbeRuntime {
     }
 
     /// Whether the probe implements the protocol itself, and so can decode the corpus frames.
-    fn decodes_corpus(self) -> bool {
+    pub(crate) fn implements_protocol(self) -> bool {
         match self {
             Self::Go | Self::Node | Self::Bun => true,
             Self::CAbiInProcess | Self::C | Self::Cpp | Self::Python | Self::Java | Self::Ruby => {
@@ -200,6 +200,8 @@ pub(crate) struct ProbeTarget {
     pub(crate) username: String,
     pub(crate) password: String,
     pub(crate) domain: String,
+    /// The leader-only operation's identity, held to its redirect and outcome by the fixture.
+    pub(crate) execution_reference: String,
     pub(crate) exercise: ProbeExercise,
 }
 
@@ -251,6 +253,10 @@ impl ProbeTarget {
             ("NERVIX_PROBE_USERNAME", self.username.clone()),
             ("NERVIX_PROBE_PASSWORD", self.password.clone()),
             ("NERVIX_PROBE_DOMAIN", self.domain.clone()),
+            (
+                "NERVIX_PROBE_EXECUTION_REFERENCE",
+                self.execution_reference.clone(),
+            ),
         ]);
         match &self.exercise {
             ProbeExercise::Subscription {
@@ -302,7 +308,7 @@ impl fmt::Debug for ClientProbe {
 impl ClientProbe {
     /// Starts an independent implementation's probe decoding the checked-in conformance corpus.
     pub(crate) async fn start_corpus(runtime: ProbeRuntime) -> io::Result<Self> {
-        if !runtime.decodes_corpus() {
+        if !runtime.implements_protocol() {
             return Err(io::Error::other(format!(
                 "the {runtime:?} probe uses the shared Rust binding and reads no frames itself"
             )));

@@ -60,17 +60,28 @@ pull request labeled `client-conformance`.
 A binding probe reads `NERVIX_CLIENT_LIBRARY`, and every probe reads its target from
 `NERVIX_PROBE_GRPC_URI`, `NERVIX_PROBE_WEBSOCKET_URI`, `NERVIX_PROBE_USERNAME`,
 `NERVIX_PROBE_PASSWORD` and `NERVIX_PROBE_DOMAIN`, and its subscription from `NERVIX_PROBE_RELAY`,
-`NERVIX_PROBE_SUBSCRIPTION` and `NERVIX_PROBE_ROWS`. Run with the `clock` argument, a binding probe
-follows the domain's clock instead and reads no subscription. Run with the `io` argument, it
+`NERVIX_PROBE_SUBSCRIPTION` and `NERVIX_PROBE_ROWS`. An independent probe also reads the UUIDv7
+reference of its leader-only command from `NERVIX_PROBE_EXECUTION_REFERENCE`.
+Run with the `clock` argument, a binding probe follows the domain's clock instead and reads no
+subscription. Run with the `io` argument, it
 publishes to the ingestor `NERVIX_PROBE_INGESTOR` names, consumes the emitter
 `NERVIX_PROBE_EMITTER` names, and reads no subscription either.
 
 ## What every probe proves
 
 `A <runtime> client round-trips an operation, typed rows, an error and a closure` runs each runtime
-against a one- and a three-node cluster, starting on `node-1`, which is a follower in most
-three-node runs. Every probe prints the same report and the scenario holds all of them to one
-expected report:
+against a one- and a three-node cluster. The harness waits for every node to agree on the leader,
+chooses another node when one exists, and logs the leader and the probe's starting node. The
+one-node example is a direct-connection control.
+
+The independent Go, Node.js and Bun probes first create an otherwise unused schema, a leader-only
+command whose completion they require before the common read operation. In a three-node example,
+they must report its redirect. The harness supplies a UUIDv7 execution reference and checks the
+original request, the repeated request and the terminal outcome against that exact reference. Go
+follows a command reply's `LeaderRedirect`; TypeScript follows `SessionEnding{LeaderRedirect}`
+and keeps its subscription on the replacement console session. A successful operation without
+that redirect evidence fails the three-node example. The remaining report is shared by every
+runtime and held to one expected report:
 
 - An operation: `SHOW CREATE RELAY` completes.
 - An error: a malformed statement fails with one diagnostic at the exact source span.

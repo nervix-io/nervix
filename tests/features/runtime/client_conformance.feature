@@ -98,7 +98,7 @@ Feature: Cross-language client conformance
         ON GENERAL ERROR LOG;
       START;
       """
-    When the "<runtime>" client probe subscribes as "probe" to relay "typed_rows" on node "node-1" expecting 3 rows
+    When the "<runtime>" client probe subscribes as "probe" to relay "typed_rows" on a follower when available expecting 3 rows
     And http payload is posted to node "node-1" with host "conformance-{{test_id}}.example.com" path "/typed"
       """
       {"id":1,"tenant":"acme","u8v":255,"i8v":127,"u16v":65535,"i16v":32767,"u32v":4294967295,"i32v":2147483647,"u64v":18446744073709551615,"i64v":9223372036854775807,"f32v":3.4028235e38,"f64v":1.7976931348623157e308,"flag":true,"text":"h\u00e9llo \u4e16\u754c \ud83d\ude80","raw":"AP/+gAA=","at":"2262-04-11T23:47:16.854775807Z","secret":"s1"}
@@ -113,6 +113,7 @@ Feature: Cross-language client conformance
       """
     Then within "180s" the client probe reports
       """
+      {{client_probe_redirect_report}}
       OPERATION completed
       ERROR failed diagnostics=1 span=12..12
       FIELD id U32 required public
