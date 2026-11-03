@@ -72,14 +72,15 @@ impl Observer {
                 }
             }
         });
+        let observer = Self {
+            messages: receiver,
+            task,
+        };
         timeout(BROKER_TIMEOUT, subscribed)
             .await
             .assured("the broker confirms the subscription within the observation bound")
             .assured("the subscription task remains alive");
-        Self {
-            messages: receiver,
-            task,
-        }
+        observer
     }
 
     async fn next(&mut self) -> Publish {
