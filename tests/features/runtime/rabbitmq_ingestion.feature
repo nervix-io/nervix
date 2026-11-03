@@ -33,7 +33,7 @@ Feature: RabbitMQ ingestion
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications
         TO mqtt_out TOPIC 'automatic_out_{{test_id}}'
-        MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        QOS 0 MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION notifications_subscription TO notifications;
       START;
@@ -257,7 +257,7 @@ Feature: RabbitMQ ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_redelivery_out_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_redelivery_out_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -339,7 +339,7 @@ Feature: RabbitMQ ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_lost_reject_out_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_lost_reject_out_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -439,7 +439,7 @@ Feature: RabbitMQ ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_lost_ack_out_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_lost_ack_out_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -612,7 +612,7 @@ Feature: RabbitMQ ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_lost_reject_out_{{test_id}}' MODE QOS 1 ACK PARALLEL MAX 4 ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 200ms ENCODE USING notification_codec
+        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_lost_reject_out_{{test_id}}' QOS 1 MODE ACK PARALLEL MAX 4 ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 200ms ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -746,7 +746,7 @@ Feature: RabbitMQ ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_lost_ack_out_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 100ms MAX 200ms ENCODE USING notification_codec
+        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_lost_ack_out_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 200ms ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -866,14 +866,14 @@ Feature: RabbitMQ ingestion
             FLUSH IMMEDIATE ON MESSAGE ERROR LOG
           TO refused INHERIT ALL WHERE output.user_id = 102
             FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-        CREATE MQTT TOPIC EMITTER mqtt_successful FROM successful TO mqtt_out TOPIC 'notifications_individual_out_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE MQTT TOPIC EMITTER mqtt_successful FROM successful TO mqtt_out TOPIC 'notifications_individual_out_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         CREATE MQTT TOPIC EMITTER mqtt_refused FROM refused
           TO mqtt_out TOPIC 'notifications_individual_out_{{test_id}}'
-          MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+          QOS 0 MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
           INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;

@@ -71,7 +71,7 @@ fn topic_declarations_match_the_subscription_and_producer_transport() {
         assert_eq!(ingest.declared_quiesce(undeclared), None);
     }
     assert_eq!(
-        emit.publishing_modes,
+        emit.publishing_kinds(),
         &[
             EmitterPublishingModeKind::NoAck,
             EmitterPublishingModeKind::BrokerAck

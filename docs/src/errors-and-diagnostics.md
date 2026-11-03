@@ -449,16 +449,18 @@ answers a Model canonical Plexus cannot spell with a fixed diagnostic.
 
 ### Plexus Language And Formatter
 
-MQTT QoS refusals identify the supplied number, its source span, and the levels that the ingestor
-or emitter accepts. An MQTT ingestor `ACK` mode outside a persistent session at QoS 1 or 2 is
-refused with the mode underlined and the session and QoS the statement writes named beside the
-required pairing. A refused `ON QUIESCE SUSPEND` identifies `SUSPEND` and its required
-`SESSION PERSISTENT` pairing at `QOS 1` or `QOS 2`. Completion offers the delivery and quiesce
-modes the written session and QoS keep, so a statement that follows completion reaches neither
-refusal: a clean session or QoS 0 offers `NO ACK` after `MODE`, and `BUFFER` and `DROP` after
-`ON QUIESCE`. A grammar branch those choices close names nothing a statement could write, so a
-diagnostic lists only what the open branches expect, and says `something else` only where none
-names an item.
+MQTT QoS refusals identify the supplied number, its source span, and the levels both sides accept,
+through the one `QOS` clause the two statement families share. An MQTT ingestor `ACK` mode outside a
+persistent session at QoS 1 or 2 is refused with the mode underlined and the session and QoS the
+statement writes named beside the required pairing. An MQTT emitter's mode beside a quality of
+service it does not pair with is refused the same way. A refused `ON QUIESCE SUSPEND` identifies
+`SUSPEND` and its required `SESSION PERSISTENT` pairing at `QOS 1` or `QOS 2`. Completion offers the
+delivery and quiesce modes the written session and QoS keep, so a statement that follows completion
+reaches none of these refusals: a clean session or QoS 0 offers `NO ACK` after an ingestor's `MODE`,
+and `BUFFER` and `DROP` after `ON QUIESCE`, and an emitter's `MODE` offers only the modes its written
+quality of service pairs with. A grammar branch those choices close names nothing a statement could
+write, so a diagnostic lists only what the open branches expect, and says `something else` only where
+none names an item.
 
 The language layer reports rejected source the same way. Lexing and parsing each create the report
 at the stage that failed, and its context names that stage and holds the rejected text with every
@@ -1333,8 +1335,13 @@ initialization failures. They never include a record's values. An ingestor whose
 the option choices its entity declares for it, such as an MQTT `ACK` mode outside a persistent
 session at QoS 1 or 2, is `ConnectorDeclarationIssue::Delivery`, carrying the vocabulary's typed
 `UnmetDeliveryRequirement` that names the entity, the mode, every required choice and the choice the
-statement writes for each option. The grammar refuses the same statement with the same text,
-underlining the mode.
+statement writes for each option. An emitter whose publishing mode lacks the choices its entity
+declares for it, such as an MQTT `NO ACK` beside `QOS 1`, is `ConnectorDeclarationIssue::Publishing`
+with the vocabulary's `UnmetPublishingRequirement`, the same statement of the same facts. The grammar
+refuses either statement with the same text, underlining the mode, and the registry's refusal covers
+what the grammar cannot see, a `SET MODE` against the quality of service the stored emitter keeps.
+The start plan reports the requirement as `EmitterStartPlanError::UnmetPublishing` for a Model that
+reached it without the registry, and so has no plan to give it.
 
 MySQL table-name construction refuses empty path parts and more than two parts with typed
 `ExternalNameError` outcomes. Its offline client check refuses pool-sizing URL parameters through
