@@ -144,7 +144,10 @@ fn source_surface(kind: IngestorEntityKind) -> IngestorSurface {
             options: &[("INSTANCES", false)],
         },
         IngestorEntityKind::Sqs(SqsIngestorEntity::Queue) => IngestorSurface {
-            delivery: &[(IngestDeliveryKind::AckSequential, false)],
+            delivery: &[
+                (IngestDeliveryKind::AckSequential, false),
+                (IngestDeliveryKind::AckParallel, false),
+            ],
             quiesce: SUSPEND,
             locator: Some(("QUEUE", "sqs_queue")),
             options: &[("INSTANCES", false)],
