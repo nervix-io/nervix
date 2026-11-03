@@ -65,7 +65,8 @@ Feature: Domain metrics
       """
       "transaction_id":"txn-1"
       """
-    When these Plexus commands are executed
+    When leadership is transferred to node "<leader>"
+    And these Plexus commands are executed on node "node-1"
       """
       DESCRIBE DOMAIN;
       """
@@ -102,6 +103,7 @@ Feature: Domain metrics
       """
 
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | leader |
+      | 1            | node-1 |
+      | 3            | node-1 |
+      | 3            | node-2 |

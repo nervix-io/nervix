@@ -1,5 +1,6 @@
 //! Repository tooling, outside the product layer order.
-//! Owns: resolved failure contracts, discarded outcomes and Option/Result panic APIs.
+//! Owns: resolved failure contracts, discarded outcomes, Option/Result panic APIs and the
+//! rendering of reports recorded as tracing fields.
 //! Depends on: compiler types, trait obligations and source-local boundary classifications.
 //! Must not know: error-name conventions, product-file exemptions or runtime recovery policy.
 
@@ -23,6 +24,7 @@ declare_tool_lint! { pub nervix::BARE_ERROR_SIGNATURE, Deny, "Nervix failure con
 declare_tool_lint! { pub nervix::DISCARDED_OUTCOME, Deny, "discarded failure outcomes require explicit classification", report_in_external_macro: true }
 declare_tool_lint! { pub nervix::BARE_PANIC, Deny, "Option and Result panic operations require a stated guarantee", report_in_external_macro: true }
 declare_tool_lint! { pub nervix::REPLACED_ERROR, Deny, "informative failures retain their typed cause beneath replacement context", report_in_external_macro: true }
+declare_tool_lint! { pub nervix::PARTIAL_REPORT_FIELD, Deny, "a report recorded as a tracing field renders its whole context chain", report_in_external_macro: true }
 
 #[derive(Clone, Copy)]
 enum Boundary {
@@ -220,6 +222,117 @@ impl ErrorRules {
                 replacement.error_type
             ),
         );
+    }
+
+    /// The authored value a resolved tracing `display` field records, when that value is a
+    /// report. The `%` sigil, and a `display` call written out, record the value's plain
+    /// `Display`, which for a report is its outermost context alone.
+    pub fn displayed_report<'tcx>(
+        &self,
+        cx: &LateContext<'tcx>,
+        expression: &'tcx Expr<'tcx>,
+    ) -> Option<&'tcx Expr<'tcx>> {
+        let ExprKind::Call(function, [value]) = expression.kind else {
+            return None;
+        };
+        let ty::FnDef(definition, arguments) = *cx.typeck_results().expr_ty(function).kind() else {
+            return None;
+        };
+        if !self.tracing_display(cx.tcx, definition) {
+            return None;
+        }
+        let recorded = cx
+            .tcx
+            .instantiate_bound_regions_with_erased(arguments)
+            .type_at(0);
+        if !self.report_value(cx, recorded) {
+            return None;
+        }
+        // The `%` sigil borrows its value inside the tracing macro; the authored value is the one
+        // borrowed.
+        if let ExprKind::AddrOf(_, _, borrowed) = value.kind {
+            return Some(borrowed);
+        }
+        Some(value)
+    }
+
+    /// Where `value`, a tracing field's value, was written. A shorthand field, `%name` or
+    /// `%owner.name`, rebuilds its value from the tokens of its name inside the macro, so that
+    /// expression carries the macro's span while each name token keeps the span it was written
+    /// with.
+    pub fn field_value_span(&self, value: &Expr<'_>) -> Span {
+        if let ExprKind::Field(owner, name) = value.kind {
+            let owner = self.field_value_span(owner);
+            return owner.to(name.span);
+        }
+        if let ExprKind::Path(rustc_hir::QPath::Resolved(None, path)) = value.kind
+            && let Some(first) = path.segments.first()
+            && let Some(last) = path.segments.last()
+        {
+            return first.ident.span.to(last.ident.span);
+        }
+        value.span
+    }
+
+    /// Diagnoses a tracing field that records `value`, a report written at `written`, by its plain
+    /// `Display`.
+    pub fn partial_report_field(
+        &self,
+        cx: &LateContext<'_>,
+        value: &Expr<'_>,
+        written: Span,
+        flow: &mut Flow,
+    ) {
+        flow.diagnostic(
+            cx,
+            value.hir_id,
+            written,
+            PARTIAL_REPORT_FIELD,
+            "this tracing field records a report by its plain Display, which is its outermost \
+             context alone; record the whole chain with %format_args!(\"{error:#}\")"
+                .into(),
+        );
+    }
+
+    /// Whether `definition` is tracing's `display` field constructor, the function the `%` sigil
+    /// names.
+    fn tracing_display(&self, tcx: TyCtxt<'_>, definition: DefId) -> bool {
+        if tcx.crate_name(definition.krate).as_str() != "tracing_core" {
+            return false;
+        }
+        let Some(name) = tcx.opt_item_name(definition) else {
+            return false;
+        };
+        if name.as_str() != "display" {
+            return false;
+        }
+        let Some(module) = tcx.opt_parent(definition) else {
+            return false;
+        };
+        let Some(module_name) = tcx.opt_item_name(module) else {
+            return false;
+        };
+        module_name.as_str() == "field"
+    }
+
+    /// Whether a value of type `value` displays as a report: a report itself, or a borrow, box or
+    /// shared owner whose `Display` delegates to one.
+    fn report_value<'tcx>(&self, cx: &LateContext<'tcx>, value: Ty<'tcx>) -> bool {
+        let value = self.normalize(cx, value).peel_refs();
+        let ty::Adt(adt, arguments) = value.kind() else {
+            return false;
+        };
+        if cx.tcx.crate_name(adt.did().krate).as_str() == "error_stack"
+            && cx.tcx.item_name(adt.did()).as_str() == "Report"
+        {
+            return true;
+        }
+        if cx.tcx.lang_items().owned_box() == Some(adt.did())
+            || self.shared_owner(cx.tcx, adt.did())
+        {
+            return self.report_value(cx, arguments.type_at(0));
+        }
+        false
     }
 
     pub fn new(root: PathBuf) -> Self {

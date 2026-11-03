@@ -57,6 +57,7 @@ pub mod collector_output;
 pub mod dns_authority;
 mod http_readiness;
 mod postgres_clients;
+mod pulsar_auth;
 mod reaper;
 pub mod restartable_rabbitmq;
 
@@ -164,6 +165,19 @@ pub const KAFKA_DOCKER_NETWORK: &str = "kafka_docker_network";
 pub const PULSAR_ADDR: &str = "pulsar_addr";
 pub const PULSAR_TLS_ADDR: &str = "pulsar_tls_addr";
 pub const PULSAR_ADMIN_ADDR: &str = "pulsar_admin_addr";
+/// The TLS port of the Pulsar broker, dialled through a loopback address its certificate does not
+/// name.
+pub const PULSAR_TLS_UNNAMED_ADDR: &str = "pulsar_tls_unnamed_addr";
+/// The plaintext port of the broker that authenticates its clients, which refuses a client without
+/// [`PULSAR_AUTH_TOKEN`].
+pub const PULSAR_AUTH_ADDR: &str = "pulsar_auth_addr";
+/// The TLS port of the broker that authenticates its clients, which refuses a client that presents
+/// no certificate of the scenario certificate authority.
+pub const PULSAR_AUTH_TLS_ADDR: &str = "pulsar_auth_tls_addr";
+/// A token the broker at [`PULSAR_AUTH_ADDR`] accepts.
+pub const PULSAR_AUTH_TOKEN: &str = "pulsar_auth_token";
+/// A well-formed token signed by a key the broker at [`PULSAR_AUTH_ADDR`] does not hold.
+pub const PULSAR_AUTH_FORGED_TOKEN: &str = "pulsar_auth_forged_token";
 pub const RABBITMQ_ADDR: &str = "rabbitmq_addr";
 pub const RABBITMQ_MANAGEMENT_ADDR: &str = "rabbitmq_management_addr";
 pub const RABBITMQ_TLS_ADDR: &str = "rabbitmq_tls_addr";
@@ -316,6 +330,8 @@ pub enum ContainerReadiness {
     Http {
         port: ContainerPort,
         path: &'static str,
+        /// The token a dependency that authenticates its HTTP API takes for this request.
+        bearer_token: Option<&'static str>,
     },
     Running,
 }
@@ -556,6 +572,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                 ContainerReadiness::Http {
                     port: 8080.tcp(),
                     path: namespace_path,
+                    bearer_token: None,
                 },
                 "Pulsar public/default namespace",
                 || {
@@ -593,6 +610,10 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         self.endpoints.insert(
             PULSAR_TLS_ADDR,
             format!("pulsar+ssl://127.0.0.1:{tls_port}"),
+        );
+        self.endpoints.insert(
+            PULSAR_TLS_UNNAMED_ADDR,
+            format!("pulsar+ssl://127.0.0.2:{tls_port}"),
         );
         self.endpoints
             .insert(PULSAR_ADMIN_ADDR, format!("http://127.0.0.1:{admin_port}"));
@@ -2597,12 +2618,16 @@ async fn wait_for_container<I: Image>(
         ContainerReadiness::MappedTcp(port) => {
             wait_for_container_tcp(container, port, dependency).await
         }
-        ContainerReadiness::Http { port, path } => {
+        ContainerReadiness::Http {
+            port,
+            path,
+            bearer_token,
+        } => {
             let host_port = container
                 .get_host_port_ipv4(port)
                 .await
                 .map_err(testcontainers_error(dependency))?;
-            HttpReadiness::new(host_port, path)
+            HttpReadiness::new(host_port, path, bearer_token)
                 .wait(REUSABLE_READY_TIMEOUT)
                 .await
                 .map_err(|error| {

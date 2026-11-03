@@ -421,6 +421,7 @@ tags = [
   "@client_io_03_generation",
   "@remote_ack_owners",
   "@backup_wait",
+  "@client_wire_backup_outage",
   "@stopped_checkpoint_writes",
   "@backup_cut_diagnostics",
   "@backup_parked_wait",
@@ -455,6 +456,8 @@ tags = [
   "@mqtt_emitter_pubcomp_boundary",
   "@mqtt_client_credentials_refused",
   "@pulsar_source_retirement",
+  "@pulsar_ingestor_reconnect",
+  "@pulsar_subscription_conflict",
   "@forced_failover_delivery",
   "@mqtt_parallel_gather_at_quiesce",
   "@sqs_receive_at_quiesce",
@@ -1942,6 +1945,16 @@ scenario = "A bounded native wait recovers the original multi-domain backup afte
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Native-client session recovery of a backup whose session a stopped TCP forwarder ended: reconnect attempts until the forwarder restarts after the client's retry budget has passed, the repeated command under its reference, and the archive download. Existing client, storage and cluster lifecycle locks are tracked; the reconnect backoff, command-retry asynchronous waits and the forwarder's sockets are untracked."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "scenario.client-wire-backup-outage"
+invariant = "A backup whose session is lost keeps reconnecting until its own wait deadline, past the client's retry budget, and completes under its original execution reference with a verified archive on one and three nodes."
+invocation = "scenarios"
+scenario = "A native backup waits through an outage longer than its retry budget on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Client command and pending-reply lifetimes while two delayed domain cuts each stay within their own budget and together exceed the ordinary request budget."
 examples = 2
 feature = "tests/features/cluster/backup_wait.feature"
@@ -2702,6 +2715,16 @@ scenario = "A cluster backup recovers a first-domain lease release refused by a 
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
+coverage = "Under scheduling stress: native-client session recovery of a backup across a TCP forwarder outage longer than its retry budget, the repeated command under its reference, and the archive download. The reconnect backoff, command-retry asynchronous waits and the forwarder's sockets are untracked."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "stress.client-wire-backup-outage"
+invariant = "A backup whose session is lost keeps reconnecting until its own wait deadline, past the client's retry budget, and completes under its original execution reference with a verified archive on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "A native backup waits through an outage longer than its retry budget on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
 coverage = "Under scheduling stress: client command and pending-reply lifetimes while two delayed domain cuts each stay within their own budget and together exceed the ordinary request budget."
 examples = 2
 feature = "tests/features/cluster/backup_wait.feature"
@@ -3092,6 +3115,26 @@ scenario = "An MQTT input moves away from an unavailable endpoint without retain
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "The ingestor loop's failed read, its resume on the declared retry policy and the consumer it opens again, with no driver retry between a lost broker and the host. Broker I/O, TLS and async waits are outside tracked-lock detection."
+examples = 2
+feature = "tests/features/runtime/pulsar_client_authentication.feature"
+id = "scenario.pulsar-ingestor-reconnect"
+invariant = "A Pulsar ingestor that loses its broker reports each failed reconnect to the host, whose backoff grows on its RETRY POLICY, and clears its status once the broker returns, on one and three nodes."
+invocation = "scenarios"
+scenario = "A Pulsar ingestor leaves reconnecting to its declared RETRY POLICY"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: the ingestor loop's failed read, its resume on the declared retry policy and the consumer it opens again, with no driver retry between a lost broker and the host. Broker I/O, TLS and async waits are outside tracked-lock detection."
+examples = 2
+feature = "tests/features/runtime/pulsar_client_authentication.feature"
+id = "stress.pulsar-ingestor-reconnect"
+invariant = "A Pulsar ingestor that loses its broker reports each failed reconnect to the host, whose backoff grows on its RETRY POLICY, and clears its status once the broker returns, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "A Pulsar ingestor leaves reconnecting to its declared RETRY POLICY"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Typed input retirement during domain rebuild after source tasks stop, removing the Pulsar subscription a dropped ingestor owned. Broker I/O, async waits and concurrent registry reads are outside tracked-lock detection."
 examples = 4
 feature = "tests/features/runtime/pulsar_subscriptions.feature"
@@ -3109,6 +3152,26 @@ id = "stress.pulsar-subscription-drop"
 invariant = "DROP while running or stopped retires each locally owned Pulsar input before its typed execution plan is withdrawn, on one and three nodes."
 invocation = "stress-scenarios"
 scenario = "Dropping a Pulsar ingestor removes the subscription it owns"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "An owned EXCLUSIVE Pulsar join the broker refuses at open, on one and three nodes: the source host starts the ingestor with no consumer, publishes the refusal through its tracked status and resume paths, and retries until the other consumer leaves. The connector holds no tracked lock; broker I/O and async waits are outside tracked-lock detection."
+examples = 2
+feature = "tests/features/runtime/pulsar_subscription_types.feature"
+id = "scenario.pulsar-subscription-join-refused"
+invariant = "A join refused because another consumer holds the subscription leaves the ingestor started, reports the refusal as its transient status, and reaches the first resume that the broker admits."
+invocation = "scenarios"
+scenario = "A subscription another consumer holds is the ingestor's transient status until it leaves"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: an owned EXCLUSIVE Pulsar join the broker refuses at open, on one and three nodes, with the source host publishing the refusal through its tracked status and resume paths until the other consumer leaves. The connector holds no tracked lock; broker I/O and async waits are outside tracked-lock detection."
+examples = 2
+feature = "tests/features/runtime/pulsar_subscription_types.feature"
+id = "stress.pulsar-subscription-join-refused"
+invariant = "A join refused because another consumer holds the subscription leaves the ingestor started, reports the refusal as its transient status, and reaches the first resume that the broker admits."
+invocation = "stress-scenarios"
+scenario = "A subscription another consumer holds is the ingestor's transient status until it leaves"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -3385,11 +3448,13 @@ workloads = [
   "scenario.backup-lease-release-recovery",
   "scenario.backup-native-recovery",
   "scenario.backup-multi-domain-wait",
+  "scenario.client-wire-backup-outage",
   "stress.paced.reopen-generation",
   "stress.paced.delayed-refusal",
   "stress.backup-lease-release-recovery",
   "stress.backup-native-recovery",
   "stress.backup-multi-domain-wait",
+  "stress.client-wire-backup-outage",
 ]
 
 [[owner]]
@@ -3957,6 +4022,10 @@ workloads = [
   "stress.pulsar-subscription-replacement",
   "scenario.pulsar-subscription-retention",
   "stress.pulsar-subscription-retention",
+  "scenario.pulsar-ingestor-reconnect",
+  "stress.pulsar-ingestor-reconnect",
+  "scenario.pulsar-subscription-join-refused",
+  "stress.pulsar-subscription-join-refused",
   "scenario.websocket-source-drop",
   "scenario.websocket-source-reconnect",
   "scenario.websocket-source-move",

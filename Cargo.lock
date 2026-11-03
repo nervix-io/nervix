@@ -6935,6 +6935,7 @@ dependencies = [
  "nervix-primitives",
  "nervix-recovery",
  "percent-encoding",
+ "rcgen",
  "reqwest 0.13.5",
  "rustls",
  "rustls-native-certs",
@@ -7288,7 +7289,6 @@ dependencies = [
  "nervix-primitives",
  "nervix-recovery",
  "pulsar",
- "tempfile",
  "thiserror 2.0.21",
  "tokio-util",
  "tracing",
@@ -9820,7 +9820,7 @@ dependencies = [
 [[package]]
 name = "pulsar"
 version = "6.9.0"
-source = "git+https://github.com/nervix-io/pulsar-rs.git?branch=nervix-message-size-ack-receipts#effd94b4d137e85823f103b123727883c53ccaad"
+source = "git+https://github.com/nervix-io/pulsar-rs.git?branch=nervix-rustls-client-config#39fa340c6a5a2c846cae4cc0cba948975997867c"
 dependencies = [
  "async-channel",
  "async-trait",
