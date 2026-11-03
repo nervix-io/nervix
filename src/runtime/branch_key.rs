@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use error_stack::ResultExt as _;
 use nervix_models::SchemaField;
 
@@ -249,6 +251,28 @@ impl BranchKey {
         self.0.json.as_str()
     }
 
+    /// The key's public JSON projection, with fields masked by their declared sensitivity.
+    /// A key with no sensitive fields borrows its canonical text, which remains the identity used
+    /// for routing and storage.
+    pub(crate) fn to_json_string_masking(&self, sensitivity: &VmSchemaSensitivity) -> Cow<'_, str> {
+        if !sensitivity
+            .field_names()
+            .any(|field| self.0.fields.contains_key(field))
+        {
+            return Cow::Borrowed(self.as_str());
+        }
+        let mut object = serde_json::Map::new();
+        for (field, value) in &self.0.fields {
+            let rendered = if sensitivity.is_sensitive(field.as_str()) {
+                serde_json::Value::String("<masked>".to_owned())
+            } else {
+                value.to_json_value()
+            };
+            object.insert(field.as_str().to_owned(), rendered);
+        }
+        Cow::Owned(serde_json::Value::Object(object).to_string())
+    }
+
     /// The non-sensitive identity the control plane names this concrete branch by, computed when
     /// the key was constructed.
     pub(crate) fn fingerprint(&self) -> BranchKeyFingerprint {
@@ -429,6 +453,28 @@ mod tests {
     /// How every diagnostic names the branch keyed by tenant `acme-secret`.
     const SECRET_TENANT_BRANCH: &str =
         "branch 3525112b62a3c2262596c624543a4333a324f9e7bc945c6031936604e166af12";
+
+    #[test]
+    fn materialized_inspection_masks_sensitive_key_values_of_different_types() {
+        let key = BranchKey::from_fields([
+            (
+                named("tenant"),
+                RuntimeValue::String("private-tenant".to_owned()),
+            ),
+            (named("account"), RuntimeValue::U64(42)),
+            (named("zone"), RuntimeValue::String("east".to_owned())),
+        ])
+        .assured("the fixture has named fields and finite values");
+        let sensitivity = VmSchemaSensitivity::from_sensitive_fields(["tenant", "account"]);
+
+        assert_eq!(
+            key.to_json_string_masking(&sensitivity),
+            r#"{"account":"<masked>","tenant":"<masked>","zone":"east"}"#
+        );
+        let plain = key.to_json_string_masking(&VmSchemaSensitivity::default());
+        assert_eq!(plain, key.as_str());
+        assert!(matches!(plain, Cow::Borrowed(_)));
+    }
 
     /// A branch is named by the lowercase hexadecimal fingerprint of its key, the text `DESCRIBE`
     /// prints for the same branch, and never by the key's values, which a branch schema may declare

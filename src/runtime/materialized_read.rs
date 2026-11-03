@@ -1,7 +1,8 @@
 //! Reading an installed materialized dependency from its selected state owner.
 //!
 //! Layer: data plane.
-//! - **Owns.** Resolving local or remote materialized rows and reporting dependency-read failures.
+//! - **Owns.** Resolving local or remote materialized rows, redacting public record reports, and
+//!   reporting dependency-read failures.
 //! - **Depends on.** Prepared materialized plans, runtime row carriers, state placement and exchange.
 //! - **Must not know.** Models, Plexus parsing or archive restore policy.
 
@@ -384,6 +385,7 @@ impl Runtime {
         domain: &DomainName,
         relay: &RelayName,
         unit: Unit,
+        sensitivity: &VmSchemaSensitivity,
     ) -> error_stack::Result<Vec<MaterializedRecordReport>, MaterializedReadError> {
         let routing = self
             .domain_routing(domain)
@@ -418,7 +420,7 @@ impl Runtime {
                 ) {
                     continue;
                 }
-                reports.push(materialized_record_report(&record)?);
+                reports.push(record.report(sensitivity)?);
             }
         }
         if !found {
@@ -454,10 +456,13 @@ impl Runtime {
                 .await?
             {
                 for record in restored.records {
-                    reports.push(materialized_record_report(&MaterializedGenerationRecord {
-                        branch: record.branch,
-                        row: record.row,
-                    })?);
+                    reports.push(
+                        MaterializedGenerationRecord {
+                            branch: record.branch,
+                            row: record.row,
+                        }
+                        .report(sensitivity)?,
+                    );
                 }
             }
         }
@@ -792,6 +797,7 @@ impl Runtime {
         domain: &DomainName,
         relay: &RelayName,
         unit: Unit,
+        sensitivity: &VmSchemaSensitivity,
     ) -> error_stack::Result<Vec<MaterializedRecordReport>, MaterializedReadError> {
         let placement = self
             .state_placement_for_unit(
@@ -824,10 +830,11 @@ impl Runtime {
             .records
             .into_iter()
             .map(|record| {
-                materialized_record_report(&MaterializedGenerationRecord {
+                MaterializedGenerationRecord {
                     branch: record.branch,
                     row: record.row,
-                })
+                }
+                .report(sensitivity)
             })
             .collect::<error_stack::Result<Vec<_>, MaterializedReadError>>()?;
         reports.sort_by(|left, right| BranchKey::canonical_order(&left.branch, &right.branch));
@@ -1298,20 +1305,24 @@ impl Runtime {
     }
 }
 
-/// Render one materialized record for the public relay-state report.
-fn materialized_record_report(
-    record: &MaterializedGenerationRecord,
-) -> error_stack::Result<MaterializedRecordReport, MaterializedReadError> {
-    Ok(MaterializedRecordReport {
-        branch: record.branch.clone(),
-        payload: record.row.to_json_string().change_context(
-            MaterializedReadError::RecordReport {
-                branch: record.branch.clone(),
-            },
-        )?,
-        ingested_at_low_watermark: record.row.metadata().ingested_at_low_watermark(),
-        ingested_at_high_watermark: record.row.metadata().ingested_at_high_watermark(),
-    })
+impl MaterializedGenerationRecord {
+    /// Render this record under the relay schema's sensitivity for public inspection.
+    fn report(
+        &self,
+        sensitivity: &VmSchemaSensitivity,
+    ) -> error_stack::Result<MaterializedRecordReport, MaterializedReadError> {
+        Ok(MaterializedRecordReport {
+            branch: self.branch.clone(),
+            payload: self
+                .row
+                .to_json_string_masking(sensitivity)
+                .change_context(MaterializedReadError::RecordReport {
+                    branch: self.branch.clone(),
+                })?,
+            ingested_at_low_watermark: self.row.metadata().ingested_at_low_watermark(),
+            ingested_at_high_watermark: self.row.metadata().ingested_at_high_watermark(),
+        })
+    }
 }
 
 /// The wait of one branch task for the materialized state its parked messages need.
@@ -1414,6 +1425,43 @@ mod tests {
         runtime_ack::{AckOutcome, AckSet},
         runtime_schema::{RuntimeRecordMetadata, RuntimeValue},
     };
+
+    #[test]
+    fn materialized_inspection_masks_payload_fields_and_preserves_watermarks() {
+        use meticulous::ResultExt as _;
+
+        use crate::runtime_schema::test_runtime_row;
+
+        let low = Timestamp::from_unix_nanos(11);
+        let high = Timestamp::from_unix_nanos(29);
+        let record = MaterializedGenerationRecord {
+            branch: string_branch_key("tenant", "private-tenant"),
+            row: test_runtime_row([
+                ("secret".to_owned(), RuntimeValue::I64(42)),
+                ("seq".to_owned(), RuntimeValue::I64(3)),
+                (
+                    "measurement".to_owned(),
+                    RuntimeValue::F64(ordered_float::OrderedFloat(f64::INFINITY)),
+                ),
+            ])
+            .with_metadata(RuntimeRecordMetadata::from_ingested_at_watermarks(
+                low, high,
+            )),
+        };
+        let sensitivity = VmSchemaSensitivity::from_sensitive_fields(["secret"]);
+
+        let report = record
+            .report(&sensitivity)
+            .assured("the fixture's Arrow columns match its values");
+
+        assert_eq!(report.branch, record.branch);
+        assert_eq!(
+            report.payload,
+            r#"{"measurement":"Infinity","secret":"<masked>","seq":3}"#
+        );
+        assert_eq!(report.ingested_at_low_watermark, low);
+        assert_eq!(report.ingested_at_high_watermark, high);
+    }
 
     #[nervix_primitives::test]
     async fn stored_materialized_reads_open_containers_larger_than_the_bulk_budget() {
