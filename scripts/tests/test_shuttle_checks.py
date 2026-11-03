@@ -642,6 +642,25 @@ class LintTargetTests(unittest.TestCase):
         self.assertEqual(sorted(packages), sorted(inventory.packages()))
         self.assertEqual(len(packages), len(set(packages)))
 
+    def test_the_test_profile_lanes_partition_the_inventory_packages(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        justfile = (root / "justfile").read_text(encoding="utf-8")
+        declared = re.search(r"^shuttle_test_packages := \[(?P<items>[^\]]*)\]$", justfile, re.M)
+        self.assertIsNotNone(declared, "the justfile declares shuttle_test_packages")
+        packages = re.findall(r'"([^"]+)"', declared.group("items"))
+        lanes = re.findall(r"^clippy_shuttle_test_packages_(\d+) := \[(?P<items>[^\]]*)\]$", justfile, re.M | re.S)
+        self.assertGreater(len(lanes), 0, "the justfile declares the Shuttle test-profile lanes")
+        linted = []
+        for number, items in lanes:
+            linted.extend(re.findall(r'"([^"]+)"', items))
+            lane = (
+                f'*(clippy-target "shuttle-tests-{number}" *clippy_shuttle_test_packages_{number} '
+                '["--lib", "--profile", "test", "--features", "shuttle"])'
+            )
+            self.assertIn(lane, justfile)
+        # Each package `test-shuttle` explores is linted in test mode exactly once.
+        self.assertEqual(sorted(linted), sorted(packages))
+
 
 if __name__ == "__main__":
     unittest.main()

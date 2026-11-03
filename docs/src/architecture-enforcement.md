@@ -378,8 +378,10 @@ The sanitizer compiler adapter preserves the source parser's span contract as de
 The [concurrency](data-plane-concurrency.md), [error](errors-and-diagnostics.md) and
 [state](typed-states.md) chapters retain those operational owners.
 
-CI runs the complete gate for every pull request: the `checks` job runs `just validate-ci 4`, which
-runs the source and lint checks four recipes at a time and `just ratchet` after them, through kache.
+CI runs the complete gate for every pull request: the `checks` job's two shards run
+`just validate-ci 4 1/2` and `just validate-ci 4 2/2` on runners of their own, four recipes at a
+time through kache. The second lints the Shuttle and Loom modes and the compiler tooling and runs
+`just ratchet` after its lints, and the first runs every other source and lint check.
 The tooling's own qualification is selected by labels in the `extra-tests` job. A pull request
 labeled `extra-compiler` runs `just coverage-native-extras test-typed-ratchet`, which runs
 `just test-typed-ratchet` with its ordinary part under native coverage and its product doctests and

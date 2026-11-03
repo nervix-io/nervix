@@ -26,7 +26,7 @@ use nervix_primitives::{
     time::{Instant, sleep, timeout},
 };
 use pulsar::{
-    Error as PulsarError, OperationRetryOptions, Pulsar, SubType as PulsarSubType, TokioExecutor,
+    Error as PulsarError, Pulsar, SubType as PulsarSubType, TokioExecutor,
     error::{
         ConnectionError as PulsarConnectionError, ConsumerError as PulsarConsumerError,
         ServiceDiscoveryError as PulsarServiceDiscoveryError,
@@ -46,8 +46,8 @@ use pulsar::{
 use tokio_util::codec::Framed;
 
 use super::{
-    DURABLE_SUBSCRIPTION_EXISTS, PulsarAckReceipts, PulsarRefusal, PulsarServerError,
-    PulsarTopicIngestor, PulsarTopicIngestorError, PulsarTopicIngestorPlan,
+    DURABLE_SUBSCRIPTION_EXISTS, PulsarAckReceipts, PulsarClientConnection, PulsarRefusal,
+    PulsarServerError, PulsarTopicIngestor, PulsarTopicIngestorError, PulsarTopicIngestorPlan,
     PulsarTopicIngestorPosition, PulsarTopicIngestorSettings, PulsarUnresolvedRequest,
 };
 
@@ -569,10 +569,9 @@ async fn plan(
     ownership: PulsarSubscriptionOwnership,
 ) -> PulsarTopicIngestorPlan {
     let client = Pulsar::builder(broker.service_url.clone(), TokioExecutor)
-        .with_operation_retry_options(OperationRetryOptions {
-            operation_timeout: OPERATION_TIMEOUT,
-            ..PulsarTopicIngestorPlan::operation_retries()
-        })
+        .with_operation_retry_options(
+            PulsarClientConnection::new(&[], Some(OPERATION_TIMEOUT)).operation_retries(),
+        )
         .build()
         .await
         .expect("the loopback broker serves the client's handshake");

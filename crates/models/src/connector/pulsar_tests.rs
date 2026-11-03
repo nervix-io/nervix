@@ -279,10 +279,13 @@ fn client_schema_declares_exactly_the_keys_both_directions_read() {
         declared,
         vec![
             "addr",
+            "auth_token",
             "namespace",
             "tls_allow_insecure_connection",
             "tls_ca_file",
+            "tls_cert_file",
             "tls_hostname_verification_enabled",
+            "tls_key_file",
         ]
     );
     let addr = config
@@ -311,6 +314,25 @@ fn client_schema_declares_exactly_the_keys_both_directions_read() {
         trust.value,
         ClientConfigValue::File(ClientConfigFile::CertificateAuthority)
     );
+    let certificate = config
+        .key("tls_cert_file")
+        .assured("the declared key list above names the client certificate");
+    assert_eq!(
+        certificate.value,
+        ClientConfigValue::File(ClientConfigFile::Certificate)
+    );
+    let private_key = config
+        .key("tls_key_file")
+        .assured("the declared key list above names the client certificate's key");
+    assert_eq!(
+        private_key.value,
+        ClientConfigValue::File(ClientConfigFile::PrivateKey)
+    );
+    let token = config
+        .key("auth_token")
+        .assured("the declared key list above names the token");
+    assert_eq!(token.presence, ClientConfigPresence::Optional);
+    assert_eq!(token.value, ClientConfigValue::String);
     for flag in [
         "tls_allow_insecure_connection",
         "tls_hostname_verification_enabled",
@@ -323,7 +345,9 @@ fn client_schema_declares_exactly_the_keys_both_directions_read() {
     for tls in [
         "tls_allow_insecure_connection",
         "tls_ca_file",
+        "tls_cert_file",
         "tls_hostname_verification_enabled",
+        "tls_key_file",
     ] {
         let key = config
             .key(tls)
@@ -339,7 +363,12 @@ fn client_schema_declares_exactly_the_keys_both_directions_read() {
     }
     for key in config.keys() {
         assert_eq!(key.owner, ClientConfigOwner::Nervix);
-        assert!(!key.confidential, "{} is not a secret", key.name);
+        assert_eq!(
+            key.confidential,
+            key.name == "auth_token",
+            "only the token is a secret, not {}",
+            key.name
+        );
     }
     assert_eq!(config.ownership_label(), "Nervix");
     assert!(config.namespaces().is_empty());
@@ -351,10 +380,13 @@ fn client_schema_accepts_every_declared_key_on_a_tls_address() {
     client_schema()
         .validate(&[
             config_entry("addr", "pulsar+ssl://broker.example.com:6651"),
+            config_entry("auth_token", "issued-token"),
             config_entry("namespace", "tenant-a/orders"),
             config_entry("tls_allow_insecure_connection", "false"),
             config_entry("tls_ca_file", "trust.pem"),
+            config_entry("tls_cert_file", "client.pem"),
             config_entry("tls_hostname_verification_enabled", "true"),
+            config_entry("tls_key_file", "client-key.pem"),
         ])
         .assured(
             "every declared Pulsar key with a valid value is accepted before mount resolution",
@@ -383,6 +415,65 @@ fn tls_keys_require_a_tls_address(#[case] key: &str, #[case] value: &str) {
             } if *refused == key
         ),
         "{key} is refused for its plaintext address: {refusal:?}"
+    );
+}
+
+#[test]
+fn a_client_certificate_requires_a_tls_address() {
+    let refusal = client_schema()
+        .validate(&[
+            config_entry("addr", "pulsar://broker.example.com:6650"),
+            config_entry("tls_cert_file", "client.pem"),
+            config_entry("tls_key_file", "client-key.pem"),
+        ])
+        .expect_err("a plaintext Pulsar connection presents no client certificate");
+
+    assert!(
+        matches!(
+            refusal.current_context(),
+            ClientConfigSchemaError::RequiresScheme {
+                address: "addr",
+                scheme: "pulsar+ssl",
+                ..
+            }
+        ),
+        "a client certificate is refused for its plaintext address: {refusal:?}"
+    );
+}
+
+#[rstest]
+#[case("tls_cert_file", "tls_key_file")]
+#[case("tls_key_file", "tls_cert_file")]
+fn half_a_client_certificate_is_refused(#[case] present: &str, #[case] missing: &str) {
+    let refusal = client_schema()
+        .validate(&[
+            config_entry("addr", "pulsar+ssl://broker.example.com:6651"),
+            config_entry(present, "identity.pem"),
+        ])
+        .expect_err("a client certificate and its key are a pair");
+
+    assert!(
+        matches!(
+            refusal.current_context(),
+            ClientConfigSchemaError::RequiresKey { key, required }
+                if *key == present && *required == missing
+        ),
+        "{present} is refused without {missing}: {refusal:?}"
+    );
+}
+
+#[test]
+fn inspection_redacts_the_token() {
+    let entries = [
+        config_entry("addr", "pulsar://broker.example.com:6650"),
+        config_entry("auth_token", "issued-token"),
+    ];
+
+    let inspected = client_schema().inspection_entries(&entries);
+
+    assert_eq!(
+        inspected[1],
+        config_entry("auth_token", crate::CLIENT_CONFIG_REDACTION)
     );
 }
 
@@ -457,8 +548,8 @@ fn a_namespace_that_cannot_qualify_a_topic_is_refused(#[case] namespace: &str) {
 }
 
 #[rstest]
-#[case("tls_cert_file")]
-#[case("auth_token")]
+#[case("auth_params")]
+#[case("tls_trust_certs_file_path")]
 #[case("namespcae")]
 fn client_schema_refuses_an_undeclared_key(#[case] key: &str) {
     let refusal = client_schema()

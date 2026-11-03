@@ -271,4 +271,4 @@ Client types that currently support TLS-oriented configuration through mounted r
 
 A `ZEROMQ` client has no TLS: its driver offers plain `tcp://` and `ipc://` transports and no ZMTP security mechanism. Its `CONFIG` values are still rendered over its `MOUNT`, for its ingestors and its emitters alike.
 
-Pulsar currently supports mounted `tls_ca_file` server trust configuration, but not mounted client certificate authentication.
+A `PULSAR` client mounts `tls_ca_file`, `tls_cert_file` and `tls_key_file` on a `pulsar+ssl://...` address, for its ingestors and its emitters alike.

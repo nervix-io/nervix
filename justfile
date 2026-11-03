@@ -2460,87 +2460,77 @@ autoinherit-check:
     cargo autoinherit
     git diff --exit-code
 
-# Each package/configuration is a separate parallel dependency. The one Cargo recipe below
-# hashes its package, arguments and toolchain into one of four shared build directories, and
-# `just --jobs N` bounds it.
-clippy_all_features_packages := [
-    "nervix-approx-into",
+# Clippy runs in lanes. A lane holds the configurations that can reuse one another's build artifacts:
+# one execution mode, one target and toolchain, and packages that share most of their dependency
+# graph. It lints them one after another in a build directory of its own, so each finds fresh what
+# the configurations before it compiled alike, and none waits for another lane's Cargo lock or holds
+# a `--jobs` slot while it waits. Lanes run in parallel, as many at once as `--jobs` allows, so the
+# longest lane bounds a run. A family too large for one lane splits into numbered sublanes of at most
+# eight configurations, closer packages together, trading the reuse between sublanes for parallelism.
+clippy_build_directory(lane) := cargo_target_dir / "clippy" / lane
+
+# The packages linted with every feature, by lane: the Plexus language and its clients, the
+# libraries and engines below them, and the cluster's network stack.
+clippy_language_packages_1 := ["nervix-plexus", "nervix-plexus-format", "nervix-roto", "nervix-vm", "nervix-web-console"]
+
+clippy_language_packages_2 := ["nervix-benchmark", "nervix-cli", "nervix-client-ffi", "nervix-client-host", "nervix-client-python"]
+
+clippy_foundation_packages_1 := ["nervix-approx-into", "nervix-bounded-write", "nervix-dataflow-graph", "nervix-expiry-map", "nervix-primitives-macros", "nervix-recovery"]
+
+clippy_foundation_packages_2 := [
     "nervix-arbitrary",
     "nervix-backup",
-    "nervix-benchmark",
-    "nervix-bounded-write",
     "nervix-branch-instances",
     "nervix-checkpoint-replication",
-    "nervix-cli",
-    "nervix-client-ffi",
-    "nervix-client-host",
-    "nervix-client-python",
     "nervix-client-wire",
     "nervix-columnar-json",
-    "nervix-dataflow-graph",
-    "nervix-dns",
-    "nervix-expiry-map",
     "nervix-jaq",
     "nervix-models",
-    "nervix-plexus",
-    "nervix-plexus-format",
-    "nervix-primitives-macros",
-    "nervix-recovery",
-    "nervix-roto",
-    "nervix-simd-kernels",
-    "nervix-test-environment",
-    "nervix-vm",
-    "nervix-wasm-protocol",
-    "nervix-wasm-sdk",
-    "nervix-web-console",
 ]
 
-clippy_connector_packages := [
-    "nervix-connector",
-    "nervix-connector-clickhouse",
-    "nervix-connector-http",
-    "nervix-connector-iceberg",
-    "nervix-connector-kafka",
-    "nervix-connector-mongodb",
-    "nervix-connector-mqtt",
-    "nervix-connector-mysql",
-    "nervix-connector-nats",
-    "nervix-connector-otel",
-    "nervix-connector-postgres",
-    "nervix-connector-prometheus",
+clippy_foundation_packages_3 := ["nervix-simd-kernels", "nervix-wasm-protocol", "nervix-wasm-sdk"]
+
+clippy_cluster_packages := ["nervix-dns", "nervix-test-environment"]
+
+# The connector packages, by lane: the contract and the HTTP services, the databases, the message
+# brokers, and the streams and stores of messages.
+clippy_service_connector_packages_1 := ["nervix-connector", "nervix-connector-http", "nervix-connector-otel", "nervix-connector-prometheus", "nervix-connector-sentry"]
+
+clippy_service_connector_packages_2 := ["nervix-connector-clickhouse", "nervix-connector-iceberg", "nervix-connector-mongodb", "nervix-connector-mysql", "nervix-connector-postgres"]
+
+clippy_messaging_connector_packages_1 := ["nervix-connector-kafka", "nervix-connector-mqtt", "nervix-connector-nats", "nervix-connector-pulsar", "nervix-connector-rabbitmq"]
+
+clippy_messaging_connector_packages_2 := ["nervix-connector-redis", "nervix-connector-sqs", "nervix-connector-syslog", "nervix-connector-websockets", "nervix-connector-zeromq"]
+
+# The libraries linted under the Shuttle mode, by lane: the connectors, and the runtime below them.
+clippy_shuttle_connector_packages_1 := ["nervix-connector-fake", "nervix-connector", "nervix-connector-http", "nervix-connector-otel", "nervix-connector-sentry", "nervix-connector-clickhouse"]
+
+clippy_shuttle_connector_packages_2 := ["nervix-connector-iceberg", "nervix-connector-mongodb", "nervix-connector-mysql", "nervix-connector-postgres", "nervix-connector-mqtt", "nervix-connector-nats"]
+
+clippy_shuttle_connector_packages_3 := [
     "nervix-connector-pulsar",
     "nervix-connector-rabbitmq",
     "nervix-connector-redis",
-    "nervix-connector-sentry",
     "nervix-connector-sqs",
     "nervix-connector-syslog",
+    "nervix-connector-zeromq",
     "nervix-connector-websockets",
-    "nervix-connector-zeromq",
 ]
 
-clippy_shuttle_packages := [
-    "nervix-connector-fake",
-    "nervix-client-core",
+clippy_shuttle_runtime_packages := ["nervix-client-core", "nervix-execution", "nervix-interconnect", "nervix-wasm"]
+
+# Every package `test-shuttle` explores, in two lanes: the runtime and server, and the connectors.
+# scripts/tests/test_shuttle_checks.py holds the two to an exact partition of shuttle_test_packages.
+clippy_shuttle_test_packages_1 := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-consensus", "nervix-server", "nervix-deadlock"]
+
+clippy_shuttle_test_packages_2 := [
     "nervix-connector",
-    "nervix-connector-clickhouse",
-    "nervix-connector-http",
-    "nervix-connector-iceberg",
-    "nervix-connector-mongodb",
+    "nervix-connector-kafka",
     "nervix-connector-mqtt",
-    "nervix-connector-mysql",
-    "nervix-connector-nats",
-    "nervix-connector-otel",
-    "nervix-connector-postgres",
-    "nervix-connector-pulsar",
     "nervix-connector-rabbitmq",
     "nervix-connector-redis",
-    "nervix-connector-sentry",
     "nervix-connector-sqs",
     "nervix-connector-syslog",
-    "nervix-connector-zeromq",
-    "nervix-execution",
-    "nervix-interconnect",
-    "nervix-wasm",
     "nervix-connector-websockets",
 ]
 
@@ -2549,91 +2539,162 @@ clippy-targets: ordinary-clippy-targets shuttle-clippy-targets turmoil-clippy-ta
 
 [private, parallel]
 ordinary-clippy-targets: \
-    *(clippy-target *clippy_all_features_packages ["--all-features", "--all-targets"]) \
-    *(clippy-target *clippy_connector_packages ["--all-targets"]) \
-    *(clippy-target *["nervix-execution", "nervix-interconnect", "nervix-model-harness", "nervix-wasm", "nervix-connector-fake"] ["--all-targets"]) \
-    (clippy-target "nervix-server" ["--all-targets", "--package", "nervix-scenarios", "--features", "benchmarks testing"]) \
-    (clippy-target "nervix-client-core" ["--all-targets", "--features", "autocomplete"]) \
-    (clippy-target "nervix-paced-simulation" ["--all-targets"]) \
-    (clippy-target "nervix-consensus" ["--all-targets", "--features", "testing"]) \
-    (clippy-target "nervix-primitives" ["--all-targets", "--features", "native"]) \
-    (clippy-target "nervix-primitives" ["--all-targets", "--features", "native test-util"]) \
-    (clippy-target "nervix-deadlock" ["--all-targets", "--features", "report-tool"]) \
-    *(clippy-target *["nervix-cli", "nervix-server", "nervix-plexus-format", "nervix-web-console"] ["--all-targets"]) \
-    (clippy-target "nervix-client-wire" ["--target", "wasm32-unknown-unknown"])
+    clippy-lane-ordinary-server \
+    clippy-lane-ordinary-foundation-1 \
+    clippy-lane-ordinary-foundation-2 \
+    clippy-lane-ordinary-foundation-3 \
+    clippy-lane-ordinary-language-1 \
+    clippy-lane-ordinary-language-2 \
+    clippy-lane-ordinary-service-connectors-1 \
+    clippy-lane-ordinary-service-connectors-2 \
+    clippy-lane-ordinary-messaging-connectors-1 \
+    clippy-lane-ordinary-messaging-connectors-2 \
+    clippy-lane-wasm32
+
+# The server's lane starts with the cluster's network stack, every package of which it compiles.
+[private]
+clippy-lane-ordinary-server: \
+    *(clippy-target "ordinary-server" *clippy_cluster_packages ["--all-features", "--all-targets"]) \
+    (clippy-target "ordinary-server" "nervix-interconnect" ["--all-targets"]) \
+    (clippy-target "ordinary-server" "nervix-consensus" ["--all-targets", "--features", "testing"]) \
+    (clippy-target "ordinary-server" "nervix-server" ["--all-targets"]) \
+    (clippy-target "ordinary-server" "nervix-server" ["--all-targets", "--package", "nervix-scenarios", "--features", "benchmarks testing"])
+
+[private]
+clippy-lane-ordinary-foundation-1: \
+    (clippy-target "ordinary-foundation-1" "nervix-primitives" ["--all-targets", "--features", "native"]) \
+    (clippy-target "ordinary-foundation-1" "nervix-primitives" ["--all-targets", "--features", "native test-util"]) \
+    *(clippy-target "ordinary-foundation-1" *clippy_foundation_packages_1 ["--all-features", "--all-targets"])
+
+[private]
+clippy-lane-ordinary-foundation-2: *(clippy-target "ordinary-foundation-2" *clippy_foundation_packages_2 ["--all-features", "--all-targets"])
+
+[private]
+clippy-lane-ordinary-foundation-3: \
+    *(clippy-target "ordinary-foundation-3" *clippy_foundation_packages_3 ["--all-features", "--all-targets"]) \
+    *(clippy-target "ordinary-foundation-3" *["nervix-execution", "nervix-model-harness", "nervix-wasm"] ["--all-targets"]) \
+    (clippy-target "ordinary-foundation-3" "nervix-deadlock" ["--all-targets", "--features", "report-tool"])
+
+[private]
+clippy-lane-ordinary-language-1: \
+    *(clippy-target "ordinary-language-1" *clippy_language_packages_1 ["--all-features", "--all-targets"]) \
+    *(clippy-target "ordinary-language-1" *["nervix-plexus-format", "nervix-web-console"] ["--all-targets"])
+
+[private]
+clippy-lane-ordinary-language-2: \
+    *(clippy-target "ordinary-language-2" *clippy_language_packages_2 ["--all-features", "--all-targets"]) \
+    (clippy-target "ordinary-language-2" "nervix-client-core" ["--all-targets", "--features", "autocomplete"]) \
+    (clippy-target "ordinary-language-2" "nervix-paced-simulation" ["--all-targets"]) \
+    (clippy-target "ordinary-language-2" "nervix-cli" ["--all-targets"])
+
+[private]
+clippy-lane-ordinary-service-connectors-1: \
+    *(clippy-target "ordinary-service-connectors-1" *clippy_service_connector_packages_1 ["--all-targets"]) \
+    (clippy-target "ordinary-service-connectors-1" "nervix-connector-fake" ["--all-targets"])
+
+[private]
+clippy-lane-ordinary-service-connectors-2: *(clippy-target "ordinary-service-connectors-2" *clippy_service_connector_packages_2 ["--all-targets"])
+
+[private]
+clippy-lane-ordinary-messaging-connectors-1: *(clippy-target "ordinary-messaging-connectors-1" *clippy_messaging_connector_packages_1 ["--all-targets"])
+
+[private]
+clippy-lane-ordinary-messaging-connectors-2: *(clippy-target "ordinary-messaging-connectors-2" *clippy_messaging_connector_packages_2 ["--all-targets"])
+
+[private]
+clippy-lane-wasm32: (clippy-target "wasm32" "nervix-client-wire" ["--target", "wasm32-unknown-unknown"])
 
 # Lint every Shuttle build: each library under the mode, the primitive boundary, and each
 # package `test-shuttle` explores in test mode. The full validation matrix runs the same targets.
 cargo-clippy-shuttle jobs=default_jobs: (run-with-jobs "shuttle-clippy-targets" jobs)
 
+[private, parallel]
+shuttle-clippy-targets: \
+    clippy-lane-shuttle-tests-1 \
+    clippy-lane-shuttle-tests-2 \
+    clippy-lane-shuttle-connectors-1 \
+    clippy-lane-shuttle-connectors-2 \
+    clippy-lane-shuttle-connectors-3 \
+    clippy-lane-shuttle-runtime \
+    clippy-lane-shuttle-server
+
 # The `--profile test` targets lint each package `test-shuttle` explores as the runner builds it,
 # with its checks compiled. The library targets never compile them, so a warning in a check would
 # otherwise pass validation and the Shuttle job alike.
-[private, parallel]
-shuttle-clippy-targets: \
-    *(clippy-target *clippy_shuttle_packages ["--lib", "--features", "shuttle"]) \
-    *(clippy-target *["nervix-connector-kafka", "nervix-consensus", "nervix-server"] ["--lib", "--features", "shuttle testing"]) \
-    *(clippy-target *["nervix-connector-prometheus"] ["--lib", "--features", "nervix-connector/shuttle nervix-primitives/shuttle"]) \
-    (clippy-target "nervix-primitives" ["--all-targets", "--features", "shuttle native"]) \
-    *(clippy-target *shuttle_test_packages ["--lib", "--profile", "test", "--features", "shuttle"])
+[private]
+clippy-lane-shuttle-tests-1: *(clippy-target "shuttle-tests-1" *clippy_shuttle_test_packages_1 ["--lib", "--profile", "test", "--features", "shuttle"])
 
-[private, parallel]
+[private]
+clippy-lane-shuttle-tests-2: *(clippy-target "shuttle-tests-2" *clippy_shuttle_test_packages_2 ["--lib", "--profile", "test", "--features", "shuttle"])
+
+[private]
+clippy-lane-shuttle-connectors-1: \
+    *(clippy-target "shuttle-connectors-1" *clippy_shuttle_connector_packages_1 ["--lib", "--features", "shuttle"]) \
+    (clippy-target "shuttle-connectors-1" "nervix-connector-prometheus" ["--lib", "--features", "nervix-connector/shuttle nervix-primitives/shuttle"])
+
+[private]
+clippy-lane-shuttle-connectors-2: *(clippy-target "shuttle-connectors-2" *clippy_shuttle_connector_packages_2 ["--lib", "--features", "shuttle"])
+
+[private]
+clippy-lane-shuttle-connectors-3: *(clippy-target "shuttle-connectors-3" *clippy_shuttle_connector_packages_3 ["--lib", "--features", "shuttle"])
+
+[private]
+clippy-lane-shuttle-runtime: \
+    (clippy-target "shuttle-runtime" "nervix-primitives" ["--all-targets", "--features", "shuttle native"]) \
+    *(clippy-target "shuttle-runtime" *clippy_shuttle_runtime_packages ["--lib", "--features", "shuttle"])
+
+# Testing changes every package that forwards it, so these share their lane with one another only.
+[private]
+clippy-lane-shuttle-server: *(clippy-target "shuttle-server" *["nervix-connector-kafka", "nervix-consensus", "nervix-server"] ["--lib", "--features", "shuttle testing"])
+
+[private]
 turmoil-clippy-targets: \
-    *(clippy-target *["nervix-execution", "nervix-interconnect"] ["--all-targets", "--features", "turmoil"]) \
-    (clippy-target "nervix-primitives" ["--all-targets", "--features", "turmoil native"])
+    (clippy-target "turmoil" "nervix-primitives" ["--all-targets", "--features", "turmoil native"]) \
+    *(clippy-target "turmoil" *["nervix-execution", "nervix-interconnect"] ["--all-targets", "--features", "turmoil"])
 
 # Lint the Loom models and harness, the primitive boundary, and each library as it ships and
-# in test mode. The same parallel dependencies run in the full validation matrix.
+# in test mode. The same lanes run in the full validation matrix.
 cargo-clippy-loom jobs=default_jobs: (run-with-jobs "loom-clippy-targets" jobs)
 
 [private, parallel]
-loom-clippy-targets: \
-    *(clippy-target *["nervix-execution", "nervix-model-harness", "nervix-interconnect", "nervix-connector-fake"] ["--all-targets", "--features", "loom"]) \
-    (clippy-target "nervix-primitives" ["--all-targets", "--features", "loom native"]) \
-    *(clippy-target *["nervix-consensus", "nervix-server"] ["--lib", "--features", "loom"]) \
-    (clippy-target "nervix-server" ["--lib", "--profile", "test", "--features", "loom"]) \
-    (clippy-target "nervix-consensus" ["--lib", "--profile", "test", "--features", "loom testing"])
+loom-clippy-targets: clippy-lane-loom-1 clippy-lane-loom-2
+
+[private]
+clippy-lane-loom-1: \
+    (clippy-target "loom-1" "nervix-primitives" ["--all-targets", "--features", "loom native"]) \
+    *(clippy-target "loom-1" *["nervix-execution", "nervix-model-harness", "nervix-interconnect", "nervix-connector-fake"] ["--all-targets", "--features", "loom"])
+
+[private]
+clippy-lane-loom-2: \
+    *(clippy-target "loom-2" *["nervix-consensus", "nervix-server"] ["--lib", "--features", "loom"]) \
+    (clippy-target "loom-2" "nervix-server" ["--lib", "--profile", "test", "--features", "loom"]) \
+    (clippy-target "loom-2" "nervix-consensus" ["--lib", "--profile", "test", "--features", "loom testing"])
 
 # Lint the diagnostic mode: the tracked locks and the detector, the deadlock diagnostics with their
-# probes, and the server as a diagnostic node, alone and with its tests and scenario binary.
+# probes, and the server as a diagnostic node, alone and with its tests and scenario binary. Each
+# selection forwards a feature of its own through every package, so each is a lane.
 cargo-clippy-deloxide jobs=default_jobs: (run-with-jobs "deloxide-clippy-targets" jobs)
 
 [private, parallel]
-deloxide-clippy-targets: \
-    (clippy-target "nervix-primitives" ["--all-targets", "--features", "deloxide native"]) \
-    (clippy-target "nervix-deadlock" ["--all-targets", "--features", "deloxide"]) \
-    (clippy-target "nervix-paced-simulation" ["--all-targets", "--features", "deloxide"]) \
-    (clippy-target "nervix-server" ["--lib", "--bins", "--features", "deloxide"]) \
-    (clippy-target "nervix-server" ["--all-targets", "--package", "nervix-scenarios", "--features", "deloxide testing"]) \
-    (clippy-target "nervix-primitives" ["--all-targets", "--features", "deloxide-order native"]) \
-    (clippy-target "nervix-deadlock" ["--all-targets", "--features", "deloxide-order"]) \
-    (clippy-target "nervix-paced-simulation" ["--all-targets", "--features", "deloxide-order"]) \
-    (clippy-target "nervix-server" ["--lib", "--bins", "--features", "deloxide-order"]) \
-    (clippy-target "nervix-server" ["--all-targets", "--package", "nervix-scenarios", "--features", "deloxide-order testing"]) \
-    (clippy-target "nervix-primitives" ["--all-targets", "--features", "deloxide-stress native"]) \
-    (clippy-target "nervix-deadlock" ["--all-targets", "--features", "deloxide-stress"]) \
-    (clippy-target "nervix-paced-simulation" ["--all-targets", "--features", "deloxide-stress"]) \
-    (clippy-target "nervix-server" ["--lib", "--bins", "--features", "deloxide-stress"]) \
-    (clippy-target "nervix-server" ["--all-targets", "--package", "nervix-scenarios", "--features", "deloxide-stress testing"])
+deloxide-clippy-targets: (clippy-lane-deloxide "deloxide") (clippy-lane-deloxide "deloxide-order") (clippy-lane-deloxide "deloxide-stress")
 
-# Clippy configurations share sixteen build directories, so a dependency one configuration compiled
-# is fresh for the others in its directory that compile it alike, while Cargo's lock on a directory
-# lets up to sixteen configurations build at once; `--jobs` bounds how many do. With four
-# directories, the four builds holding their locks left a 16-CPU runner's other cores idle. Cargo
-# keeps the artifacts of different features, profiles, targets and flags, and of the stable and
-# nightly compilers, apart there. The last hexadecimal digit of the SHA-256 of the package, Cargo
-# arguments and toolchain selects the directory, so a configuration returns to the one that holds
-# its artifacts.
-clippy_build_directory(package, args, toolchain) := cargo_target_dir / "clippy" / replace_regex(sha256(show([package, args, toolchain])), '^.*(.)$', '$1')
-
-# The shared Clippy command accepts one package and its Cargo arguments. Configurations that share
-# a build directory take turns on its lock. Keep kache configured.
 [private]
-clippy-target package args toolchain="":
-    CARGO_TARGET_DIR={{ quote(clippy_build_directory(package, args, toolchain)) }} RUSTFLAGS={{ quote("-Dwarnings " + rustflags) }} cargo {{ if toolchain == "" { "" } else { quote("+" + toolchain) } }} clippy --package {{ quote(package) }} {{ quote(args) }} -q
+clippy-lane-deloxide selection: \
+    (clippy-target selection "nervix-primitives" ["--all-targets", "--features", selection + " native"]) \
+    (clippy-target selection "nervix-deadlock" ["--all-targets", "--features", selection]) \
+    (clippy-target selection "nervix-paced-simulation" ["--all-targets", "--features", selection]) \
+    (clippy-target selection "nervix-server" ["--lib", "--bins", "--features", selection]) \
+    (clippy-target selection "nervix-server" ["--all-targets", "--package", "nervix-scenarios", "--features", selection + " testing"])
 
-# Lint one package and all of its targets; extra arguments retain their boundaries.
-cargo-clippy-package package *args: (clippy-target package ["--all-targets", args])
+# The shared Clippy command lints one package and its Cargo arguments in its lane's build
+# directory. Keep kache configured.
+[private]
+clippy-target lane package args toolchain="":
+    CARGO_TARGET_DIR={{ quote(clippy_build_directory(lane)) }} RUSTFLAGS={{ quote("-Dwarnings " + rustflags) }} cargo {{ if toolchain == "" { "" } else { quote("+" + toolchain) } }} clippy --package {{ quote(package) }} {{ quote(args) }} -q
+
+# Lint one package and all of its targets; extra arguments retain their boundaries. Focused checks
+# share one directory of their own, so a package checked again, or one beside it, reuses its build.
+cargo-clippy-package package *args: (clippy-target "package" package ["--all-targets", args])
 
 # Lint every product Clippy target, with four concurrent processes by default.
 cargo-clippy jobs=default_jobs: (run-with-jobs "clippy-targets" jobs)
@@ -2769,8 +2830,9 @@ lint-typed-ratchet jobs=default_jobs: (run-with-jobs "typed-ratchet-clippy-targe
 [private]
 typed-ratchet-clippy-targets: typed-ratchet-clippy-packages
 
-[private, parallel]
-typed-ratchet-clippy-packages: *(clippy-target *["nervix-lint-driver", "nervix-lint-report"] ["--manifest-path", "tools/nervix-lint/Cargo.toml", "--all-targets"] "nightly-2026-09-17")
+# The compiler tooling is a workspace of its own on the analysis nightly, so it is a lane of its own.
+[private]
+typed-ratchet-clippy-packages: *(clippy-target "typed-ratchet" *["nervix-lint-driver", "nervix-lint-report"] ["--manifest-path", "tools/nervix-lint/Cargo.toml", "--all-targets"] "nightly-2026-09-17")
 
 coverage-typed-ratchet-python: typed-ratchet-source-build install-cargo-crap test-typed-ratchet-compiler test-typed-ratchet-modeled
     #!/usr/bin/env bash
@@ -2889,13 +2951,46 @@ validate-dns-dependencies:
 # `validate-deloxide-applicability`, which reads its gate: its analyses admit themselves against the
 # host's memory as if nothing else ran, and beside the lints the kernel killed its server analysis
 # for memory (Check 41066649586).
-validate-ci jobs=default_jobs: (run-with-jobs "validate-ci-targets" jobs)
+#
+# `shard`, `1/2` or `2/2`, runs one of the two parts the checks job's matrix divides them into, on a
+# runner of its own; without it every check runs. The first part checks formatting, the ordinary,
+# Turmoil and Deloxide lints and the source, dependency and documentation validations. The second
+# lints the Shuttle and Loom modes and the compiler tooling, builds the ratchet's tools and runs the
+# ratchet once its own lints have finished. Together the two parts are every check.
+validate-ci jobs=default_jobs shard="": (run-with-jobs validate_ci_recipe(shard) jobs)
+
+validate_ci_recipe(shard) := if shard == "" { "validate-ci-targets" } else if shard == "1/2" { "validate-ci-shard-1" } else if shard == "2/2" { "validate-ci-shard-2" } else { error("validate-ci takes shard 1/2 or 2/2, or none for every check, not " + shard) }
 
 [private]
 validate-ci-targets: validate-ci-checks validate-deloxide-applicability
 
 [private, parallel]
-validate-ci-checks: fmt-check lint-targets validate-skill validate-plexus-docs validate-connector-capabilities validate-connector-matrix validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies test-go-ci-tool typed-ratchet-build typed-ratchet-source-build install-cargo-crap
+validate-ci-checks: validate-ci-shard-1-checks validate-ci-shard-2-checks
+
+[private]
+validate-ci-shard-1: validate-ci-shard-1-checks
+
+[private]
+validate-ci-shard-2: validate-ci-shard-2-checks validate-deloxide-applicability
+
+[private, parallel]
+validate-ci-shard-1-checks: fmt-check validate-ci-shard-1-lints validate-skill validate-plexus-docs validate-connector-capabilities validate-connector-matrix validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies test-go-ci-tool
+
+[private, parallel]
+validate-ci-shard-2-checks: validate-ci-shard-2-lints typed-ratchet-build typed-ratchet-source-build install-cargo-crap
+
+# Each part's lints build the browser console first, which the server and its clients embed.
+[private]
+validate-ci-shard-1-lints: build-web-console validate-ci-shard-1-lanes
+
+[private, parallel]
+validate-ci-shard-1-lanes: ordinary-clippy-targets turmoil-clippy-targets deloxide-clippy-targets
+
+[private]
+validate-ci-shard-2-lints: build-web-console validate-ci-shard-2-lanes
+
+[private, parallel]
+validate-ci-shard-2-lanes: shuttle-clippy-targets loom-clippy-targets typed-ratchet-clippy-targets
 
 # Hold every governed primitive to nervix-primitives and every mode feature to its owner. The check
 # rejects a direct, renamed, grouped, qualified, glob, alias or macro path to another backend's
@@ -3908,7 +4003,7 @@ docker-build-linux image_target llvm_version tag platform push cache_from cache_
         --target {{ quote(image_target) }} \
         --progress=plain \
         --platform "${normalized_platform}" \
-        --build-arg "KACHE_VERSION=${KACHE_VERSION:-1.2.2}" \
+        --build-arg "KACHE_VERSION=${KACHE_VERSION:-2.0.0}" \
         --build-arg RUST_VERSION={{ rust_toolchain_version }} \
         --build-arg LLVM_VERSION={{ quote(llvm_version) }} \
         --build-arg "KACHE_S3_BUCKET=${KACHE_S3_BUCKET}" \
