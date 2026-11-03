@@ -365,7 +365,10 @@ reset. A genuine reset failure arrives as `RequestFailed` and follows the failur
   already include an append whose outcome has not arrived; the client MUST keep that preview under
   the position the report names and use it once the append's outcome reports that position, rather
   than discard it. It MUST NOT refresh that preview from a `PreviewStale` reply, from an inspection
-  of another transaction, or from an inspection at an older position.
+  of another transaction, or from an inspection at an older position. The planning basis includes
+  the committed cluster-parameter record and revision, so a publication can invalidate a reviewed
+  preview even when its queued Models still fit the limits. A client MUST NOT replace that
+  reviewed identity from an informational parameter-change notice.
 - **X-5.** While a commit is `COMMITTING`, a client MUST keep waiting for the commit's own outcome,
   repeating the commit under its reference after any interruption.
 - **X-6.** On `TransactionDetached`, a client MUST send `AttachTransactionRequest` for the

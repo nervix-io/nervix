@@ -321,12 +321,37 @@ impl Registry {
         self.commit_planned(planned)
     }
 
+    #[cfg(test)]
     pub(crate) fn plan_mutations(
         &self,
         domain: &DomainName,
         mutations: &[RegistryMutation],
     ) -> Result<PlannedMutations, Report<RegistryError>> {
         self.plan_mutations_named(domain, mutations, "mixed mutation batch")
+    }
+
+    /// Plans one direct model batch from its caller's captured Models and parameters.
+    ///
+    /// The snapshot owns both inputs, so runtime policy installation and registry storage cannot
+    /// select a different model set or policy between validation and schedule publication.
+    pub(crate) fn plan_snapshot_mutations_with_parameters(
+        domain: &DomainName,
+        base_models: ModelIndex,
+        parameters: &nervix_models::ClusterParameterValues,
+        mutations: &[RegistryMutation],
+    ) -> Result<PlannedMutations, Report<RegistryError>> {
+        Ok(Self::plan_mutations_against(
+            domain,
+            mutations,
+            "mixed mutation batch",
+            parameters,
+            false,
+            base_models,
+        )?
+        .planned
+        .verified(
+            "this call disallows an incomplete candidate, and only that path returns no plan",
+        ))
     }
 
     /// Plans one transaction model run against the exact Models captured by its caller.
@@ -351,6 +376,7 @@ impl Registry {
         )
     }
 
+    #[cfg(test)]
     fn plan_mutations_named(
         &self,
         domain: &DomainName,
@@ -370,6 +396,7 @@ impl Registry {
             ))
     }
 
+    #[cfg(test)]
     fn plan_mutations_named_with_incomplete_candidate(
         &self,
         domain: &DomainName,

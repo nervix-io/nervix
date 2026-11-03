@@ -629,7 +629,12 @@ Current state metadata includes the optional committed cluster parameter record;
 the unseeded bootstrap state. The first bootstrap submits the complete seed through Raft. Later
 parameter commands atomically compare their policy/model/resource snapshot, replace the record
 and record durable command progress. Their apply advances the coherent runtime revision and its
-existing schedule notification. Model planning inputs include the parameter record.
+existing schedule notification. Model planning inputs include the parameter record. Every new
+model or schedule publication compares that complete record, including its revision, inside the
+serialized state-machine application before changing the graph. A parameter publication that
+applies first therefore conflicts with a plan captured before it, even if another publication
+restores the same values. Transaction commit admission, new step effects, and rollback use this
+same fence; an idempotent retry only rejoins retained progress and never reapplies its effect.
 
 The metadata encoding has one current identity. Data from a different stored shape fails decoding
 with a typed error asking for node-state recreation. Parameter durations and numeric bounds are

@@ -4407,6 +4407,36 @@ selections = ["deloxide-stress"]
 
 # Parameter publication shares the existing runtime admission and storage owners in every mode.
 [[workload]]
+coverage = "A restore held before model application meets a lower committed header cap while runtime installation retains the prior policy. Authoritative observation requires the typed cap refusal and an empty target before barriers are released."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.restore-model-cap"
+invariant = "A restore cannot strongly publish models validated against a superseded cluster cap."
+invocation = "cluster-parameters"
+scenario = "A restore refuses models above a cap committed while runtime installation waits on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "A real committed cap change invalidates the inspected transaction basis on one and three nodes while the queued Model remains valid; stale commit refusal preserves the open transaction and applies no effect before explicit reinspection."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.transaction-preview-fence"
+invariant = "An inspected transaction cannot commit against a superseded cluster-parameter revision."
+invocation = "cluster-parameters"
+scenario = "A parameter change invalidates an inspected transaction preview on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
 coverage = "The committed header-count range is checked against the request transport's representable distinct-field capacity before publication."
 examples = 2
 feature = "tests/features/cluster/cluster_parameters.feature"

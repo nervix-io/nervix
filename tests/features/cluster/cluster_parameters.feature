@@ -4,6 +4,89 @@ Feature: Committed cluster parameters
   Nervix commits one parameter record for the cluster. A parameter change is validated against
   the current record and graph, then applied on every node without a process restart.
 
+  @cluster_parameter_preview_fence
+  Scenario Outline: A parameter change invalidates an inspected transaction preview on a cluster of <cluster_size>
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA committed_parameter_schema (id U32);
+      """
+    And client "owner" is connected to the leader node
+    And client "administrator" is connected to the leader node
+    When client "owner" executes these Plexus commands
+      """
+      BEGIN;
+      CREATE SCHEMA parameter_preview (id U32);
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    When client "owner" executes these Plexus commands
+      """
+      DESCRIBE TRANSACTION OPERATION 1 FORMAT JSON;
+      """
+    Then the last inspection reports
+      """
+      transaction: {{transaction_id}}
+      domain: {{domain}}
+      state: OPEN
+      accepted operations: 1
+      applied operations: 0
+      selected operation: 1
+      report operations: 1
+      """
+    When client "administrator" executes these Plexus commands
+      """
+      ALTER CLUSTER SET UDF_CODE_BYTES = 1KiB;
+      """
+    And client "owner" attempts to commit its transaction
+    Then client "owner" commit was refused because its expected preview is stale
+    And client "owner" transaction state is "OPEN"
+    And transaction "{{transaction_id}}" eventually has state "OPEN"
+    When client "administrator" fails to execute these Plexus commands
+      """
+      SHOW CREATE SCHEMA parameter_preview;
+      """
+    Then the last command error contains
+      """
+      schema 'parameter_preview' does not exist in domain '{{domain}}'
+      """
+    When client "owner" executes these Plexus commands
+      """
+      DESCRIBE TRANSACTION OPERATION 1 FORMAT JSON;
+      """
+    Then the last inspection reports
+      """
+      transaction: {{transaction_id}}
+      domain: {{domain}}
+      state: OPEN
+      accepted operations: 1
+      applied operations: 0
+      selected operation: 1
+      report operations: 1
+      """
+    When client "owner" executes these Plexus commands
+      """
+      COMMIT;
+      """
+    Then client "owner" transaction state is "COMMITTED"
+    And transaction "{{transaction_id}}" eventually has state "COMMITTED"
+    When client "administrator" executes these Plexus commands
+      """
+      SHOW CREATE SCHEMA parameter_preview;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA parameter_preview (
+        id U32
+      );
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: A committed parameter change applies on every node without restarting on a cluster of <cluster_size>
     Given a <cluster_size> node nervix cluster is started
     When these Plexus statements are executed on the leader node
@@ -321,3 +404,60 @@ Feature: Committed cluster parameters
       | 3            | HTTP_HEADER_FIELDS | 1     | http-header-fields | 128     |
       | 1            | HTTP_HEADER_BYTES  | 16B   | http-header-bytes  | 32768B  |
       | 3            | HTTP_HEADER_BYTES  | 16B   | http-header-bytes  | 32768B  |
+
+  @restore_parameter_fence
+  Scenario Outline: A restore refuses models above a cap committed while runtime installation waits on a cluster of <cluster_size>
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event_schema (id STRING);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (id string);
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event_schema;
+      CREATE RELAY incoming SCHEMA event_schema UNBRANCHED;
+      CREATE HTTP CLIENT api CONFIG {
+        'endpoint' = 'http://127.0.0.1:9', 'timeout_ms' = 60000
+      };
+      CREATE HTTP REQUEST INGESTOR two_headers FROM api
+        METHOD 'GET' HEADERS { 'x-first' = '1', 'x-second' = '2' }
+        EVERY 1s MODE NO ACK ON QUIESCE SUSPEND
+        DECODE USING event_codec TO incoming INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "parameter-capture.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    Given the cluster is replaced by a fresh <cluster_size> node cluster whose nodes are named "restored"
+    Then the current leader node is saved as placeholder "leader"
+    Given restore step "apply models" of domain "{{domain}}_copy" on node "{{leader}}" pauses before it applies
+    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "parameter-capture.nvxb" is streamed to node "{{leader}}" under execution reference "restore-parameter-capture" in the background
+    Then the restore pauses at step "apply models" of domain "{{domain}}_copy" on node "{{leader}}"
+    When runtime installation on node "{{leader}}" is paused
+    And this Plexus command request begins executing in the background on the leader node
+      """
+      ALTER CLUSTER SET HTTP_HEADER_FIELDS = 1;
+      """
+    Then node "{{leader}}" reaches its runtime installation pause
+    And node "{{leader}}" eventually reports status containing "http-header-fields committed=1 revision=2"
+    And node "{{leader}}" eventually reports status containing "node={{leader}} http-header-fields running=128 revision=1"
+    When the restore step pause on node "{{leader}}" is released
+    Then node "{{leader}}" records the restore's lower header cap refusal before publishing ingestor "two_headers" in domain "{{domain}}_copy"
+    And the background command request succeeds
+    And the background restore stream's outcome is "failed" as "executed"
+    And the restore stream's outcome message contains "http-header-fields"
+    And the restore stream's outcome message contains "two_headers"
+    Given the active domain is "{{domain}}_copy"
+    When these Plexus commands fail with "ingestor 'two_headers' does not exist"
+      """
+      SHOW CREATE INGESTOR two_headers;
+      """
+    And these Plexus commands fail with "schema 'event_schema' does not exist"
+      """
+      SHOW CREATE SCHEMA event_schema;
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

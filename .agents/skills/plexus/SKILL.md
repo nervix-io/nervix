@@ -208,6 +208,10 @@ transaction again before retrying the commit against its reviewed basis. Do not 
 undivided request can mix
 those phases.
 
+A committed cluster parameter revision invalidates an identified transaction preview even when
+the queued Models still fit its caps or the parameter values later return to their earlier values.
+Inspect the transaction again before committing; a parameter notice does not review a new preview.
+
 Treat a successful administrative command as a completed effect. After `UPLOAD RESOURCE`, model or
 lookup creation, `START`, `STOP`, placement changes, or `COMMIT` returns `OK`, issue the dependent
 operation immediately. Do not add a readiness request, `DESCRIBE` polling loop, arbitrary delay, or

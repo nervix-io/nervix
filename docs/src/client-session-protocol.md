@@ -872,6 +872,11 @@ the applied prefix in place rather than rolling back the transaction. A commit's
 only when the final step is usable on every live node, and a client waits through `COMMITTING` for
 the outcome recorded under the commit's own reference.
 
+The planning basis includes the complete committed cluster-parameter record and its revision.
+A publication through `ALTER CLUSTER SET` invalidates an earlier identified preview, including
+when the queued Models still fit the new limits or later publications return the same values.
+The client keeps the reviewed identity until another inspection supplies the user's next choice.
+
 **Inactivity and retention.** An `OPEN` transaction expires once it has been inactive for its idle
 timeout, 15 minutes by default, whether or not a session is bound to it. Attaching it, appending to
 it, and a commit's admission or failure renew that deadline; an open connection, a bound session,

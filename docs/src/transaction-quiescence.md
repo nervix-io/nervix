@@ -206,9 +206,11 @@ as different roles rather than as one ambiguous list of “affected nodes.”
 
 ## Coherent Preview And Guarded Commit
 
-The committed cluster-parameter revision is part of the captured planning inputs. Model validation
-uses its typed limits and the Models from that same consensus schedule. A parameter change makes
-an earlier capture stale, so a model cannot commit against a superseded cap. `ALTER CLUSTER SET`
+The complete committed cluster-parameter record, including its revision, is part of the captured
+planning inputs and the preview's planning-basis fingerprint. Model validation uses its typed limits
+and the Models from that same consensus schedule. Application preflight and replicated publication
+compare that exact record before applying an effect. A parameter publication makes an earlier
+capture stale even when later assignments return its values to the same settings. `ALTER CLUSTER SET`
 runs outside domain transactions, through durable command execution; its transition validates all
 current Models and resource versions before publishing one parameter record. [Node Settings](node-settings.md)
 owns its syntax, bounds and live installation contract.

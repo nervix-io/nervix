@@ -368,6 +368,12 @@ of its resources, makes the plan stale. The step is then rejected as
 before anything pauses; a rejection at the replicated boundary first releases the pause, gates, and
 handoff the step had engaged and rolls back the leader's local registry.
 
+A restored model batch pins its versions from the same authoritative snapshot that supplies its
+Models and committed parameter record for validation. Binding and content preparation retain those
+inputs until publication. A parameter publication also makes that captured plan stale, even when
+the resource catalog is unchanged; the leader and replicated boundary compare the complete record
+and revision before accepting the Models.
+
 What follows depends on who owns the plan. An ordinary command retains that failed attempt and
 starts another attempt, derived from the newer revision, under the same execution reference, so it
 plans again and `LATEST` binds the version that completed. An explicit transaction is frozen from

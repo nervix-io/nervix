@@ -371,8 +371,15 @@ transport headers. A prerequisite cannot be assigned through this statement.
 
 Validation and publication share a commit fence. A concurrent model change or parameter change
 invalidates a captured transition before it applies, and validation runs again against the
-current state. Model admission likewise uses the committed parameter record, so a configuration
-cannot be accepted against a superseded cap.
+current state. Model admission carries its captured parameter record through validation and
+publication; application preflight and replicated apply compare its complete values and revision.
+An identified transaction preview also includes that record in its planning basis. Any parameter
+publication invalidates an earlier preview, including when its queued Models still fit the limits
+or later assignments return the same values. A stale expected preview leaves the transaction open
+with no effects until the caller inspects it again and decides whether to commit.
+Restored model batches capture their Models, resource versions and parameter record together at
+the model-planning step and carry that view through content preparation and publication. A valid
+archive can still have its model step refused by a limit committed since archive preparation.
 Known HTTP header names contribute their count and byte requirement even when their values depend
 on input. Dynamic names may replace earlier values, so transition validation retains only guaranteed
 byte contributions; request preparation checks each complete evaluated envelope against its captured

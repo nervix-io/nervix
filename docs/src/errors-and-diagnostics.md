@@ -1767,8 +1767,12 @@ of the failure.
 Parameter definitions own positive duration and numeric range errors, and structured assignments
 own empty or duplicate-key refusals. The registry names the exact parameter, domain/model or
 resource, actual requirement and candidate maximum when a lowered cap cannot hold committed
-state. Consensus compares captured inputs and reports a typed stale-input conflict before any
-publication. Bootstrap seed refusal names the parameter and `ALTER CLUSTER SET`. A failed seed
+state. Application preflight reports `SchedulePlanningStale::Parameters` when the captured parameter
+record differs, and consensus reports a typed parameter-input conflict before publication. Both
+compare the complete record and revision, after the existing domain, resource, schedule and topology
+checks. An identified transaction preview includes that record in its fingerprint; a parameter
+publication therefore produces the ordinary `PreviewStale` refusal with the transaction still open
+and no effects. Bootstrap seed refusal names the parameter and `ALTER CLUSTER SET`. A failed seed
 append is logged with its complete consensus report, including the typed causes beneath it.
 HTTP polling's literal header requirements use the same model-limit refusal as emitter headers;
 the header-count definition also refuses values beyond the native request map's capacity.

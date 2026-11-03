@@ -138,6 +138,7 @@ struct PreparedTransactionCommit {
 
 #[derive(Serialize)]
 struct TransactionPlanningBasisInput<'a> {
+    parameters: Option<&'a nervix_models::ClusterParameterRecord>,
     domain: &'a DomainState,
     models: Vec<&'a Model>,
     resources: Vec<&'a ResourceName>,
@@ -181,6 +182,7 @@ fn transaction_planning_basis(
     ordered_models.sort_by_key(|model| model.node_ref());
     let resources = resources.iter().collect();
     let input = TransactionPlanningBasisInput {
+        parameters: authoritative_inputs.parameters(),
         domain,
         models: ordered_models,
         resources,

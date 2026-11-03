@@ -490,15 +490,20 @@ impl SessionServiceImpl {
 
     pub(in crate::application) async fn prepare_domain_schedule(
         &self,
-        domain: &DomainName,
+        inputs: DomainPlanningInputs,
         graph: Option<ActiveGraph>,
         placement: PlacementPolicy,
     ) -> PreparedDomainSchedule {
-        let inputs = self.inner.consensus.domain_planning_inputs(domain).await;
         let snapshot = self
             .capture_domain_schedule_planning_snapshot(&inputs)
             .await;
-        snapshot.prepare(&inputs, domain, graph, placement, inputs.schedule())
+        snapshot.prepare(
+            &inputs,
+            inputs.domain(),
+            graph,
+            placement,
+            inputs.schedule(),
+        )
     }
 
     pub(in crate::application) async fn drop_node(

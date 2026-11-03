@@ -104,6 +104,8 @@ mod domain_mutation;
 mod durable_batch;
 mod leadership;
 mod lease_refusal;
+#[cfg(test)]
+mod planning_parameter_fence_tests;
 mod raft_record;
 mod records;
 mod replication;
@@ -5294,6 +5296,8 @@ enum DomainPlanningInputConflict {
     Voters(DomainName),
     #[error("domain '{}' node eligibility changed", .0.as_str())]
     Eligibility(DomainName),
+    #[error("domain '{}' cluster parameters changed", .0.as_str())]
+    Parameters(DomainName),
 }
 
 fn validate_domain_planning_inputs(
@@ -5321,6 +5325,9 @@ fn validate_domain_planning_inputs(
         return Err(Report::new(DomainPlanningInputConflict::Eligibility(
             domain,
         )));
+    }
+    if current.parameters != expected.parameters {
+        return Err(Report::new(DomainPlanningInputConflict::Parameters(domain)));
     }
     Ok(())
 }
