@@ -144,8 +144,32 @@ fn mqtt_topic_filter_rule(text: &str) -> Result<(), ExternalNameError> {
 
 /// The keywords of the option that chooses a subscriber's session.
 const SESSION_OPTION: &str = "SESSION";
-/// The keywords of the option that chooses the quality of service a subscriber receives at.
+/// The keywords of the option that chooses the quality of service a subscriber receives at or a
+/// publisher sends at.
 const QOS_OPTION: &str = "QOS";
+
+/// `QOS 0 | QOS 1 | QOS 2`, which every statement of either side writes.
+const MQTT_QOS: OptionDeclaration = OptionDeclaration {
+    keywords: QOS_OPTION,
+    presence: OptionPresence::Required,
+    form: OptionForm::Choice(&[
+        OptionChoice {
+            name: MqttQos::Qos0.spelling(),
+            value: None,
+            example: "QOS 0",
+        },
+        OptionChoice {
+            name: MqttQos::Qos1.spelling(),
+            value: None,
+            example: "QOS 1",
+        },
+        OptionChoice {
+            name: MqttQos::Qos2.spelling(),
+            value: None,
+            example: "QOS 2",
+        },
+    ]),
+};
 
 /// The session a broker keeps a subscriber's messages for while the subscriber is away: a
 /// persistent one, at a quality of service whose messages the broker holds until they are
@@ -161,6 +185,19 @@ const BROKER_KEPT_SESSION: &[ChoiceRequirement] = &[
         choices: &[MqttQos::Qos1.spelling(), MqttQos::Qos2.spelling()],
     },
 ];
+
+/// The publish no broker answers, QoS 0, which only `NO ACK` can complete.
+const UNANSWERED_PUBLISH: &[ChoiceRequirement] = &[ChoiceRequirement {
+    option: QOS_OPTION,
+    choices: &[MqttQos::Qos0.spelling()],
+}];
+
+/// The publish a broker answers, QoS 1 with `PUBACK` and QoS 2 with `PUBCOMP`, whose answer `ACK`
+/// waits for.
+const ANSWERED_PUBLISH: &[ChoiceRequirement] = &[ChoiceRequirement {
+    option: QOS_OPTION,
+    choices: &[MqttQos::Qos1.spelling(), MqttQos::Qos2.spelling()],
+}];
 
 /// One topic filter an MQTT client subscribes to, kept exactly as written: MQTT topics are
 /// case-sensitive and routinely hold `/`, `.`, `+` or `#`.
@@ -329,7 +366,9 @@ const MQTT_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[DeclaredBuffer {
         holds: "publishes queued for the driver",
         bound: BufferBound::Bounded {
-            capacity: BufferCapacity::Setting("1 under QOS 0, ACK PARALLEL MAX under QOS 1 and 2"),
+            capacity: BufferCapacity::Setting(
+                "1 under NO ACK and ACK SEQUENTIAL, ACK PARALLEL MAX under ACK PARALLEL",
+            ),
             overflow: BufferOverflow::FailPublish,
         },
     }],
@@ -351,7 +390,14 @@ const MQTT_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: SILENT_CONNECTION,
         },
     ],
-    driver_limits: &["Packets above the broker's maximum packet size are rejected."],
+    driver_limits: &[
+        "Packets above the broker's maximum packet size are rejected.",
+        "QOS 0 connects a clean session; QOS 1 and 2 connect a persistent one with the maximum \
+         Session Expiry Interval, and SESSION is not an emitter option: a publisher without \
+         acknowledgement needs no session, and an acknowledged one always keeps it.",
+        "The client resumes its own session across reconnects, and a new client is refused while \
+         the broker keeps a session under its identity, since it holds no state to resume it with.",
+    ],
 };
 
 impl IngestorDeclaration for MqttTopicIngestor {
@@ -403,27 +449,7 @@ impl IngestorDeclaration for MqttTopicIngestor {
                     },
                 ]),
             },
-            OptionDeclaration {
-                keywords: QOS_OPTION,
-                presence: OptionPresence::Required,
-                form: OptionForm::Choice(&[
-                    OptionChoice {
-                        name: MqttQos::Qos0.spelling(),
-                        value: None,
-                        example: "QOS 0",
-                    },
-                    OptionChoice {
-                        name: MqttQos::Qos1.spelling(),
-                        value: None,
-                        example: "QOS 1",
-                    },
-                    OptionChoice {
-                        name: MqttQos::Qos2.spelling(),
-                        value: None,
-                        example: "QOS 2",
-                    },
-                ]),
-            },
+            MQTT_QOS,
         ],
         bounds: MQTT_INGESTOR_BOUNDS,
     };
@@ -506,8 +532,8 @@ impl MqttSession {
     }
 }
 
-/// The quality of service an MQTT TOPIC ingestor subscribes with, named by its level as a statement
-/// writes it after `QOS`.
+/// The quality of service an MQTT TOPIC ingestor subscribes with or an MQTT TOPIC emitter publishes
+/// at, named by its level as a statement writes it after `QOS`.
 #[derive(
     Debug,
     Clone,
@@ -522,12 +548,12 @@ impl MqttSession {
     strum::EnumIter,
 )]
 pub enum MqttQos {
-    /// QoS 0: the broker delivers each message at most once.
+    /// QoS 0: each message is delivered at most once, and nothing answers it.
     Qos0,
-    /// QoS 1: the broker delivers each message at least once, until the subscriber's `PUBACK`.
+    /// QoS 1: each message is delivered at least once, until its receiver's `PUBACK`.
     Qos1,
-    /// QoS 2: the broker delivers each message exactly once, through the subscriber's `PUBREC` and
-    /// the `PUBREL` and `PUBCOMP` that complete it.
+    /// QoS 2: each message is delivered exactly once, through its receiver's `PUBREC` and the
+    /// `PUBREL` and `PUBCOMP` that complete it.
     Qos2,
 }
 
@@ -622,7 +648,8 @@ connector_ingestors! {
     }
 }
 
-/// One topic an MQTT client publishes to.
+/// One topic an MQTT client publishes to, at the quality of service its statement writes beside its
+/// publishing mode.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -630,6 +657,7 @@ pub struct MqttTopicEmitter {
     pub mode: MqttTopicPublishingMode,
     pub client: ClientName,
     pub topic: MqttTopicName,
+    pub qos: MqttQos,
 }
 
 impl EmitterDeclaration for MqttTopicEmitter {
@@ -646,13 +674,24 @@ impl EmitterDeclaration for MqttTopicEmitter {
             keywords: "TOPIC",
             name: LocatorName::External(MqttTopicName::DECLARATION),
         }),
+        options: &[MQTT_QOS],
         // A publish carries its topic and payload; the emitter sets no retain flag and no MQTT 5
         // property of its own.
-        options: &[],
         envelope: &[],
         properties: &[],
         bounds: MQTT_EMITTER_BOUNDS,
     };
+}
+
+impl MqttTopicEmitter {
+    /// The choice a statement that publishes at `qos` makes for the declared option opened by
+    /// `option`: the one option a requirement of this entity names.
+    pub fn publication_choice(qos: MqttQos, option: &str) -> Option<&'static str> {
+        match option {
+            QOS_OPTION => Some(qos.spelling()),
+            _ => None,
+        }
+    }
 }
 
 impl EmitterEntityBody for MqttTopicEmitter {
@@ -665,6 +704,11 @@ impl EmitterEntityBody for MqttTopicEmitter {
 
     fn client_mut(&mut self) -> Option<&mut ClientName> {
         Some(&mut self.client)
+    }
+
+    /// The quality of service this emitter publishes at, which its publishing mode requires.
+    fn chosen(&self, option: &str) -> Option<&'static str> {
+        Self::publication_choice(self.qos, option)
     }
 }
 
@@ -682,9 +726,8 @@ connector_emitters! {
 
 super::publishing::emitter_modes! {
     pub enum MqttTopicPublishingMode {
-        Qos0 { retry_policy: crate::RetryPolicy } => MqttQos0,
-        Qos1 { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => MqttQos1,
-        Qos2 { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => MqttQos2,
+        NoAck { retry_policy: crate::RetryPolicy } => NoAck requires UNANSWERED_PUBLISH,
+        Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => BrokerAck requires ANSWERED_PUBLISH,
     }
 }
 

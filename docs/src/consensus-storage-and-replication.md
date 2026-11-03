@@ -463,7 +463,8 @@ reading any records. This namespace identifies the current Model shape, includin
 subscription's required start position, a Kafka consumer group's required start position, the
 serialized Sentry platform field, an ingestor's
 `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the session and
-quality of service an MQTT TOPIC ingestor writes beside its delivery mode, a `REDIS PUBSUB`
+quality of service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an
+MQTT TOPIC emitter writes beside its publishing mode, a `REDIS PUBSUB`
 ingestor's `CHANNEL` or `PATTERN` subscription, whether a polled HTTP request's header holds a
 literal or names a client secret, `ALTER BRANCH` among the archived statements and the branch
 partition count every resolved branch declaration of the committed schedule carries. Its state

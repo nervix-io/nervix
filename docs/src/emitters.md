@@ -187,7 +187,7 @@ to discard a record.
 | Kafka | `NO ACK`; `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | Local producer-queue acceptance for `NO ACK`; one delivery report per record for `ACK` |
 | Pulsar | `NO ACK`; `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | Producer acceptance for `NO ACK`; one broker receipt per record for `ACK` |
 | RabbitMQ | `NO ACK`; `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | The channel's answer to one round trip after each write for `NO ACK`; publisher confirm for `ACK` |
-| MQTT | `QOS 0`; `QOS 1 ACK ...`; `QOS 2 ACK ...` | Client acceptance, `PUBACK`, or completion of the QoS 2 handshake respectively |
+| MQTT | `NO ACK` at `QOS 0`; `ACK SEQUENTIAL` or `ACK PARALLEL MAX <n>` at `QOS 1` or `QOS 2` | Client acceptance at `QOS 0`, `PUBACK` at `QOS 1`, or `PUBCOMP`, which completes the QoS 2 handshake, at `QOS 2` |
 | NATS | `NO ACK`; `JETSTREAM ACK SEQUENTIAL`; `JETSTREAM ACK PARALLEL MAX <n>` | The Core NATS write's queued bytes drained and flushed on the same connection for `NO ACK`, without a server round trip; JetStream `PubAck` otherwise |
 | Redis Pub/Sub | `NO ACK` | Server acceptance of `PUBLISH`; the subscriber count is not a delivery guarantee |
 | ZeroMQ | `NO ACK` | Socket acceptance |
@@ -799,8 +799,8 @@ members' concrete branch key; the written headers become Kafka and NATS headers,
 properties, AMQP headers or SQS message attributes; and an SQS FIFO message carries the members'
 message group. Without the clause every record stays its own message, carried the same way.
 
-Batching keeps every publishing mode's completion point. `NO ACK` and `QOS 0` complete when the
-producer, channel, client or socket accepts the batch message; the confirming modes wait for one
+Batching keeps every publishing mode's completion point. `NO ACK` completes when the producer,
+channel, client or socket accepts the batch message; the confirming modes wait for one
 delivery report, broker receipt, publisher confirm, `PUBACK`, completed QoS 2 handshake or
 JetStream `PubAck` for it. `ACK TIMEOUT` bounds that one wait, and a batch message whose outcome
 stays unknown is retained for the retry described above.
@@ -1183,7 +1183,10 @@ Transport-specific expectations:
   `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and optional
   `'ssl.certificate.location'` plus `'ssl.key.location'`.
 - `RABBITMQ`: use `amqps://...` in `addr`; Nervix honors `tls_ca_file` and presents `tls_cert_file` with `tls_key_file` as its client certificate; see [RabbitMQ](./ingestors.md#rabbitmq).
-- `REDIS`: use `rediss://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
+- `REDIS`: use `rediss://...` in `addr`; Nervix trusts the host's trust store, or only
+  `tls_ca_file` when it is set, and presents `tls_cert_file` with `tls_key_file` as its client
+  certificate. A plaintext `redis://` address reads none of the three files; see
+  [Redis Pub/Sub](#redis-pubsub).
 - `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`. A plaintext `mqtt://` address reads no TLS file, so `CREATE MQTT CLIENT` refuses all three with it.
 - `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
@@ -1685,8 +1688,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the command pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
-| Network waits | checking out a connection, a new one's name resolution, connection, TLS and Redis setup included: `connect_timeout_ms`; 30s when omitted<br>the answer to a PUBLISH: driver default, 500 ms |
-| Driver limits | None declared. |
+| Network waits | checking out a connection, the PING that tests it and a new one's name resolution, connection, TLS and Redis setup included: `connect_timeout_ms`; 30s when omitted<br>the answer to the checkout's PING and to the PUBLISH: driver default, 500 ms |
+| Driver limits | A payload above the server's proto-max-bulk-len is rejected, and Redis then closes the connection that sent it. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
 
 See the [REDIS PUBSUB capability and mirror reference](connector-capabilities.md#redis-pubsub-emit).
@@ -1699,18 +1702,41 @@ carry application attributes. `BATCH` is optional; the emitter learns no additio
 from Redis, whose `proto-max-bulk-len` refusal follows the ordinary record-error policy.
 
 Redis Pub/Sub has no subscriber delivery acknowledgment. The awaited `PUBLISH` response confirms
-server acceptance only. A record-specific server rejection follows `ON MESSAGE ERROR`; connection
-failures retry the undelivered work. A `REDIS CLIENT` declares its connection-pool bounds; see
-[Database Client Connection Pools](database-client-pools.md).
-A publish checks a command connection out within the client's `connect_timeout_ms`. The client's
-`pool_idle_timeout_ms` and `pool_max_lifetime_ms`, 10 and 30 minutes by default, retire a command
-connection that sat idle or grew old; see
+server acceptance only.
+
+Nervix tells a rejected record from a failed publish by the text of Redis's error reply: a reply
+that contains `Protocol error: invalid bulk length` or `string exceeds maximum allowed size`
+rejects that record through `ON MESSAGE ERROR`. Redis answers a payload above its
+`proto-max-bulk-len` with the first and then closes the connection that sent it; the pool replaces
+that connection at its next checkout. Every other error reply, such as an ACL's `NOPERM` refusal,
+`OOM` or a replica's `READONLY`, and every connection failure fails the publish as transient: the
+emitter retries the undelivered records on its `RETRY POLICY` for as long as Redis keeps refusing
+them.
+
+A `REDIS CLIENT` declares its connection-pool bounds; see
+[Database Client Connection Pools](database-client-pools.md). Every publish checks a command
+connection out of the client's pool and returns it once Redis answers. The pool first tests the
+connection it hands over with a `PING`, so each publish takes two round trips; a connection that
+fails the test is closed, and the checkout takes another one or opens a new one. Checking out,
+that test and opening a new connection share the client's `connect_timeout_ms`, 30 seconds by
+default. Redis must answer each command on a command connection, the `PING` and the `PUBLISH`,
+within the driver's 500 ms, which no key changes. A `PUBLISH` answered later fails the publish as
+transient and is retried, although Redis may already have delivered it, so its subscribers can
+receive it twice.
+
+The client's `pool_idle_timeout_ms` and `pool_max_lifetime_ms`, 10 and 30 minutes by default,
+retire a command connection that sat idle or grew old; see
 [Connection lifetimes](database-client-pools.md#connection-lifetimes).
 Each physical pooled command connection resolves the `addr` hostname through the node's
 asynchronous DNS resolver when it opens. A replacement connection can use a changed DNS answer;
 an established connection stays open until Redis or the network closes it or the pool retires it.
-For `rediss://`, TLS still verifies the configured hostname and uses its configured CA and optional
-client identity.
+For `rediss://`, TLS still verifies the configured hostname. It trusts the host's trust store, or
+only the certificates in `tls_ca_file` when the client sets it, and presents `tls_cert_file` with
+`tls_key_file` as its client certificate; a plaintext `redis://` address reads none of these
+files. A command connection fails to open when part of the host's trust store cannot be read,
+where a Pub/Sub subscription logs a warning and continues. Neither connects with an address that
+carries the driver's `#insecure` fragment, although `CREATE REDIS CLIENT` accepts it; see
+[Redis Pub/Sub](ingestors.md#redis-pubsub).
 
 ### MQTT
 
@@ -1731,13 +1757,21 @@ the broker supplies a Server Keep Alive in `CONNACK`; a broker-supplied zero dis
 connection pings its broker after one interval without traffic and ends when the following interval
 passes without an answer. QoS 0 uses a clean session. QoS 1 and 2 request a persistent session with
 the maximum Session Expiry Interval (`0xFFFFFFFF`); the broker's accepted expiry and retention
-limits still apply. Plexus exposes no session-expiry setting.
+limits still apply. Plexus exposes no session-expiry setting, and `SESSION` is not an emitter
+option: an emitter without acknowledgement needs no session, and an acknowledged one always keeps
+it.
+
+Every statement writes its quality of service as `QOS 0`, `QOS 1` or `QOS 2` before `MODE`. Neither
+has a default, and the two pair by what can complete a publish: nothing answers QoS 0, so `QOS 0`
+takes `NO ACK`, and a broker answers QoS 1 and 2, so `QOS 1` and `QOS 2` take `ACK SEQUENTIAL` or
+`ACK PARALLEL MAX <n>`.
 
 <!-- connector-matrix:emit-mqtt-topic:start -->
 ```plexus,ignore
 CREATE MQTT TOPIC EMITTER <name>
   FROM <relay>
   TO <client> TOPIC 'devices/Orders'
+  (QOS 0 | QOS 1 | QOS 2)
     MODE <mode>
     ENCODE USING <codec>
   <construction>
@@ -1753,18 +1787,18 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | --- | --- |
 | Reference | MQTT client |
 | Locator and validation rule | TOPIC 'devices/Orders' (mqtt_topic) |
-| Modes (complete bodies after MODE) | QOS 0 RETRY POLICY BACKOFF 1s MAX 30s<br>QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>QOS 2 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | No entity-specific options. |
-| Headers | Not offered: Subscription options select the session and inbound QoS; emitter QoS is part of its publishing mode. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation. |
+| Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 0)<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 1 or 2) |
+| Options in statement order | `QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |
+| Headers | Not offered: Subscription options select the session and inbound QoS, and the emitter's QOS option its outbound QoS. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation. |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
-| Buffers | publishes queued for the driver: set by 1 under QOS 0, ACK PARALLEL MAX under QOS 1 and 2; when full, fails the publish for the host to retry |
+| Buffers | publishes queued for the driver: set by 1 under NO ACK and ACK SEQUENTIAL, ACK PARALLEL MAX under ACK PARALLEL; when full, fails the publish for the host to retry |
 | Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>answers to QOS 1 and 2 publishes: `ACK TIMEOUT`<br>writes to the connection: unbounded<br>a silent connection: client key `keep_alive_ms`; two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 s when omitted |
-| Driver limits | Packets above the broker's maximum packet size are rejected. |
+| Driver limits | Packets above the broker's maximum packet size are rejected.<br>QOS 0 connects a clean session; QOS 1 and 2 connect a persistent one with the maximum Session Expiry Interval, and SESSION is not an emitter option: a publisher without acknowledgement needs no session, and an acknowledged one always keeps it.<br>The client resumes its own session across reconnects, and a new client is refused while the broker keeps a session under its identity, since it holds no state to resume it with. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-emit).
@@ -1776,7 +1810,15 @@ so `TOPIC 'devices/+'` is refused when the emitter is created. The client's `add
 by its scheme, host and port alone, as [MQTT ingestion](ingestors.md#mqtt) describes.
 
 CREATE refuses an unsupported QoS number with its value and accepted levels, such as
-`MQTT emitter QOS must be 0, 1, or 2, found 3`, underlining the supplied number.
+`MQTT QOS must be 0, 1 or 2, found 3`, underlining the supplied number. Completion after `MODE`
+offers only the modes the written quality of service pairs with, and a statement that writes
+another is refused with the mode underlined and what it writes named, such as
+`MQTT TOPIC emitters name MODE NO ACK only with QOS 0; the statement writes QOS 1`.
+
+`ALTER` holds every result to the same pairing. `SET MODE` changes the mode within a quality of
+service, so `SET MODE ACK PARALLEL MAX 8 ...` is accepted at `QOS 1` and `SET MODE NO ACK ...` is
+refused there. `SET TO` changes the quality of service, or moves it and the mode together, through
+the complete destination body.
 
 QoS 0 acknowledges client acceptance. When the emitter stops, it waits within the stop or shutdown
 deadline for its client to send the publishes it still holds, which a client cut off from its
@@ -1784,10 +1826,19 @@ broker holds until it connects again; publishes still unsent at that deadline fa
 counted in the emitter's transient error. Sending a QoS 0 publish to the connection does not
 confirm that the broker received it.
 
-QoS 1 waits for `PUBACK`; QoS 2 waits for the complete exactly-once handshake. Their persistent
-session and stable client identity let the same client resume in-flight publishes across network
-reconnects while the broker retains the session. Nervix keeps local delivery attempts and
-acknowledgements in memory, so this is not a durable checkpoint of emitter state.
+QoS 1 waits for `PUBACK`; QoS 2 waits for the complete exactly-once handshake, which `PUBCOMP`
+ends, so a record stays unacknowledged after the broker's `PUBREC` even though the broker already
+holds it. Their persistent session and stable client identity let the same client resume in-flight
+publishes across network reconnects while the broker retains the session. Nervix keeps local
+delivery attempts and acknowledgements in memory, so this is not a durable checkpoint of emitter
+state.
+
+A new client cannot take over such a session. The client that a node or emitter restart or an
+ownership move creates holds no session state, and it refuses a broker's `CONNACK` with
+`session_present` set, so a QoS 1 or 2 emitter reconnects on its retry policy and publishes nothing
+while the broker keeps a session under its identity. `DESCRIBE EMITTER` shows the refusal as its
+transient error, and an attached emitter holds its input for that time. The emitter recovers once
+the broker discards that session, or under a new `client_id`.
 Reconnect pacing follows the declared retry policy. When an answer misses its `ACK TIMEOUT`, or
 the broker or client fails it for a reason that
 is not the record's own, the emitter keeps every answer the broker already gave and retries only the
@@ -3790,7 +3841,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; `NO ACK` retry after its channel or connection is lost before a write's round trip completes; either mode after a lost upstream ACK or attached sibling failure | Without `MANDATORY`, a message no binding routes is dropped by the broker and its record reported delivered; `NO ACK` can lose a record after the broker's channel has taken it; queue durability and message persistence remain broker policy | None |
 | SQS | Retry after an ambiguous `SendMessage` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; SQS retains its own at-least-once behavior | None |
 | MQTT | QoS 1 or 2 retry after an ambiguous handshake; any mode after a lost upstream ACK or attached sibling failure | QoS 0 can lose a record after client acceptance; later delivery follows the configured broker and session guarantees | None |
-| Redis Pub/Sub | Retry after Redis accepts `PUBLISH` but the Nervix ACK is lost, or after attached sibling failure | Any failure after detached relay acceptance; subscribers that are absent or disconnected miss the message | None |
+| Redis Pub/Sub | Retry after a `PUBLISH` whose answer missed the driver's 500 ms or was lost with its connection, which Redis may already have delivered; retry after Redis accepts `PUBLISH` but the Nervix ACK is lost, or after attached sibling failure | Any failure after detached relay acceptance; subscribers that are absent or disconnected miss the message | None |
 | ZeroMQ | Retry after socket send acceptance followed by lost ACK or attached sibling failure | Any failure after detached relay acceptance; socket send does not establish durable receiver storage | None |
 | Sentry | Retry after an ambiguous HTTP result, which sends the same envelope and `event_id` again; lost ACK; or attached sibling failure | Any failure after detached relay acceptance; an accepted event can still be subject to Sentry service policy | None |
 | OTEL | Retry after an ambiguous Export result, which resends the same request bytes; lost ACK; or attached sibling failure | Any failure after detached relay acceptance; `partial_success` acknowledges the whole request, so receiver-rejected records in that response are lost | None |

@@ -25,7 +25,7 @@ use super::delivery::{
 };
 use crate::{
     lexer::{Identifier, Token, Word},
-    parser_support::{ParseError, client_ref, external_name, kw, kw_phrase2},
+    parser_support::{ParseError, client_ref, external_name, kw, kw_phrase2, mqtt_qos_clause},
 };
 
 /// The session and the quality of service a statement writes before its delivery mode.
@@ -90,23 +90,6 @@ fn session_clause<'src>()
         kw(Identifier::Clean).to(MqttSession::Clean),
         kw(Identifier::Persistent).to(MqttSession::Persistent),
     )))
-}
-
-fn qos_clause<'src>()
--> impl Parser<'src, &'src [Token], MqttQos, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Qos).ignore_then(
-        select! { Token::NumberLiteral(raw) => raw }
-            .labelled("mqtt_qos")
-            .try_map(|raw, span| match raw.as_str() {
-                "0" => Ok(MqttQos::Qos0),
-                "1" => Ok(MqttQos::Qos1),
-                "2" => Ok(MqttQos::Qos2),
-                _ => Err(Rich::custom(
-                    span,
-                    format!("MQTT ingestor QOS must be 0, 1 or 2, found {raw}"),
-                )),
-            }),
-    )
 }
 
 fn parallel_delivery<'src>()
@@ -236,7 +219,7 @@ fn checked_delivery<'src>()
 fn subscription<'src>()
 -> impl Parser<'src, &'src [Token], MqttSubscription, extra::Err<ParseError<'src>>> + Clone {
     session_clause()
-        .then(qos_clause())
+        .then(mqtt_qos_clause())
         .map(|(session, qos)| MqttSubscriptionChoices { session, qos })
         .then_with_ctx(checked_delivery())
         .map(|(choices, mode)| MqttSubscription { choices, mode })
@@ -739,7 +722,7 @@ mod tests {
         let source = clauses_statement(&format!(
             "SESSION PERSISTENT QOS {qos} MODE NO ACK ON QUIESCE DROP"
         ));
-        let expected = format!("MQTT ingestor QOS must be 0, 1 or 2, found {qos}");
+        let expected = format!("MQTT QOS must be 0, 1 or 2, found {qos}");
         let refusals = refusal(&source);
         assert!(
             refusals.contains(&(expected, qos.to_owned())),

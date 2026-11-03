@@ -148,6 +148,8 @@ pub(crate) enum ConnectorDeclarationIssue {
     Envelope(nervix_models::EnvelopeDeclarationError),
     #[error("{0}")]
     Delivery(nervix_models::UnmetDeliveryRequirement),
+    #[error("{0}")]
+    Publishing(nervix_models::UnmetPublishingRequirement),
     #[error("{site} requires an exact, non-null, non-sensitive {expected} value")]
     EnvelopeValue {
         site: EnvelopeValueSite,

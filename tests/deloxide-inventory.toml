@@ -229,6 +229,7 @@ tags = [
   "@websocket_declaration_lifecycle",
   "@endpoint_metadata_buffer",
   "@mqtt_source_retirement",
+  "@mqtt_emitter_pubcomp_boundary",
   "@mqtt_client_credentials_refused",
   "@pulsar_source_retirement",
   "@forced_failover_delivery",
@@ -968,6 +969,16 @@ id = "scenario.mqtt-finish-at-stop"
 invariant = "STOP retains an MQTT client until every QOS 0 publish it took is flushed to the broker within the finish deadline, rather than completing while that publish is held behind a broker fault."
 invocation = "scenarios"
 scenario = "STOP waits for the publish a QOS 0 MQTT TOPIC emitter's client holds"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "An attached MQTT QOS 2 emitter on one and three nodes whose endpoint drops every PUBREL, so each publish reaches the broker and its exchange stops after PUBREC: the persistent session's event loop keeps running while ACK TIMEOUT expires, the host retries the record on its policy, and the retry's exchange reaches PUBCOMP once the endpoint forwards again."
+examples = 2
+feature = "tests/features/runtime/mqtt_emission.feature"
+id = "scenario.mqtt-emitter-pubcomp-boundary"
+invariant = "An MQTT QOS 2 record stays unacknowledged until PUBCOMP, whatever the broker already holds, and a retried exchange completes through the same running event loop without blocking its emitter task."
+invocation = "scenarios"
+scenario = "An attached MQTT QOS 2 emitter holds the input offset until PUBCOMP"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -2524,6 +2535,16 @@ id = "stress.mqtt-finish-at-stop"
 invariant = "STOP retains an MQTT client until every QOS 0 publish it took is flushed to the broker within the finish deadline, rather than completing while that publish is held behind a broker fault."
 invocation = "stress-scenarios"
 scenario = "STOP waits for the publish a QOS 0 MQTT TOPIC emitter's client holds"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: an attached MQTT QOS 2 emitter on one and three nodes whose endpoint drops every PUBREL, so each publish reaches the broker and its exchange stops after PUBREC: the persistent session's event loop keeps running while ACK TIMEOUT expires, the host retries the record on its policy, and the retry's exchange reaches PUBCOMP once the endpoint forwards again."
+examples = 2
+feature = "tests/features/runtime/mqtt_emission.feature"
+id = "stress.mqtt-emitter-pubcomp-boundary"
+invariant = "An MQTT QOS 2 record stays unacknowledged until PUBCOMP, whatever the broker already holds, and a retried exchange completes through the same running event loop without blocking its emitter task."
+invocation = "stress-scenarios"
+scenario = "An attached MQTT QOS 2 emitter holds the input offset until PUBCOMP"
 selections = ["deloxide-stress"]
 
 [[workload]]

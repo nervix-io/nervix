@@ -455,6 +455,10 @@ current connection, retry and deadline limits.
   retire; ordinary stop retains a persistent session. Read `Ingestors` → `MQTT` for identities,
   session lifetime, the separate raw-frame and admitted-publish bounds, oversized-payload counts
   and cleanup failures, and `Emitters` → `MQTT` for emitter identities.
+- An `MQTT TOPIC` emitter writes its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, `NO ACK` only at
+  `QOS 0` and `ACK` only at `QOS 1` or `QOS 2`. `SET MODE` stays within the written quality of
+  service, and `SET TO` changes it. Read `Emitters` → `MQTT` for what each level completes on and
+  for the persistent session a new client cannot take over.
 - An `MQTT CLIENT`'s `addr` is `mqtt://` or `mqtts://`, a host and a port, with no credentials,
   path or query: write `username` and `password` (redacted on inspection), `keep_alive_ms` in
   whole seconds and the source admission bound `max_packet_size` as their own keys, checked against
@@ -470,6 +474,12 @@ current connection, retry and deadline limits.
   glob over channel names, and read `metadata.channel` and `metadata.pattern` to tell deliveries
   apart. Consult the Redis manual sections for the byte bounds, how a pattern matches, the
   metadata's nulls and unavailable header operations.
+- Choose Redis Pub/Sub only where losing and repeating messages is acceptable. Redis keeps nothing
+  for a subscription that is closed: a disconnect, an ownership handoff, a graceful shutdown and
+  intake that falls behind Redis's Pub/Sub output-buffer limit each lose what is published
+  meanwhile, and an emitter retries a `PUBLISH` answered later than the driver's 500 ms, which a
+  subscriber can then receive twice. The Redis sections of `Ingestors` and `Emitters` state each
+  window.
 - An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL` with `ON QUIESCE SUSPEND`. An emitter writes
   its request shape, `SEND SINGLE` or `SEND BATCH`, before `MODE ACK RETRY POLICY ...`. Treat
   `QUEUE` as a literal, case-preserving SQS name, and check `SQS CLIENT` keys against `Ingestors` →
@@ -753,7 +763,7 @@ Choose checks relevant to the configured graph:
   expiry outcomes.
 
 For a parse error, follow the reported expected token and compare clause order with the relevant
-public example. For an MQTT QoS or session-pairing refusal, use the underlined token and the
+public example. For an MQTT QoS, session or mode pairing refusal, use the underlined token and the
 connector's Ingestors or Emitters section to choose an accepted value or quiesce mode.
 For a validation error, trace exact types, declaration order, domain ownership,
 branch compatibility, construction completeness, and connector capabilities. For missing data,
