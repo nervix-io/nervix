@@ -14,6 +14,12 @@ errors; the public projection uses their value-free key contexts. Redis's capaci
 the ingestor plan's typed range error beneath `OfflineClientConfigError` for
 `subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
 
+Kafka's offline check retains `rdkafka::error::KafkaError` beneath `OfflineClientConfigError`.
+A native property with an invalid value and an unknown native property both project as
+`invalid client config key '<key>'`, beneath the client/domain context. The raw driver description
+stays internal because it can quote the configured value. An accepted delegated property without
+an explicit public declaration is also confidential in client inspection, which prints `********`.
+
 RabbitMQ's TLS file keys declare `amqps` as their permitted address scheme. The shared schema's
 `ClientConfigSchemaError::RequiresScheme` refuses TLS files with `amqp` before file inspection
 and commit, naming the key, `addr` and `amqps` without the configured values. The existing
@@ -443,16 +449,18 @@ answers a Model canonical Plexus cannot spell with a fixed diagnostic.
 
 ### Plexus Language And Formatter
 
-MQTT QoS refusals identify the supplied number, its source span, and the levels that the ingestor
-or emitter accepts. An MQTT ingestor `ACK` mode outside a persistent session at QoS 1 or 2 is
-refused with the mode underlined and the session and QoS the statement writes named beside the
-required pairing. A refused `ON QUIESCE SUSPEND` identifies `SUSPEND` and its required
-`SESSION PERSISTENT` pairing at `QOS 1` or `QOS 2`. Completion offers the delivery and quiesce
-modes the written session and QoS keep, so a statement that follows completion reaches neither
-refusal: a clean session or QoS 0 offers `NO ACK` after `MODE`, and `BUFFER` and `DROP` after
-`ON QUIESCE`. A grammar branch those choices close names nothing a statement could write, so a
-diagnostic lists only what the open branches expect, and says `something else` only where none
-names an item.
+MQTT QoS refusals identify the supplied number, its source span, and the levels both sides accept,
+through the one `QOS` clause the two statement families share. An MQTT ingestor `ACK` mode outside a
+persistent session at QoS 1 or 2 is refused with the mode underlined and the session and QoS the
+statement writes named beside the required pairing. An MQTT emitter's mode beside a quality of
+service it does not pair with is refused the same way. A refused `ON QUIESCE SUSPEND` identifies
+`SUSPEND` and its required `SESSION PERSISTENT` pairing at `QOS 1` or `QOS 2`. Completion offers the
+delivery and quiesce modes the written session and QoS keep, so a statement that follows completion
+reaches none of these refusals: a clean session or QoS 0 offers `NO ACK` after an ingestor's `MODE`,
+and `BUFFER` and `DROP` after `ON QUIESCE`, and an emitter's `MODE` offers only the modes its written
+quality of service pairs with. A grammar branch those choices close names nothing a statement could
+write, so a diagnostic lists only what the open branches expect, and says `something else` only where
+none names an item.
 
 The language layer reports rejected source the same way. Lexing and parsing each create the report
 at the stage that failed, and its context names that stage and holds the rejected text with every
@@ -468,10 +476,13 @@ cannot begin at all, the diagnostic expects the placeholder the clause names, su
 the expression grammar's first diagnostic at the tokens of the statement where it failed, with the
 message the standalone reader gives the same text. Where a complete expression is followed by a token
 no clause of the statement expects, the statement reports that token with its own expectations. An
-expression's diagnostic carries no expectations of the expression grammar, so completion inside an
-unfinished expression offers nothing rather than guessing at expression syntax. A caller that owns
-a larger operation adds its own context above the
-language's report instead of copying the diagnostics into its error: splitting a client batch reports
+unfinished expression retains the expression grammar's semantic expectations for function names,
+invocations, qualified fields and assignment targets. These expectations keep the statement's
+token positions and participate in its composed grammar. Completion resolves functions in the
+selected connector scope and metadata fields from that entity's declaration; the diagnostic keeps
+the expression reader's expected tokens and found token. Ordinary clause continuations still
+belong to the surrounding statement grammar. A caller that owns a larger operation adds its own
+context above the language's report instead of copying the diagnostics into its error: splitting a client batch reports
 that the batch could not be split, and the formatter reports a source that did not parse, the line
 of a statement the vocabulary could not render, or a rendering defect whose output changed meaning
 or no longer parses. The formatter's command line reads the language's report beneath its context
@@ -891,6 +902,19 @@ configuration failure, not a record rejection. A checkout that runs out of
 `EmitterOpenError::Initialize` while the pool opens and beneath `EmitterWriteError::NotInitialized`
 on a write, which the host retries on its policy.
 
+The Postgres statement key `timeout_ms` is optional and held to PostgreSQL's signed integer
+millisecond range at the offline configuration boundary. A range refusal keeps its typed integer
+conversion cause beneath `ClientConfigError::InvalidDeadline` and projects the `timeout_ms` key,
+rather than the address, into `OfflineClientConfigError`. The connection's private
+`PostgresStatementDeadline` applies both the server option and each catalog-query or INSERT response
+budget. A local timeout keeps `DeadlineElapsed`, its operation, key and bound beneath
+`PostgresWriteError::Deadline` and the host publish context; its printable description survives that
+projection. The interrupted connection closes instead of returning its pending response to the
+idle pool. A server `57014` becomes `PostgresWriteError::StatementCanceled` when the client has a
+configured deadline: it reports that safe SQLSTATE and configured bound without treating every
+operator cancellation as a proven timeout. Both remain transient publish failures, with no record
+rejection or exposed server response text.
+
 Redis subscription protocol and read failures retain their driver causes beneath
 `RedisPubSubIngestorError::SubscriptionSetup` or `SubscriptionRead`. An unanswered idle probe keeps
 the shared `DeadlineElapsed` with `idle_timeout_ms` and its configured bound beneath `IdleProbe`
@@ -1309,8 +1333,13 @@ initialization failures. They never include a record's values. An ingestor whose
 the option choices its entity declares for it, such as an MQTT `ACK` mode outside a persistent
 session at QoS 1 or 2, is `ConnectorDeclarationIssue::Delivery`, carrying the vocabulary's typed
 `UnmetDeliveryRequirement` that names the entity, the mode, every required choice and the choice the
-statement writes for each option. The grammar refuses the same statement with the same text,
-underlining the mode.
+statement writes for each option. An emitter whose publishing mode lacks the choices its entity
+declares for it, such as an MQTT `NO ACK` beside `QOS 1`, is `ConnectorDeclarationIssue::Publishing`
+with the vocabulary's `UnmetPublishingRequirement`, the same statement of the same facts. The grammar
+refuses either statement with the same text, underlining the mode, and the registry's refusal covers
+what the grammar cannot see, a `SET MODE` against the quality of service the stored emitter keeps.
+The start plan reports the requirement as `EmitterStartPlanError::UnmetPublishing` for a Model that
+reached it without the registry, and so has no plan to give it.
 
 MySQL table-name construction refuses empty path parts and more than two parts with typed
 `ExternalNameError` outcomes. Its offline client check refuses pool-sizing URL parameters through

@@ -262,15 +262,16 @@ platform string; connector preparation uses it only when the codec's event omits
 A polled HTTP request's header holds a literal or names a client secret as two states of one enum,
 so a value cannot be both or neither, and the Model that names a secret holds its key and never its
 value.
-The registry's `NERVIX GROUP POS` archive signature identifies the current Model layout, including
+The registry's `NERVIX MQTT EMIT` archive signature identifies the current Model layout, including
 an owned Pulsar subscription's required start position, a Kafka consumer group's required start
 position, the required branch partition count, Sentry platform, an ingestor's
 `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the session and
-quality of service an MQTT TOPIC ingestor writes beside its delivery mode, a `REDIS PUBSUB`
-ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`, and that header state.
-Consensus's `raft_group_start_` keyspaces and current state metadata encoding identify its stored
-shapes. An unrecognized signature, namespace or
-encoding fails with the owning storage error and requires the stored data to be recreated.
+quality of service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an
+MQTT TOPIC emitter writes beside its publishing mode, a `REDIS PUBSUB` ingestor's subscription,
+which is either a `CHANNEL` or a `PATTERN`, and that header state. Consensus's `raft_mqtt_emit_`
+keyspaces and current state metadata encoding identify its stored shapes. An unrecognized signature,
+namespace or encoding fails with the owning storage error and requires the stored data to be
+recreated.
 
 ## Absence And Distinct States
 
@@ -524,6 +525,13 @@ lookup. A Postgres address's TLS policy is the typed `PostgresSslMode`, read thr
 option written twice, is refused rather than defaulted to a policy. A Postgres conflict clause's
 rules belong to `PostgresConflictAction`, whose typed refusal names a missing `DO UPDATE` target, an
 empty target column or an update without a mapped column outside its target.
+
+Postgres connection options and their `Option<PostgresStatementDeadline>` are constructed together
+before the pool opens. Absence means the client omitted a Nervix statement bound; presence has
+passed both the shared positive-millisecond rule and PostgreSQL's signed integer range. Every
+borrow copies that immutable deadline, so the server option and local query wait consume the same
+validated value. A local elapsed wait and a server-canceled statement have distinct typed contexts:
+the latter may name the configured bound without asserting why the server canceled it.
 
 RabbitMQ's consumer enum distinguishes automatic acknowledgement, sequential acknowledgement
 and parallel acknowledgement. The parallel variant owns a `NonZeroU16` prefetch count and batch

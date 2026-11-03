@@ -64,6 +64,20 @@ fn locators(declarations: &[LocatorDeclaration]) -> Option<String> {
     Some(described.join(" | "))
 }
 
+/// What a synopsis writes after the reference: the one locator a body writes, or its alternatives,
+/// of which a body writes exactly one.
+fn locator_template(declarations: &[LocatorDeclaration]) -> String {
+    let examples: Vec<String> = declarations
+        .iter()
+        .map(LocatorDeclaration::example)
+        .collect();
+    match examples.as_slice() {
+        [] => String::new(),
+        [only] => format!(" {only}"),
+        alternatives => format!(" ({})", alternatives.join(" | ")),
+    }
+}
+
 /// The locator written in full, with the label completion offers for its name.
 fn locator_with_label(declaration: LocatorDeclaration) -> String {
     let label = match declaration.name {
@@ -135,7 +149,8 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
         acknowledgement_confirmation,
         delivery,
         quiesce,
-        locator: declared_locator,
+        // Read with the entity's alternatives through `kind.locators()` below.
+        locator: _,
         options: declared_options,
         bounds: declared_bounds,
     } = kind.capabilities();
@@ -144,6 +159,7 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
         IngestorReferenceKind::Endpoint(endpoint) => format!("{endpoint:?} endpoint"),
         IngestorReferenceKind::Schema => "SCHEMA <schema>".to_owned(),
     };
+    let declared_locators = kind.locators();
     let modes: Vec<_> = delivery
         .iter()
         .map(|delivery| format!("{}{}", delivery.example, requirements(delivery.requires)))
@@ -169,10 +185,7 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
             "\n  DECODE USING <codec>"
         }
     };
-    let location = match declared_locator {
-        Some(declaration) => format!(" {}", declaration.example()),
-        None => String::new(),
-    };
+    let location = locator_template(&declared_locators);
     let template = format!(
         "CREATE {} INGESTOR <name>\n  FROM {from}{location}{}\n  MODE <mode>\n  ON QUIESCE \
          <quiesce>{decode}\n  TO <relay> UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG\n  ON \
@@ -182,7 +195,7 @@ fn ingestor(kind: IngestorEntityKind) -> Value {
     );
     json!({
         "entity": kind.phrase(), "connector": kind.connector().keyword(),
-        "reference": reference, "locator": locators(&kind.locators()), "options": options,
+        "reference": reference, "locator": locators(&declared_locators), "options": options,
         "modes": modes, "quiesce": quiesce, "metadata": metadata,
         "headers": header_model(headers), "every_node": executes_on_every_cluster_node,
         "position": position_class.as_ref(),
@@ -329,7 +342,10 @@ fn emitter(kind: EmitterEntityKind) -> Value {
         EmitterBatchLegality::Unavailable { reason } => (format!("unavailable: {reason}"), None),
     };
     let maximum = maximum.map(|limit| limit.to_string());
-    let modes: Vec<_> = publishing_modes.iter().map(|mode| mode.example()).collect();
+    let modes: Vec<_> = publishing_modes
+        .iter()
+        .map(|mode| format!("{}{}", mode.kind.example(), requirements(mode.requires)))
+        .collect();
     let options: Vec<_> = options.iter().map(option).collect();
     let envelope: Vec<_> = envelope.iter().map(|clause| clause.example()).collect();
     let properties: Vec<_> = properties

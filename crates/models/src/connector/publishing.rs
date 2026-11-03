@@ -1,7 +1,8 @@
 //! The publishing policies each emitter entity can represent.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** Generation of each entity's closed policy enum and a borrowed observation of it.
+//! - **Owns.** Generation of each entity's closed policy enum, its declaration and a borrowed
+//!   observation of it.
 //! - **Depends on.** Acknowledgement windows, retry policy and publishing capability kinds.
 //! - **Must not know.** Grammar, validation, connector drivers or execution plans.
 
@@ -11,17 +12,22 @@
 )]
 
 /// Declare an entity's complete set of representable publishing policies once. Its capability
-/// declaration reads KINDS, and observers borrow the policy instead of retaining a second copy.
+/// declaration reads KINDS, and observers borrow the policy instead of retaining a second copy. A
+/// policy a statement names only beside certain option choices states them after its kind with
+/// `requires`.
 macro_rules! emitter_modes {
-    (pub enum $Mode:ident { $( $Variant:ident { $($field:ident : $Type:ty),+ $(,)? } => $Kind:ident, )+ }) => {
+    (pub enum $Mode:ident { $( $Variant:ident { $($field:ident : $Type:ty),+ $(,)? } => $Kind:ident $(requires $requires:expr)?, )+ }) => {
         #[derive(Debug, Clone, PartialEq, Eq, ::serde::Serialize, ::serde::Deserialize,
                  ::rkyv::Archive, ::rkyv::Serialize, ::rkyv::Deserialize)]
         pub enum $Mode {
             $( $Variant { $($field: $Type,)+ }, )+
         }
         impl $Mode {
-            /// Every policy this entity represents, in declaration order.
-            pub const KINDS: &'static [$crate::EmitterPublishingModeKind] = &[$($crate::EmitterPublishingModeKind::$Kind,)+];
+            /// Every policy this entity represents, in declaration order, with the option choices
+            /// each needs written beside it.
+            pub const KINDS: &'static [$crate::DeclaredPublishing] = &[
+                $($crate::DeclaredPublishing::of($crate::EmitterPublishingModeKind::$Kind)$(.requiring($requires))?,)+
+            ];
 
             /// A borrowed observation for rendering and policy-independent inspection.
             pub fn publishing(&self) -> $crate::EmitterPublishing<'_> {

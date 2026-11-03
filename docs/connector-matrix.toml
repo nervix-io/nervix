@@ -19,7 +19,7 @@ ingest_locator = "The endpoint declaration owns the host and path this cluster s
 mirror = "An endpoint is the server side: every live node serves it, its requests carry no remote source position, and their headers and method, path, query, peer address and host metadata describe what a client sent. The HTTP REQUEST emitter instead sends requests to an external endpoint through an HTTP CLIENT."
 
 [entity."KAFKA TOPIC"]
-mirror = "Consumption tracks replayable log offsets and consumer groups; publication uses a producer queue or delivery report. Both directions use the same quoted, case-preserving Kafka topic names."
+mirror = "Consumption tracks replayable log offsets and consumer groups; ACK consumption waits for commit confirmation, while publication uses a producer queue or delivery report. Both directions use the same quoted, case-preserving Kafka topic names and a client with bootstrap.servers. Nervix-owned client keys are refused; other driver properties are checked offline under one accepted name each. Consumers disable topic auto-creation, while producers retain the driver default, so provision input and output topics explicitly."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."PULSAR TOPIC"]
@@ -27,11 +27,11 @@ mirror = "Consumption declares subscription ownership and, when ingestor-owned, 
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."MQTT TOPIC"]
-emit_headers = "Subscription options select the session and inbound QoS; emitter QoS is part of its publishing mode. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation."
+emit_headers = "Subscription options select the session and inbound QoS, and the emitter's QOS option its outbound QoS. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation."
 envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
-ingest_headers = "Subscription options select the session and inbound QoS; emitter QoS is part of its publishing mode. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation."
+ingest_headers = "Subscription options select the session and inbound QoS, and the emitter's QOS option its outbound QoS. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation."
 metadata = "The current topic declaration exposes the payload and configured subscription, with no typed publish-property metadata namespace."
-mirror = "Subscription options select the session and inbound QoS; emitter QoS is part of its publishing mode. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation."
+mirror = "Subscription options select the session and inbound QoS, and the emitter's QOS option its outbound QoS. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."NATS SUBJECT"]

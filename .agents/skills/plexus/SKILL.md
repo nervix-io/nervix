@@ -51,7 +51,9 @@ Ingestors section for the exact clause order, host admission and recovery limits
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
 contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and
-completion status messages.
+completion status messages. For connector expression completion, including filters, HTTP request
+expressions, ALTER constructions, metadata fields and entity-specific header functions, follow
+the CLI's Completion section.
 Read the Ingestors and Emitters chapters for `SHOW INGESTORS`, `SHOW EMITTERS`, and `DESCRIBE`;
 their inspection contracts distinguish effective options from canonical `SHOW CREATE` configuration.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
@@ -570,7 +572,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   TLS-file interface, certificate and key must be supplied together, and TLS files require
   `verify-full`. A `POSTGRES TABLE` names `'Orders'` or `'sales.Orders'`, each part sent with its
   case kept; `ON CONFLICT (...) DO UPDATE` needs a target and a mapped column outside it, and
-  `MAX SIZE` is at most `1073741822B`. Read
+  `MAX SIZE` is at most `1073741822B`. Keep its optional statement `timeout_ms` separate from
+  `pool_acquire_timeout_ms`; read their bounds and retry semantics in
   [Emitters → Postgres](../../../docs/src/emitters.md#postgres).
 - Give a `RABBITMQ` client an `amqp://` or `amqps://` `addr` that names a host and no port 0; Nervix
   refuses any other address before commit. Mounted `tls_ca_file`, `tls_cert_file` and
@@ -639,8 +642,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `WEBSOCKETS ENDPOINT`, an explicit `ON OVERFLOW DROP OLDEST|DROP NEWEST` for `BUFFER`; include
   `RETRY AFTER` for endpoint `REJECT`. Write every `MQTT TOPIC` ingestor's `SESSION CLEAN` or
   `SESSION PERSISTENT` and its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, and use its `ACK` modes
-  and `SUSPEND` only with `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. Do not invent a default or
-  use a mode offered by another entity.
+  and `SUSPEND` only with `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. Write every `MQTT TOPIC`
+  emitter's `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, with `NO ACK` only at `QOS 0` and `ACK` only
+  at `QOS 1` or `QOS 2`. Do not invent a default or use a mode offered by another entity.
 - A server endpoint WebSocket keeps its route and signaling protocol for the connection. After
   its source stops or is replaced, reconnect to use the new source; after signaling, the next
   refused payload on the preceding connection closes with 1013. Configured routes without a live
