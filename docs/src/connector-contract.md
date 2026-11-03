@@ -1005,8 +1005,10 @@ refusal before either a PULL or PUSH socket opens; an omitted value selects conn
 The MySQL offline check also applies the vocabulary's pooled-client reserved-key declaration to
 URL query parameters. A pool override is a value-free refusal naming `POOL SIZE`, before storage
 or connection attempts; the host uses that same declaration for resolved configuration. MySQL's
-current client schema declares `addr`, `timeout_ms`, `tls_ca_file`, `tls_cert_file` and
-`tls_key_file`, with paired certificate and key files. Its
+current client schema declares `addr`, the pool acquire/lifetime/maintenance keys, `timeout_ms`,
+`tls_ca_file`, `tls_cert_file` and `tls_key_file`, with paired certificate and key files. The
+vocabulary validates nonnegative idle milliseconds and positive whole-second maximum ages before
+commit; the driver never truncates a declared maximum age. Its
 table declaration admits one or two nonempty, case-preserving identifier parts, and the connector
 quotes each part separately. Its declared placeholder bound is shared with the statement divider;
 the bound narrows rows by mapped column count. The [MySQL manual](emitters.md#mysql) gives its
@@ -1435,9 +1437,10 @@ rather than a wider or narrower one, and it is absent where the message carries 
 that keeps a message whose transport value its field's type cannot hold hands that value over as
 unrepresentable, with its declared type and a description of the transport value, never a
 substitute value and never an absence: `RABBITMQ QUEUE` does so for an AMQP timestamp after
-2262-04-11, the last instant a `DATETIME` holds. `KAFKA TOPIC` and `SQS QUEUE` instead fail the read
-of a message whose timestamp is out of range, as their paragraphs below state, before any value is
-handed over.
+2262-04-11, the last instant a `DATETIME` holds, and `KAFKA TOPIC` for a record timestamp before
+1677-09-21 or after 2262-04-11. `SQS QUEUE` instead fails the read of a message whose system
+attribute timestamp is out of range, as its paragraph below states, before any value is handed
+over.
 A `STRING` such as a socket address may be written into the column in place instead of being
 allocated per message.
 A message that hands over another number of values than its entity declares, or a value of another
@@ -1470,15 +1473,19 @@ with the domain's routing, outside the source host.
 Kafka metadata borrows the record's key without allocating another byte sequence. Missing keys
 remain distinct from empty keys. Its timestamp is the exact instant of the driver's Unix
 milliseconds, with `create_time` or `log_append_time` as its kind; an unavailable timestamp has no
-instant or kind. A null value and an empty non-null value both lend an empty payload, but their
-tombstone flags differ. The codec decides whether an empty payload yields any rows. Every row
-that it yields shares the originating record's metadata and transport position. Kafka's
-`SUSPEND`-only quiesce declaration makes retained quiesce metadata unreachable for this entity.
-A present timestamp out of range is a typed source read failure, not an unrepresentable metadata
-value. If conversion fails after a valid prefix was gathered, the source returns that prefix and
-keeps one report for the next admitted read. A cancelled read leaves the report pending; no later
-record is taken while it is pending. The source declares this single-report bound beside its
-driver buffers.
+instant or kind. A present timestamp whose milliseconds name an instant before 1677-09-21 or after
+2262-04-11, which no `DATETIME` holds, is handed over as unrepresentable, described by those
+milliseconds, and its kind still reads as `create_time` or `log_append_time`. Reading the record
+never converts its timestamp: the message converts it only when the host visits its metadata, so
+such a record is read, acknowledged and positioned like any other. A null value and an empty
+non-null value both lend an empty payload, but their tombstone flags differ. The codec decides
+whether an empty payload yields any rows. Every row that it yields shares the originating record's
+metadata and transport position. Kafka's `SUSPEND`-only quiesce declaration makes retained quiesce
+metadata unreachable for this entity. A record at the last offset Kafka's signed offsets reach has
+no next position to acknowledge, which is a typed source read failure. If that failure follows a
+valid prefix gathered in the same read, the source returns that prefix and keeps one report for the
+next admitted read. A cancelled read leaves the report pending; no later record is taken while it
+is pending. The source declares this single-report bound beside its driver buffers.
 
 MQTT metadata and headers borrow the delivered packet the message owns, the one admission copied
 out of its frame, so the host copies them only when a quiesce buffer retains the message. The
@@ -3237,15 +3244,23 @@ and Arrow type retained beneath the publish context. It is not a per-record reje
 that keeps a MySQL pool at `POOL SIZE MIN` reports a pass that ends below it as
 `PoolMinimumError::NotRestored`, naming the minimum, above the failed checkout's `CheckOut` and the
 driver's error, before its next pass retries; a later writer's failure remains a separate
-diagnostic. MySQL's configured `timeout_ms` is read once through `ConfiguredDeadline` and retained
-with the node's shared driver pool. It bounds every checkout, including the minimum keeper's,
-initial connection validation, and each insert as separate operations. An elapsed operation keeps
-the typed `DeadlineElapsed` beneath its MySQL and host contexts and attaches its safe operation,
-key and duration for public emitter diagnostics. MySQL composition preserves the shared-client
-report through initialization. An elapsed operation is infrastructure failure, never a row
-rejection. Cancelling a driver command marks its connection disconnected, and the
-recycler discards it before handing out capacity again. Omitting the key retains the declared
-unbounded waits. TLS files extend the URL's existing `SslOpts`, retaining verification and trust
+diagnostic. MySQL retains its effective `pool_acquire_timeout_ms` checkout budget, defaulted by
+its client schema to 30 seconds, and optional `timeout_ms` operation budget through
+`ConfiguredDeadline`. Every checkout, including the minimum keeper's, takes the shorter applicable
+bound and names that bound's key on expiry. Initial validation and each insert separately retain
+the operation bound; without `timeout_ms` those operations remain unbounded after checkout.
+An elapsed operation keeps the typed `DeadlineElapsed` beneath its MySQL and host contexts and
+attaches its safe operation, key and duration for public emitter diagnostics. MySQL composition
+preserves the shared-client report through initialization. An elapsed operation is infrastructure
+failure, never a row rejection. Cancelling a driver command marks its connection disconnected,
+and the recycler discards it before handing out capacity again. The pool's immutable policy
+reads effective defaults once, applies idle and optional absolute lifetimes to the driver, and
+passes `pool_maintenance_interval_ms` to the unchanged minimum keeper. Driver expiry scans retain
+their own cadence; [Database Client Connection Pools](database-client-pools.md#connection-lifetimes)
+defines retirement and in-flight operation boundaries. A lifetime or maintenance value that violates
+its declared schema rule retains `ClientConfigSchemaError` beneath `MySqlPoolPolicyError::InvalidKey`
+at open.
+TLS files extend the URL's existing `SslOpts`, retaining verification and trust
 choices, and paired identity files install the driver's RSA PKCS#1 identity. The silent-handshake,
 locked-insert/retry and shared-pool-contention scenarios own the public deadline observations;
 the mounted-certificate scenario uses an account that requires a client certificate.

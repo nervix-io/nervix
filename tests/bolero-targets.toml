@@ -3461,10 +3461,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/connectors/kafka/src/topic/__fuzz__/topic__ingestor__metadata_tests__bolero_kafka_record_metadata_preserves_every_field/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "kafka-record-metadata"
-invariant = "Every bounded current Kafka record preserves its complete topic, partition, offset, nullable binary key, millisecond timestamp and kind, and null-value tombstone distinction through the production message metadata and retained replay, while its payload and transport position stay exact."
+invariant = "Every bounded current Kafka record preserves its complete topic, partition, offset, nullable binary key, millisecond timestamp as the exact instant or, past either end of the instants a DATETIME holds, as an unrepresentable value describing its milliseconds, its kind, and null-value tombstone distinction through the production message metadata and retained replay, while its payload and transport position stay exact."
 manifest = "Cargo.toml"
 max_input_bytes = 128
 package = "nervix-connector-kafka"
@@ -3716,7 +3716,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/src/connector/__fuzz__/connector__config_schema__tests__bolero_schema_checked_client_entries_round_trip/corpus"
-domain_version = 27
+domain_version = 28
 features = []
 id = "client-config-schema"
 invariant = "Bounded entries drawn from every current client key schema preserve complete values and acceptance through JSON and archive round trips; effective defaults preserve authored entries and are idempotent, as is public inspection."
