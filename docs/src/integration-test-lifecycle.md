@@ -64,6 +64,13 @@ with [Cluster Interconnect](./interconnect.md), client requests, redirects, reco
 recovery with [Client Session Protocol](./client-session-protocol.md), and command identity and
 completion with [Command Completion](./command-completion.md).
 
+`just test-scenarios` and `just test-scenarios-reuse` build `tests-deps`, set `ORT_DYLIB_PATH`,
+and pass each caller argument intact to the scenario binary through Cargo. Names and regular
+expressions containing spaces, and brace input globs, are single arguments when quoted by the
+caller; the recipe does not expand their contents as shell code. The reuse recipe also sets
+`NERVIX_TESTCONTAINERS_MODE=reusable`. [Developing Nervix](./developing-nervix.md#validation-and-tests)
+shows a named selection and the focused argument-forwarding check.
+
 ## What Runs Where
 
 The emitter assembly outline observes the emitter's public received-message total before each
