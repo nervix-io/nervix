@@ -328,6 +328,13 @@ struct NatsStreamMetadataVisit<'a> {
 }
 
 impl NatsStreamMetadataVisit<'_> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the connector supplies a synchronous projection from parsed delivery \
+                      metadata; local projection bodies remain analyzed"
+        )
+    )]
     fn field(
         &self,
         ty: IngestorMetadataType,

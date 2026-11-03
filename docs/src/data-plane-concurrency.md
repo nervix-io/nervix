@@ -1706,6 +1706,10 @@ application calls require a callable/trait contract or `nervix::dispatch(reason 
 owning callable; a cold module default is insufficient. A dispatch contract states the external
 driver or callback boundary; it does not exempt compiler-visible local callback bodies or acquisitions.
 
+The NATS stream metadata visitor carries this contract on its field helper: a synchronous callback
+projects the borrowed delivery metadata into the requested scalar sink. Its per-visit `OnceCell`
+is stack-local, and the compiler continues to analyze each local projection body.
+
 The MySQL insert builder and the Postgres table name builder carry a dispatch contract for the
 vocabulary's opaque iterator over at most two immutable table-name parts, with at most 128 bytes
 across them. The boundary is
