@@ -187,7 +187,7 @@ to discard a record.
 | Kafka | `NO ACK`; `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | Local producer-queue acceptance for `NO ACK`; one delivery report per record for `ACK` |
 | Pulsar | `NO ACK`; `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | Producer acceptance for `NO ACK`; one broker receipt per record for `ACK` |
 | RabbitMQ | `NO ACK`; `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | The channel's answer to one round trip after each write for `NO ACK`; publisher confirm for `ACK` |
-| MQTT | `QOS 0`; `QOS 1 ACK ...`; `QOS 2 ACK ...` | Client acceptance, `PUBACK`, or completion of the QoS 2 handshake respectively |
+| MQTT | `NO ACK` at `QOS 0`; `ACK SEQUENTIAL` or `ACK PARALLEL MAX <n>` at `QOS 1` or `QOS 2` | Client acceptance at `QOS 0`, `PUBACK` at `QOS 1`, or `PUBCOMP`, which completes the QoS 2 handshake, at `QOS 2` |
 | NATS | `NO ACK`; `JETSTREAM ACK SEQUENTIAL`; `JETSTREAM ACK PARALLEL MAX <n>` | The Core NATS write's queued bytes drained and flushed on the same connection for `NO ACK`, without a server round trip; JetStream `PubAck` otherwise |
 | Redis Pub/Sub | `NO ACK` | Server acceptance of `PUBLISH`; the subscriber count is not a delivery guarantee |
 | ZeroMQ | `NO ACK` | Socket acceptance |
@@ -799,8 +799,8 @@ members' concrete branch key; the written headers become Kafka and NATS headers,
 properties, AMQP headers or SQS message attributes; and an SQS FIFO message carries the members'
 message group. Without the clause every record stays its own message, carried the same way.
 
-Batching keeps every publishing mode's completion point. `NO ACK` and `QOS 0` complete when the
-producer, channel, client or socket accepts the batch message; the confirming modes wait for one
+Batching keeps every publishing mode's completion point. `NO ACK` completes when the producer,
+channel, client or socket accepts the batch message; the confirming modes wait for one
 delivery report, broker receipt, publisher confirm, `PUBACK`, completed QoS 2 handshake or
 JetStream `PubAck` for it. `ACK TIMEOUT` bounds that one wait, and a batch message whose outcome
 stays unknown is retained for the retry described above.
@@ -1760,13 +1760,21 @@ the broker supplies a Server Keep Alive in `CONNACK`; a broker-supplied zero dis
 connection pings its broker after one interval without traffic and ends when the following interval
 passes without an answer. QoS 0 uses a clean session. QoS 1 and 2 request a persistent session with
 the maximum Session Expiry Interval (`0xFFFFFFFF`); the broker's accepted expiry and retention
-limits still apply. Plexus exposes no session-expiry setting.
+limits still apply. Plexus exposes no session-expiry setting, and `SESSION` is not an emitter
+option: an emitter without acknowledgement needs no session, and an acknowledged one always keeps
+it.
+
+Every statement writes its quality of service as `QOS 0`, `QOS 1` or `QOS 2` before `MODE`. Neither
+has a default, and the two pair by what can complete a publish: nothing answers QoS 0, so `QOS 0`
+takes `NO ACK`, and a broker answers QoS 1 and 2, so `QOS 1` and `QOS 2` take `ACK SEQUENTIAL` or
+`ACK PARALLEL MAX <n>`.
 
 <!-- connector-matrix:emit-mqtt-topic:start -->
 ```plexus,ignore
 CREATE MQTT TOPIC EMITTER <name>
   FROM <relay>
   TO <client> TOPIC 'devices/Orders'
+  (QOS 0 | QOS 1 | QOS 2)
     MODE <mode>
     ENCODE USING <codec>
   <construction>
@@ -1782,18 +1790,18 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | --- | --- |
 | Reference | MQTT client |
 | Locator and validation rule | TOPIC 'devices/Orders' (mqtt_topic) |
-| Modes (complete bodies after MODE) | QOS 0 RETRY POLICY BACKOFF 1s MAX 30s<br>QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>QOS 2 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | No entity-specific options. |
-| Headers | Not offered: Subscription options select the session and inbound QoS; emitter QoS is part of its publishing mode. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation. |
+| Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 0)<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 1 or 2) |
+| Options in statement order | `QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |
+| Headers | Not offered: Subscription options select the session and inbound QoS, and the emitter's QOS option its outbound QoS. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation. |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
-| Buffers | publishes queued for the driver: set by 1 under QOS 0, ACK PARALLEL MAX under QOS 1 and 2; when full, fails the publish for the host to retry |
+| Buffers | publishes queued for the driver: set by 1 under NO ACK and ACK SEQUENTIAL, ACK PARALLEL MAX under ACK PARALLEL; when full, fails the publish for the host to retry |
 | Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>answers to QOS 1 and 2 publishes: `ACK TIMEOUT`<br>writes to the connection: unbounded<br>a silent connection: client key `keep_alive_ms`; two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 s when omitted |
-| Driver limits | Packets above the broker's maximum packet size are rejected. |
+| Driver limits | Packets above the broker's maximum packet size are rejected.<br>QOS 0 connects a clean session; QOS 1 and 2 connect a persistent one with the maximum Session Expiry Interval, and SESSION is not an emitter option: a publisher without acknowledgement needs no session, and an acknowledged one always keeps it.<br>The client resumes its own session across reconnects, and a new client is refused while the broker keeps a session under its identity, since it holds no state to resume it with. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-emit).
@@ -1805,7 +1813,15 @@ so `TOPIC 'devices/+'` is refused when the emitter is created. The client's `add
 by its scheme, host and port alone, as [MQTT ingestion](ingestors.md#mqtt) describes.
 
 CREATE refuses an unsupported QoS number with its value and accepted levels, such as
-`MQTT emitter QOS must be 0, 1, or 2, found 3`, underlining the supplied number.
+`MQTT QOS must be 0, 1 or 2, found 3`, underlining the supplied number. Completion after `MODE`
+offers only the modes the written quality of service pairs with, and a statement that writes
+another is refused with the mode underlined and what it writes named, such as
+`MQTT TOPIC emitters name MODE NO ACK only with QOS 0; the statement writes QOS 1`.
+
+`ALTER` holds every result to the same pairing. `SET MODE` changes the mode within a quality of
+service, so `SET MODE ACK PARALLEL MAX 8 ...` is accepted at `QOS 1` and `SET MODE NO ACK ...` is
+refused there. `SET TO` changes the quality of service, or moves it and the mode together, through
+the complete destination body.
 
 QoS 0 acknowledges client acceptance. When the emitter stops, it waits within the stop or shutdown
 deadline for its client to send the publishes it still holds, which a client cut off from its
@@ -1813,10 +1829,19 @@ broker holds until it connects again; publishes still unsent at that deadline fa
 counted in the emitter's transient error. Sending a QoS 0 publish to the connection does not
 confirm that the broker received it.
 
-QoS 1 waits for `PUBACK`; QoS 2 waits for the complete exactly-once handshake. Their persistent
-session and stable client identity let the same client resume in-flight publishes across network
-reconnects while the broker retains the session. Nervix keeps local delivery attempts and
-acknowledgements in memory, so this is not a durable checkpoint of emitter state.
+QoS 1 waits for `PUBACK`; QoS 2 waits for the complete exactly-once handshake, which `PUBCOMP`
+ends, so a record stays unacknowledged after the broker's `PUBREC` even though the broker already
+holds it. Their persistent session and stable client identity let the same client resume in-flight
+publishes across network reconnects while the broker retains the session. Nervix keeps local
+delivery attempts and acknowledgements in memory, so this is not a durable checkpoint of emitter
+state.
+
+A new client cannot take over such a session. The client that a node or emitter restart or an
+ownership move creates holds no session state, and it refuses a broker's `CONNACK` with
+`session_present` set, so a QoS 1 or 2 emitter reconnects on its retry policy and publishes nothing
+while the broker keeps a session under its identity. `DESCRIBE EMITTER` shows the refusal as its
+transient error, and an attached emitter holds its input for that time. The emitter recovers once
+the broker discards that session, or under a new `client_id`.
 Reconnect pacing follows the declared retry policy. When an answer misses its `ACK TIMEOUT`, or
 the broker or client fails it for a reason that
 is not the record's own, the emitter keeps every answer the broker already gave and retries only the
