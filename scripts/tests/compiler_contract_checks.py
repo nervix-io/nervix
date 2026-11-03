@@ -275,6 +275,36 @@ class CompilerContractTests(unittest.TestCase):
                 self.assertNotEqual(refused.returncode, 0, refused.stderr)
                 self.assertIn(diagnostic, refused.stderr)
 
+    def test_report_fields_record_their_whole_chain(self) -> None:
+        result = self.compile("error_report_field", "--error-format=json")
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        diagnostics = [json.loads(line) for line in result.stderr.splitlines() if line.startswith("{")]
+        findings = [item for item in diagnostics if (item.get("code") or {}).get("code") == "nervix::partial_report_field"]
+        source = (ROOT / "tools/nervix-lint/fixtures/tests/semantics/error_report_field.rs").read_bytes()
+        snippets = []
+        for finding in findings:
+            primary = [span for span in finding["spans"] if span["is_primary"]]
+            self.assertEqual(len(primary), 1, finding)
+            span = primary[0]
+            self.assertTrue(span["file_name"].endswith("error_report_field.rs"), finding)
+            snippets.append(source[span["byte_start"]:span["byte_end"]].decode())
+        # Each refused field is named at its authored value: a direct, shorthand, explicit and
+        # renamed `display`, a shorthand field of an owner, a value an authored macro receives and
+        # one an authored macro owns.
+        self.assertEqual(sorted(snippets),
+                         ["boxed", "current", "error", "failure", "self.held", "shared", "wrapped"],
+                         result.stderr)
+        for name in ("error_report_field_allowed", "error_report_field_expected"):
+            with self.subTest(name=name):
+                accepted = self.compile(name)
+                self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        for name, diagnostic in (("error_report_field_unfulfilled", "expectation is unfulfilled"),
+                                 ("error_report_field_wide", "covers 2 distinct operations")):
+            with self.subTest(name=name):
+                refused = self.compile(name)
+                self.assertNotEqual(refused.returncode, 0, refused.stderr)
+                self.assertIn(diagnostic, refused.stderr)
+
     def test_replacement_classification_crosses_metadata(self) -> None:
         target = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
         result = self.compile("error_replacement_metadata", crate_name="callee")

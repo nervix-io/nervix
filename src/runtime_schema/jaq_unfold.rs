@@ -250,7 +250,7 @@ impl CompiledCodec {
         trace!(
             codec = self.name.as_str(),
             input,
-            error = %error,
+            error = %format_args!("{error:#}"),
             "ON INGESTION program evaluation failed"
         );
         let cause = Report::new(CodecError::JaqIngestionEvaluation {

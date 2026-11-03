@@ -1053,6 +1053,7 @@ dependencies = [
  "nervix-recovery",
  "serde_json",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
