@@ -627,7 +627,7 @@ that thread ran on a CPU for 86 percent of the run, every scenario took about 1.
 median across the factor `3` runs, and the run needed 279,439 slot-seconds where 48 slots had
 needed at most 215,000. More slots added no throughput, so the job keeps factor `3`. Memory was no
 limit on those runs' runner, which used at most 28 GiB of its 62. The archive build runs on
-`blacksmith-16vcpu-ubuntu-2404`, the unit tests on `blacksmith-4vcpu-ubuntu-2404`, and the scenario shards on
+`blacksmith-16vcpu-ubuntu-2404`, the unit tests on GitHub's hosted `ubuntu-24.04`, and the scenario shards on
 `blacksmith-8vcpu-ubuntu-2404`, whose 32 GB give each of its 24 slots the memory that runner gave
 each of 48. Each of the three shards keeps every product and harness deadline on 8 CPUs and 24
 slots, half the slots a 16-CPU shard held, so a shard takes about twice as long. The shards left Boat because a Boat
