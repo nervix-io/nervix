@@ -16,8 +16,8 @@ use nervix_models::ClusterNodeIdentity;
 use rkyv::{Archive, Deserialize, Serialize};
 
 use crate::{
-    InterconnectRequest, PoolClass, RemoteOperationFailure, StatePlacementEnvelope,
-    StateSnapshotEnvelope,
+    FetchStateCheckpoint, InterconnectRequest, InterconnectStreamRequest, PoolClass,
+    RemoteOperationFailure, StatePlacementEnvelope, StateSnapshotEnvelope,
 };
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -52,5 +52,13 @@ impl InterconnectRequest for KafkaStartRequest {
     type Response = Result<KafkaStartResponse, RemoteOperationFailure>;
     const NAME: &'static str = "coordinate_kafka_start";
     const CLASS: PoolClass = PoolClass::Commands;
-    const TIMEOUT: Duration = Duration::from_secs(60);
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "canonical-start admission shares the checkpoint-transfer deadline instead \
+                      of introducing an independent timeout"
+        )
+    )]
+    const TIMEOUT: Duration = <FetchStateCheckpoint as InterconnectStreamRequest>::TIMEOUT;
 }
