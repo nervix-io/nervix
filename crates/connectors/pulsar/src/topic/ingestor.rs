@@ -46,10 +46,7 @@ use pulsar::{
     ConsumerBuilder as PulsarConsumerBuilder, ConsumerOptions as PulsarConsumerOptions,
     Error as PulsarError, Pulsar, SubType as PulsarSubType, TokioExecutor,
     consumer::{InitialPosition as PulsarInitialPosition, Message as PulsarMessage},
-    error::{
-        ConnectionError as PulsarConnectionError, ConsumerError as PulsarConsumerError,
-        ServiceDiscoveryError as PulsarServiceDiscoveryError,
-    },
+    error::{ConnectionError as PulsarConnectionError, ConsumerError as PulsarConsumerError},
     message::proto::ServerError as PulsarServerError,
     proto::MessageIdData,
 };
@@ -69,37 +66,6 @@ mod metadata_tests;
 /// `NotAllowedError`, such as one past a topic's subscription limit, so only this reason says that
 /// the subscription exists.
 const DURABLE_SUBSCRIPTION_EXISTS: &str = "Durable subscription with the same name already exists";
-
-impl PulsarRefusal {
-    /// What the broker refused a join with, when `error` says it refused the subscribe or the
-    /// topic lookup before it, and did not fail in some other way.
-    fn of_join(error: &PulsarError) -> Option<Self> {
-        let (code, reason) = match error {
-            PulsarError::Connection(PulsarConnectionError::PulsarError(code, reason))
-            | PulsarError::Consumer(PulsarConsumerError::Connection(
-                PulsarConnectionError::PulsarError(code, reason),
-            ))
-            | PulsarError::ServiceDiscovery(PulsarServiceDiscoveryError::Query(code, reason)) => {
-                (code, reason)
-            }
-            _ => return None,
-        };
-        Some(Self {
-            error: *code,
-            reason: reason.clone(),
-        })
-    }
-
-    /// Whether the broker refused for what holds right now rather than for what the statement
-    /// declares, so the same join can pass later: another consumer holds the subscription, or the
-    /// broker has not yet loaded the topic.
-    fn holds_only_for_now(&self) -> bool {
-        matches!(
-            self.error,
-            Some(PulsarServerError::ConsumerBusy | PulsarServerError::ServiceNotReady)
-        )
-    }
-}
 
 /// Why a request of a Pulsar consumer has no outcome it can rely on: the broker may or may not
 /// have applied it.

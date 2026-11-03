@@ -33,7 +33,11 @@ use nervix_connector::{
 use nervix_models::{ClientConfigEntry, ConnectorKind};
 use pulsar::{
     Authentication, ConnectionRetryOptions, Error as PulsarError, OperationRetryOptions, Pulsar,
-    PulsarBuilder, TokioExecutor, error::ConnectionError as PulsarConnectionError,
+    PulsarBuilder, TokioExecutor,
+    error::{
+        ConnectionError as PulsarConnectionError, ConsumerError as PulsarConsumerError,
+        ServiceDiscoveryError as PulsarServiceDiscoveryError,
+    },
     message::proto::ServerError as PulsarServerError,
 };
 use thiserror::Error;
@@ -69,6 +73,37 @@ impl fmt::Display for PulsarRefusal {
             write!(formatter, ": {reason}")?;
         }
         Ok(())
+    }
+}
+
+impl PulsarRefusal {
+    /// What the broker refused a join with, when `error` says it refused the subscribe or the
+    /// topic lookup before it, and did not fail in some other way.
+    pub(super) fn of_join(error: &PulsarError) -> Option<Self> {
+        let (code, reason) = match error {
+            PulsarError::Connection(PulsarConnectionError::PulsarError(code, reason))
+            | PulsarError::Consumer(PulsarConsumerError::Connection(
+                PulsarConnectionError::PulsarError(code, reason),
+            ))
+            | PulsarError::ServiceDiscovery(PulsarServiceDiscoveryError::Query(code, reason)) => {
+                (code, reason)
+            }
+            _ => return None,
+        };
+        Some(Self {
+            error: *code,
+            reason: reason.clone(),
+        })
+    }
+
+    /// Whether the broker refused for what holds right now rather than for what the statement
+    /// declares, so the same join can pass later: another consumer holds the subscription, or the
+    /// broker has not yet loaded the topic.
+    pub(super) fn holds_only_for_now(&self) -> bool {
+        matches!(
+            self.error,
+            Some(PulsarServerError::ConsumerBusy | PulsarServerError::ServiceNotReady)
+        )
     }
 }
 
