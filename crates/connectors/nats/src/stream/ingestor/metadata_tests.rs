@@ -156,7 +156,9 @@ fn bolero_delivery_metadata_retains_every_wire_field() {
             raw.headers = if written.is_empty() {
                 None
             } else {
-                Some(crate::subject::NatsSubjectEmitter::header_map(&written))
+                Some(crate::subject::NatsSubjectEmitter::header_map(
+                    written.clone(),
+                ))
             };
             let header_bytes = if written.is_empty() {
                 0

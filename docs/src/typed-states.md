@@ -264,6 +264,12 @@ A polled HTTP request's header holds a literal or names a client secret as two s
 so a value cannot be both or neither, and the Model that names a secret holds its key and never its
 value.
 
+The NATS driver's ordered transport header projection owns either validated frame bytes with
+checked compact ranges or the emitter's owned ordered pairs. Names, values and payloads keep
+their ownership through publication; neither a cast nor a fabricated range stands for a failed
+transport offset conversion. The SDK's indexed authoring and typed-inspection views preserve
+empty JSON value arrays. These driver representations never enter semantic Models or plans.
+
 A NATS ingestor or emitter Model is one of two entities, `NATS SUBJECT` or `NATS STREAM`, so a stored
 declaration holds the archived union of both. The registry's `NERVIX MODEL NSE` archive signature
 identifies the current Model layout, including those unions, an owned Pulsar subscription's required

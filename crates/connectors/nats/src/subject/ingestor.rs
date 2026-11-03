@@ -168,6 +168,7 @@ impl NatsSubjectIngestorPlan {
         let addr = client_config_value(config, "addr", "NATS")
             .change_context(NatsSubjectIngestorError::ClientConfig)?;
         let mut options = async_nats::ConnectOptions::new()
+            .ordered_headers()
             .max_reconnects(1)
             .event_callback(move |event| {
                 let lost = lost.clone();
@@ -238,7 +239,7 @@ impl IngestMessageHeaders for NatsMessageHeaders {
             return;
         };
         for (name, value) in headers.iter_ordered() {
-            visit(name.as_ref(), value.as_str());
+            visit(name, value);
         }
     }
 }
@@ -638,6 +639,155 @@ mod tests {
         ));
     }
 
+    /// The production SDK encoder and ordered receive parser preserve every generated pair and
+    /// payload through a loopback server, including Unicode, wire folding and retained headers.
+    #[test]
+    fn bolero_ordered_headers_survive_the_transport_and_retention() {
+        use nervix_arbitrary::Entropy;
+        use nervix_connector::RetainedIngestHeaders;
+        use nervix_primitives::runtime::Builder;
+
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the property owns a current-thread runtime");
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(64)
+            .for_each(|bytes: &[u8]| {
+                let mut entropy = Entropy::new(bytes);
+                let folded = entropy.flag();
+                let count = entropy.byte() % 9;
+                let mut written = Vec::new();
+                for _ in 0..count {
+                    let name =
+                        ["first", "second", "First", "third"][usize::from(entropy.byte() % 4)];
+                    let name = if entropy.flag() {
+                        format!("{name}-{}", "n".repeat(64))
+                    } else {
+                        name.to_string()
+                    };
+                    let base = ["alpha", "βeta", "雪", ""][usize::from(entropy.byte() % 4)];
+                    let value = if entropy.flag() {
+                        format!("\u{2003}{base} ")
+                    } else {
+                        base.to_string()
+                    };
+                    written.push((name, value));
+                }
+                let payload = vec![entropy.byte(), entropy.byte(), entropy.byte()];
+                let expected = written
+                    .iter()
+                    .map(|(name, value)| {
+                        let value = if folded {
+                            format!("{}  tail-λ", value.trim_start())
+                        } else {
+                            value.trim().to_string()
+                        };
+                        (name.clone(), value)
+                    })
+                    .collect::<Vec<_>>();
+                runtime.block_on(async move {
+                    timeout(Duration::from_secs(5), async move {
+                        let server = ScriptedServer::start().await;
+                        let addr = server.addr();
+                        let expected_payload = payload.clone();
+                        let input = written.clone();
+                        let (finish, finished) = oneshot::channel();
+                        let script = nervix_primitives::task::spawn(async move {
+                            let mut connection = server.accept(1024 * 1024).await;
+                            let subscription = connection.expect_subscription().await;
+                            let publish = connection.expect_publish().await;
+                            let mut encoded = Vec::new();
+                            let mut returned = String::new();
+                            if !input.is_empty() {
+                                encoded.extend_from_slice(b"NATS/1.0\r\n");
+                                returned.push_str("NATS/1.0\r\n");
+                                for (name, value) in &input {
+                                    encoded.extend_from_slice(
+                                        format!("{name}: {value}\r\n").as_bytes(),
+                                    );
+                                    returned.push_str(&format!("{name}: {value}\r\n"));
+                                    if folded {
+                                        returned.push_str("  tail-λ\r\n");
+                                    }
+                                }
+                                encoded.extend_from_slice(b"\r\n");
+                                returned.push_str("\r\n");
+                            }
+                            encoded.extend_from_slice(&expected_payload);
+                            assert_eq!(publish.message, encoded);
+                            if input.is_empty() {
+                                connection.deliver(&subscription, &expected_payload).await;
+                            } else {
+                                connection
+                                    .deliver_headers(
+                                        &subscription,
+                                        returned.as_bytes(),
+                                        &expected_payload,
+                                    )
+                                    .await;
+                            }
+                            finished
+                                .await
+                                .expect("the property consumed the echoed frame");
+                            connection
+                        });
+                        let (lost, _losses) = mpsc::channel(PENDING_LOSS_SIGNALS);
+                        let client = NatsSubjectIngestorPlan::client_from_config(
+                            &[entry("addr", &addr)],
+                            lost,
+                        )
+                        .await
+                        .expect("the source selects ordered transport headers");
+                        let mut subscription = client
+                            .subscribe("events")
+                            .await
+                            .expect("the property subscribes");
+                        client.flush().await.expect("the subscription is written");
+                        client
+                            .publish_with_headers(
+                                "events",
+                                crate::subject::NatsSubjectEmitter::header_map(written),
+                                payload.clone().into(),
+                            )
+                            .await
+                            .expect("the bounded publication fits the server");
+                        let message = match subscription.next().await {
+                            Some(message) => message,
+                            None => {
+                                let _ = finish.send(());
+                                script
+                                    .await
+                                    .expect("the server's original failure is reported");
+                                panic!("the echoed message arrives");
+                            }
+                        };
+                        assert_eq!(message.payload.as_ref(), payload);
+                        let headers = NatsMessageHeaders::new(message);
+                        let retained = RetainedIngestHeaders::capture(&headers);
+                        drop(headers);
+                        let mut actual = Vec::new();
+                        retained.visit(&mut |name, value| {
+                            actual.push((name.to_string(), value.to_string()))
+                        });
+                        assert_eq!(actual, expected);
+                        subscription
+                            .unsubscribe()
+                            .await
+                            .expect("the property ends its subscription");
+                        client.flush().await.expect("the unsubscription is written");
+                        finish
+                            .send(())
+                            .expect("the server waits for the property to finish");
+                        let _connection = script.await.expect("the server completes its script");
+                    })
+                    .await
+                    .expect("one bounded transport case completes");
+                });
+            });
+    }
+
     #[test]
     fn every_header_value_is_visited_under_its_name() {
         let mut header_map = async_nats::HeaderMap::new();
@@ -677,7 +827,9 @@ mod tests {
                 subject: "events".into(),
                 reply: None,
                 payload: bytes::Bytes::new(),
-                headers: Some(crate::subject::NatsSubjectEmitter::header_map(&written)),
+                headers: Some(crate::subject::NatsSubjectEmitter::header_map(
+                    written.clone(),
+                )),
                 status: None,
                 description: None,
                 length: 0,

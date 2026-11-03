@@ -41,6 +41,15 @@ protocol state or acknowledgement authority. The existing row-refusal map owns f
 fields; no task, record or branch stores the visit cache. Reply subjects stay in each retained
 emitter envelope across retries, and ordered headers stay with their message. These paths add no
 shared map, lock or publication protocol.
+NATS transport headers share one immutable driver projection. Received headers borrow the same
+frame allocation as their payload, including a zero-length payload; outbound headers own the
+existing ordered vector and keep size admission ahead of wire encoding. Neither the Nervix
+header visitor nor the driver's pull-control header reader constructs an indexed map. Typed SDK
+map access can initialize a message-local `std::sync::OnceLock` projection; this is an external
+SDK inspection boundary, outside those record and control paths and outside Deloxide's tracked
+primitives. Normal SDK authoring retains its indexed map. Driver-owner allocation, ownership and
+framing checks qualify this boundary; no concurrent map or new Nervix lock site is introduced.
+
 The metadata, request/reply, header-order and TLS scenarios are registered for active, order and
 stressed lifecycle diagnostics around the ingest groups and emitters. Deloxide does not observe
 the driver, asynchronous waits or these message-local conversions; their production-owner tests

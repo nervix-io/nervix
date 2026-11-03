@@ -1159,8 +1159,19 @@ confirmation window before retrying unresolved records. It never creates a strea
 hot-path records. Core `REPLY TO` is evaluated through the shared envelope owner and retained with
 the payload across retry. The connector checks the reply against the publication-subject rule
 before handing it to the driver. Both NATS connection builders require TLS for a `tls://` address,
-including on subsequent connections. The pinned driver owns ordered header encoding and decoding;
-the connector visits those pairs directly rather than reconstructing their order from a map.
+including on subsequent connections. The pinned driver owns ordered header encoding and decoding.
+Ingest clients select its validated transport projection: folded values are normalized in the
+existing frame allocation, which the payload already retains, and compact checked offsets make
+header visits borrow each immutable name and value directly. The offsets fit the NATS server's
+[signed 32-bit payload bound](https://github.com/nats-io/nats-server/blob/main/server/server.go);
+the decoder still reports an offset-conversion failure for a peer outside that contract. Outbound pairs move into the driver without copying names or values; the driver
+checks the complete encoded size before allocating the wire buffer. Stream-reserved message ID
+and expected-stream headers override only exactly spelled names and leave other repeats in their
+written positions. The ordinary SDK authoring map retains indexed lookup and its JSON contract,
+including keys with empty value arrays. The transport projection preserves that map's footprint;
+its borrowed visits and clones allocate nothing. Driver-owner checks cover populated shapes,
+long repeated names, large values, continuation folding, empty payload ownership, byte counts
+and reserved overrides. The connector never reconstructs transport order from a map.
 
 `MQTT TOPIC` keeps a subscription's topic filter and a publication's topic exactly as written,
 letter case included, within MQTT's 65,535-byte string. A filter may write `+` for one level and

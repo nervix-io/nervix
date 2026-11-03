@@ -221,6 +221,7 @@ class InventoryTests(unittest.TestCase):
             "ingest-metadata-projection",
             "sqs-system-metadata",
             "nats-delivery-metadata",
+            "nats-ordered-header-transport",
             "endpoint-request-metadata",
             "websocket-client-config",
             "mqtt-client-config",

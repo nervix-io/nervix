@@ -3758,3 +3758,18 @@ random_iterations = 256
 source = "crates/models/src/connector/mqtt/config_tests.rs"
 test = "connector::mqtt::config_tests::bolero_mqtt_client_config_preserves_every_valid_connection_setting"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/connectors/nats/src/subject/__fuzz__/subject__ingestor__tests__bolero_ordered_headers_survive_the_transport_and_retention/corpus"
+domain_version = 1
+features = []
+id = "nats-ordered-header-transport"
+invariant = "The production NATS encoder, ordered transport decoder and retained header owner preserve every bounded exact-name interleaved pair and payload; received Unicode, leading and trailing whitespace, continuation folding and empty header blocks follow the NATS header contract."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-connector-nats"
+random_iterations = 256
+source = "crates/connectors/nats/src/subject/ingestor.rs"
+test = "subject::ingestor::tests::bolero_ordered_headers_survive_the_transport_and_retention"
+test_target = "lib"

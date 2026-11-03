@@ -273,7 +273,7 @@ impl CoreWrites {
             let headers = if record.headers.is_empty() {
                 None
             } else {
-                Some(NatsSubjectEmitter::header_map(&record.headers))
+                Some(NatsSubjectEmitter::header_map(record.headers))
             };
             let result = connector
                 .feed(OutboundMessage {
@@ -457,12 +457,8 @@ impl NatsSubjectEmitter {
         delay
     }
 
-    pub(crate) fn header_map(headers: &[(String, String)]) -> async_nats::HeaderMap {
-        let mut header_map = async_nats::HeaderMap::new();
-        for (name, value) in headers {
-            header_map.append(name.as_str(), value.as_str());
-        }
-        header_map
+    pub(crate) fn header_map(headers: Vec<(String, String)>) -> async_nats::HeaderMap {
+        async_nats::HeaderMap::from_ordered(headers)
     }
 
     fn is_core_record_rejection(error: &NatsPublishError) -> bool {

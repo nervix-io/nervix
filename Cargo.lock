@@ -687,14 +687,13 @@ dependencies = [
 [[package]]
 name = "async-nats"
 version = "0.49.1"
-source = "git+https://github.com/glebpom/nats.rs.git?rev=51b219e6946e431ceb0614b688792ed58117006c#51b219e6946e431ceb0614b688792ed58117006c"
+source = "git+https://github.com/glebpom/nats.rs.git?rev=63902f457700dc4bdf015465baf4fcdcff695c1c#63902f457700dc4bdf015465baf4fcdcff695c1c"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
  "bytes",
  "futures-util",
  "memchr",
- "ordered-multimap",
  "pin-project",
  "portable-atomic",
  "rand 0.10.3",
@@ -706,6 +705,7 @@ dependencies = [
  "serde_json",
  "serde_nanos",
  "serde_repr",
+ "smallvec",
  "thiserror 2.0.21",
  "time",
  "tokio",

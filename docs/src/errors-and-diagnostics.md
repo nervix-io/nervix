@@ -1215,7 +1215,10 @@ A NATS source whose client loses its connection to the server reports
 received, and each reconnect that fails reports `NatsSubjectIngestorError::Connect` beneath
 `IngestorError::Resume`; the source host shows the deepest cause as the ingestor's transient error.
 The driver's `ConnectError` remains beneath `Connect`, so a peer that closes before its initial
-INFO message is reported as `expected INFO, got nothing`. A NATS STREAM source reports the
+INFO message is reported as `expected INFO, got nothing`. The driver's ordered header decoder
+keeps invalid UTF-8, header-name, header-value and checked-offset conversion failures as typed
+causes under `io::Error`; these remain transport failures, separate from projected delivery-field
+failures. A NATS STREAM source reports the
 server's answer that its stream or consumer does not exist as
 `NatsStreamIngestorError::MissingStream` or `MissingConsumer` beneath `IngestorError::Resume`,
 naming the stream and the consumer, and a consumer it cannot read as declared as `PushConsumer` or

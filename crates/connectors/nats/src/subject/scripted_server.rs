@@ -279,6 +279,27 @@ impl ScriptedConnection {
         self.send(&message).await;
     }
 
+    /// Delivers one explicit transport header block before its payload.
+    pub(crate) async fn deliver_headers(
+        &mut self,
+        subscription: &Subscription,
+        headers: &[u8],
+        payload: &[u8],
+    ) {
+        let mut message = format!(
+            "HMSG {} {} {} {}\r\n",
+            subscription.subject,
+            subscription.sid,
+            headers.len(),
+            headers.len() + payload.len()
+        )
+        .into_bytes();
+        message.extend_from_slice(headers);
+        message.extend_from_slice(payload);
+        message.extend_from_slice(b"\r\n");
+        self.send(&message).await;
+    }
+
     /// Delivers `payload` on `subscription` with `reply` as the subject the client answers it on.
     pub(crate) async fn deliver_for_reply(
         &mut self,
