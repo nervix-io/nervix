@@ -333,7 +333,7 @@ impl SubscriptionSender {
             Err(error) => {
                 debug!(
                     subscription = %self.handle.name,
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     "a subscription notice does not fit a session frame"
                 );
                 return Ok(());
@@ -395,7 +395,7 @@ impl SubscriptionSender {
                         Err(error) => {
                             debug!(
                                 subscription = %self.handle.name,
-                                error = %error,
+                                error = %format_args!("{error:#}"),
                                 "a subscription loss report does not fit a session frame"
                             );
                             self.dropped_rows = 0;

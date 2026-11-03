@@ -72,3 +72,24 @@ Feature: Gossip subscription interest
       {"id":3}
       """
     Then the relay subscription does not receive a payload within "2s"
+
+  Scenario: A subscription a live node refuses to confirm names that node and its refusal
+    Given a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event ( id I64 );
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      START;
+      """
+    Then node "node-1" eventually reports interconnect to "node-2" as "connected"
+    And node "node-1" eventually reports interconnect to "node-3" as "connected"
+    When node "node-2" refuses the next subscription interest visibility check it answers
+    And these Plexus commands are attempted on node "node-1"
+      """
+      CREATE SUBSCRIPTION refused_events TO events;
+      """
+    Then node "node-2" refused a subscription interest visibility check
+    And the last command error message contains "did not become visible on every live node" exactly once
+    And the last command error message contains "subscription interest visibility failed on node 'node-2'" exactly once
+    And the last command error message contains "is not served by the node that answered" exactly once

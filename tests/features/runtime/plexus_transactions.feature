@@ -1877,3 +1877,53 @@ Feature: Plexus transactions
       | cluster_size |
       | 1            |
       | 3            |
+
+  @client_wire_held_recovery @command_reference_recovery
+  Scenario: A held transaction reaches its semantic preflight after admission loses leadership
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA atomic_event (value STRING);
+      """
+    When these Plexus commands are executed on the active session
+      """
+      BEGIN;
+      ALTER SCHEMA atomic_event ADD FIELD note STRING OPTIONAL;
+      CREATE SCHEMA must_not_exist (value STRING);
+      """
+    Then the current leader node is saved as placeholder "preflight_leader"
+    And a node other than placeholder "preflight_leader" is saved as placeholder "preflight_successor"
+    Given leadership moves from node "{{preflight_leader}}" to node "{{preflight_successor}}" before its next admission proposal
+    When these Plexus commands fail on the active session
+      """
+      ALTER SCHEMA atomic_event DROP FIELD missing;
+      """
+    Then the last command error contains
+      """
+      field `missing` does not exist
+      """
+    And the leadership move before the admission proposal completed
+    When this Plexus command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA atomic_event;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA atomic_event (
+        value STRING
+      );
+      """
+    When this Plexus command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA must_not_exist;
+      """
+    Then the last command error contains
+      """
+      schema 'must_not_exist' does not exist
+      """
+    When these Plexus commands are executed on the active session
+      """
+      REVERT;
+      """
