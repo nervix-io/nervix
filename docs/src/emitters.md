@@ -490,6 +490,9 @@ An `HTTP CLIENT` means the same transport for HTTP polling and for the HTTP emit
 HTTP through maintained implementations, Reqwest for polling and hyper for the emitter, over
 HTTP/2 when the endpoint's TLS negotiates it and HTTP/1.1 otherwise, and:
 
+- Both directions trust the Mozilla roots Nervix ships plus the host's native roots. Every PEM
+  certificate in `tls_ca_file` adds to that set, and `tls_cert_file` with `tls_key_file` supplies
+  the client identity. An empty or unreadable native store leaves the bundled roots available.
 - `timeout_ms` is the one deadline of a request and every redirect it follows. A poll's request
   runs within it until the whole response body has been read, and an emitted request until its
   final response headers are complete, as [HTTP requests](#http-requests) describes.
@@ -1121,10 +1124,16 @@ the registry refuses it again in a Model that reaches it another way. The
 declares, and each entity's section below says what its transport does with them. `KAFKA TOPIC`
 declares `TIMESTAMP`, which [Kafka](#kafka) writes as each record's create time, `PULSAR TOPIC`
 declares `TIMESTAMP` and `DELIVER AFTER`, which [Pulsar](#pulsar) writes as each message's event
-time and delivery time, `SQS QUEUE` declares `DELAY` and `DEDUPLICATION ID`, which [SQS](#sqs)
-sends with each message, and the two [RabbitMQ](#rabbitmq) entities declare `MANDATORY`. No entity
-declares another clause or a property yet, and every emitter refuses each clause its entity does
-not declare.
+time and delivery time, `SQS QUEUE`
+declares `DELAY` and `DEDUPLICATION ID`, which [SQS](#sqs) sends with each message, and the two
+[RabbitMQ](#rabbitmq) entities declare `PERSISTENT`, `MANDATORY`, `TIMESTAMP` and their AMQP
+`PROPERTIES` below. Every emitter refuses clauses and keys its entity does not declare.
+
+For the forms its entity declares, `ALTER` offers `SET PERSISTENT` and `DROP PERSISTENT`,
+`SET TIMESTAMP <expression>` and `DROP TIMESTAMP`, and `SET PROPERTIES { … }` and `DROP PROPERTIES`.
+`SET PROPERTIES` replaces the complete nonempty property set. Each targeted operation preserves
+the envelope fields it does not name. Inside a property set, completion offers the declared keys
+that have not yet been written.
 
 | Clause | Written with | Value every record carries |
 | --- | --- | --- |
@@ -1196,7 +1205,8 @@ Transport-specific expectations:
   connection presents no client certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and
   `tls_key_file`.
 - `SENTRY`: the referenced `SENTRY CLIENT` carries an `https://...` `dsn`; its `tls_ca_file` adds
-  a trust root beside the platform's native roots, and `tls_cert_file` with `tls_key_file` presents
+  trust roots beside Nervix's bundled Mozilla roots and the host's native roots, and
+  `tls_cert_file` with `tls_key_file` presents
   a client certificate.
 - `OTEL`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file`, `tls_cert_file`, and
   `tls_key_file` for both OTLP/gRPC and OTLP/HTTP-protobuf. `tls_ca_file` adds a server trust root,
@@ -1502,7 +1512,9 @@ CREATE RABBITMQ QUEUE EMITTER <name>
   TO <client> QUEUE 'orders'
     MODE <mode>
     ENCODE USING <codec>
+    [PERSISTENT]
     [MANDATORY]
+    [TIMESTAMP occurred_at]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
@@ -1523,8 +1535,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
 | Batch transformation required | no |
-| Envelope | MANDATORY |
-| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Envelope | PERSISTENT<br>MANDATORY<br>TIMESTAMP occurred_at |
+| PROPERTIES keys and exact types | content_type: STRING<br>content_encoding: STRING<br>message_id: STRING<br>correlation_id: STRING<br>reply_to: STRING<br>expiration: STRING<br>priority: U8<br>type: STRING<br>app_id: STRING<br>user_id: STRING |
 | Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>messages the broker returns unrouted under MANDATORY, until the write that published them reads them: set by the messages of one write; when full, holds back what fills it |
 | Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open, confirm select and the queue check: `connect_timeout_ms`; 30s when omitted<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: `timeout_ms`; unbounded when omitted |
 | Driver limits | A frame above the negotiated frame_max ends the connection. |
@@ -1541,7 +1553,9 @@ CREATE RABBITMQ EXCHANGE EMITTER <name>
   (ROUTING KEY input.category)
     MODE <mode>
     ENCODE USING <codec>
+    [PERSISTENT]
     [MANDATORY]
+    [TIMESTAMP occurred_at]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
@@ -1562,8 +1576,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
 | Batch transformation required | no |
-| Envelope | MANDATORY |
-| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Envelope | PERSISTENT<br>MANDATORY<br>TIMESTAMP occurred_at |
+| PROPERTIES keys and exact types | content_type: STRING<br>content_encoding: STRING<br>message_id: STRING<br>correlation_id: STRING<br>reply_to: STRING<br>expiration: STRING<br>priority: U8<br>type: STRING<br>app_id: STRING<br>user_id: STRING |
 | Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>messages the broker returns unrouted under MANDATORY, until the write that published them reads them: set by the messages of one write; when full, holds back what fills it |
 | Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open, confirm select and the exchange check: `connect_timeout_ms`; 30s when omitted<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: `timeout_ms`; unbounded when omitted |
 | Driver limits | A frame above the negotiated frame_max ends the connection.<br>A routing key longer than the 255 bytes an AMQP short string carries is not sent; its record is rejected. |
@@ -1596,6 +1610,54 @@ the key. Records whose keys differ never share a [batch payload](#batch-payloads
 message carries the one key its members share. `SHOW CREATE EMITTER` retains the exchange's name
 and the routing key's expression.
 
+Both RabbitMQ entities accept `PERSISTENT`, then `MANDATORY`, then `TIMESTAMP <expression>`
+and `PROPERTIES { … }`, after `ENCODE USING` and before construction. `PERSISTENT` writes AMQP
+`delivery_mode = 2`; without it the message is transient. Persistence requires an externally
+provisioned durable queue and publisher confirms to establish broker acceptance. It does not
+create a queue or make a transient queue durable, and it does not remove the duplicate window after
+a lost confirmation.
+
+`TIMESTAMP` computes a non-null `DATETIME`, encoded as a whole unsigned Unix second. A timestamp
+before the Unix epoch or with a fractional second rejects its record without sending it; Nervix
+never truncates or clamps it. The Unix epoch itself is a valid timestamp, distinct from an omitted
+property. RabbitMQ preserves this application-provided time rather than generating one.
+
+| `PROPERTIES` key | Exact non-null type | AMQP property |
+| --- | --- | --- |
+| `content_type`, `content_encoding` | `STRING` | MIME type and encoding |
+| `message_id`, `correlation_id` | `STRING` | Application message and correlation identifiers |
+| `reply_to` | `STRING` | Reply address |
+| `expiration` | `STRING` | Broker message TTL, written as decimal milliseconds |
+| `priority` | `U8` | Message priority; the provisioned queue determines priority scheduling |
+| `type`, `app_id` | `STRING` | Application message type and application identifier |
+| `user_id` | `STRING` | Creating user, which the broker validates against the authenticated user |
+
+Every string property must fit AMQP's 255-byte short string, including every UTF-8 byte; an
+oversized property rejects only its record and names the property and its byte count without
+printing its value. The registry checks exact types, nullability and sensitivity at `CREATE` and
+`ALTER`. Property expressions follow the [envelope scope](#envelope-clauses), and every retry
+carries the original evaluated properties and timestamp. `write_header` remains separate: writing
+a header named `content_type` sets an AMQP table entry, not the basic `content_type` property.
+
+```plexus,ignore
+CREATE RABBITMQ QUEUE EMITTER notifications FROM events
+  TO broker QUEUE 'notifications'
+  MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s
+  ENCODE USING event_codec
+  PERSISTENT
+  TIMESTAMP input.occurred_at
+  PROPERTIES { 'content_type' = 'application/json', 'message_id' = input.id,
+               'priority' = 5 AS U8 }
+  INHERIT ALL
+  FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+```
+
+`ALTER RABBITMQ QUEUE EMITTER notifications SET PERSISTENT` and `DROP PERSISTENT` change the flag;
+`SET TIMESTAMP <expression>` and `DROP TIMESTAMP` change the timestamp; `SET PROPERTIES { … }`
+replaces the whole property set and `DROP PROPERTIES` clears it. Each operation preserves the other
+envelope fields. The same operations apply to an `EXCHANGE` emitter. `SHOW CREATE EMITTER` and
+`DESCRIBE EMITTER` show the configured envelope.
+
 Nervix never declares an exchange or a binding. When an exchange emitter opens, it checks that its
 exchange exists with a passive declaration; while it is missing, the emitter stays unavailable with
 `RabbitMQ exchange '<name>' does not exist` as its transient error, confirms nothing, so its input
@@ -1614,7 +1676,7 @@ collects that window's answers, and attributes every return before refilling the
 reporting a mandatory record delivered. Each message retains its original `ACK TIMEOUT`.
 Under `NO ACK` the return precedes the answer to the round trip that ends the write, so the emitter
 reads every return of the write once that answer arrives. A return names the message's exchange,
-routing key, properties and body, not its Nervix record. It rejects the first matching
+routing key, complete AMQP properties and body, not its Nervix record. It rejects the first matching
 message in publication order: within the current confirmation window under `ACK`, or the write
 under `NO ACK`. Identical transport messages therefore take returns in that order. A return never
 changes a record settled by an earlier window.
@@ -2292,7 +2354,7 @@ Nervix owns every key of a `SENTRY CLIENT` and refuses a key it does not declare
 | --- | --- | --- |
 | `dsn` | Yes | The project DSN, `<scheme>://<public-key>[:<secret-key>]@<host>[:<port>]/[<path>/]<project-id>`, with an `http` or `https` scheme. It is confidential, and client inspection redacts it. |
 | `timeout_ms` | Yes | A positive whole number of milliseconds that bounds each envelope request, as [Client Deadlines](#client-deadlines) defines. |
-| `tls_ca_file` | No | A PEM certificate authority that HTTPS trusts in addition to the platform's native roots. |
+| `tls_ca_file` | No | PEM certificate authorities that HTTPS trusts in addition to the Mozilla roots Nervix ships and the host's native roots. |
 | `tls_cert_file`, `tls_key_file` | No | The PEM certificate and private key HTTPS presents as the client's identity, supplied together. |
 
 `CREATE CLIENT` checks the complete DSN with Sentry's own parser, including rendered template
@@ -2568,8 +2630,8 @@ The TLS file keys need an `https` endpoint on either protocol, and `tls_cert_fil
 `tls_key_file` go together; `CREATE CLIENT` and `ALTER CLIENT` check both before reading a file or
 opening a transport. Mount the files as resources. The certificate and key are the emitter's client
 identity. `tls_ca_file` adds a trust root rather than replacing the built-in ones: `grpc` trusts the
-bundled WebPKI roots and the file, and `http/protobuf` trusts the platform's trust store and the
-file.
+bundled WebPKI roots and the file, and `http/protobuf` trusts Nervix's bundled Mozilla roots, the
+host's native roots and the file.
 
 Opening an emitter reads its TLS files and builds its transport, but contacts no endpoint: the
 `grpc` channel connects when an export first needs a connection, and the `http/protobuf` client
@@ -3865,7 +3927,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | Kafka | `ACK` retry after an ambiguous delivery report or timeout; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` can lose a record after local producer-queue admission; broker durability follows Kafka client and topic configuration | None; Kafka producer idempotence is pass-through client configuration |
 | Pulsar | `ACK` retry after an ambiguous broker receipt; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` does not expose broker failures after producer acceptance; retention and durability remain broker policy | None |
 | NATS | JetStream retry after an ambiguous `PubAck`; Core `NO ACK` retry after a timed-out write or a connection change, including records the server may already have received; either mode after a lost upstream ACK or attached sibling failure | Core NATS `NO ACK` confirms a local drain and flush on the write's connection, without durable stream acknowledgement; a connection failure after that completion can lose what the server has not read | None |
-| RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; `NO ACK` retry after its channel or connection is lost before a write's round trip completes; either mode after a lost upstream ACK or attached sibling failure | Without `MANDATORY`, a message no binding routes is dropped by the broker and its record reported delivered; `NO ACK` can lose a record after the broker's channel has taken it; queue durability and message persistence remain broker policy | None |
+| RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; `NO ACK` retry after its channel or connection is lost before a write's round trip completes; either mode after a lost upstream ACK or attached sibling failure | Without `MANDATORY`, a message no binding routes is dropped by the broker and its record reported delivered; `NO ACK` can lose a record after the broker's channel has taken it; persistence requires PERSISTENT and a provisioned durable queue | None |
 | SQS | Retry after an ambiguous `SendMessage` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; SQS retains its own at-least-once behavior | None |
 | MQTT | QoS 1 or 2 retry after an ambiguous handshake; any mode after a lost upstream ACK or attached sibling failure | QoS 0 can lose a record after client acceptance; later delivery follows the configured broker and session guarantees | None |
 | Redis Pub/Sub | Retry after a `PUBLISH` whose answer missed the driver's 500 ms or was lost with its connection, which Redis may already have delivered; retry after Redis accepts `PUBLISH` but the Nervix ACK is lost, or after attached sibling failure | Any failure after detached relay acceptance; subscribers that are absent or disconnected miss the message | None |

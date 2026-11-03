@@ -501,6 +501,15 @@ current connection, retry and deadline limits.
   failures and which subscription `ALTER` retains or removes. Changing only consumer policy or
   handing the same subscription to `PROVISIONED` preserves its backlog; a changed broker, qualified
   topic or subscription name retires the preceding owned subscription best-effort.
+- A `PULSAR TOPIC` ingestor exposes `metadata.topic`, `message_id`, `key` and `producer_name` as
+  `STRING`, `publish_time` and `event_time` as `DATETIME`, `ordering_key` as `BYTES`, and
+  `sequence_id` and `redelivery_count` as `I64`. These fields are nullable and non-sensitive;
+  missing keys and event times stay null, and empty keys and epoch times remain present. A batch
+  member's present sequence ID or event time overrides its envelope, including zero; an omitted
+  member field inherits it. Use `TIMESTAMP AT metadata.event_time` for producer time or
+  `TIMESTAMP AT metadata.publish_time` for broker publication time. An absent event time follows
+  the route's timestamp-admission error policy. Message properties remain ordered, case-sensitive
+  transport headers. Read `Ingestors` → `Pulsar` for identity formatting and conversion bounds.
 - A `PULSAR CLIENT`'s `namespace` is exactly `'tenant/namespace'` (default `public/default`), and
   its TLS keys require a `pulsar+ssl://` `addr`; check both against `Ingestors` → `Pulsar` before
   generating a client.
@@ -538,7 +547,7 @@ current connection, retry and deadline limits.
   nothing. A `gzip`, `deflate` or `br` response arrives decompressed and without its
   `content-encoding` and `content-length` headers. Read `Ingestors` → `HTTP REQUEST` for the
   request, responses, failures and the shared client keys, and `Emitters` → `HTTP client transport`
-  for redirects and proxies.
+  for redirects, proxies and the common TLS trust policy used by polling and emitting.
 - Every `PROMETHEUS CLIENT` sets `addr` to the API root, an `http` or `https` URL without a
   query string or fragment, and a positive `timeout_ms`. It sets no key beyond `tls_ca_file` and
   the paired `tls_cert_file` and `tls_key_file`; `CREATE PROMETHEUS CLIENT` refuses any other. It

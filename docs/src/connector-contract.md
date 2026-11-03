@@ -349,7 +349,8 @@ each integration connects through it.
 
 Composition passes the resolver's handle into the HTTP polling and Prometheus source plans and into
 the HTTP request, Sentry, OTEL HTTP, and Iceberg emitter plans. The shared `HttpClientConfig` installs
-it on the Reqwest 0.13 clients of HTTP polling, Prometheus, Sentry and OTEL HTTP. The HTTP request
+it on the Reqwest 0.13 clients of HTTP polling, Prometheus, Sentry and OTEL HTTP. Their shared TLS
+trust and identity follow [HTTP client transport](#http-client-transport), as HTTP request emission does. The HTTP request
 emitter resolves each request's target host, or its client's declared proxy's host, itself, as its
 [request transport](#emitter-boundary) describes. Iceberg REST uses a separate Reqwest 0.12 client with that same resolver. Iceberg object
 storage uses OpenDAL 0.57 with a Reqwest 0.13 client that the connector builds with the node
@@ -404,6 +405,11 @@ one contract:
   names through the node resolver, never reads `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
   `NO_PROXY` or their lowercase forms, follows no redirect by itself, bounds each request by the
   client's `timeout_ms` where the client sets it, and presents the client's TLS trust and identity.
+  It obtains its preconfigured rustls client from `RustlsClientConfigProvider`, the same owner the
+  HTTP request emitter uses: bundled Mozilla roots plus native roots, with every certificate in
+  `tls_ca_file` added and the optional paired client certificate and key. An empty native store
+  does not prevent client construction. The HTTP builder advertises HTTP/2 and HTTP/1.1 through
+  ALPN; passing a preconfigured TLS client must not drop protocol negotiation.
   Reqwest's `gzip`, `deflate` and `brotli` features, which the OTEL connector selects and Cargo
   unifies across the server's build, make such a client ask for those encodings with
   `accept-encoding: gzip,deflate,br` unless its request writes that field, and decompress a
@@ -948,7 +954,7 @@ remain in their owning work records until that delivery.
 | Side | What the entity declares |
 | --- | --- |
 | Ingestor | Header reads, the typed metadata fields in their order, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits, and any alternative locators a body may write instead of it, each with its own keywords and name; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
-| Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which `KAFKA TOPIC` declares `TIMESTAMP`, `PULSAR TOPIC` declares `TIMESTAMP` and `DELIVER AFTER`, `SQS QUEUE` declares `DELAY` and `DEDUPLICATION ID`, the two RabbitMQ emitter entities declare `MANDATORY`, and no entity declares any other clause or key yet. |
+| Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which `KAFKA TOPIC` declares `TIMESTAMP`, `PULSAR TOPIC` declares `TIMESTAMP` and `DELIVER AFTER`, `SQS QUEUE` declares `DELAY` and `DEDUPLICATION ID`, the two RabbitMQ emitter entities declare `PERSISTENT`, `MANDATORY`, `TIMESTAMP` and their AMQP basic properties, and every entity refuses clauses and keys it does not declare. |
 | Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Every client declares its CONFIG key names, required or optional presence, value type, confidentiality, file role and Nervix or driver ownership, and which of its entities read each key: every ingestor and emitter that references the client, or only its ingestors or only its emitters. Only a client both sides reference declares a key for one side; a SYSLOG client does, and its connector takes the side a deadline key bounds a wait on from that declaration. The declaration explicitly names delegated property namespaces and reserved keys, the statement clause that sets a reserved key a statement owns, which its refusal names, and the other names its driver reads for one property: each pair of names with the one the client accepts, and a prefix the driver strips from a key before reading it, with the driver's own properties that begin with it. Validation, composed-grammar completion, public inspection and the generated key reference read this one schema. |
 
 Plexus client definitions start with `CREATE [IF NOT EXISTS] <CONNECTOR> CLIENT <name>`. The
@@ -1766,7 +1772,9 @@ from codec rejections, oversized payloads, quiesce drops and transport redeliver
 Every MQTT subscription checks the successful `SUBACK` grant against its declared QoS before
 publishing readiness, including under `NO ACK`. A lower grant is
 `MqttTopicIngestorError::SubscriptionDowngraded`, carrying the requested and granted levels, beneath
-the host's resume context. The connector retains a `RetiringSubscription` phase. Before another
+the host's resume context. An explicit refused `SUBACK` reports `SubscriptionRefused`; an empty
+persistent session retained after that refusal is not an accepted subscription. Both refusals
+retain the connector's `RetiringSubscription` phase. Before another
 subscription attempt, it runs the existing retirement exchange: clean CONNECT, UNSUBSCRIBE and
 DISCONNECT with session expiry zero, bounded by the client's connection budget. A failed or
 cancelled retirement keeps that phase, including across suspension; only successful cleanup
@@ -1872,6 +1880,27 @@ the replacement remains a runtime installation failure. Matching sessions keep t
 retired subscriptions lose theirs. Each phase runs at most its declared instance count of
 connections concurrently, and keeps no discovery-map guard while awaiting a connection.
 The [ingestor manual](./ingestors.md#mqtt) owns the public behavior.
+
+### Pulsar received metadata
+
+The Pulsar connector converts each driver delivery once into a message owning its payload,
+ordered properties, complete acknowledgement position and validated metadata. The visitor lends
+the nine fields declared by `PulsarTopicIngestor` in declaration order; it renders the message id
+only when read and lends binary ordering keys without a retained metadata row. Publish and optional
+event milliseconds become checked `Timestamp` values; sequence ids are checked into `I64`.
+The driver expands a stored batch before this conversion: a present member sequence id or event
+time overrides its envelope field, including zero; an omitted member field uses that envelope
+value. Event time remains absent when neither carries it, without substituting publish time.
+Missing event time and keys remain absent, including the distinction from present epoch or empty
+values. The external `CommandMessage` contract defaults an omitted redelivery count to zero; the
+connector exposes that count losslessly as `I64`.
+
+A failed conversion preserves its typed timestamp or integer cause under the connector's field
+error and `IngestorError::Read`, including topic and message identity. During batch gathering the
+source returns the valid prefix and retains one pending failure for the next active read. A cancelled
+read preserves that pending failure. This state is instance-local, bounded to one report and never
+persisted. No receive queue, network wait or host cadence changes. The public field contracts live
+in the [Pulsar ingestor manual](./ingestors.md#pulsar).
 
 ### Pulsar subscription ownership
 
@@ -2809,8 +2838,12 @@ sequenceDiagram
   acknowledgement boundary remains the state's highest durable replica progress.
 
 - **Pulsar client.** The Pulsar ingestor and emitter build on Nervix's fork of `pulsar-rs`,
-  `nervix-io/pulsar-rs`, because the released crate discards `CommandConnected` and returns from an
-  acknowledgement before the broker answers it. The fork keeps each connection's announced
+  `nervix-io/pulsar-rs`, because the released crate discards delivered redelivery counts and
+  `CommandConnected`, and returns from an
+  acknowledgement before the broker answers it. Its received-message envelope carries the optional
+  `CommandMessage.redelivery_count` through the bounded consumer channel, including every member
+  of a broker batch. The public `Message` constructor and getter preserve wire presence; message-id
+  equality and hashing remain identity operations. The fork keeps each connection's announced
   `maxMessageSize`, refuses a message whose serialized metadata and payload exceed it before
   writing it, as the Java client does, and resolves a send the broker answers with `SendError` with
   that error's server code and reason. The broker itself only closes the connection on a frame
@@ -2919,6 +2952,13 @@ sequenceDiagram
   order. A return is never attributed to a later window or write, and an unmatched return fails
   the write. Size-refusal recovery cannot continue on a replacement channel while a positive
   mandatory answer still has an undecidable return outcome; the host retries that unresolved prefix.
+  The publisher converts each retained record envelope into its complete AMQP basic properties
+  before sending that message: persistence, whole-second timestamp, the declared string properties
+  and U8 priority, plus the independent header table. A nonrepresentable timestamp or string longer
+  than 255 bytes is a typed per-record refusal before transport. Timestamp zero is present, not
+  absent. Every retransmission on a replacement channel and every mandatory-return comparison
+  uses those same prepared properties. Host retries rebuild them from the original retained
+  envelope, whose expressions are never evaluated again.
   The broker answers no `NO ACK` message itself, so the emitter ends a `NO ACK`
   write with one round trip on its channel, which the broker answers only after it has taken every
   message written before it, and the answer delivers the write; a write costs that one round trip,

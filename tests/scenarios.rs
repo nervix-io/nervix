@@ -222,6 +222,7 @@ mod kafka_metadata;
 mod mqtt_fixtures;
 mod mqtt_publish_properties;
 mod mqtt_sessions;
+mod mqtt_subscription_refusal;
 mod mysql_isolation;
 mod nats_delivery;
 mod paced_replication;
@@ -230,8 +231,10 @@ mod postgres_fixtures;
 mod process_cluster;
 mod pulsar_delivery;
 mod pulsar_emission;
+mod pulsar_metadata;
 mod pulsar_readiness;
 mod pulsar_subscriptions;
+mod rabbitmq_envelope;
 mod rabbitmq_properties;
 mod restarted_voter;
 mod session_protocol;
@@ -416,6 +419,8 @@ struct SubscriptionReceipt {
 struct ScenarioWorld {
     mqtt_envelope_observer: Option<mqtt_publish_properties::Observer>,
     mqtt_publication_endpoint: Option<mqtt_publish_properties::Endpoint>,
+    rabbitmq_envelope_broker:
+        Option<nervix_test_environment::restartable_rabbitmq::RestartableRabbitMq>,
     mqtt_fixture_publication: Option<mqtt_fixtures::Publication>,
     postgres_fixture_locks: Option<postgres_fixtures::HeldLocks>,
     postgres_fixture_observations: Option<postgres_fixtures::Observations>,
@@ -34944,11 +34949,27 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 let scenario_ports = std::mem::take(&mut world.scenario_ports);
                 crate::common::port_pool::release_test_ports(&scenario_ports);
 
+                let rabbitmq_cleanup =
+                    if let Some(mut broker) = world.rabbitmq_envelope_broker.take() {
+                        Some(broker.shutdown().await)
+                    } else {
+                        None
+                    };
+                if let Some(Err(error)) = &rabbitmq_cleanup {
+                    append_cucumber_log_line(&format!(
+                        "scenario teardown failed: isolated RabbitMQ: {error}"
+                    ));
+                }
                 world.enter_phase(
                     ScenarioPhase::Finished,
                     &format!("body={body} {cluster_cleanup}"),
                 );
                 world.scenario_admission = None;
+                if let Some(cleanup) = rabbitmq_cleanup {
+                    cleanup.assured(
+                        "the scenario-owned RabbitMQ broker is removed after all other cleanup",
+                    );
+                }
             })
         })
         .with_writer(writer)

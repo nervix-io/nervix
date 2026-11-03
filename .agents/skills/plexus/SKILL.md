@@ -38,6 +38,10 @@ delivery during downstream stalls; it distinguishes QoS 0 overflow, acknowledged
 the counters that expose each outcome, and the refusal of a broker grant below the declared QoS.
 For MQTT retained publication, typed publish properties and user-property headers, read
 [Emitters → MQTT](../../../docs/src/emitters.md#mqtt) for their exact types, limits and retry contract.
+For Pulsar source identity, keys, redelivery and event-time windows, read
+[Ingestors → Pulsar](../../../docs/src/ingestors.md#pulsar) and its metadata table. Choose
+`TIMESTAMP AT metadata.event_time` or `TIMESTAMP AT metadata.publish_time` deliberately: an absent
+event time stays null, while an explicit epoch time is preserved.
 
 For RabbitMQ consumption choose `MODE NO ACK`, `MODE ACK SEQUENTIAL`, or
 `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
@@ -45,6 +49,9 @@ Parallel `MAX` is 1 through 65,535 and is the broker prefetch per instance. Each
 on its own graph outcome. Automatic consumption has no prefetch or transport acknowledgement;
 work already accepted by the broker can be lost before the graph completes. Read the RabbitMQ
 Ingestors section for the exact clause order, host admission and recovery limits.
+For RabbitMQ publication, read [Emitters → RabbitMQ](../../../docs/src/emitters.md#rabbitmq) for
+`PERSISTENT`, `TIMESTAMP`, exact AMQP `PROPERTIES` types, targeted envelope alterations and the
+durable-queue requirement; property writes and `write_header` have different contracts.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
