@@ -3176,9 +3176,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
-| Network waits | pool checkout (including connection and handshake), initial validation, and each insert: `timeout_ms`; unbounded when omitted |
-| Driver limits | Without timeout_ms, pool checkout, connection validation and inserts have no deadline.<br>TLS identity keys use the driver's RSA PKCS#1 private-key format.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |
-| Stalled-peer checks | `STALLED PEER timeout_ms` |
+| Network waits | pool checkout, including connection and authentication; timeout_ms also applies when shorter: `pool_acquire_timeout_ms`; when omitted, the client's declared pool_acquire_timeout_ms default<br>initial validation and each insert; also bounds each pool checkout when shorter: `timeout_ms`; unbounded when omitted |
+| Driver limits | Without timeout_ms, initial validation after checkout and inserts have no operation deadline.<br>Maximum connection age is checked on reuse, return and the driver's idle scan; active inserts are not interrupted.<br>TLS identity keys use the driver's RSA PKCS#1 private-key format.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER pool_acquire_timeout_ms` |
 
 See the [MYSQL TABLE capability and mirror reference](connector-capabilities.md#mysql-table-emit).
 <!-- connector-matrix:emit-mysql-table:end -->
@@ -3236,27 +3236,27 @@ verification choices. For mutual TLS, set `tls_cert_file` and `tls_key_file` tog
 driver reads a PEM certificate chain and an RSA PKCS#1 private key; for a PEM key this is the
 `RSA PRIVATE KEY` form, which OpenSSL can produce with `openssl rsa -traditional`.
 
-The current client CONFIG keys are required `addr` and optional `timeout_ms`, `tls_ca_file`,
-`tls_cert_file` and `tls_key_file`. The address must
-be a `mysql://` URL accepted by the driver's offline parser. Declare capacity with
-`POOL SIZE MIN ... MAX ...`. Nervix installs those bounds on default driver pool options;
-[Database Client Connection Pools](database-client-pools.md) details the resulting URL lifetime settings.
-Pool-size query parameters such as `pool_min` and `pool_max` are refused before the client is
-committed, including their percent-encoded spellings and ASCII case variants. Unknown standalone
-CONFIG keys are refused rather than ignored. The generated [MYSQL client key reference](connector-capabilities.md#mysql-client)
-lists each key's presence, type and confidentiality; it does not expose additional pool-lifetime
-keys. The [pool minimum](database-client-pools.md#how-each-client-type-keeps-its-minimum) keeper waits
-one second before each pass, counting idle and checked-out connections together.
+The client requires `addr` and declares the pool acquire, idle lifetime, maximum-age and minimum
+maintenance keys documented in [Database Client Connection Pools](database-client-pools.md#connection-lifetimes).
+Its optional operation bound is `timeout_ms`; TLS files are `tls_ca_file`, `tls_cert_file` and
+`tls_key_file`. The address must be a `mysql://` URL accepted by the driver's offline parser.
+Declare capacity with `POOL SIZE MIN ... MAX ...`. Pool-size query parameters such as `pool_min`
+and `pool_max` are refused before commit, including percent-encoded spellings and ASCII case
+variants. Unknown standalone CONFIG keys are refused. The generated
+[MYSQL client key reference](connector-capabilities.md#mysql-client) lists every key's presence,
+type and confidentiality. `DESCRIBE CLIENT` shows effective defaults; `SHOW CREATE CLIENT`
+preserves authored configuration.
 
-`timeout_ms` is a positive, schedulable whole number of milliseconds. It bounds opening and
-validating the pool's first connection, each subsequent pool checkout (including connection
-establishment and authentication), and each insert. The minimum keeper uses the same checkout
-bound. Each of these is a separate operation; an insert's bound starts after checkout, and an
-isolated row's insert receives its own bound. Omitting the key leaves these waits unbounded.
-An elapsed bound is an infrastructure failure, reported with `timeout_ms` and its duration, and
-the emitter retries its pending rows on its declared policy. The driver discards a connection
-whose in-flight command was cancelled. A timeout does not establish whether the server committed
-an insert; use a stable key and an appropriate `ON CONFLICT` action where retries must converge.
+`pool_acquire_timeout_ms` bounds each checkout, including connection establishment and
+authentication, and defaults to 30 seconds. `timeout_ms`, when configured, also bounds checkout,
+initial validation and each insert as separate operations. Checkout uses the shorter applicable
+bound, including in the minimum keeper. An insert's operation bound starts after checkout, and
+an isolated row's insert gets its own bound. Omitting `timeout_ms` leaves validation after checkout
+and inserts without an operation deadline; it never removes the acquire deadline.
+An elapsed bound is an infrastructure failure naming its key and duration, and the emitter
+retries pending rows on its declared policy. The driver discards a connection whose in-flight
+command was cancelled. A timeout does not establish whether the server committed an insert;
+use a stable key and an appropriate `ON CONFLICT` action where retries must converge.
 
 ### MongoDB
 
