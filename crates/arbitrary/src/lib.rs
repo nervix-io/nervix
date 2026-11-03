@@ -145,8 +145,12 @@ mod tests {
                     assert_eq!(emitter.connector.kind(), kind, "{domain:?}");
                     assert!(
                         kind.capabilities()
-                            .publishing_modes
-                            .contains(&emitter.connector.publishing().kind()),
+                            .accepts_publishing_mode_kind(emitter.connector.publishing().kind()),
+                        "{domain:?} {kind:?}"
+                    );
+                    assert_eq!(
+                        emitter.connector.unmet_publishing(),
+                        None,
                         "{domain:?} {kind:?}"
                     );
                 }

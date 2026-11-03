@@ -34,7 +34,7 @@ preserve those complete values.
 KAFKA TOPIC ingestor generators draw domain-owned offsets, with no position, and a consumer group
 with either required `START AT` position. Statement generators mix typed `SET START AT` with shared
 ingestor operations. The Model, registry and consensus properties preserve those complete values.
-The `NERVIX GROUP POS` registry signature and `raft_group_start_` consensus namespace identify this
+The `NERVIX MQTT EMIT` registry signature and `raft_mqtt_emit_` consensus namespace identify this
 current Model layout before decoding.
 
 MQTT TOPIC ingestor generators draw either session at QoS 0, 1 or 2 beside `NO ACK`, and the
@@ -42,6 +42,10 @@ persistent session at QoS 1 or 2 beside an acknowledged mode, so every pairing t
 admits is generated and none it refuses. The Model/archive, registry, consensus and canonical
 Plexus properties preserve the session, quality of service and mode as separate written values,
 and the archive signature and consensus keyspace namespace fence this shape before decoding.
+
+MQTT TOPIC emitter generators draw `NO ACK` at QoS 0 and `ACK`, with either window, at QoS 1 or 2,
+so every pairing the declaration admits is generated and none it refuses. The same properties
+preserve the quality of service and the mode as separate written values under the same fence.
 
 Every target is registered in `tests/bolero-targets.toml` for ordinary randomized/corpus checks and
 sanitizer libFuzzer. The same bounded generators, production storage paths and complete assertions

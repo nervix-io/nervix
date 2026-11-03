@@ -1515,7 +1515,7 @@ fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
 }
 
 // The header identifies the current persisted Model shape before archive decoding.
-const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX GROUP POS";
+const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX MQTT EMIT";
 
 #[cfg(test)]
 #[cfg_attr(
