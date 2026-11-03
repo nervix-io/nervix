@@ -113,7 +113,7 @@ fn both_topic_directions_share_the_topic_rule_and_the_client() {
 }
 
 #[test]
-fn topic_declares_message_properties_as_headers() {
+fn topic_declares_message_properties_and_typed_metadata() {
     let ingest = IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic).capabilities();
     let emit = EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic).capabilities();
 
@@ -125,8 +125,18 @@ fn topic_declares_message_properties_as_headers() {
         emit.headers,
         Some(HeaderModel::exact(HeaderLayout::LastWins))
     );
-    assert_eq!(ingest.metadata, IngestorMetadataDeclaration::NONE);
-    assert!(ingest.metadata.fields().is_empty());
+    const EXPECTED: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
+        crate::IngestorMetadataField::new("topic", crate::IngestorMetadataType::String),
+        crate::IngestorMetadataField::new("message_id", crate::IngestorMetadataType::String),
+        crate::IngestorMetadataField::new("publish_time", crate::IngestorMetadataType::Datetime),
+        crate::IngestorMetadataField::new("event_time", crate::IngestorMetadataType::Datetime),
+        crate::IngestorMetadataField::new("key", crate::IngestorMetadataType::String),
+        crate::IngestorMetadataField::new("ordering_key", crate::IngestorMetadataType::Bytes),
+        crate::IngestorMetadataField::new("producer_name", crate::IngestorMetadataType::String),
+        crate::IngestorMetadataField::new("sequence_id", crate::IngestorMetadataType::I64),
+        crate::IngestorMetadataField::new("redelivery_count", crate::IngestorMetadataType::I64),
+    ]);
+    assert_eq!(ingest.metadata, EXPECTED);
     assert!(emit.options.is_empty());
 }
 

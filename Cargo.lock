@@ -7827,6 +7827,7 @@ dependencies = [
  "opentelemetry-proto",
  "ort",
  "playwright-rs",
+ "prost 0.13.5",
  "prost 0.14.4",
  "pulsar",
  "rcgen",
@@ -9701,7 +9702,7 @@ dependencies = [
 [[package]]
 name = "pulsar"
 version = "6.9.0"
-source = "git+https://github.com/nervix-io/pulsar-rs.git?branch=nervix-rustls-client-config#d9b1a2c5eeaca30967e584d1b91cba7a8b19d9df"
+source = "git+https://github.com/nervix-io/pulsar-rs.git?branch=nervix-rustls-client-config#39fa340c6a5a2c846cae4cc0cba948975997867c"
 dependencies = [
  "async-channel",
  "async-trait",
