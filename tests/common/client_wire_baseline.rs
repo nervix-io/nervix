@@ -317,9 +317,9 @@ impl OperationSamples {
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct ProcessCounters {
-    user_cpu_ticks: u64,
-    system_cpu_ticks: u64,
+pub(crate) struct ProcessCounters {
+    pub(crate) user_cpu_ticks: u64,
+    pub(crate) system_cpu_ticks: u64,
     resident_bytes: u64,
     peak_resident_bytes: u64,
 }
@@ -1222,7 +1222,7 @@ fn prometheus_samples(metrics: &str, prefix: &str) -> Result<Vec<PrometheusSampl
     Ok(samples)
 }
 
-fn read_process_counters(pid: u32) -> Result<ProcessCounters> {
+pub(crate) fn read_process_counters(pid: u32) -> Result<ProcessCounters> {
     let stat_path = format!("/proc/{pid}/stat");
     let stat =
         fs::read_to_string(&stat_path).with_context(|| format!("failed to read {stat_path}"))?;

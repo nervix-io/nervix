@@ -214,9 +214,10 @@ type probe struct {
 
 // command runs one statement, following leader redirects with the same execution reference.
 // An outcome the server could not settle is a failure of the probe, never a success.
-func (p *probe) command(query string) (*session.CommandOutcome, error) {
-	reference := newReference()
+func (p *probe) command(query, reference string) (*session.CommandOutcome, error) {
+	var attempts []string
 	for attempt := 0; attempt < 50; attempt++ {
+		attempts = append(attempts, reference)
 		reply, err := p.commands.request(session.ClientRequestCommandRequest,
 			func(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 				queryOffset := builder.CreateString(query)
@@ -267,6 +268,10 @@ func (p *probe) command(query string) (*session.CommandOutcome, error) {
 		}
 		if _, known := dispositions[outcome.DispositionType()]; !known {
 			return nil, fmt.Errorf("undeclared command disposition %d", outcome.DispositionType())
+		}
+		if len(attempts) > 1 {
+			report(fmt.Sprintf("REDIRECT original=%s repeated=%s outcome=%s",
+				attempts[0], attempts[len(attempts)-1], outcome.ExecutionReference()))
 		}
 		return outcome, nil
 	}
@@ -476,6 +481,10 @@ func renderCells(length int, cellAt func(*session.Cell, int) bool, fields []fiel
 func report(line string) { fmt.Println(line) }
 
 func run() error {
+	reference := os.Getenv("NERVIX_PROBE_EXECUTION_REFERENCE")
+	if reference == "" {
+		return errors.New("NERVIX_PROBE_EXECUTION_REFERENCE is not set")
+	}
 	rows, err := strconv.Atoi(os.Getenv("NERVIX_PROBE_ROWS"))
 	if err != nil {
 		return err
@@ -498,13 +507,20 @@ func run() error {
 	defer home.close()
 	p := &probe{ctx: ctx, target: probeTarget, home: home, commands: home}
 
-	operation, err := p.command("SHOW CREATE RELAY " + probeTarget.relay + ";")
+	proof, err := p.command("CREATE SCHEMA redirect_proof (value U8);", reference)
+	if err != nil {
+		return err
+	}
+	if proof.DispositionType() != session.CommandDispositionCommandCompleted {
+		return fmt.Errorf("the leader-only redirect proof failed: %s", proof.Message())
+	}
+	operation, err := p.command("SHOW CREATE RELAY "+probeTarget.relay+";", newReference())
 	if err != nil {
 		return err
 	}
 	report("OPERATION " + dispositions[operation.DispositionType()])
 
-	failed, err := p.command("CREATE RELAY;")
+	failed, err := p.command("CREATE RELAY;", newReference())
 	if err != nil {
 		return err
 	}

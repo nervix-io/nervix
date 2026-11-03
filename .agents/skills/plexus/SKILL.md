@@ -47,6 +47,9 @@ Parallel `MAX` is 1 through 65,535 and is the broker prefetch per instance. Each
 on its own graph outcome. Automatic consumption has no prefetch or transport acknowledgement;
 work already accepted by the broker can be lost before the graph completes. Read the RabbitMQ
 Ingestors section for the exact clause order, host admission and recovery limits.
+For RabbitMQ publication, read [Emitters → RabbitMQ](../../../docs/src/emitters.md#rabbitmq) for
+`PERSISTENT`, `TIMESTAMP`, exact AMQP `PROPERTIES` types, targeted envelope alterations and the
+durable-queue requirement; property writes and `write_header` have different contracts.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
@@ -566,6 +569,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   node, so size it for the node's whole workload rather than per emitter, and expect one pool per
   node the client is placed on. Read the dedicated `Common` → `Database Client Connection Pools`
   documentation entry before choosing values.
+- For a `MYSQL` client's checkout budget, connection lifetimes and minimum-maintenance interval,
+  read `Connection lifetimes` in `Database Client Connection Pools`. Keep the checkout budget
+  separate from the insert's operation bound, and expect maximum age to allow an active insert to finish.
 - A `REDIS` client's command pool and a `POSTGRES` client's pool take `pool_idle_timeout_ms` and
   `pool_max_lifetime_ms`, 10 and 30 minutes by default; Redis never applies them to a Pub/Sub
   ingestor's subscription connection. A `POSTGRES` client also takes `pool_acquire_timeout_ms`, 30
@@ -580,7 +586,13 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   case kept; `ON CONFLICT (...) DO UPDATE` needs a target and a mapped column outside it, and
   `MAX SIZE` is at most `1073741822B`. Keep its optional statement `timeout_ms` separate from
   `pool_acquire_timeout_ms`; read their bounds and retry semantics in
-  [Emitters → Postgres](../../../docs/src/emitters.md#postgres).
+  [Emitters → Postgres](../../../docs/src/emitters.md#postgres). Write every connection part in
+  `addr`: the driver fills a missing port, user, password or database from the node's `PG*`
+  environment and password file, and ignores a query option it does not know. `verify-full` trusts
+  the driver's bundled Mozilla roots as well as `tls_ca_file`. Map an `ARRAY` or `VEC` value to a
+  `json`, `jsonb` or `text` column, never a native array column. Only SQLSTATE classes 21, 22 and
+  23 reject a row; a missing table or column, an unmatched conflict target or a missing privilege
+  retries on `RETRY POLICY` until it is fixed.
 - Give a `RABBITMQ` client an `amqp://` or `amqps://` `addr` that names a host and no port 0; Nervix
   refuses any other address before commit. Mounted `tls_ca_file`, `tls_cert_file` and
   `tls_key_file` require `amqps`; `CREATE` refuses these keys with `amqp`. Certificate and key must

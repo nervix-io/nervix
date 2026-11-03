@@ -734,10 +734,14 @@ absent TLS peer and produces no failure.
 A MySQL pool is kept at its `POOL SIZE MIN` by a task no caller waits on, so that task is the only
 witness of a pass that ends below the minimum. It reports `PoolMinimumError::NotRestored`, naming
 the minimum, above the failed checkout's `PoolMinimumError::CheckOut` and the driver's error, at
-`debug`, returns the connections the pass held, and passes again a second later. An emitter that
+`debug`, returns the connections the pass held, and passes again after the declared maintenance interval. An emitter that
 needs a connection meanwhile reports its own failed checkout. The shared MySQL pool retains
-`ConfiguredDeadline` for `timeout_ms`, when present, and every checkout, validation and insert
-keeps a typed `DeadlineElapsed` on expiry. Driver checkout and validation errors retain their
+the effective `ConfiguredDeadline` for `pool_acquire_timeout_ms` and optional `timeout_ms`.
+Checkout uses the shorter applicable bound, and every expired checkout, validation or insert
+keeps a typed `DeadlineElapsed` naming the key that ended it. An unusable lifetime or maintenance
+value keeps its vocabulary `ClientConfigSchemaError` beneath the connector's
+`MySqlPoolPolicyError::InvalidKey` and the initialization context; public CREATE validation uses
+that same declared value rule. Driver checkout and validation errors retain their
 typed causes through the open/write contexts. The emitter's pool-borrow context adds no rendered
 copy of the report. Its deadline report also attaches the safe operation, key and duration for
 the host's public emitter diagnostic. MySQL initialization changes context on the shared-client
@@ -950,7 +954,8 @@ for its `idle_timeout_ms`, ends with `DeadlineElapsed` beneath the listener's co
 That failure closes only the connection and is logged at debug level; it is never the ingestor's
 transient error. A Syslog client that sets a deadline key its direction and protocol never wait on
 is refused as `SyslogConfigError::InapplicableDeadlineKey`, naming the key and the clients it
-applies to.
+applies to. When several keys are inapplicable, the first refusal follows the shared deadline-key
+order, independently of the order of the client's entries.
 
 An MQTT client configuration the vocabulary cannot carry is refused as an
 `MqttClientConfigError`, which names the key without its value: an empty or NUL-bearing identity, a
@@ -1285,6 +1290,10 @@ branch by the fingerprint of its key, as described under
 [Sensitive Data And Observability](#sensitive-data-and-observability), and unbranched work as
 `unbranched`. [Data Plane](./data-plane.md) owns branch execution and
 [Cluster Interconnect](./interconnect.md) owns snapshot exchange.
+
+Materialized-state inspection refuses a missing scheduled payload schema or resolved branch
+metadata with the observation owner's typed error. It never substitutes an empty sensitivity
+set. Local and remote report failures retain their complete cause chain at the command boundary.
 
 The materialized installation owner refuses a lower snapshot revision with
 `RuntimeStateOperationError::MaterializedSnapshotRevision { received, current }`, a snapshot from an
@@ -1873,6 +1882,12 @@ warning instead of inventing per-record rejections. An OTLP/gRPC export the rece
 retries, whatever code tonic reports for it. An answered status other than `INVALID_ARGUMENT`,
 `RESOURCE_EXHAUSTED` or a code the OTLP specification lists as retryable is a misconfiguration
 failure, which the host does not retry.
+
+The shared HTTP client builder adds `HttpClientConfigError::Tls` above the
+`TlsClientConfigError` the common rustls configuration owner returns. HTTP polling, Prometheus,
+Sentry and OTEL HTTP therefore retain that owner's CA-file or client-identity classification
+instead of rebuilding the TLS failure from text. Native-root loading remains the TLS owner's
+diagnostic; its bundled roots still permit client construction when the native store is empty.
 
 An HTTP polling request whose response exceeds `MAX BODY SIZE` fails that poll with a typed
 `ResponseTooLarge` cause. DNS, connection, TLS, response-body and timeout failures retain their
@@ -2827,15 +2842,16 @@ is the lowercase hexadecimal digest of the branch's canonical key text, the iden
 PROCESSOR` checkpoint lines and `DESCRIBE BACKUP` print and transaction-impact reports carry for
 the same branch, so an operator matches a failure to those reports by that text. The per-branch
 statistics the execution graph carries to sessions name each branch by the same fingerprint, and
-per-branch metric series are keyed by it. A session subscription, which masks sensitive key fields,
-is where a key's other field values are read.
+per-branch metric series are keyed by it. Session subscriptions and materialized-state inspection
+mask sensitive key fields while exposing the key's non-sensitive field values.
 
 The fingerprint is a plain digest of the key text, computed without a secret. It hides a key only
 as far as the key's values are hard to guess: someone who can guess a sensitive key value can
 compute its fingerprint and confirm the guess against a diagnostic. The rule also governs only text
 that names a branch in a failure, an event, a log or a statistic. A statement or an emitter that an
 operator directs at branch data follows its own contract: `SHOW RELAY <relay> MATERIALIZED STATE`
-prints each entry's key and payload ([Relay](./relay.md)), and an SQS emitter's `FROM BRANCH` group
+prints each entry's key and payload with their declared sensitive fields masked on both local and
+remote reads ([Relay](./relay.md)), and an SQS emitter's `FROM BRANCH` group
 is the record's branch key ([Emitters](./emitters.md)).
 
 ### Log Levels
@@ -3318,3 +3334,12 @@ Connector terminology follows entity ownership: `IngestorError` and `EmitterOpen
 record. Renaming and grouping entity owners changes neither retry classification nor what is
 rendered at the boundary. The ingestor planner's input identity/kind errors cover client, endpoint
 and native schema references before composition.
+
+
+RabbitMQ emitter property preparation preserves a typed refusal until the per-record reporting
+boundary. A short-string failure keeps the driver's typed cause below the property name and byte
+count; a timestamp refusal names the requirement for nonnegative whole Unix seconds. Neither
+renders the property value. The publisher projects these reports into the record's message-error
+outcome before transport and continues with representable neighbours. A wrong property name or
+type at this connector boundary remains a typed contract refusal; normal statements are already
+checked against the entity's declaration and exact types at `CREATE` and `ALTER`.

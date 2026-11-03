@@ -2,7 +2,8 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Reading `timeout_ms`, `connect_timeout_ms` and `idle_timeout_ms` from a client's
+//! - **Owns.** Reading `timeout_ms`, `connect_timeout_ms`, `idle_timeout_ms` and
+//!   `pool_acquire_timeout_ms` from a client's
 //!   entries, each held to the vocabulary's one deadline rule, the default a connection takes
 //!   without its key, and the typed failure of a wait that ran out of its deadline.
 //! - **Depends on.** The vocabulary's deadline keys, rule and default, and a client's

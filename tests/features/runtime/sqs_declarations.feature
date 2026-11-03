@@ -107,15 +107,53 @@ Feature: SQS queue declarations
       """
 
     Examples:
-      | cluster_size | mode                                                               | quiesce                                      | expected                            |
-      | 1            | NO ACK                                                             | SUSPEND                                      | expected ACK, found NO              |
-      | 3            | NO ACK                                                             | SUSPEND                                      | expected ACK, found NO              |
-      | 1            | ACK PARALLEL MAX 11 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | SUSPEND                                      | expected SEQUENTIAL, found PARALLEL |
-      | 3            | ACK PARALLEL MAX 11 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | SUSPEND                                      | expected SEQUENTIAL, found PARALLEL |
-      | 1            | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s      | DROP                                         | expected SUSPEND, found DROP        |
-      | 3            | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s      | DROP                                         | expected SUSPEND, found DROP        |
-      | 1            | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s      | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | expected SUSPEND, found BUFFER      |
-      | 3            | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s      | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | expected SUSPEND, found BUFFER      |
+      | cluster_size | mode                                                                                   | quiesce                                      | expected                                      |
+      | 1            | NO ACK                                                                                 | SUSPEND                                      | expected ACK, found NO                        |
+      | 3            | NO ACK                                                                                 | SUSPEND                                      | expected ACK, found NO                        |
+      | 1            | ACK PARALLEL MAX 11 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | SUSPEND                                      | SQS ACK PARALLEL MAX must be between 1 and 10 |
+      | 3            | ACK PARALLEL MAX 11 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | SUSPEND                                      | SQS ACK PARALLEL MAX must be between 1 and 10 |
+      | 1            | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                          | DROP                                         | expected SUSPEND, found DROP                  |
+      | 3            | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                          | DROP                                         | expected SUSPEND, found DROP                  |
+      | 1            | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                          | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | expected SUSPEND, found BUFFER                |
+      | 3            | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                          | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | expected SUSPEND, found BUFFER                |
+
+  Scenario Outline: SQS queue ingestors accept ACK PARALLEL up to the service's receive maximum
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event (tenant STRING, value STRING);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, value string);
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE SQS CLIENT sqs_main CONFIG {
+        'endpoint' = 'http://127.0.0.1:1',
+        'region' = 'eu-west-1',
+        'access_key_id' = 'declaration-key',
+        'secret_access_key' = 'declaration-secret'
+      };
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SQS QUEUE INGESTOR parallel
+        FROM sqs_main QUEUE 'orders' INSTANCES 2
+        MODE <mode>
+        ON QUIESCE SUSPEND DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      SHOW CREATE INGESTOR parallel;
+      """
+    Then the last command output contains
+      """
+      QUEUE 'orders' INSTANCES 2 MODE <mode>
+      """
+
+    Examples:
+      | cluster_size | mode                                                                                   |
+      | 1            | ACK PARALLEL MAX 1 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s  |
+      | 3            | ACK PARALLEL MAX 1 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s  |
+      | 1            | ACK PARALLEL MAX 10 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+      | 3            | ACK PARALLEL MAX 10 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 
   Scenario Outline: SQS queue emitters require a request shape and refuse shapes and publishing modes the queue does not declare
     Given a <cluster_size> node nervix cluster is started

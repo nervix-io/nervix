@@ -237,7 +237,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_plexus/corpus"
-domain_version = 36
+domain_version = 38
 features = []
 id = "plexus-model"
 invariant = "Canonical Plexus of a generated Model of every family reparses through the client and server grammars to the complete CREATE statement."
@@ -252,7 +252,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
-domain_version = 37
+domain_version = 39
 features = []
 id = "plexus-archive-model"
 invariant = "Complete cluster/domain archives preserve every ordered canonical Model document through export, production restore reads, semantic reparse and byte-exact re-export."
@@ -431,6 +431,36 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/client-host/src/tests/__fuzz__/tests__arrow__bolero_host_columns_round_trip_through_the_arrow_c_data_interface/corpus"
+domain_version = 1
+features = []
+id = "client-host-arrow-columns"
+invariant = "Every batch a host builds level by level, of up to six rows of one to four nullable or required, sensitive or not columns of every scalar inside up to two LIST and FIXED_LIST levels, exports a row schema that imports as its struct type, and imports back through its exported struct array and through its exported stream as the complete original batch, down to its canonical Arrow IPC stream."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-client-host"
+random_iterations = 256
+source = "crates/client-host/src/tests/arrow.rs"
+test = "tests::arrow::bolero_host_columns_round_trip_through_the_arrow_c_data_interface"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/client-host/src/tests/__fuzz__/tests__fields__bolero_typed_field_descriptions_round_trip/corpus"
+domain_version = 1
+features = []
+id = "client-host-typed-field-descriptors"
+invariant = "Every field a binding describes as typed levels, of every scalar inside 0 to 32 LIST and FIXED_LIST levels of 1 to INT32_MAX elements, nullable or not, sensitive or not and named by the whole name rule, becomes the complete original field, and every scalar level names its scalar back through its field type's kind."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-client-host"
+random_iterations = 256
+source = "crates/client-host/src/tests/fields.rs"
+test = "tests::fields::bolero_typed_field_descriptions_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/branch-instances/src/__fuzz__/membership__tests__bolero_owned_branches_publish_exactly_the_current_owners_membership/corpus"
 domain_version = 1
 features = []
@@ -447,7 +477,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_plexus/corpus"
-domain_version = 35
+domain_version = 37
 features = []
 id = "plexus-statement"
 invariant = "Canonical Plexus of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
@@ -477,7 +507,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
-domain_version = 35
+domain_version = 37
 features = []
 id = "plexus-statement-text"
 invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical Plexus reparses to them."
@@ -492,7 +522,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatted_documents_keep_their_statements/corpus"
-domain_version = 35
+domain_version = 37
 features = []
 id = "plexus-format-document"
 invariant = "Formatting a generated document with gaps, comments and either line ending keeps its statements and comments and is idempotent."
@@ -507,7 +537,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatter_text_is_formatted_or_rejected/corpus"
-domain_version = 34
+domain_version = 36
 features = []
 id = "plexus-format-text"
 invariant = "Edited documents are either refused as unparseable or formatted without changing their statements, idempotently."
@@ -582,7 +612,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/connectors/__fuzz__/surface__bolero_generated_entities_state_only_what_their_entity_declares/corpus"
-domain_version = 26
+domain_version = 28
 features = []
 id = "models-connector-declarations"
 invariant = "A generated ingestor and emitter of every entity state only what their entity declares: a declared delivery or publishing mode whose required option choices they make, a quiesce mode their entity honors, a body of the declared form, batching the declared legality admits, a type contract exactly for direct-value bodies and a client of a declared connector."
@@ -761,6 +791,36 @@ test_target = "test:representations"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/models/tests/representations/__fuzz__/sqs_receive_windows__bolero_sqs_receive_windows_round_trip_through_every_representation/corpus"
+domain_version = 1
+features = []
+id = "models-sqs-receive-windows"
+invariant = "SQS receive windows keep their counts through the number, text, JSON and archive forms."
+manifest = "Cargo.toml"
+max_input_bytes = 16
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/tests/representations/sqs_receive_windows.rs"
+test = "sqs_receive_windows::bolero_sqs_receive_windows_round_trip_through_every_representation"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/tests/representations/__fuzz__/sqs_receive_windows__bolero_sqs_receive_window_input_is_validated_or_rejected/corpus"
+domain_version = 1
+features = []
+id = "models-sqs-receive-window-validation"
+invariant = "Window input reads as a window from 1 to 10 or fails with a typed error, and the JSON and archive decoders refuse counts outside that range."
+manifest = "Cargo.toml"
+max_input_bytes = 16
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/tests/representations/sqs_receive_windows.rs"
+test = "sqs_receive_windows::bolero_sqs_receive_window_input_is_validated_or_rejected"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/identities__bolero_identities_round_trip_through_every_representation/corpus"
 domain_version = 3
 features = []
@@ -852,7 +912,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/models__bolero_models_and_statements_round_trip_through_their_archives/corpus"
-domain_version = 33
+domain_version = 36
 features = []
 id = "models-archived-models"
 invariant = "Every generated Model family and statement form keeps every field through its archive, and a stored Model widens to requested versions and pins back to itself."
@@ -1151,6 +1211,20 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/rabbitmq/src/publisher/__fuzz__/publisher__properties_tests__bolero_amqp_properties_preserve_every_declared_value_through_the_wire/corpus"
+domain_version = 1
+features = []
+id = "rabbitmq-amqp-properties"
+invariant = "The publisher's production conversion preserves every declared AMQP property, persistence, timestamp presence including epoch zero, and the independent header table through Lapin's complete AMQP serialization and parse."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-connector-rabbitmq"
+random_iterations = 256
+source = "crates/connectors/rabbitmq/src/publisher/properties_tests.rs"
+test = "publisher::properties_tests::bolero_amqp_properties_preserve_every_declared_value_through_the_wire"
+test_target = "lib"
+[[target]]
+case_timeout_seconds = 10
 corpus = "src/runtime_schema/__fuzz__/runtime_schema__syslog__tests__bolero_structured_data_and_headers_match_the_per_byte_reading/corpus"
 domain_version = 1
 features = []
@@ -1227,7 +1301,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/registry/__fuzz__/registry__storage__tests__bolero_registry_archived_models_round_trip/corpus"
-domain_version = 28
+domain_version = 29
 features = []
 id = "registry-archived-models"
 invariant = "The registry's current tagged Model archive restores the complete generated vocabulary Model, including full-width counts and pinned resource bindings."
@@ -2097,7 +2171,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_consensus_state_records_recover_every_stored_value/corpus"
-domain_version = 25
+domain_version = 26
 features = []
 id = "consensus-state-records"
 invariant = "A generated replicated state holding records of every family, including unit-keyed schedules, stored by the consensus state writer into a real keyspace, and a second revision stored as the changes from it each recover with complete equality of every record, index and metadata field."
@@ -2112,7 +2186,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_corrupt_consensus_state_records_fail_typed_or_recover_canonically/corpus"
-domain_version = 25
+domain_version = 26
 features = []
 id = "consensus-state-corruption"
 invariant = "Flipped, truncated, extended, rekeyed, copied, unknown and missing consensus state records free every decoding allocation and either fail recovery with the typed invalid-state failure or recover a state stored under its own canonical keys whose readers' invariants hold and which recovers again unchanged."
@@ -2127,7 +2201,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_consensus_raft_records_round_trip_through_the_storage_codec/corpus"
-domain_version = 23
+domain_version = 24
 features = []
 id = "consensus-raft-records"
 invariant = "Votes, log positions, log entries of every consensus command, current state metadata, snapshot manifests and sections restore with complete equality through the storage codec, and every log and section key names exactly the position or section it was built for."
@@ -2157,7 +2231,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/registry/storage/__fuzz__/registry__storage__properties__bolero_registry_stored_models_list_back_from_memory_and_tables/corpus"
-domain_version = 25
+domain_version = 26
 features = []
 id = "registry-stored-models"
 invariant = "Committed Models named across the whole name rule list back complete and in key order, and read back by their own keys, from a reopened registry serving them from its journal or from the on-disk table a flush moved them into."
@@ -2172,7 +2246,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/registry/storage/__fuzz__/registry__storage__properties__bolero_corrupt_registry_records_fail_typed_or_list_canonically/corpus"
-domain_version = 25
+domain_version = 26
 features = []
 id = "registry-stored-models-corruption"
 invariant = "Damaged registry records free every decoding allocation, and damaged records and keys either fail the listing with the registry's typed storage failure or list Models whose own keys are exactly the stored keys."
@@ -3206,6 +3280,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/mqtt/src/topic/ingestor/__fuzz__/topic__ingestor__delivered_publish__tests__bolero_delivered_publishes_hand_over_their_declared_row_and_user_properties/corpus"
+domain_version = 1
+features = []
+id = "mqtt-publish-metadata"
+invariant = "Every publish the client decodes and the driver admits hands over exactly one value of its declared type for each declared metadata field, in declared order, absent exactly where its packet carries none, and its MQTT 5 user properties in written order with their repeats; the row and the headers survive the copy a quiesce buffer retains."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-connector-mqtt"
+random_iterations = 256
+source = "crates/connectors/mqtt/src/topic/ingestor/delivered_publish_tests.rs"
+test = "topic::ingestor::delivered_publish::tests::bolero_delivered_publishes_hand_over_their_declared_row_and_user_properties"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/connectors/prometheus/src/query/__fuzz__/query__answer__tests__bolero_every_sample_is_exactly_the_declared_object/corpus"
 domain_version = 1
 features = []
@@ -3627,7 +3716,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/src/connector/__fuzz__/connector__config_schema__tests__bolero_schema_checked_client_entries_round_trip/corpus"
-domain_version = 27
+domain_version = 28
 features = []
 id = "client-config-schema"
 invariant = "Bounded entries drawn from every current client key schema preserve complete values and acceptance through JSON and archive round trips; effective defaults preserve authored entries and are idempotent, as is public inspection."
@@ -3642,7 +3731,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_entity_presentations_keep_declared_rows_and_complete_configuration/corpus"
-domain_version = 21
+domain_version = 23
 features = []
 id = "connector-entity-presentation"
 invariant = "Every generated source and sink entity uses its declared phrase and ordered inspection rows, while the canonical Plexus built from that shared presentation reparses to its complete Model including all options, modes, payload mappings, flush and error policies."
@@ -3657,7 +3746,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/web-console/src/create_dialog/__fuzz__/create_dialog__ingestor_source_draft__tests__bolero_ingestor_source_drafts_preserve_every_declared_entity_configuration/corpus"
-domain_version = 9
+domain_version = 10
 features = []
 id = "console-ingestor-source-drafts"
 invariant = "Every current transport entity's draft filled from a generated source builds that complete source unchanged, preserving reference, external names, declared option choices, acknowledgement windows and deadlines, quiesce settings, instances, a required query with arbitrary interior text and an omitted or written Prometheus body limit."
