@@ -623,10 +623,7 @@ async fn when_restore_coordinator_yields_leadership(
         .assured("a multi-node cluster has another voter");
     world
         .cluster()
-        .transfer_leadership(&coordinator, &successor);
-    world
-        .cluster()
-        .wait_for_leader(&successor, Some(&successor))
+        .move_leadership(&coordinator, &successor)
         .await
         .assured("the successor leads before the restore resumes");
     world

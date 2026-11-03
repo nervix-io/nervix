@@ -490,8 +490,9 @@ scenario exercises the real driver and database; these external asynchronous wai
 Deloxide's tracked locks and the model checkers' coverage.
 
 A MySQL pool keeps its `POOL SIZE MIN` with one keeper task, which the pool's handle stops. The
-keeper holds no lock and waits on no notification: once a second it reads the driver's count of
-established connections and, below the minimum, awaits the driver's checkouts one at a time,
+keeper holds no lock and waits on no notification: after each `pool_maintenance_interval_ms`
+delay (one second by default), it reads the driver's count of established connections and, below
+the minimum, awaits the driver's checkouts one at a time,
 holding each until its pass ends, so every connection it opens is one the driver accounts against
 the maximum. These external asynchronous waits are outside Deloxide's tracked locks and the model
 checkers' coverage; unit tests drive the production keeper over a stand-in pool on a paused clock.
@@ -722,6 +723,15 @@ workloads, and their `stress.` forms, read every field in both ACK modes, observ
 drive a paced window from the producer's timestamp and refuse a timestamp beside tracked ingestion,
 acknowledgement and lifecycle locks. The AMQP client's reader, metadata visits and the async
 refusal step remain outside Deloxide's lock detector.
+
+MQTT publish metadata and user properties stay with the packet their message owns until the host
+has projected what its programs read, and visiting them adds no lock or shared state. The
+`mqtt-publish-metadata` Bolero property holds the complete row, the headers and their retained copy
+to the decoded and admitted packet. The registered `scenario.mqtt-*` and `stress.mqtt-*` workloads
+read every field through a real broker on one and three nodes, in `NO ACK` and `ACK SEQUENTIAL`,
+beside tracked ingestion, acknowledgement and quiesce state, and include a broker redelivery and a
+buffering quiesce. Driver polling and the event-loop task remain outside Deloxide's lock detector;
+the ingestor-host and MQTT driver Shuttle checks retain their existing scope.
 
 ### Kafka source rejection floors
 
@@ -1225,7 +1235,9 @@ futures and messages exclusively. A driver confirm can carry another message's r
 owner collects the set before attributing returns and refilling it. An interrupted mandatory
 window retains positive answers whose return attribution remains unknown, rather than reporting
 delivery; known returns and safe nonmandatory answers are settled once. The lookup borrows payload
-contents and uses no shared map or tracked lock. The Shuttle checks
+contents and compares each message's complete prepared AMQP properties, including persistence and
+timestamp. These immutable values come from its retained envelope and are reused on retransmission;
+attribution adds no shared map or tracked lock. The Shuttle checks
 `shuttle_a_return_followed_by_a_multiple_ack_rejects_only_its_message` and
 `shuttle_a_deadline_never_delivers_a_partially_attributed_mandatory_window` drive this production
 owner with selected callbacks and deadline events. They qualify the owner, not Lapin's opaque locks

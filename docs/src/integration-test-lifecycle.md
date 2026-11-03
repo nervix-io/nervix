@@ -92,6 +92,13 @@ with [Cluster Interconnect](./interconnect.md), client requests, redirects, reco
 recovery with [Client Session Protocol](./client-session-protocol.md), and command identity and
 completion with [Command Completion](./command-completion.md).
 
+`just test-scenarios` and `just test-scenarios-reuse` build `tests-deps`, set `ORT_DYLIB_PATH`,
+and pass each caller argument intact to the scenario binary through Cargo. Names and regular
+expressions containing spaces, and brace input globs, are single arguments when quoted by the
+caller; the recipe does not expand their contents as shell code. The reuse recipe also sets
+`NERVIX_TESTCONTAINERS_MODE=reusable`. [Developing Nervix](./developing-nervix.md#validation-and-tests)
+shows a named selection and the focused argument-forwarding check.
+
 ## What Runs Where
 
 The emitter assembly outline observes the emitter's public received-message total before each
@@ -1818,6 +1825,41 @@ reply ends an attachment, it retires that domain's unread frames from the pendin
 queue while preserving them in the ordered log. Assertions about events after detachment therefore
 start at the acknowledged boundary, including when ticks arrived while the client awaited the reply.
 
+### Leadership Moves
+
+A scenario moves leadership with `leadership is transferred from node … to node …`, with
+`leadership is transferred to node …`, which starts from the running leader, with the moves a
+scenario arms under a held command, and when a restore coordinator yields leadership in a
+multi-node cluster. Only the harness asks for a transfer: a node never transfers leadership on its
+own, not even when it stops. Every move ends only when its target reports itself the leader, within
+the 40-second status wait budget, so the step that follows starts from the leadership the scenario
+named.
+
+A transfer is a request, not a reservation of the next election. The leader stops sending
+heartbeats, every voter is told to grant the target's vote despite the leader's lease, and the
+target campaigns at once. Every other voter's election timeout keeps running until the target's
+votes come back, however. Under load a granted vote's reply can miss the target's vote request
+deadline, which is the minimum election timeout, or another voter's timeout can pass before the
+target's vote reaches it. That voter then campaigns and wins, and because OpenRaft orders the
+candidates of one term by node identifier, it can win even the term in which the target is
+campaigning. Raft is right to elect it, and nothing moves leadership on afterwards, so one request
+followed by a wait for the target would spend the whole budget with another node leading.
+
+A move therefore watches the leadership the target reports, a leader and its term. Each time it sees
+a leadership that is not the target's and that it has not asked yet, it asks that leader to
+transfer to the target. It never asks on a timer: it asks once per leadership it sees, it ignores a
+report of a term older than the leadership it last asked, and it never asks a target that already
+leads, because a leader asked to transfer to itself stops its heartbeats and hands leadership to
+whichever follower's election timeout passes first. Every repeated request is printed with the
+leadership that prompted it, and a move that runs out of budget names each leadership that prompted
+one and the last status the target reported.
+
+The leader-failover scenario `A leadership transfer reaches its target after another voter wins the
+election it started` blocks the target's consensus connectivity until the third voter leads. The
+election the transfer starts can then never reach the target, and the third voter wins it. The
+connectivity returns once that voter leads, and the move must still end with every node reporting
+the target as the leader.
+
 ## Node Tasks And Readiness
 
 An in-process node is the server application started as one Tokio task. That task is the node's
@@ -2494,9 +2536,13 @@ the whole server, so no build has to produce another file and no launch has to f
 `nervix-server`, and `main` reads `arg0` before it does anything else. A process of that name calls
 `run_server_process`, the entry point the `nervix-server` executable's own `main` calls, and none of
 the suite runs. Clap takes the program's name from the same `arg0`, so the command line a scenario
-reads is the product's. The dependency lifecycle helper is selected the same way. The one launch
-of another file is the client protocol's baseline, whose subject is a release build:
-`just client-wire-baseline` builds that server and names it to the suite.
+reads is the product's. The dependency lifecycle helper is selected the same way. The launches of
+another file are the client protocol's measurements, whose subject is a release build:
+`just client-wire-baseline` and `just client-wire-tls-cost` build that server and name it to the
+suite. The transport cost starts two such processes that differ only in their session listener: one
+serves plaintext gRPC, and the other serves TLS on the port a plaintext listener would use,
+presenting the development certificate in-process TLS nodes present. The process's readiness probe
+and the clients the fixture opens follow the listener's transport.
 
 Each launch has 120 seconds from its start until the process accepts commands. Reading the
 executable, spawning the process and waiting for its readiness share that one deadline, and a
@@ -2792,6 +2838,12 @@ The second line appears only when a connection or the accept loop had to be abor
 A receiver's port is drawn with the scenario's fixture ports and goes back with them at the end of
 cleanup, once the nodes that dialed it have ended.
 
+The HTTP transport scenarios can also start one or three real node processes with
+`SSL_CERT_FILE` pointing to an empty file and `SSL_CERT_DIR` to an empty directory. The cluster
+owns those paths until its processes end; only those children's environments change. This
+exercises client construction without native trust anchors alongside the ordinary suite,
+without changing the runner's trust store or serializing scenarios.
+
 ## HTTP Proxies
 
 A scenario about the proxy an HTTP client declares, or about proxy environment variables a node
@@ -2977,6 +3029,16 @@ probe drives the shared Rust binding's C ABI from a blocking task of the binary'
 every call of the binding blocks its caller; every other probe is a child process that the fixture
 starts with its target in `NERVIX_PROBE_*` variables and its standard input closed. A probe prints
 one report line per observation on standard output, and the fixture keeps every line it read.
+
+The row-conformance exercise waits for every node to agree on its leader and starts on a different
+node when the cluster has one, logging both identities. Its independent Go, Node.js and Bun probes
+first create an otherwise unused schema, a leader-only command, and must report its redirect and
+preserve the harness-supplied UUIDv7 execution reference across the original request, the repeated
+request and the terminal outcome. The fixture compares all three
+references with its own expected value; merely completing the operation does not qualify the
+redirect. Go exercises the native command-reply redirect and TypeScript the console's
+`SessionEnding{LeaderRedirect}`, with subsequent subscription traffic on the replacement session.
+The one-node examples retain the same row oracle as direct-connection controls.
 
 A probe's waits are bounded twice. The step that starts it waits at most 180 seconds for the line
 that says its subscription is open or its clock attach completed. A later step can wait, for the
@@ -3922,3 +3984,15 @@ maps lifecycle and failure-handling contracts to their executable checks.
 [Test Liveness 06](https://app.clickup.com/t/86bc2wugx) retains the historical high-parallelism run
 results, comparison with the interrupted run, startup and cleanup distributions, and CI artifacts.
 Those results qualify their recorded revision and workload.
+
+### Scenario-owned RabbitMQ restarts
+
+The RabbitMQ persistence scenario owns an ephemeral broker through the test environment. It
+provisions a durable queue explicitly, waits for the emitted message to be ready, stops the Nervix
+domain, restarts that broker with its data directory intact, refreshes its endpoint from Docker's
+current published port, and waits for a fresh authenticated AMQP
+connection within thirty seconds, closes that readiness probe and reads the message through AMQP.
+Stopping the domain before restarting the broker rules out replay by
+Nervix as the explanation for the surviving message. This broker is separate from the suite's
+shared RabbitMQ service, so the restart cannot disrupt another scenario. The after hook removes it
+explicitly after node teardown, including when the scenario fails before its restart step.
