@@ -208,7 +208,7 @@ impl MqttTopicIngestorStartPlan {
         let ending = units
             .iter()
             .map(|unit| match unit {
-                Unit::Instance(index) => u64::from(*index),
+                Unit::Instance(index) => *index,
                 _ => unreachable!("MQTT plans declare instance units"),
             })
             .collect::<std::collections::BTreeSet<_>>();

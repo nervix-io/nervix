@@ -530,7 +530,7 @@ impl Runtime {
         self.inner
             .executor
             .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
-                decode_start_positions(&snapshot.payload, generation, &cancellation)
+                decode_start_positions(&snapshot.payload, generation, cancellation)
             })
             .await
             .change_context_lazy(failure)?

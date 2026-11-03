@@ -455,6 +455,9 @@ current connection, retry and deadline limits.
   retire; ordinary stop retains a persistent session. Read `Ingestors` → `MQTT` for identities,
   session lifetime, the separate raw-frame and admitted-publish bounds, oversized-payload counts
   and cleanup failures, and `Emitters` → `MQTT` for emitter identities.
+- For MQTT publish metadata, user properties through `read_header`, and what `metadata.retain` and
+  `metadata.message_expiry` can read, follow `Ingestors` → `MQTT`; convert
+  `metadata.correlation_data` explicitly before using it as text.
 - An `MQTT TOPIC` emitter writes its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, `NO ACK` only at
   `QOS 0` and `ACK` only at `QOS 1` or `QOS 2`. `SET MODE` stays within the written quality of
   service, and `SET TO` changes it. Read `Emitters` → `MQTT` for what each level completes on and

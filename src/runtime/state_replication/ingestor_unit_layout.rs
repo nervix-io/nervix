@@ -21,7 +21,7 @@ use nervix_execution::{Cancellation, CpuClass, MemoryClass, Reservation};
 use nervix_interconnect::{
     IngestorUnitSelection, OwnershipHandoffCheckpoint, OwnershipHandoffInput, StateCheckpointRead,
 };
-use nervix_models::{SchemaFingerprint, Unit};
+use nervix_models::{NodeUnitRef, SchemaFingerprint, Unit};
 
 use super::*;
 use crate::{
@@ -162,7 +162,7 @@ impl Runtime {
         self.inner
             .executor
             .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
-                project_checkpoint(&placement, snapshot, selection, &cancellation)
+                project_checkpoint(&placement, snapshot, selection, cancellation)
             })
             .await
             .change_context(OwnershipHandoffError::IngestorUnitLayout)?
@@ -295,20 +295,19 @@ impl Runtime {
                     .await
                     .change_context(OwnershipHandoffError::IngestorUnitLayout)?;
                 let domain = domain.clone();
-                let entity = entity.clone();
+                let target = NodeUnitRef::new(entity.clone(), unit);
                 self.inner
                     .executor
                     .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
                         let _inputs = charges;
                         merge_checkpoints(
                             domain,
-                            entity,
-                            unit,
+                            target,
                             schema_fingerprint,
                             kafka_offsets,
                             source_count,
                             decoded,
-                            &cancellation,
+                            cancellation,
                         )
                     })
                     .await
@@ -320,8 +319,7 @@ impl Runtime {
 
 fn merge_checkpoints(
     domain: DomainName,
-    entity: NodeRef,
-    unit: Unit,
+    target: NodeUnitRef,
     schema: SchemaFingerprint,
     kafka_offsets: bool,
     source_count: std::num::NonZeroU64,
@@ -413,9 +411,9 @@ fn merge_checkpoints(
                 RuntimeStatePlacement {
                     domain: domain.clone(),
                     state,
-                    kind: entity.kind,
-                    identifier: entity.identifier.clone(),
-                    unit,
+                    kind: target.node.kind,
+                    identifier: target.node.identifier.clone(),
+                    unit: target.unit,
                     branch_key: None,
                 },
                 PersistedRuntimeStateEntry { lsm, payload },

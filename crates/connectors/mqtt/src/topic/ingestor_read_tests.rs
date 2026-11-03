@@ -12,7 +12,8 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     BrokerIngestorConnector as _, IngestorBatch, IngestorBatchRequest, IngestorConnector as _,
-    IngestorError, IngestorMessage as _, IngestorReadCancellation,
+    IngestorError, IngestorMessage as _, IngestorReadCancellation, RetainedIngestMetadata,
+    RetainedIngestMetadataValue,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, MqttClientConfig, MqttQos, MqttSession};
@@ -745,6 +746,84 @@ async fn an_acknowledged_exactly_once_batch_has_written_every_pubrec_and_complet
         [1, 2, 3],
         "the connection completed every release the broker sent"
     );
+}
+
+/// The Retain As Published option of an MQTT 5 subscription, in its options byte.
+const RETAIN_AS_PUBLISHED: u8 = 0b0000_1000;
+
+#[nervix_primitives::test]
+async fn a_subscription_asks_the_broker_to_keep_the_retain_flag_its_publisher_wrote() {
+    let fixture = DnsFixture::start().await;
+    let broker = ScriptedBroker::start().await;
+    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
+    let mut source = MqttTopicIngestor::open(&plan, 0)
+        .await
+        .assured("an MQTT source opens without connecting");
+    let subscribing = async {
+        let mut connection = broker.accept().await;
+        let (packet_type, subscribe) = connection.read_packet().await;
+        assert_eq!(packet_type, 8, "the client subscribes once connected");
+        // SUBACK: the SUBSCRIBE's packet identifier, an empty property section, QoS 1 granted.
+        connection
+            .write(&[0x90, 0x04, subscribe[0], subscribe[1], 0, 1])
+            .await;
+        subscribe
+    };
+    let (resumed, subscribe) = tokio::join!(source.resume(), subscribing);
+    resumed.assured("the scripted broker granted the subscription");
+
+    // The packet identifier, an empty property section, and the filter with its two-byte length
+    // come before the filter's options.
+    let filter_bytes = usize::from(u16::from_be_bytes([subscribe[3], subscribe[4]]));
+    let filter = &subscribe[5..5 + filter_bytes];
+    assert_eq!(filter, b"$share/default~ingestor/events");
+    let options = subscribe[5 + filter_bytes];
+    assert_eq!(options, RETAIN_AS_PUBLISHED | 1, "QoS 1, as published");
+}
+
+#[nervix_primitives::test]
+async fn a_rejected_publish_is_read_again_with_the_row_its_packet_arrived_with() {
+    let fixture = DnsFixture::start().await;
+    let broker = ScriptedBroker::start().await;
+    let window = NonZeroU64::new(2).assured("two is non-zero");
+    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), window);
+    let (mut source, mut connection) = subscribed(&plan, &broker).await;
+    connection.write_publish(7, b"first delivery").await;
+    connection
+        .write_duplicate_retained_publish(8, b"delivered again")
+        .await;
+
+    let first = read_whole_batch(&mut source, 2).await;
+    let rows = [
+        RetainedIngestMetadata::capture(first[0].metadata().fields),
+        RetainedIngestMetadata::capture(first[1].metadata().fields),
+    ];
+    let first_positions = positions(&first);
+    let rejecting = source.reject(&first_positions);
+    let Ok(rejected) = timeout(OBSERVATION_BUDGET, rejecting).await else {
+        panic!("a rejection on a live connection returned within its budget");
+    };
+    rejected.assured("a live connection replays what the host rejected");
+    let again = read_whole_batch(&mut source, 2).await;
+
+    assert_eq!(
+        RetainedIngestMetadata::capture(again[0].metadata().fields),
+        rows[0],
+        "reading a publish again locally is no redelivery by the broker"
+    );
+    assert_eq!(
+        RetainedIngestMetadata::capture(again[1].metadata().fields),
+        rows[1]
+    );
+    let retain_and_duplicate =
+        |row: &RetainedIngestMetadata| (row.values()[1].clone(), row.values()[3].clone());
+    let flagged = RetainedIngestMetadataValue::Bool(true);
+    let unflagged = RetainedIngestMetadataValue::Bool(false);
+    assert_eq!(
+        retain_and_duplicate(&rows[0]),
+        (unflagged.clone(), unflagged)
+    );
+    assert_eq!(retain_and_duplicate(&rows[1]), (flagged.clone(), flagged));
 }
 
 #[nervix_primitives::test]

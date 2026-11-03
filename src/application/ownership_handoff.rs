@@ -1184,9 +1184,7 @@ impl SessionServiceImpl {
             let capture = nervix_primitives::time::timeout_at(
                 preparation_deadline,
                 self.capture_planned_ownership_input(
-                    &coordination,
-                    &operation_id,
-                    domain,
+                    &preparations,
                     moved,
                     &node_incarnations,
                     base_schedule_fingerprint,
@@ -1386,9 +1384,7 @@ impl SessionServiceImpl {
 
     async fn capture_planned_ownership_input(
         &self,
-        coordination: &CoordinationIdentity,
-        operation_id: &str,
-        domain: &DomainName,
+        preparations: &ClusterOwnershipHandoffPreparations,
         moved: &PlannedOwnershipMove,
         incarnations: &BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
         base_schedule_fingerprint: [u8; 32],
@@ -1409,9 +1405,7 @@ impl SessionServiceImpl {
         match &moved.input {
             PlannedOwnershipInput::Unit => Ok(OwnershipHandoffInput::Unit(
                 self.capture_ownership_handoff_state(
-                    coordination,
-                    operation_id,
-                    domain,
+                    preparations,
                     moved,
                     incarnation(&moved.former_owner),
                     base_schedule_fingerprint,
@@ -1433,9 +1427,7 @@ impl SessionServiceImpl {
                     if !captured_units.contains_key(&key) {
                         let checkpoints = self
                             .capture_ownership_handoff_state(
-                                coordination,
-                                operation_id,
-                                domain,
+                                preparations,
                                 &source,
                                 incarnation(node),
                                 base_schedule_fingerprint,
@@ -1450,9 +1442,7 @@ impl SessionServiceImpl {
                         .clone();
                     let checkpoints = self
                         .capture_ownership_handoff_state(
-                            coordination,
-                            operation_id,
-                            domain,
+                            preparations,
                             &source,
                             incarnation(node),
                             base_schedule_fingerprint,
@@ -1507,14 +1497,15 @@ impl SessionServiceImpl {
 
     async fn capture_ownership_handoff_state(
         &self,
-        coordination: &CoordinationIdentity,
-        operation_id: &str,
-        domain: &DomainName,
+        preparations: &ClusterOwnershipHandoffPreparations,
         moved: &PlannedOwnershipMove,
         source_incarnation: ClusterNodeIncarnation,
         base_schedule_fingerprint: [u8; 32],
         selection: nervix_interconnect::OwnershipHandoffSelection,
     ) -> OwnershipHandoffResult<Vec<nervix_interconnect::OwnershipHandoffCheckpoint>> {
+        let coordination = &preparations.coordination;
+        let operation_id = preparations.operation_id.as_str();
+        let domain = &preparations.domain;
         Self::verify_ownership_handoff_node_incarnation(
             &self.live_node_incarnations().await,
             &moved.former_owner,

@@ -94,7 +94,7 @@ Feature: Typed ingestor metadata
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'mqtt_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but MQTT TOPIC ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'mqtt_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but MQTT TOPIC ingestors declare only metadata.topic, metadata.retain, metadata.qos, metadata.duplicate, metadata.content_type, metadata.response_topic, metadata.correlation_data and metadata.message_expiry"
       """
       CREATE MQTT TOPIC INGESTOR mqtt_source
         FROM mqtt_main TOPIC 'devices/+/Orders' SESSION PERSISTENT QOS 1
@@ -219,7 +219,7 @@ Feature: Typed ingestor metadata
         TIMESTAMP AT metadata.status
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'mqtt_time' in domain '{{domain}}' takes its TIMESTAMP AT metadata.polled_at, but MQTT TOPIC ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'mqtt_time' in domain '{{domain}}' takes its TIMESTAMP AT metadata.polled_at, but MQTT TOPIC ingestors declare only metadata.topic, metadata.retain, metadata.qos, metadata.duplicate, metadata.content_type, metadata.response_topic, metadata.correlation_data and metadata.message_expiry"
       """
       CREATE MQTT TOPIC INGESTOR mqtt_time
         FROM mqtt_main TOPIC 'devices/+/Orders' SESSION PERSISTENT QOS 1

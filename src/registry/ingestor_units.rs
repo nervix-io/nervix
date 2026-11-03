@@ -134,7 +134,7 @@ impl IngestorUnits {
             Self::Instances(count) => count.get(),
             Self::PerPartition { count, .. } => u64::from(count.get()),
         };
-        (0..count).map(|index| Unit::Instance(index)).collect()
+        (0..count).map(Unit::Instance).collect()
     }
 
     /// The exact relay units with which this source instance must move.

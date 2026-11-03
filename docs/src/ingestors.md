@@ -503,12 +503,12 @@ General notes:
 - each source entity declares the typed transport metadata its messages expose as
   `metadata.<field>`, listed under Metadata in its reference below: `KAFKA TOPIC` declares
   `metadata.topic`, `metadata.partition`, `metadata.offset`, `metadata.key`, `metadata.timestamp`,
-  `metadata.timestamp_type`, and `metadata.tombstone`, `RABBITMQ QUEUE` declares the delivery's
+  `metadata.timestamp_type`, and `metadata.tombstone`, `MQTT TOPIC` declares the delivered packet's
+  topic, flags, quality of service and MQTT 5 properties, `RABBITMQ QUEUE` declares the delivery's
   envelope and its AMQP basic properties, `SQS QUEUE` declares the message identity and its system
   attributes, `PULSAR TOPIC` declares the [message identity, times, keys and delivery fields](#pulsar),
-  `SYSLOG LISTENER` declares
-  `metadata.peer_addr`, `metadata.transport`, and `metadata.tls_peer`, `HTTP REQUEST` declares
-  `metadata.status` and `metadata.polled_at`,
+  `SYSLOG LISTENER` declares `metadata.peer_addr`, `metadata.transport`, and `metadata.tls_peer`,
+  `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`,
   `HTTP ENDPOINT` declares `metadata.method`, `metadata.path`, `metadata.query`,
   `metadata.remote_addr`, and `metadata.host`, `PROMETHEUS QUERY` declares `metadata.query` and
   `metadata.evaluated_at`, `WEBSOCKETS CONNECTION` declares `metadata.frame_type`,
@@ -572,6 +572,7 @@ The `name` argument can be any expression that returns `STRING`. Both functions 
   counting a value that is not UTF-8 the same way
 - `WEBSOCKETS CONNECTION` exposes printable ASCII headers from its opening HTTP upgrade response
 - `KAFKA TOPIC` exposes Kafka record headers
+- `MQTT TOPIC` exposes MQTT 5 user properties
 - `NATS SUBJECT` exposes message headers
 - `PULSAR TOPIC` exposes message properties
 - `RABBITMQ QUEUE` exposes AMQP message headers, converting typed AMQP values to strings
@@ -587,13 +588,14 @@ Each of these sources declares a [header model](./connector-contract.md#header-m
 | `HTTP ENDPOINT` | `repeats_by_name`, lowercase names | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | `KAFKA TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `PULSAR TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| `MQTT TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `NATS SUBJECT` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | `RABBITMQ QUEUE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `SQS QUEUE` | `last_wins`, exact names | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | `WEBSOCKETS CONNECTION` | `repeats_by_name`, lowercase names | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | `WEBSOCKETS ENDPOINT` | `repeats_by_name`, lowercase names | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 
-`CLIENT PRODUCER`, `MQTT TOPIC`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `SYSLOG LISTENER` carry no transport headers and refuse `read_header` and `read_headers`.
+`CLIENT PRODUCER`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `SYSLOG LISTENER` carry no transport headers and refuse `read_header` and `read_headers`.
 <!-- connector-matrix:ingest-headers:end -->
 
 `read_headers` returns a name's values in the order its model keeps them, at most one of them where
@@ -616,7 +618,7 @@ WHERE read_header("tenant") = output.tenant
 
 Leader-side validation rejects these functions for a source that carries no transport headers, the
 sources the table above lists after it, with a message that names the source's phrase, such as
-`MQTT TOPIC ingestors do not support read_header or read_headers`.
+`REDIS PUBSUB ingestors do not support read_header or read_headers`.
 
 ## TLS Client Configuration
 
@@ -1923,10 +1925,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | TOPIC 'devices/+/orders' (mqtt_topic_filter) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2)<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2) |
 | Options in statement order | `INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1<br>`SESSION CLEAN` (keyword choice); `SESSION PERSISTENT` (keyword choice); required<br>`QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |
-| Headers | Not offered: Subscription options select the session and inbound QoS, and the emitter's QOS option its outbound QoS. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation. |
+| Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Instancing | per_partition |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND (requires SESSION PERSISTENT and QOS 1 or 2)<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
-| Metadata | Not offered: The current topic declaration exposes the payload and configured subscription, with no typed publish-property metadata namespace. |
+| Metadata | metadata.topic: STRING OPTIONAL<br>metadata.retain: BOOL OPTIONAL<br>metadata.qos: U8 OPTIONAL<br>metadata.duplicate: BOOL OPTIONAL<br>metadata.content_type: STRING OPTIONAL<br>metadata.response_topic: STRING OPTIONAL<br>metadata.correlation_data: BYTES OPTIONAL<br>metadata.message_expiry: U32 OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
@@ -2007,6 +2009,33 @@ retained subscription cannot turn the rejection into a successful resume. Suspen
 pending retirement. Permission granted later permits a fresh subscription attempt. An accepted
 persistent session keeps its original grant across reconnects; changing the filter or QoS retires
 that session.
+
+Each publish's packet supplies its metadata and headers:
+
+- `metadata.topic` is the topic the broker delivered the publish on, with the levels a `+` or `#`
+  matched written out. Route on it to tell apart what one wildcard filter receives
+- `metadata.retain` is the retain flag its publisher wrote, because every subscription asks for
+  Retain As Published; without that option a broker clears the flag on what it forwards. A broker
+  sends a shared subscription nothing it retained before, so a publish reads `true` only when its
+  publisher set the flag while the subscription existed
+- `metadata.qos` is the quality of service of the delivered packet: the lower of what its publisher
+  sent and the subscription's `QOS`
+- `metadata.duplicate` is the packet's duplicate flag, which a broker sets when it delivers a
+  publish again. A publish the ingestor reads again after rejecting it is the same packet and keeps
+  the value it arrived with
+- `metadata.content_type`, `metadata.response_topic`, `metadata.correlation_data` (`BYTES`) and
+  `metadata.message_expiry` (`U32`, in seconds) are its MQTT 5 properties. Each is null where the
+  publisher set none, while an empty string, empty bytes or a zero expiry stay values. A broker
+  counts the expiry down while it holds the publish, so it reads the lifetime left when the broker
+  sent it, not the interval the publisher wrote. `hex_encode(metadata.correlation_data)` or
+  `bytes_to_utf8(metadata.correlation_data)` explicitly converts the correlation data for a string
+  field
+- `read_header` and `read_headers` read its MQTT 5 user properties, in the order the publisher wrote
+  them with each repeat of a name in its place. A name matches only a name spelled the same, letter
+  case included
+
+An `ON QUIESCE BUFFER` retains a publish's metadata and user properties with its payload, and its
+`MAX SIZE` counts the payload alone.
 
 In an `ACK` mode an ingestor acknowledges a batch once every `PUBACK` its QoS 1 publishes ask for,
 and every `PUBREC` its QoS 2 publishes ask for, is written to the connection, within one keep-alive

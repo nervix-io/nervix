@@ -37,10 +37,11 @@ use crate::{
     ClientConfigValue, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
     EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
-    IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration, IngestorEntityBody,
-    IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorReference,
-    IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
-    OptionForm, OptionPresence, PositionClass, RetryPolicy,
+    HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
+    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataDeclaration,
+    IngestorMetadataField, IngestorMetadataType, IngestorReference, IngestorReferenceKind,
+    LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
+    PositionClass, RetryPolicy,
 };
 
 mod config;
@@ -400,13 +401,25 @@ const MQTT_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     ],
 };
 
+/// A delivered publish's topic and flags, then its MQTT 5 properties.
+const MQTT_TOPIC_METADATA: IngestorMetadataDeclaration = IngestorMetadataDeclaration::new(&[
+    IngestorMetadataField::new("topic", IngestorMetadataType::String),
+    IngestorMetadataField::new("retain", IngestorMetadataType::Bool),
+    IngestorMetadataField::new("qos", IngestorMetadataType::U8),
+    IngestorMetadataField::new("duplicate", IngestorMetadataType::Bool),
+    IngestorMetadataField::new("content_type", IngestorMetadataType::String),
+    IngestorMetadataField::new("response_topic", IngestorMetadataType::String),
+    IngestorMetadataField::new("correlation_data", IngestorMetadataType::Bytes),
+    IngestorMetadataField::new("message_expiry", IngestorMetadataType::U32),
+]);
+
 impl IngestorDeclaration for MqttTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         instancing: crate::IngestorInstancingCapability::PerPartition,
-        // An MQTT packet carries no transport header map, and the source reads no MQTT 5 user
-        // property as one.
-        headers: None,
-        metadata: IngestorMetadataDeclaration::NONE,
+        // MQTT 5 user properties: a broker keeps their order and repeats from the publisher, and
+        // their names compare exactly.
+        headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+        metadata: MQTT_TOPIC_METADATA,
         executes_on_every_cluster_node: false,
         reference: IngestorReferenceKind::Client(ConnectorKind::Mqtt),
         // A persistent session's broker delivers again every publish a lost connection did not

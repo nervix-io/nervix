@@ -1444,7 +1444,7 @@ mod tests {
                     mode: MqttIngestMode::NoAck,
                 },
             )),
-            reads_headers: false,
+            reads_headers: true,
         }
     }
 
