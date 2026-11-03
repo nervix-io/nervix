@@ -237,7 +237,8 @@ resubmitting an outcome that might already have produced output.
 | Timed control probes | One task on the binary's runtime per probe, holding a clone of a named client the scenario connected beforehand until its statements return, and aborted when the step drops it. The deadline is captured before dispatch and enforced on that task, which records each statement's dispatch and completion with its domain, so a runner stall delays learning the result without extending the probe or what it measures | `tests/common/runner_observation.rs`, used by the timed client step in `tests/scenarios.rs` |
 | Syslog mixed-framing TCP publication | One abort-on-drop task on the binary's runtime, owning connection establishment, the complete framed bytes and the sender through shutdown | The mixed-framing sender step in `tests/scenarios.rs`, using `tests/common/runner_observation.rs` |
 | Syslog TLS publication and split-frame writes | One abort-on-drop task on the binary's runtime, owning TCP connection establishment, the TLS handshake and the complete prepared write. Publication closes the connection there; a split-frame write returns its sender for the later remainder | `tests/common/syslog_tls.rs`, using `tests/common/runner_observation.rs` |
-| Command outcome recovery | On the task awaiting the command, including a backup or a backup's recovery a step sends through the raw session, or on its background execution. It repeats the original execution reference on one session at a time, opening each node in turn until the current leader supplies a known outcome | `tests/common/command_recovery.rs`, over the raw session in `tests/common/raw_session.rs` |
+| Command outcome recovery | On the task awaiting the command, including a backup or its recovery, or on its background execution. It retains the original request and transaction position, asks nodes in turn, and keeps at most one recovery exchange per node until the answering binding can be retained | `tests/common/command_recovery.rs`, over the prepared request and raw exchange in `tests/common/raw_session.rs` |
+| Armed command observations | On the command's background task or the step awaiting a named request. Earlier unresolved outcomes repeat the original request; a witness tied to the current attempt preserves the raw outcome after the intended boundary. Named cancellation follows the repeated request's correlation id | `tests/common/command_probe.rs`, `tests/session_protocol/mod.rs`, and the command steps in `tests/scenarios.rs` |
 | Publication-relative receipt timing | A runtime task owns the subscription read before publication and retains its receipt timestamp. The assertion bounds completion after the HTTP publishing step returns; scenario teardown cancels an unfinished reader before stopping nodes | `tests/common/runner_observation.rs`, `tests/common/raw_session.rs` and the timed subscription steps in `tests/scenarios.rs` |
 | Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive, preparing ONNX fixtures or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
 | Runner-lag observer | A tick polled beside the whole run on the runner task, which logs every stall of that task of one second or more | `tests/common/runner_lag.rs`, wrapped around the run in `tests/scenarios.rs` |
@@ -1205,14 +1206,26 @@ The harness keeps these boundaries explicit.
   it leads answers with another unknown outcome, so recovery reads no status to find the leader,
   and a step's background execution recovers the same way. No new round starts once 60 seconds
   have passed for one command, and a repeated command that joins an execution still applying waits
-  for its reply. While the step's session holds no subscription and no transaction, it moves to the
-  node that answered and the step goes on there. A session that holds one stays where it is, so
-  its subscriptions keep delivering. For the active session a later step reuses, for a background
-  execution's session, and for a setup session once it opened a subscription, another session of
-  the same user learns the outcome of a command that leaves what the session holds alone. A
-  command sent while the session is bound to a transaction keeps its unknown outcome and fails the
-  step, and so does a command that begins or ends a transaction, opens or deletes a subscription,
-  attaches a clock or changes the domain on a session that cannot move. A request a step sends once
+  for its reply. The prepared request freezes its query, domain, execution reference, expected
+  transaction position and preview before the first send, alongside its authenticated user and
+  original transaction identity. Recovery attaches that transaction when necessary, then repeats
+  the frozen request; a newer position or a finished attachment never replaces the original
+  request's position or resolves its outcome. `TransactionTakenOver` remains a terminal refusal.
+  Each recovery run retains at most one exchange per cluster node, including an uncertain BEGIN
+  whose reply carries no transaction status, so closing an intermediate exchange cannot revert
+  its transaction before recovery resolves.
+
+  A setup session that holds nothing moves to the node that answered. A held session's stateless
+  commands retain their original exchange. A transaction-binding command retains the answering
+  exchange, so BEGIN, appends, COMMIT and REVERT continue with the recovered binding. When the
+  original exchange owns subscriptions, clock observations, lifetime diagnostics, unfinished
+  reply transfers, unread requests or replies, it stays
+  alive and a retained command peer carries the recovered transaction. Ordinary commands use that
+  peer; raw protocol probes and exchange-local subscription, clock and domain operations keep
+  their original exchange. Domain selection updates both command targets. Request correlations
+  remain outstanding until their replies are consumed, so recovery preserves unread work as well
+  as live observers. Opening or deleting a subscription, attaching a clock and changing the domain
+  are not replayed on another exchange. A request a step sends once
   under a scenario-chosen execution reference learns its outcome the same way before the step
   records its disposition. The backup steps that send a backup through the raw session learn each
   outcome the same way before they assert what it carries: a cluster backup under a fresh
@@ -1226,9 +1239,24 @@ The harness keeps these boundaries explicit.
   goes on. A proposal held that way answers `OutcomeUnknown` with cause `LeadershipLost`, as a
   lapsed lease's does, and the backup scenario that holds its first backup there requires the step
   to learn the backup from the successor and recover it to another destination.
+
+  Background command probes record the command pauses, domain-resume proposal or failure pauses,
+  and exact-reference lease refusal a scenario arms. An unresolved admission before the intended
+  boundary repeats the prepared request; the witness belongs to the current attempt, so a later
+  reconciliation arrival cannot turn
+  an earlier admission reply into an after-boundary reply. A reached pause remains observed after
+  release or rearming. A lease-refusal receipt requires both consumption for that reference and
+  phase and the matching public unconfirmed-lease reply. Once the intended boundary is observed,
+  the command's raw outcome goes to the original assertion. Known failures remain failures.
+  The named durable-admission step follows the named command's immutable request through earlier
+  unresolved replies, updates only its correlation id, and keeps the existing 30-second bound.
+  Cancellation then targets that admitted waiter; it does not cancel the durable execution.
+  Other raw pause steps retain their one-attempt observation semantics. Probe arming, correlation
+  ids, execution references, original positions, answering nodes and phase messages are logged.
+
   The paced simulation's published graph is loaded through one native client so its
-  BEGIN/COMMIT state and command references survive an interrupted finalization. Raw wire probes
-  retain the protocol's received dispositions. A restore completion probe explicitly requesting
+  BEGIN/COMMIT state and command references survive an interrupted finalization. Restore stream
+  probes retain the protocol's received dispositions. A restore completion probe explicitly requesting
   outcome recovery repeats its same reference, statement and archive against the cluster's nodes
   after an unknown outcome, redirect or interrupted transport. It starts no further attempt after
   its 120-second recovery budget; each stream keeps its existing reply timeout. It returns a

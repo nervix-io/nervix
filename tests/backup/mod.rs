@@ -952,15 +952,13 @@ async fn backup_command_outcome(
     command: &str,
     reference: &str,
 ) -> std::io::Result<nervix_client_wire::CommandOutcome> {
-    let outcome = session
-        .run_command_result_with_reference(command, reference)
-        .await?;
-    if !outcome_awaits_leader(&outcome) {
+    let prepared = session.prepare_command(command, reference);
+    let outcome = prepared.run(session).await?;
+    if !prepared.awaits_recovery(&outcome) {
         return Ok(outcome);
     }
     let routes = world.cluster().leader_routes();
-    let scope = session.scope();
-    let learned = learn_command_outcome(&routes, &scope, command, reference, outcome).await;
+    let learned = learn_command_outcome(&routes, &prepared, outcome, None).await;
     Ok(learned.outcome)
 }
 
