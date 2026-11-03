@@ -93,6 +93,11 @@ an out-of-range present timestamp is a typed conversion failure. Missing binary 
 empty keys remain present empty bytes, and the null-payload tombstone flag preserves the distinction
 from a present empty payload when both lend an empty slice to a codec.
 
+An MQTT publish keeps a property its publisher left unset distinct from one it set empty: an unset
+content type, response topic, correlation data or message expiry is absent and reads as a typed
+null, while an empty string, empty bytes or a zero expiry remain values. Absence comes from the
+packet, never from an encoding of the value.
+
 A paced poll message carries a typed metadata variant. HTTP polling supplies its response status
 and scheduled poll instant in that variant, while sources with no integration fields carry the
 headers-only variant. The host copies the variant into a matching quiesce buffer and Arrow builder;
@@ -521,9 +526,18 @@ configuration has one reserved-key declaration, shared by offline MySQL URL insp
 host's resolved-configuration refusal. Pool capacity remains the client's typed `POOL SIZE`
 bounds, with no competing URL setting.
 
-The MySQL shared pool and each borrowed connection retain an `Option<ConfiguredDeadline>`:
-absence means the client omitted an operation bound, while a present value has already passed
-the shared schedulable-deadline validation. Checkout, validation and insert failures keep typed
+Syslog iterates its own typed wait scopes, each of which names its shared `DeadlineKey`. The
+client declaration owns which direction reads the key, and the scope identifies the transports
+that perform the wait.
+
+The MySQL shared pool retains one required effective checkout deadline, read from the schema's
+defaulted `pool_acquire_timeout_ms`, and an optional operation deadline from `timeout_ms`.
+Each borrowed connection retains the optional operation bound; absence means no insert deadline.
+The pool chooses the shorter applicable checkout bound once, preserving its typed key. Maximum
+connection age is `Option<Duration>`: omission disables it. Zero idle duration is a genuine duration
+that immediately retires returned connections above the minimum, rather than absence. The
+vocabulary's millisecond value forms validate zero-inclusive lifetimes and whole-second maximum
+ages before those driver options are built. Checkout, validation and insert failures keep typed
 reports, including `DeadlineElapsed`, beneath their host contexts; a rendered reason is never
 the pool-borrow error's state. Paired identity-file presence is established by the client schema,
 then checked again when the driver options are constructed. The connector extends the parsed

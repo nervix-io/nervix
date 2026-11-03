@@ -9,6 +9,8 @@
     nervix::layer(harness, reason = "tests the MySQL client owner")
 )]
 
+use std::time::Duration;
+
 use nervix_primitives::{
     net::TcpListener,
     task::{AbortOnDropHandle, spawn},
@@ -95,47 +97,66 @@ fn an_incomplete_identity_retains_the_shared_typed_refusal() {
 }
 
 #[nervix_primitives::test]
-async fn a_silent_mysql_handshake_ends_at_its_configured_deadline() {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is available");
-    let address = listener
-        .local_addr()
-        .expect("the listener has a bound address");
-    let _peer = AbortOnDropHandle::new(spawn(async move {
-        let (_stream, _) = listener
-            .accept()
+async fn silent_mysql_handshakes_keep_their_effective_deadline_key_and_bound() {
+    for (key, expected_key) in [
+        ("timeout_ms", nervix_models::DeadlineKey::Timeout),
+        (
+            "pool_acquire_timeout_ms",
+            nervix_models::DeadlineKey::PoolAcquireTimeout,
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("the pool connects to the fixture");
-        std::future::pending::<()>().await;
-    }));
-    let config = [
-        ClientConfigEntry {
-            key: "addr".to_string(),
-            value: format!("mysql://{address}/nervix"),
-        },
-        ClientConfigEntry {
-            key: "timeout_ms".to_string(),
-            value: "100".to_string(),
-        },
-    ];
-    let bounds = ClientPoolBounds::new(0, std::num::NonZeroU32::MIN)
-        .expect("one pooled connection is valid");
-    let outcome = timeout(Duration::from_secs(30), MySqlPool::open(&config, bounds))
-        .await
-        .expect("the configured operation deadline must end before the test observation bound");
-    let report = match outcome {
-        Ok(_) => panic!("a silent server never completes its MySQL handshake"),
-        Err(report) => report,
-    };
-    assert!(
-        report.contains::<nervix_connector::DeadlineElapsed>(),
-        "{report:#}"
-    );
-    assert!(format!("{report:#}").contains("timeout_ms"));
-    assert!(report.frames().any(|frame| matches!(
-        frame.kind(),
-        error_stack::FrameKind::Attachment(error_stack::AttachmentKind::Printable(message))
-            if message.to_string().contains("within timeout_ms 100ms")
-    )));
+            .expect("loopback is available");
+        let address = listener
+            .local_addr()
+            .expect("the listener has a bound address");
+        let _peer = AbortOnDropHandle::new(spawn(async move {
+            let (_stream, _) = listener
+                .accept()
+                .await
+                .expect("the pool connects to the fixture");
+            std::future::pending::<()>().await;
+        }));
+        let config = [
+            ClientConfigEntry {
+                key: "addr".to_string(),
+                value: format!("mysql://{address}/nervix"),
+            },
+            ClientConfigEntry {
+                key: key.to_string(),
+                value: "100".to_string(),
+            },
+        ];
+        let bounds = ClientPoolBounds::new(0, std::num::NonZeroU32::MIN)
+            .expect("one pooled connection is valid");
+        let started = Instant::now();
+        let outcome = timeout(Duration::from_secs(30), MySqlPool::open(&config, bounds))
+            .await
+            .expect("the configured operation deadline must end before the test observation bound");
+        let report = match outcome {
+            Ok(_) => panic!("a silent server never completes its MySQL handshake"),
+            Err(report) => report,
+        };
+        assert!(
+            report.contains::<nervix_connector::DeadlineElapsed>(),
+            "{report:#}"
+        );
+        let elapsed = report
+            .downcast_ref::<nervix_connector::DeadlineElapsed>()
+            .expect("the typed deadline remains inspectable");
+        assert_eq!(elapsed.key, expected_key);
+        assert_eq!(elapsed.bound, Duration::from_millis(100));
+        assert!(started.elapsed() >= elapsed.bound);
+        eprintln!(
+            "{key} ended the silent handshake after {:?}",
+            started.elapsed()
+        );
+        assert!(format!("{report:#}").contains(key));
+        assert!(report.frames().any(|frame| matches!(
+            frame.kind(),
+            error_stack::FrameKind::Attachment(error_stack::AttachmentKind::Printable(message))
+                if message.to_string().contains(&format!("within {key} 100ms"))
+        )));
+    }
 }

@@ -165,7 +165,9 @@ dot-separated namespace, the storage backend and location, catalog reference and
 commit-size limit. Registry and Model archive properties compare those fields with the complete
 Model. The vocabulary owner separately checks namespace JSON/archive equality and backend
 conversions in `models-iceberg-declarations`; `client-config-schema` covers ordered owned and
-delegated configuration values through JSON/archive equality and public inspection.
+delegated configuration values through JSON/archive equality and public inspection. The same property
+includes MySQL pool keys with nonnegative idle milliseconds, whole-second maximum ages,
+defaulted acquire/maintenance intervals, and complete authored-value preservation.
 
 ## Client Configuration And Inspection
 
