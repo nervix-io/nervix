@@ -1515,6 +1515,7 @@ CREATE RABBITMQ QUEUE EMITTER <name>
     [PERSISTENT]
     [MANDATORY]
     [TIMESTAMP occurred_at]
+    [PROPERTIES { '<key>' = <expression>, ... }]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
@@ -1556,6 +1557,7 @@ CREATE RABBITMQ EXCHANGE EMITTER <name>
     [PERSISTENT]
     [MANDATORY]
     [TIMESTAMP occurred_at]
+    [PROPERTIES { '<key>' = <expression>, ... }]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
