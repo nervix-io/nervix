@@ -170,7 +170,7 @@ keeps the ingestor's accepted policy.
 | Entity | `MODE` forms |
 | --- | --- |
 | `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC`, `RABBITMQ QUEUE` | `NO ACK`, `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` |
-| `SQS QUEUE` | `ACK SEQUENTIAL ...` |
+| `SQS QUEUE` | `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` with `MAX` at most 10 |
 | `NATS STREAM` | `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` |
 | `CLIENT PRODUCER` | `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` without `BATCH TIMEOUT` |
 | `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` | `NO ACK`, `ACK MAX <n> ACK TIMEOUT <duration>` |
@@ -505,12 +505,12 @@ General notes:
 - each source entity declares the typed transport metadata its messages expose as
   `metadata.<field>`, listed under Metadata in its reference below: `KAFKA TOPIC` declares
   `metadata.topic`, `metadata.partition`, `metadata.offset`, `metadata.key`, `metadata.timestamp`,
-  `metadata.timestamp_type`, and `metadata.tombstone`, `RABBITMQ QUEUE` declares the delivery's
+  `metadata.timestamp_type`, and `metadata.tombstone`, `MQTT TOPIC` declares the delivered packet's
+  topic, flags, quality of service and MQTT 5 properties, `RABBITMQ QUEUE` declares the delivery's
   envelope and its AMQP basic properties, `SQS QUEUE` declares the message identity and its system
   attributes, `PULSAR TOPIC` declares the [message identity, times, keys and delivery fields](#pulsar),
-  `SYSLOG LISTENER` declares
-  `metadata.peer_addr`, `metadata.transport`, and `metadata.tls_peer`, `HTTP REQUEST` declares
-  `metadata.status` and `metadata.polled_at`,
+  `SYSLOG LISTENER` declares `metadata.peer_addr`, `metadata.transport`, and `metadata.tls_peer`,
+  `HTTP REQUEST` declares `metadata.status` and `metadata.polled_at`,
   `HTTP ENDPOINT` declares `metadata.method`, `metadata.path`, `metadata.query`,
   `metadata.remote_addr`, and `metadata.host`, `PROMETHEUS QUERY` declares `metadata.query` and
   `metadata.evaluated_at`, `WEBSOCKETS CONNECTION` declares `metadata.frame_type`,
@@ -574,6 +574,7 @@ The `name` argument can be any expression that returns `STRING`. Both functions 
   counting a value that is not UTF-8 the same way
 - `WEBSOCKETS CONNECTION` exposes printable ASCII headers from its opening HTTP upgrade response
 - `KAFKA TOPIC` exposes Kafka record headers
+- `MQTT TOPIC` exposes MQTT 5 user properties
 - `NATS SUBJECT` exposes message headers
 - `NATS STREAM` exposes the headers each message was published with
 - `PULSAR TOPIC` exposes message properties
@@ -590,6 +591,7 @@ Each of these sources declares a [header model](./connector-contract.md#header-m
 | `HTTP ENDPOINT` | `repeats_by_name`, lowercase names | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | `KAFKA TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `PULSAR TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| `MQTT TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `NATS SUBJECT` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | `NATS STREAM` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | `RABBITMQ QUEUE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
@@ -597,7 +599,7 @@ Each of these sources declares a [header model](./connector-contract.md#header-m
 | `WEBSOCKETS CONNECTION` | `repeats_by_name`, lowercase names | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | `WEBSOCKETS ENDPOINT` | `repeats_by_name`, lowercase names | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 
-`CLIENT PRODUCER`, `MQTT TOPIC`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `SYSLOG LISTENER` carry no transport headers and refuse `read_header` and `read_headers`.
+`CLIENT PRODUCER`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `SYSLOG LISTENER` carry no transport headers and refuse `read_header` and `read_headers`.
 <!-- connector-matrix:ingest-headers:end -->
 
 `read_headers` returns a name's values in the order its model keeps them, at most one of them where
@@ -620,7 +622,7 @@ WHERE read_header("tenant") = output.tenant
 
 Leader-side validation rejects these functions for a source that carries no transport headers, the
 sources the table above lists after it, with a message that names the source's phrase, such as
-`MQTT TOPIC ingestors do not support read_header or read_headers`.
+`REDIS PUBSUB ingestors do not support read_header or read_headers`.
 
 ## TLS Client Configuration
 
@@ -1214,7 +1216,7 @@ ingestors and `HTTP REQUEST` emitters, and each key means the same for both:
 | `timeout_ms` | Yes | A positive whole number of milliseconds that bounds one request and the redirects it follows, as [Client Deadlines](#client-deadlines) defines. For a poll it covers name resolution, connection setup, TLS, the request and the whole response body, and for an emitted request everything up to its complete final response headers. |
 | `follow_redirects` | No | `true` follows a redirect to the client's own origin; `false`, or leaving the key out, makes a redirect the response. See [HTTP client transport](emitters.md#http-client-transport). |
 | `proxy` | No | An `http` or `https` URL with a host, naming the proxy that every request of the client goes through. User information in it is sent to the proxy alone, as `Basic` proxy credentials. |
-| `tls_ca_file` | No | A PEM certificate authority that HTTPS trusts in addition to the default roots: the platform's trust store for a poll, and the Mozilla roots Nervix ships together with the host's native roots for the emitter. |
+| `tls_ca_file` | No | PEM certificate authorities that HTTPS trusts in addition to the Mozilla roots Nervix ships and the host's native roots, for polling and emitting alike. |
 | `tls_cert_file`, `tls_key_file` | Together | The PEM certificate chain and private key the client presents to authenticate over HTTPS. |
 | `secret.<name>` | No | A confidential string the operator names after the `secret.` prefix. A polling header sends it through `CLIENT SECRET 'secret.<name>'`; an emitter sends none of them. |
 
@@ -1923,9 +1925,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | TOPIC 'devices/+/orders' (mqtt_topic_filter) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2)<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2) |
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1<br>`SESSION CLEAN` (keyword choice); `SESSION PERSISTENT` (keyword choice); required<br>`QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |
-| Headers | Not offered: Subscription options select the session and inbound QoS, and the emitter's QOS option its outbound QoS. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation. |
+| Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND (requires SESSION PERSISTENT and QOS 1 or 2)<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
-| Metadata | Not offered: The current topic declaration exposes the payload and configured subscription, with no typed publish-property metadata namespace. |
+| Metadata | metadata.topic: STRING OPTIONAL<br>metadata.retain: BOOL OPTIONAL<br>metadata.qos: U8 OPTIONAL<br>metadata.duplicate: BOOL OPTIONAL<br>metadata.content_type: STRING OPTIONAL<br>metadata.response_topic: STRING OPTIONAL<br>metadata.correlation_data: BYTES OPTIONAL<br>metadata.message_expiry: U32 OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
@@ -2006,6 +2008,33 @@ retained subscription cannot turn the rejection into a successful resume. Suspen
 pending retirement. Permission granted later permits a fresh subscription attempt. An accepted
 persistent session keeps its original grant across reconnects; changing the filter or QoS retires
 that session.
+
+Each publish's packet supplies its metadata and headers:
+
+- `metadata.topic` is the topic the broker delivered the publish on, with the levels a `+` or `#`
+  matched written out. Route on it to tell apart what one wildcard filter receives
+- `metadata.retain` is the retain flag its publisher wrote, because every subscription asks for
+  Retain As Published; without that option a broker clears the flag on what it forwards. A broker
+  sends a shared subscription nothing it retained before, so a publish reads `true` only when its
+  publisher set the flag while the subscription existed
+- `metadata.qos` is the quality of service of the delivered packet: the lower of what its publisher
+  sent and the subscription's `QOS`
+- `metadata.duplicate` is the packet's duplicate flag, which a broker sets when it delivers a
+  publish again. A publish the ingestor reads again after rejecting it is the same packet and keeps
+  the value it arrived with
+- `metadata.content_type`, `metadata.response_topic`, `metadata.correlation_data` (`BYTES`) and
+  `metadata.message_expiry` (`U32`, in seconds) are its MQTT 5 properties. Each is null where the
+  publisher set none, while an empty string, empty bytes or a zero expiry stay values. A broker
+  counts the expiry down while it holds the publish, so it reads the lifetime left when the broker
+  sent it, not the interval the publisher wrote. `hex_encode(metadata.correlation_data)` or
+  `bytes_to_utf8(metadata.correlation_data)` explicitly converts the correlation data for a string
+  field
+- `read_header` and `read_headers` read its MQTT 5 user properties, in the order the publisher wrote
+  them with each repeat of a name in its place. A name matches only a name spelled the same, letter
+  case included
+
+An `ON QUIESCE BUFFER` retains a publish's metadata and user properties with its payload, and its
+`MAX SIZE` counts the payload alone.
 
 In an `ACK` mode an ingestor acknowledges a batch once every `PUBACK` its QoS 1 publishes ask for,
 and every `PUBREC` its QoS 2 publishes ask for, is written to the connection, within one keep-alive
@@ -2385,7 +2414,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | --- | --- |
 | Reference | SQS client |
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |
-| Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
+| Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 10 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
@@ -2393,8 +2422,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | answered |
-| Buffers | The connector holds no buffer between its transport and the host. |
-| Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup and a delete: `timeout_ms`; unbounded when omitted<br>a receive, after the one-second long poll it asks the service to hold it for: `timeout_ms`; unbounded when omitted |
+| Buffers | messages gathered for one host read: set by 1 under ACK SEQUENTIAL; ACK PARALLEL MAX otherwise, at most 10; when full, holds back what fills it |
+| Network waits | gathering further messages after the first under ACK PARALLEL; cancellation hands over every message already gathered: `BATCH TIMEOUT`<br>connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup, a deletion, a batch deletion and a batch visibility change: `timeout_ms`; unbounded when omitted<br>a receive, after the long poll of at most one second it asks the service to hold it for: `timeout_ms`; unbounded when omitted |
 | Driver limits | A request that stalls below 1 byte a second for 5 s is cancelled. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
 
@@ -2405,8 +2434,11 @@ See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sq
 `-` and `_`, where a FIFO queue's name ends in `.fifo` and the suffix counts toward the 80. Nervix
 preserves its case in both directions, so `QUEUE 'Orders-EU_1.fifo'` reads exactly that queue. The
 ingestor reads a message's attributes through `read_header` and `read_headers`. It names
-`MODE ACK SEQUENTIAL` and `ON QUIESCE SUSPEND`, the only delivery and quiesce modes it declares: the
-queue keeps each message until the source deletes it, so suspending loses nothing.
+`MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX <n> ...`, and `ON QUIESCE SUSPEND`, the delivery
+and quiesce modes it declares: the queue keeps each message until the source deletes it, so
+suspending loses nothing. An `ACK PARALLEL` window holds 1 to 10 messages, the most one SQS receive
+returns, and `CREATE` refuses a larger one, as in `SQS ACK PARALLEL MAX must be between 1 and 10,
+found 11`.
 
 The `SQS CLIENT` an ingestor or emitter names declares `endpoint`, `region`, `access_key_id` and
 `secret_access_key`, which are required, and the optional `session_token`, `timeout_ms` and
@@ -2414,12 +2446,13 @@ The `SQS CLIENT` an ingestor or emitter names declares `endpoint`, `region`, `ac
 Every request is signed for `region` with `access_key_id` and `secret_access_key`, and carries
 `session_token` when those are temporary credentials. `SHOW CREATE CLIENT` and `DESCRIBE` print the
 three credentials as `********`. `timeout_ms` bounds every request of both directions, name
-resolution, connection setup, TLS and the answer included: an ingestor's queue lookup and each
-deletion, and each receive once its one-second long poll has passed, because a service with no
-message holds a receive for that long poll before it answers. Without `timeout_ms` those waits are
-unbounded. `CREATE SQS CLIENT` reads `tls_ca_file` before it commits the client, and refuses a file
-holding a section that is not a certificate, or no certificate at all, as
-`invalid client config key 'tls_ca_file'`: a client that trusted it alone could reach no service.
+resolution, connection setup, TLS and the answer included: an ingestor's queue lookup, each batch
+deletion and each batch visibility change, and each receive once its long poll of at most one
+second has passed, because a service with no message holds a receive for its long poll before it
+answers. Without `timeout_ms` those waits are unbounded. `CREATE SQS CLIENT` reads `tls_ca_file`
+before it commits the client, and refuses a file holding a section that is not a certificate, or no
+certificate at all, as `invalid client config key 'tls_ca_file'`: a client that trusted it alone
+could reach no service.
 
 Each receive requests SQS system attributes separately from the message attributes that
 `read_header` and `read_headers` read. Routes can read the following optional, non-sensitive
@@ -2461,28 +2494,48 @@ service answers. A queue that does not exist fails the
 lookup with its name, such as `SQS queue 'orders' does not exist`, and is retried the same way;
 Nervix never creates it.
 
-Each poll is a `ReceiveMessage` for one message with all of its attributes, which the service
-answers as soon as a message arrives or after a one-second wait without one. The service hides the
+Under `ACK SEQUENTIAL` each poll is a `ReceiveMessage` for one message with all of its attributes,
+which the service answers as soon as a message arrives or after a one-second wait without one.
+Under `ACK PARALLEL MAX <n>` the poll asks for `n` messages, and the service may answer with fewer
+than the queue holds. Once the first message arrives the source sends further receives for the
+messages its batch still lacks, until the batch holds `n` or its `BATCH TIMEOUT`, counted from that
+first message, has passed: a receive waits up to a second while a whole second of the window
+remains and does not wait after that, and a receive that did not wait and brought nothing ends the
+batch. The batch's messages then wait on their acknowledgements together. The service hides every
 message it returns from every other receive until the queue's visibility timeout ends, and the
-source deletes it only once it is acknowledged, so a failed lookup or poll never removes a message
-from the queue. A message whose acknowledgement fails or does not arrive within the mode's
-`ACK TIMEOUT` is rejected, which leaves it in the queue. So is one whose deletion fails, which
-`DESCRIBE INGESTOR` shows as a transient error; the source does not repeat the deletion. Either way
-the message becomes visible again once its visibility timeout ends and is received again, as a
-duplicate if the graph had already processed it, and the source polls again after its
-`RETRY POLICY` delay. A queue whose visibility timeout is shorter than the mode's `ACK TIMEOUT` can
-also hand a message that still awaits its acknowledgement to another receive.
+source deletes a batch's messages only once the batch is acknowledged, with one
+`DeleteMessageBatch` request for each ten of them and one `DeleteMessage` request for a message
+left alone, as every `ACK SEQUENTIAL` batch is, so a failed lookup or poll never removes a message
+from the queue.
+
+A batch whose acknowledgement fails or does not arrive within the mode's `ACK TIMEOUT` is rejected:
+one `ChangeMessageVisibilityBatch` request for each ten of its messages makes them visible again at
+once, and the source polls again after its `RETRY POLICY` delay, so it receives them again then
+instead of after the queue's visibility timeout. Under `INSTANCES` greater than one, another
+instance can receive them sooner. A rejected message whose receipt handle no longer holds it
+invisible needs no change, because it was deleted or its visibility timeout already ended. A
+deletion that fails, or one the service does not carry out for a message, is a transient error that
+`DESCRIBE INGESTOR` shows, and the batch is then rejected in the same way, so its messages are
+received again, as duplicates if the graph had already processed them. A visibility change that
+fails is a transient error too; the source does not repeat it, and such a message becomes visible
+again once its visibility timeout ends. Deleting needs the client's credentials to allow
+`sqs:DeleteMessage`, and rejecting needs `sqs:ChangeMessageVisibility`, so credentials without the
+latter fail each rejection this way. A queue whose visibility timeout is shorter than the mode's
+`ACK TIMEOUT` can also hand a message that still awaits its acknowledgement to another receive. A
+message the service returns without the receipt handle that settles it, or with a system attribute
+that fails its check, stays out of the batch and fails the next poll with a typed error, after the
+batch's other messages reach the relay; it becomes visible again once its visibility timeout ends.
 
 Suspension stops polling. Messages wait in the queue only for its configured retention period, and
 the ingestor resumes by polling past anything the service expired. A poll still waiting when the
 ingestor quiesces or stops is never abandoned, because the service hides the message it answers
 with until its visibility timeout ends: the source sends no further poll and waits for that answer,
-which a responsive service gives within the poll's one-second wait, and a message it brings
-dispatches before the source suspends or closes. Only a service that has not answered within
-10 seconds of the quiesce change or the stop, or within the poll's `timeout_ms` after its long poll
-when that ends sooner, ends that poll unanswered, which `DESCRIBE INGESTOR` shows as a transient
-error; a message the poll was returning then stays invisible until its
-visibility timeout ends.
+which a responsive service gives within the poll's wait of at most one second, and the messages it
+brings dispatch, with those its batch had already gathered, before the source suspends or closes.
+Only a service that has not answered within 10 seconds of the quiesce change or the stop, or within
+the poll's `timeout_ms` after its long poll when that ends sooner, ends that poll unanswered, which
+`DESCRIBE INGESTOR` shows as a transient error; a message the poll was returning then stays
+invisible until its visibility timeout ends.
 
 ### Prometheus
 
@@ -2671,7 +2724,7 @@ Every key of a `PROMETHEUS CLIENT`'s `CONFIG` is Nervix's own:
 | --- | --- | --- |
 | `addr` | Yes | The root of the Prometheus HTTP API: an `http` or `https` URL with a host, whose path is the prefix the API is served under, such as `/monitoring` behind a reverse proxy. Each query is sent to `api/v1/query` beneath it, so the URL carries no query string and no fragment. |
 | `timeout_ms` | Yes | A positive whole number of milliseconds that bounds one query, as [Client Deadlines](#client-deadlines) defines. It covers name resolution, connection setup, TLS and the whole response. |
-| `tls_ca_file` | No | A PEM certificate authority that HTTPS trusts in addition to the platform's native roots. |
+| `tls_ca_file` | No | PEM certificate authorities that HTTPS trusts in addition to the Mozilla roots Nervix ships and the host's native roots. |
 | `tls_cert_file`, `tls_key_file` | Together | The PEM certificate chain and private key the client presents to authenticate over HTTPS. |
 
 `CREATE PROMETHEUS CLIENT` refuses a configuration that cannot configure a query source, and names the key:

@@ -15,6 +15,18 @@ Feature: Cluster leader failover
     And node "node-3" eventually reports a leader other than "node-1"
     And node "node-2" eventually reports raft voters "node-1,node-2,node-3"
 
+  Scenario: A leadership transfer reaches its target after another voter wins the election it started
+    Given a 3 node nervix cluster is started
+    Then the current leader node is saved as placeholder "old_leader"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    And a node other than placeholders "old_leader" and "new_leader" is saved as placeholder "bystander"
+    Given consensus connectivity for node "{{new_leader}}" is blocked until node "{{bystander}}" leads
+    When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
+    Then consensus connectivity for node "{{new_leader}}" was restored once node "{{bystander}}" led
+    And node "{{new_leader}}" eventually reports leader "{{new_leader}}"
+    And node "{{old_leader}}" eventually reports leader "{{new_leader}}"
+    And node "{{bystander}}" eventually reports leader "{{new_leader}}"
+
   @slots_6
   Scenario Outline: Dead scheduled node primary failover promotes a live replica
     Given Kafka is running

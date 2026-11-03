@@ -409,6 +409,65 @@ Feature: Resource lifecycle
       | 3            |
 
   @resource_upload_idempotency
+  Scenario Outline: An upload whose installing call loses its reply reports its one assigned version
+    Given a <cluster_size> node nervix cluster is started
+    And node "node-1" has resource directory "proto_dir" containing
+      """
+      {
+        "schema/root.proto": "syntax = \"proto3\";",
+        "schema/types/common.proto": "message Common {}"
+      }
+      """
+    And node "node-1" has resource directory "different_proto_dir" containing
+      """
+      {
+        "schema/root.proto": "syntax = \"proto3\"; message Different {}"
+      }
+      """
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE DOMAIN {{domain}};
+      CREATE RESOURCE proto;
+      """
+    Then the current leader node is saved as placeholder "upload_leader"
+    Given node "{{upload_leader}}" loses the reply to its next installed resource upload
+    And client "uploader" is connected to the leader node
+    When client "uploader" selects domain "{{domain}}"
+    And client "uploader" uploads resource "proto" from "{{proto_dir}}" with identity "lost-reply"
+    Then the last command output contains
+      """
+      uploaded resource version 1
+      """
+    And node "{{upload_leader}}" lost the reply to the resource upload it installed
+    And the last client upload installed version 1
+    And the last client upload repeated its call and recovered version 1
+    When client "uploader" uploads resource "proto" from "{{proto_dir}}" with identity "lost-reply"
+    Then the last command output contains
+      """
+      uploaded resource version 1
+      """
+    And the last client upload recovered version 1 from an earlier upload
+    When client "uploader" upload of resource "proto" from "{{different_proto_dir}}" with identity "lost-reply" fails with "already assigned version 1 with digest"
+    When client "uploader" executes these Plexus commands
+      """
+      DESCRIBE RESOURCE proto;
+      """
+    Then the last command output contains
+      """
+      versions: 1
+      """
+    And the last command output does not contain
+      """
+      versions: 1,2
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @resource_upload_idempotency
   Scenario: Upload retry after leader change reports the assigned version
     Given a 3 node nervix cluster is started
     And node "node-1" has resource directory "proto_dir" containing
@@ -475,7 +534,7 @@ Feature: Resource lifecycle
       """
       uploaded resource version 1
       """
-    And the last client upload recovered version 1 from an earlier upload
+    And the last client upload repeated its call and recovered version 1
     And node "{{upload_leader}}" refused the publication until its reconciliation took the upload up
     When client "uploader" executes these Plexus commands
       """

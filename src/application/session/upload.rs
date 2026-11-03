@@ -286,3 +286,23 @@ impl SessionServiceImpl {
         }
     }
 }
+
+#[cfg(feature = "testing")]
+impl SessionServiceImpl {
+    /// Whether `reply` answers an upload call that installed a version on this node, and a
+    /// scenario armed the node to lose the reply to such a call. A reply that recovered a recorded
+    /// upload, redirected it or failed it is kept.
+    pub(in crate::application) fn loses_installed_upload_reply(&self, reply: &UploadReply) -> bool {
+        let UploadDisposition::Installed {
+            origin: OutcomeOrigin::Executed,
+            ..
+        } = &reply.disposition
+        else {
+            return false;
+        };
+        self.inner
+            .runtime
+            .fault_injection()
+            .loses_installed_resource_upload_reply(self.inner.consensus.local_node_id())
+    }
+}

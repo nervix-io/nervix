@@ -16,7 +16,8 @@ server = []
 [dependencies]
 ahash-compile-time = { workspace = true }
 arrow-schema = { workspace = true }
-chumsky = { workspace = true }
+# `unstable` provides `chumsky::cache`, which keeps one built grammar for inputs of every lifetime.
+chumsky = { workspace = true, features = ["unstable"] }
 error-stack = { workspace = true }
 meticulous = { workspace = true }
 nervix-approx-into = { workspace = true }

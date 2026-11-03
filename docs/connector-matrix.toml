@@ -27,11 +27,9 @@ mirror = "Consumption declares subscription ownership and, when ingestor-owned, 
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."MQTT TOPIC"]
-emit_headers = "Subscription options select the session and inbound QoS, and the emitter's QOS option its outbound QoS. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation."
+emit_headers = "A publication carries its topic, payload and quality of service; this implementation writes no MQTT 5 user property on it."
 envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
-ingest_headers = "Subscription options select the session and inbound QoS, and the emitter's QOS option its outbound QoS. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation."
-metadata = "The current topic declaration exposes the payload and configured subscription, with no typed publish-property metadata namespace."
-mirror = "Subscription options select the session and inbound QoS, and the emitter's QOS option its outbound QoS. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation."
+mirror = "Subscription options select the session and inbound QoS, and the emitter's QOS option its outbound QoS. Ingestion reads a delivered publish's MQTT 5 properties and user properties; publication writes neither."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."NATS SUBJECT"]
@@ -46,11 +44,9 @@ mirror = "A durable pull consumer an operator provisioned acknowledges or negati
 
 [entity."RABBITMQ QUEUE"]
 mirror = "A queue consumer acknowledges delivery tags on its channel; publishing waits for a channel answer or publisher confirmation. Both directions use the same quoted, case-preserving RabbitMQ queue names."
-properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."RABBITMQ EXCHANGE"]
 mirror = "No ingestor consumes an exchange: the exchange routes each message by the key its record computes to the queues bound to it, and a RABBITMQ QUEUE ingestor consumes one of those queues. Publishing waits for a channel answer or publisher confirmation, as it does for a queue."
-properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."REDIS PUBSUB"]
 emit_headers = "Redis Pub/Sub carries a channel and a payload, and for a pattern subscription the pattern that matched, but no headers. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. An ingestor subscribes to a quoted channel or channel pattern and an emitter publishes to a quoted channel, each case-preserving."
@@ -151,7 +147,7 @@ properties = "This entity declares no typed PROPERTIES block; any encoded record
 [entity."MYSQL TABLE"]
 emit_headers = "The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity."
 envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
-mirror = "The MySQL connector inserts mapped rows and handles declared conflicts; it declares no binlog or query ingestor."
+mirror = "The MySQL connector inserts mapped rows and handles declared conflicts; its client declares checkout, idle/max-age and minimum-maintenance policy. It declares no binlog or query ingestor."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."MONGODB COLLECTION"]
@@ -172,6 +168,6 @@ none = "Nothing is pending. The host keeps no position and reads again after its
 replayable = "The host retains the positions, suspends the source, and reestablishes its assignment. It retries the same rejection before polling any later batch or committing a later position, so a retried rejection must not depend on a poll. The [Kafka source](#integration-specific-boundaries) therefore seeks each rejected partition it is assigned at once, and starts every other one at its earliest rejected record when its consumer group assigns it again, until a commit passes that record."
 
 [confirmation]
-answered = "Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. A Pulsar source in an `ACK` mode acknowledges a batch's positions of each topic in one command that carries a request id, and acknowledging returns once the broker's `CommandAckResponse` arrived, within the client's operation timeout. A NATS STREAM source acknowledges each delivery with a request to its acknowledgement subject, and acknowledging returns once the server answered it, within the client's request timeout."
+answered = "Once the broker answered: SQS messages are acknowledged by `DeleteMessageBatch` requests of up to ten entries, a message left alone by a `DeleteMessage` request, and acknowledging returns once the service answered every request and deleted every message. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. A Pulsar source in an `ACK` mode acknowledges a batch's positions of each topic in one command that carries a request id, and acknowledging returns once the broker's `CommandAckResponse` arrived, within the client's operation timeout. A NATS STREAM source acknowledges each delivery with a request to its acknowledgement subject, and acknowledging returns once the server answered it, within the client's request timeout."
 none = "The source acknowledges nothing on its transport."
 written = "Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, and MQTT answers a `PUBACK` with nothing and a QoS 2 `PUBREC` only with the `PUBREL` the client completes on its own, so nothing more can be confirmed. An MQTT source returns once the client's event loop, which its connection's driver task keeps polling, has flushed every `PUBACK` and `PUBREC` the batch asks for to the connection. An MQTT subscription becomes ready only when its declared QoS is granted; a lower `SUBACK` grant fails in every mode, including `NO ACK`."

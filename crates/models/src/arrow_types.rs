@@ -152,6 +152,7 @@ mod tests {
         use crate::{
             HttpIngestorEntity, IngestorEntityKind, KafkaIngestorEntity, MqttIngestorEntity,
             PulsarIngestorEntity, SyslogIngestorEntity, WebsocketsIngestorEntity,
+            ZeroMqIngestorEntity,
         };
 
         let described = |kind: IngestorEntityKind| {
@@ -170,7 +171,7 @@ mod tests {
             })
         };
         assert_eq!(
-            described(IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic)),
+            described(IngestorEntityKind::ZeroMq(ZeroMqIngestorEntity::Pull)),
             None
         );
         assert_eq!(
@@ -198,6 +199,19 @@ mod tests {
                 ),
                 ("timestamp_type".to_owned(), DataType::Utf8, true),
                 ("tombstone".to_owned(), DataType::Boolean, true),
+            ])
+        );
+        assert_eq!(
+            described(IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic)),
+            Some(vec![
+                ("topic".to_owned(), DataType::Utf8, true),
+                ("retain".to_owned(), DataType::Boolean, true),
+                ("qos".to_owned(), DataType::UInt8, true),
+                ("duplicate".to_owned(), DataType::Boolean, true),
+                ("content_type".to_owned(), DataType::Utf8, true),
+                ("response_topic".to_owned(), DataType::Utf8, true),
+                ("correlation_data".to_owned(), DataType::Binary, true),
+                ("message_expiry".to_owned(), DataType::UInt32, true),
             ])
         );
         assert_eq!(

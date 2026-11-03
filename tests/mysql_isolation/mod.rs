@@ -100,8 +100,22 @@ async fn certificate_directory(world: &mut ScenarioWorld, node: String, placehol
 
 #[then(expr = "within {string} one of MySQL emitters {string} reports an exhausted pool deadline")]
 async fn pool_deadline(world: &mut ScenarioWorld, duration: String, emitters: String) {
+    pool_deadline_for_key(world, duration, emitters, "timeout_ms".to_string()).await;
+}
+
+#[then(
+    expr = "within {string} one of MySQL emitters {string} reports a {string} exhausted pool \
+            deadline"
+)]
+async fn pool_deadline_for_key(
+    world: &mut ScenarioWorld,
+    duration: String,
+    emitters: String,
+    key: String,
+) {
     let duration = parse_duration_text(&duration).expect("the observation bound is a duration");
-    let deadline = Instant::now() + duration;
+    let started = Instant::now();
+    let deadline = started + duration;
     let mut outputs = BTreeMap::new();
     loop {
         nervix_primitives::task::consume_budget().await;
@@ -116,7 +130,13 @@ async fn pool_deadline(world: &mut ScenarioWorld, duration: String, emitters: St
             )
             .await
             .expect("the public emitter inspection succeeds");
-            if output.contains("checking out a MySQL connection did not finish within timeout_ms") {
+            if output.contains(&format!(
+                "checking out a MySQL connection did not finish within {key}"
+            )) {
+                eprintln!(
+                    "MySQL {key} exhausted-pool diagnostic observed after {:?}",
+                    started.elapsed()
+                );
                 return;
             }
             outputs.insert(emitter.to_string(), output);

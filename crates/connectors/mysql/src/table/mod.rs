@@ -24,7 +24,7 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
-use std::{num::NonZeroUsize, ops::Range, time::Duration};
+use std::{num::NonZeroUsize, ops::Range};
 
 use arrow_array::{
     Array, ArrayRef, BinaryArray, BooleanArray, FixedSizeListArray, Float32Array, Float64Array,
@@ -37,8 +37,8 @@ use chrono::DateTime;
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use mysql_async::{
-    ClientIdentity, Conn, Opts, OptsBuilder, Params, Pool as DriverPool, PoolConstraints, PoolOpts,
-    Value, prelude::Queryable as _,
+    ClientIdentity, Conn, Opts, OptsBuilder, Params, Pool as DriverPool, PoolConstraints, Value,
+    prelude::Queryable as _,
 };
 use nervix_connector::{
     ClientConfigError, ConfiguredDeadline, EmitterFinish, EmitterFinishResult, EmitterHost,
@@ -57,12 +57,14 @@ use nervix_primitives::{
 use tracing::{debug, trace};
 
 mod pool_minimum;
+mod pool_policy;
 
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod client_tests;
 
 use pool_minimum::{KeptPool, PoolMinimum, PoolMinimumError};
+use pool_policy::MySqlPoolPolicy;
 
 const MYSQL: &str = "mysql";
 
@@ -71,9 +73,6 @@ const MEASURED_REQUEST: &str = "MySQL insert";
 
 /// What separates one row's placeholders from the next in a multi-row insert.
 const ROW_SEPARATOR: &str = ", ";
-
-/// How often an idle MySQL pool is topped back up to its declared minimum.
-const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The node's shared MySQL pool, with the task that keeps it at its declared minimum.
 pub struct MySqlPool {
@@ -88,27 +87,25 @@ pub struct MySqlConnection {
     timeout: Option<ConfiguredDeadline>,
 }
 
-/// The one pool and operation bound shared by writers and the keeper of its minimum.
+/// The pool, checkout bound and optional operation bound shared by writers and the minimum keeper.
 #[derive(Clone)]
 struct ConfiguredPool {
     driver: DriverPool,
     timeout: Option<ConfiguredDeadline>,
+    checkout: ConfiguredDeadline,
 }
 
 impl ConfiguredPool {
     async fn connection(&self) -> error_stack::Result<Conn, MySqlWriteError> {
         let acquisition = self.driver.get_conn();
-        let acquired = match self.timeout {
-            Some(deadline) => match timeout(deadline.bound(), acquisition).await {
-                Ok(acquired) => acquired,
-                Err(_) => {
-                    return Err(MySqlWriteError::report_deadline(
-                        deadline,
-                        "checking out a MySQL connection",
-                    ));
-                }
-            },
-            None => acquisition.await,
+        let acquired = match timeout(self.checkout.bound(), acquisition).await {
+            Ok(acquired) => acquired,
+            Err(_) => {
+                return Err(MySqlWriteError::report_deadline(
+                    self.checkout,
+                    "checking out a MySQL connection",
+                ));
+            }
         };
         acquired.change_context(MySqlWriteError::CheckOut)
     }
@@ -303,6 +300,8 @@ impl MySqlPool {
         let invalid = || Report::new(EmitterOpenError::InvalidConfiguration { connector: MYSQL });
         let initialized = || EmitterOpenError::Initialize { connector: MYSQL };
         let builder = Self::options(config)?;
+        let policy = MySqlPoolPolicy::read(config)
+            .change_context(EmitterOpenError::InvalidConfiguration { connector: MYSQL })?;
         let operation_timeout = ConfiguredDeadline::timeout(config)
             .change_context(EmitterOpenError::InvalidConfiguration { connector: MYSQL })?;
         let minimum = usize::try_from(bounds.minimum()).map_err(|_| {
@@ -317,10 +316,9 @@ impl MySqlPool {
             ))
         })?;
         let pool = ConfiguredPool {
-            driver: DriverPool::new(
-                builder.pool_opts(PoolOpts::default().with_constraints(constraints)),
-            ),
+            driver: DriverPool::new(builder.pool_opts(policy.pool_options(constraints))),
             timeout: operation_timeout,
+            checkout: policy.checkout(operation_timeout),
         };
         let validation = async {
             let mut connection = pool.connection().await?;
@@ -344,7 +342,7 @@ impl MySqlPool {
             None => validation.await,
         };
         validated.change_context(initialized())?;
-        let kept_minimum = PoolMinimum::keep(pool.clone(), minimum, MAINTENANCE_INTERVAL);
+        let kept_minimum = PoolMinimum::keep(pool.clone(), minimum, policy.maintenance_interval());
         Ok(Self {
             pool,
             _minimum: kept_minimum,
@@ -1658,6 +1656,9 @@ mod tests {
         let pool = ConfiguredPool {
             driver: DriverPool::new(opts),
             timeout: None,
+            checkout: MySqlPoolPolicy::read(&[])
+                .expect("the declared defaults are valid")
+                .checkout(None),
         };
         assert_eq!(
             pool.established(),
