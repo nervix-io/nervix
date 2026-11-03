@@ -13,8 +13,11 @@ default = []
 shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
 
 [dependencies]
-async-nats = { workspace = true, features = ["nkeys"] }
+async-nats = { workspace = true }
 async-trait = { workspace = true }
+aws-lc-rs = { workspace = true }
+crc = { workspace = true }
+data-encoding = { workspace = true }
 error-stack = { workspace = true }
 futures-util = { workspace = true }
 meticulous = { workspace = true }
@@ -22,8 +25,11 @@ nervix-connector = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 thiserror = { workspace = true }
+zeroize = "1.9"
 
 [dev-dependencies]
+bolero = { workspace = true }
 bytes = { workspace = true }
+nkeys = "0.4.5"
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["io-util"] }

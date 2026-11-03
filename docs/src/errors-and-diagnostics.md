@@ -1186,9 +1186,12 @@ client failure the source does not classify keeps the driver's error as the type
 `Acknowledge` or `NegativelyAcknowledge`. The innermost context is the reason `DESCRIBE INGESTOR`
 shows.
 
-NATS client option preparation keeps schema and address refusals and credentials-file I/O or
-parsing failures beneath their owning typed contexts. A credentials-file I/O failure is an opaque
-typed attachment because the driver's message can name the confidential file path. Schema
+NATS client option preparation keeps schema, address and user-seed refusals and credentials-file
+I/O or parsing failures beneath their owning typed contexts. Base32 and AWS-LC key preparation
+retain their typed causes; seed length, kind, checksum and incomplete credential sections have
+value-free typed failures. A credentials-file I/O or blocking-task failure is an opaque typed
+attachment so no confidential path is rendered. The async-nats callback requires its `AuthError`
+and is the library projection boundary for an AWS-LC nonce-signing failure. Schema
 exclusion errors name the two authentication keys without their values. Ingestor and emitter
 configuration failures preserve those reports, and a broker authentication refusal retains the
 driver's typed connection failure. Emitter status projects its typed connection kind without

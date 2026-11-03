@@ -20,6 +20,9 @@ use meticulous::OptionExt as _;
 use nervix_connector::{client_config_value, client_tls_paths, optional_client_config_value};
 use nervix_models::{ClientConfigEntry, ConnectorKind};
 use thiserror::Error;
+use zeroize::Zeroizing;
+
+mod authentication;
 
 #[derive(Clone, Copy, Debug, Error)]
 pub(crate) enum NatsClientOptionsError {
@@ -29,6 +32,8 @@ pub(crate) enum NatsClientOptionsError {
     Address,
     #[error("failed to load the {connector} credentials_file", connector = ConnectorKind::Nats)]
     CredentialsFile,
+    #[error("failed to prepare the {connector} nkey_seed", connector = ConnectorKind::Nats)]
+    NkeySeed,
 }
 
 pub(crate) struct NatsClientOptions {
@@ -52,7 +57,30 @@ impl NatsClientOptions {
         let address = address
             .parse::<ServerAddr>()
             .change_context(NatsClientOptionsError::Address)?;
-        let mut options = ConnectOptions::new().require_tls(address.tls_required());
+        let mut options = if let Some(token) = optional_client_config_value(config, "token") {
+            ConnectOptions::new().token(token.to_owned())
+        } else if let Some(seed) = optional_client_config_value(config, "nkey_seed") {
+            authentication::nkey_options(seed).change_context(NatsClientOptionsError::NkeySeed)?
+        } else if let Some(path) = optional_client_config_value(config, "credentials_file") {
+            let path = path.to_owned();
+            let contents =
+                nervix_primitives::task::spawn_blocking(move || std::fs::read_to_string(path))
+                    .await
+                    .map_err(|source| {
+                        Report::new(NatsClientOptionsError::CredentialsFile).attach(source)
+                    })?
+                    .map_err(|source| {
+                        // A confidential path may occur in an I/O failure. Preserve its typed cause
+                        // as an opaque attachment rather than rendering it in the public context.
+                        Report::new(NatsClientOptionsError::CredentialsFile).attach(source)
+                    })?;
+            let contents = Zeroizing::new(contents);
+            authentication::credentials_options(&contents)
+                .change_context(NatsClientOptionsError::CredentialsFile)?
+        } else {
+            ConnectOptions::new()
+        };
+        options = options.require_tls(address.tls_required());
         let tls = client_tls_paths(config);
         if let Some(ca_file) = tls.ca_file {
             options = options.add_root_certificates(ca_file);
@@ -60,19 +88,6 @@ impl NatsClientOptions {
         // The declared schema above already established a complete client identity or its absence.
         if let (Some(cert_file), Some(key_file)) = (tls.cert_file, tls.key_file) {
             options = options.add_client_certificate(cert_file, key_file);
-        }
-        if let Some(token) = optional_client_config_value(config, "token") {
-            options = options.token(token.to_owned());
-        }
-        if let Some(seed) = optional_client_config_value(config, "nkey_seed") {
-            options = options.nkey(seed.to_owned());
-        }
-        if let Some(path) = optional_client_config_value(config, "credentials_file") {
-            options = options.credentials_file(path).await.map_err(|source| {
-                // The driver's I/O error may name this confidential path. Keep the typed
-                // failure inspectable without rendering it as a public report context.
-                Report::new(NatsClientOptionsError::CredentialsFile).attach(source)
-            })?;
         }
         Ok(Self { address, options })
     }
@@ -134,47 +149,59 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn preparation_preserves_credentials_file_io_and_decoding_failures() {
-        // This public nkey fixture is a seed, rather than a complete credentials file. Its
-        // contents are intentionally unsuitable for the driver's credentials-file decoder.
-        let seed_path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../docker/nats/auth-user.nk"
-        );
+    async fn preparation_preserves_credentials_file_io_without_rendering_its_path() {
         let missing_path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../../docker/nats/no-such-credentials"
         );
-        for (path, kind) in [
-            (seed_path, std::io::ErrorKind::InvalidData),
-            // The driver wraps a filesystem read failure in io::Error::other; its decoder
-            // reports InvalidData. Preserve exactly the typed failure its public API returns.
-            (missing_path, std::io::ErrorKind::Other),
-        ] {
-            let Err(report) = NatsClientOptions::from_config(&[
-                entry("addr", "nats://localhost:4222"),
-                entry("credentials_file", path),
-            ])
-            .await
-            else {
-                panic!("unavailable or malformed credentials cannot prepare a connection");
-            };
-            assert!(matches!(
-                report.current_context(),
-                NatsClientOptionsError::CredentialsFile
-            ));
-            let source = report
-                .downcast_ref::<std::io::Error>()
-                .assured("the driver IO failure remains typed");
-            assert_eq!(source.kind(), kind);
-            assert_eq!(
-                report.to_string(),
-                "failed to load the NATS credentials_file"
-            );
-            assert_eq!(
-                format!("{report:#}"),
-                "failed to load the NATS credentials_file"
-            );
-        }
+        let Err(report) = NatsClientOptions::from_config(&[
+            entry("addr", "nats://localhost:4222"),
+            entry("credentials_file", missing_path),
+        ])
+        .await
+        else {
+            panic!("unavailable or malformed credentials cannot prepare a connection");
+        };
+        assert!(matches!(
+            report.current_context(),
+            NatsClientOptionsError::CredentialsFile
+        ));
+        let source = report
+            .downcast_ref::<std::io::Error>()
+            .assured("the filesystem failure remains typed");
+        assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(
+            report.to_string(),
+            "failed to load the NATS credentials_file"
+        );
+        assert_eq!(
+            format!("{report:#}"),
+            "failed to load the NATS credentials_file"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn preparation_preserves_the_typed_credentials_decoder_refusal() {
+        let seed_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../docker/nats/auth-user.nk"
+        );
+        let Err(report) = NatsClientOptions::from_config(&[
+            entry("addr", "nats://localhost:4222"),
+            entry("credentials_file", seed_path),
+        ])
+        .await
+        else {
+            panic!("a credentials file requires a complete JWT and user seed");
+        };
+        assert!(matches!(
+            report.current_context(),
+            NatsClientOptionsError::CredentialsFile
+        ));
+        assert!(matches!(
+            report.downcast_ref::<super::authentication::NatsAuthenticationError>(),
+            Some(super::authentication::NatsAuthenticationError::Credentials)
+        ));
+        assert!(!format!("{report:#}").contains(seed_path));
     }
 }

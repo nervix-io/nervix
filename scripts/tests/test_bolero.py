@@ -205,6 +205,8 @@ class InventoryTests(unittest.TestCase):
             "restore-installation-storage",
             "restore-staging-kept-measurement",
             "typed-report", "typed-source-contract", "typed-site-union", "typed-source-syntax", "typed-hidden-tunables",
+            "typed-non-aws-lc-crypto",
+            "nats-user-authentication",
             "plexus-statement",
             "plexus-statement-text",
             "plexus-emitter-envelopes",
@@ -388,6 +390,7 @@ class InventoryTests(unittest.TestCase):
             "dns-operation-budget",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
+            "nervix-connector-nats",
             "nervix-client-core",
             "nervix-client-wire",
             "nervix-client-ffi",

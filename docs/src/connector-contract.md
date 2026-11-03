@@ -1115,9 +1115,14 @@ unpooled client's Nervix-owned keys are the address, `timeout_ms`, the TLS files
 authentication keys `token`, `credentials_file` and `nkey_seed`. Its schema declares the latter
 three mutually exclusive and confidential, and identifies `credentials_file` as a mounted file.
 Both sides build authentication and TLS options through one connector-owned builder, then attach
-their own connection-loss notifications or reconnect policy. Reading or parsing a credentials
-file preserves the driver's typed I/O cause; a broker's authentication refusal remains a typed
-connection failure. The address's userinfo and query options belong to the driver and are masked in inspection. The
+their own connection-loss notifications or reconnect policy. Token authentication uses the driver;
+nkey and JWT credentials use its auth callback with AWS-LC Ed25519 signing. The connector validates
+the fixed-size user seed's base32, user prefix and transcription checksum, and reads a mounted
+credentials file on the blocking pool. Decoded seed bytes and the temporary file text are cleared
+on drop. Reading preserves the filesystem's typed I/O cause without rendering the path; parsing
+preserves a value-free typed authentication cause. A broker's authentication refusal remains a
+typed connection failure. The cryptography chapter records the signing owner and its FIPS limits.
+The address's userinfo and query options belong to the driver and are masked in inspection. The
 NATS-specific declaration tests, generated grammar conformance and one-/three-node public
 declaration scenarios qualify these facts together.
 

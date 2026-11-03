@@ -19,6 +19,9 @@ A declared exclusion group admits zero or one of its named keys. NATS uses it fo
 connection rather than a fabricated empty credential. A refusal names the two conflicting keys
 and carries no credential values. The group's names are sorted, unique and declared by its
 schema, checked when the static declaration is constructed.
+NATS preparation turns a signing method into either a user-nkey identity or a credentials identity
+with its JWT and signing key. The callback constructs only that method's authentication fields;
+a seed's user prefix and checksum are validated before AWS-LC derives its public key.
 Defaulted keys carry their declared value in their presence variant. The effective-entry projection
 adds it only when the authored key is absent; an invalid explicit value still fails validation.
 `DESCRIBE CLIENT` distinguishes these effective defaults from authored values, with the same

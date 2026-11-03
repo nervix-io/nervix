@@ -71,6 +71,7 @@
   - [Domain Clock](./domain-clock.md)
   - [Cluster Interconnect](./interconnect.md)
   - [Name Resolution](./name-resolution.md)
+  - [Cryptography](./cryptography.md)
   - [Client Session Protocol](./client-session-protocol.md)
   - [Control Plane](./control-plane.md)
   - [Execution Plans](./execution-plans.md)

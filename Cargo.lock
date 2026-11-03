@@ -7134,16 +7134,22 @@ version = "0.1.0-dev"
 dependencies = [
  "async-nats",
  "async-trait",
+ "aws-lc-rs",
+ "bolero",
  "bytes",
+ "crc",
+ "data-encoding",
  "error-stack",
  "futures-util",
  "meticulous",
  "nervix-connector",
  "nervix-models",
  "nervix-primitives",
+ "nkeys",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
