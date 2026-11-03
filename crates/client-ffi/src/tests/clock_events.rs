@@ -104,7 +104,7 @@ pub(super) struct SharedClock(*mut ClockEvent);
 
 impl SharedClock {
     fn new(event: DomainClockEvent) -> Self {
-        Self(ClockEvent::new(event).into_shared())
+        Self(crate::abi::into_shared(ClockEvent::new(event)))
     }
 
     pub(super) fn kind(&self) -> ClockEventKind {

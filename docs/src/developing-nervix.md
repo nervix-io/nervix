@@ -37,6 +37,17 @@ Install:
 - Rust via `rustup`
 - `just` (latest release)
 - `zellij`
+- `uv`, which runs the repository's Python tools, and the CPython headers and shared library
+  (`python3-dev` on Debian and Ubuntu, or any CPython that `uv python install` provides), which
+  the tests of the Python package, `crates/client-python`, embed
+
+The Python package builds with maturin, which `just build-client-python` runs as
+`uvx --from maturin==1.16.0 maturin`, into an abi3 wheel for CPython 3.12 and later under
+`target/client-conformance/wheels`. The recipe installs the wheel and `pyarrow`, the probe's test
+dependency, into a CPython 3.12 environment at `target/client-conformance/python`, which uv
+downloads when no CPython 3.12 is installed. The package's own tests run with `cargo test` and embed
+the CPython that pyo3 finds on `PATH`, with its library's directory as the tests' run path, so an
+interpreter outside the loader's default path, such as pyenv's, runs them too.
 
 `just build-web-console` builds the console the server embeds. trunk uses a `wasm-bindgen` CLI
 from `PATH` when its version equals the one `Cargo.lock` locks, and otherwise downloads it from
@@ -332,6 +343,20 @@ For test runs:
 ```bash
 just test
 ```
+
+To run one named scenario, quote its name or regular expression as one shell argument:
+
+```bash
+just test-scenarios --input tests/features/tools/cli_session.feature \
+    --name '^CLI completion uses UTF-8 byte edits after Unicode text$' --concurrency 4 --retry 0
+```
+
+`test-scenarios` and `test-scenarios-reuse` forward each argument unchanged. Quote an input glob
+such as `'tests/features/runtime/{first,second}.feature'` so the scenario runner expands it.
+Pass each option and its value separately; a quoted string containing several options stays one
+argument. `test-scenarios-reuse` accepts the same selections and keeps dependency containers for
+the next run. `just test-scenario-arguments` checks both recipes without compiling Rust or
+starting services.
 
 For representation properties and sanitizer fuzzing, see
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md). The focused entry points are

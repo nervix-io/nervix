@@ -21,17 +21,19 @@ lifetimes, restoration and runnable paced workflows. This ledger owns the qualif
 | C ABI, in process | Shared Rust binding | Native gRPC | `tests/common/client_conformance/c_abi_probe.rs` |
 | C (C11) | Shared Rust binding | Native gRPC | `tests/client_conformance/c/probe.c` |
 | C++ (C++17) | Shared Rust binding, owned through `std::unique_ptr` | Native gRPC | `tests/client_conformance/cpp/probe.cpp` |
-| CPython 3.12+ | Shared Rust binding through `ctypes` | Native gRPC | `tests/client_conformance/python/probe.py` |
+| CPython 3.12+ | Shared Rust binding through the Python package `nervix_client` on pyo3, `crates/client-python` | Native gRPC | `tests/client_conformance/python/probe.py` |
 | Java 22+ | Shared Rust binding through the Foreign Function and Memory API | Native gRPC | `tests/client_conformance/java/Probe.java` |
 | Ruby 3.3+ | Shared Rust binding through Fiddle | Native gRPC | `tests/client_conformance/ruby/probe.rb` |
 | Go 1.25+ | Independent native client, `flatc --go` and `google.golang.org/grpc` | Native gRPC | `tests/client_conformance/go/` |
 | Node.js 24 | Independent native client, `flatc --ts` and the built-in `WebSocket` | Binary WebSocket | `tests/client_conformance/node/probe.ts` |
 | Bun 1.4 | The same TypeScript client, unchanged | Binary WebSocket | `tests/client_conformance/node/probe.ts` |
 
-The shared Rust binding is `crates/client-ffi`, whose contract is
-`crates/client-ffi/include/nervix_client.h`. Every binding host drives the Rust client's own state
-machine, so leader retry, request correlation, reconnection, execution identity and subscription
-restoration are the ones `nervix-client-core` tests, and no host reinterprets an uncertain outcome.
+The shared Rust binding is the host session runtime, `crates/client-host`, which C, C++, Java and
+Ruby hosts reach through the C ABI of `crates/client-ffi`, whose contract is
+`crates/client-ffi/include/nervix_client.h`, and CPython hosts through the Python package of
+`crates/client-python`. Every binding host drives the Rust client's own state machine, so leader
+retry, request correlation, reconnection, execution identity and subscription restoration are the
+ones `nervix-client-core` tests, and no host reinterprets an uncertain outcome.
 The Go and TypeScript clients implement the protocol themselves: they correlate replies by request
 identity, follow a leader redirect with the same execution reference, and fail rather than report
 success when an outcome is unknown. Other JVM languages reach the binding through the same Foreign
@@ -50,27 +52,38 @@ pull request labeled `client-conformance`.
 | Shared binding | `cargo build --package nervix-client-ffi` | Loaded from `target/debug/libnervix_client_ffi.so` |
 | C | `cc -std=c11 -Wall -Wextra -Werror -pthread -I crates/client-ffi/include tests/client_conformance/c/probe.c -L target/debug -lnervix_client_ffi -Wl,-rpath,target/debug -o target/client-conformance/c-probe` | `target/client-conformance/c-probe` |
 | C++ | `c++ -std=c++17 -Wall -Wextra -Werror -pthread -I crates/client-ffi/include tests/client_conformance/cpp/probe.cpp -L target/debug -lnervix_client_ffi -Wl,-rpath,target/debug -o target/client-conformance/cpp-probe` | `target/client-conformance/cpp-probe` |
-| Python | None | `python3 tests/client_conformance/python/probe.py` |
+| Python | `just build-client-python`: `maturin build` of `crates/client-python` into an abi3 wheel under `target/client-conformance/wheels`, installed with `pyarrow` into the CPython 3.12 environment `target/client-conformance/python` | `target/client-conformance/python/bin/python tests/client_conformance/python/probe.py` |
 | Java | None; the launcher compiles the source file | `java --enable-native-access=ALL-UNNAMED tests/client_conformance/java/Probe.java` |
 | Ruby | None | `ruby tests/client_conformance/ruby/probe.rb` |
 | Go | `flatc --go` into a copy of `tests/client_conformance/go`, then `go build` | `target/client-conformance/go-probe`, or `go-probe corpus <dir>` |
 | Node.js | `flatc --ts`, `npm ci`, then `esbuild probe.ts --bundle --platform=node --format=esm` | `node target/client-conformance/node/probe.mjs`, or with `corpus <dir>` |
 | Bun | The Node.js bundle; Bun is the release the probe's `package-lock.json` pins | `target/client-conformance/node-src/node_modules/.bin/bun target/client-conformance/node/probe.mjs` |
 
-A binding probe reads `NERVIX_CLIENT_LIBRARY`, and every probe reads its target from
+A probe of the C ABI reads `NERVIX_CLIENT_LIBRARY`, and every probe reads its target from
 `NERVIX_PROBE_GRPC_URI`, `NERVIX_PROBE_WEBSOCKET_URI`, `NERVIX_PROBE_USERNAME`,
 `NERVIX_PROBE_PASSWORD` and `NERVIX_PROBE_DOMAIN`, and its subscription from `NERVIX_PROBE_RELAY`,
-`NERVIX_PROBE_SUBSCRIPTION` and `NERVIX_PROBE_ROWS`. Run with the `clock` argument, a binding probe
-follows the domain's clock instead and reads no subscription. Run with the `io` argument, it
+`NERVIX_PROBE_SUBSCRIPTION` and `NERVIX_PROBE_ROWS`. An independent probe also reads the UUIDv7
+reference of its leader-only command from `NERVIX_PROBE_EXECUTION_REFERENCE`.
+Run with the `clock` argument, a binding probe follows the domain's clock instead and reads no
+subscription. Run with the `io` argument, it
 publishes to the ingestor `NERVIX_PROBE_INGESTOR` names, consumes the emitter
 `NERVIX_PROBE_EMITTER` names, and reads no subscription either.
 
 ## What every probe proves
 
 `A <runtime> client round-trips an operation, typed rows, an error and a closure` runs each runtime
-against a one- and a three-node cluster, starting on `node-1`, which is a follower in most
-three-node runs. Every probe prints the same report and the scenario holds all of them to one
-expected report:
+against a one- and a three-node cluster. The harness waits for every node to agree on the leader,
+chooses another node when one exists, and logs the leader and the probe's starting node. The
+one-node example is a direct-connection control.
+
+The independent Go, Node.js and Bun probes first create an otherwise unused schema, a leader-only
+command whose completion they require before the common read operation. In a three-node example,
+they must report its redirect. The harness supplies a UUIDv7 execution reference and checks the
+original request, the repeated request and the terminal outcome against that exact reference. Go
+follows a command reply's `LeaderRedirect`; TypeScript follows `SessionEnding{LeaderRedirect}`
+and keeps its subscription on the replacement console session. A successful operation without
+that redirect evidence fails the three-node example. The remaining report is shared by every
+runtime and held to one expected report:
 
 - An operation: `SHOW CREATE RELAY` completes.
 - An error: a malformed statement fails with one diagnostic at the exact source span.
@@ -208,8 +221,8 @@ the independent interoperation with Rust in both encoding directions.
 
 [Client I/O 05](https://app.clickup.com/t/86bc8bj8d) added
 `examples/paced-simulation/python/paced_simulation.py`, a runnable application rather than a probe.
-It reaches the binding through the same `ctypes` path as the Python probe, with nothing but the
-standard library: it follows the domain clock and projects every wait and admission check through
+It reaches the binding's C ABI through `ctypes`, with nothing but the standard library: it
+follows the domain clock and projects every wait and admission check through
 `nx_domain_clock_*`, builds its batches with `nx_batch_builder_*`, reads deliveries with
 `nx_batch_*`, and runs its producer, consumers, clock and inspection loops on one session from
 several threads. `paced_simulation.feature` runs it with `just test-scenarios` beside the Rust

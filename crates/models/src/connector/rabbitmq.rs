@@ -349,6 +349,56 @@ pub struct RabbitMqQueueEmitter {
     pub queue: RabbitMqQueueName,
 }
 
+/// AMQP Basic properties shared by queue and exchange publication.
+const RABBITMQ_EMITTER_PROPERTIES: &[crate::PropertyDeclaration] = &[
+    crate::PropertyDeclaration {
+        name: "content_type",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "content_encoding",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "message_id",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "correlation_id",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "reply_to",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "expiration",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "priority",
+        ty: crate::PropertyType::U8,
+    },
+    crate::PropertyDeclaration {
+        name: "type",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "app_id",
+        ty: crate::PropertyType::String,
+    },
+    crate::PropertyDeclaration {
+        name: "user_id",
+        ty: crate::PropertyType::String,
+    },
+];
+
+const RABBITMQ_EMITTER_ENVELOPE: &[EnvelopeClauseKind] = &[
+    EnvelopeClauseKind::Persistent,
+    EnvelopeClauseKind::Mandatory,
+    EnvelopeClauseKind::Timestamp,
+];
+
 impl EmitterDeclaration for RabbitMqQueueEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         // An AMQP field table holds one value per name, in ascending order of name.
@@ -363,8 +413,8 @@ impl EmitterDeclaration for RabbitMqQueueEmitter {
             name: LocatorName::External(RabbitMqQueueName::DECLARATION),
         }),
         options: &[],
-        envelope: &[EnvelopeClauseKind::Mandatory],
-        properties: &[],
+        envelope: RABBITMQ_EMITTER_ENVELOPE,
+        properties: RABBITMQ_EMITTER_PROPERTIES,
         bounds: RABBITMQ_QUEUE_EMITTER_BOUNDS,
     };
 }
@@ -416,8 +466,8 @@ impl EmitterDeclaration for RabbitMqExchangeEmitter {
                 example: "ROUTING KEY input.category",
             },
         }],
-        envelope: &[EnvelopeClauseKind::Mandatory],
-        properties: &[],
+        envelope: RABBITMQ_EMITTER_ENVELOPE,
+        properties: RABBITMQ_EMITTER_PROPERTIES,
         bounds: RABBITMQ_EXCHANGE_EMITTER_BOUNDS,
     };
 }

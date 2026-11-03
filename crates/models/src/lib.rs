@@ -192,17 +192,17 @@ pub use connector::{
     SentryEmitterEntity, SentryEventEmitter, SentryEventEmitterMode, SentryEventPublishingMode,
     SqsConfigEntry, SqsEmitter, SqsEmitterEntity, SqsFifoGroup, SqsIngestMode, SqsIngestor,
     SqsIngestorEntity, SqsQueueEmitter, SqsQueueEmitterMode, SqsQueueIngestor,
-    SqsQueueIngestorAlteration, SqsQueueName, SqsQueuePublishingMode, SqsSend,
-    SyslogCollectorEmitter, SyslogCollectorEmitterMode, SyslogCollectorPublishingMode,
-    SyslogConfigEntry, SyslogEmitter, SyslogEmitterEntity, SyslogFrameLimits, SyslogIngestMode,
-    SyslogIngestor, SyslogIngestorEntity, SyslogListenerIngestor, SyslogListenerIngestorAlteration,
-    UnmetDeliveryRequirement, UnmetPublishingRequirement, WEBSOCKETS_CONTROL_FRAME_BUDGET,
-    WaitBound, WebsocketsClientConfig, WebsocketsClientConfigError, WebsocketsConfigEntry,
-    WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsFrameType,
-    WebsocketsIngestMode, WebsocketsIngestor, WebsocketsIngestorAlteration,
-    WebsocketsIngestorEntity, WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders,
-    WebsocketsUpgradeHeadersError, WrittenChoice, ZeroMqConfigEntry, ZeroMqEmitter,
-    ZeroMqEmitterEntity, ZeroMqIngestMode, ZeroMqIngestor, ZeroMqIngestorEntity,
+    SqsQueueIngestorAlteration, SqsQueueName, SqsQueuePublishingMode, SqsReceiveMax,
+    SqsReceiveMaxError, SqsSend, SyslogCollectorEmitter, SyslogCollectorEmitterMode,
+    SyslogCollectorPublishingMode, SyslogConfigEntry, SyslogEmitter, SyslogEmitterEntity,
+    SyslogFrameLimits, SyslogIngestMode, SyslogIngestor, SyslogIngestorEntity,
+    SyslogListenerIngestor, SyslogListenerIngestorAlteration, UnmetDeliveryRequirement,
+    UnmetPublishingRequirement, WEBSOCKETS_CONTROL_FRAME_BUDGET, WaitBound, WebsocketsClientConfig,
+    WebsocketsClientConfigError, WebsocketsConfigEntry, WebsocketsConnectionIngestor,
+    WebsocketsEndpointIngestor, WebsocketsFrameType, WebsocketsIngestMode, WebsocketsIngestor,
+    WebsocketsIngestorAlteration, WebsocketsIngestorEntity, WebsocketsUpgradeHeader,
+    WebsocketsUpgradeHeaders, WebsocketsUpgradeHeadersError, WrittenChoice, ZeroMqConfigEntry,
+    ZeroMqEmitter, ZeroMqEmitterEntity, ZeroMqIngestMode, ZeroMqIngestor, ZeroMqIngestorEntity,
     ZeroMqPullIngestor, ZeroMqPullIngestorAlteration, ZeroMqPushEmitter, ZeroMqPushEmitterMode,
     ZeroMqPushPublishingMode, validate_clickhouse_client_config,
 };
@@ -222,7 +222,8 @@ pub use emitter_batch::{
     EmitterBatchLimitError, EmitterBatchPolicy, PayloadSizeError, PayloadSizeLimit,
 };
 pub use emitter_envelope::{
-    EmitterEnvelope, EnvelopeClause, EnvelopeDeclarationError, EnvelopeProperty,
+    EmitterEnvelope, EmitterEnvelopeAlteration, EnvelopeClause, EnvelopeDeclarationError,
+    EnvelopeProperty,
 };
 pub use expression::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, CaseBranch, Expression,
