@@ -1,6 +1,6 @@
 //! A staging file reads back exactly the staged batches its appends recorded, from any of them.
 
-use arrow_array::{Int64Array, RecordBatch, StringArray};
+use arrow_array::{DictionaryArray, Int64Array, RecordBatch, StringArray, types::Int32Type};
 use arrow_schema::{DataType, Field, Schema};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::Cancelled;
@@ -330,6 +330,111 @@ fn a_staging_file_is_never_created_over_an_existing_file() {
         std::fs::read(&path).assured("the existing file is left in place"),
         b"not a staging file"
     );
+}
+
+#[test]
+fn every_staged_batch_carries_its_dictionaries_so_a_span_can_start_at_any_of_them() {
+    let directory = tempfile::tempdir().assured("the staging directory is created");
+    let path = directory.path().join("staging-1.arrow");
+    let schema = StdArc::new(Schema::new(vec![Field::new(
+        "action",
+        DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+        false,
+    )]));
+    let dictionary_batch = |actions: Vec<&str>| {
+        let column: DictionaryArray<Int32Type> = actions.into_iter().collect();
+        RecordBatch::try_new(StdArc::clone(&schema), vec![StdArc::new(column)])
+            .assured("the column matches the dictionary schema")
+    };
+    let batches = [
+        dictionary_batch(vec!["open", "close", "open"]),
+        dictionary_batch(vec!["update"]),
+        dictionary_batch(vec!["close", "update"]),
+    ];
+
+    let schema_end = create(&path, &schema).assured("the staging file is created");
+    let first = append(&path, schema_end, &schema, &batches[..2], every_batch)
+        .assured("the first append writes its batches");
+    let second = append(&path, first.end, &schema, &batches[2..], every_batch)
+        .assured("the second append continues the file");
+
+    let mut ranges = first.ranges.clone();
+    ranges.extend(second.ranges.iter().cloned());
+    assert_every_span_reads_back(&path, schema_end, &schema, &ranges, &batches);
+}
+
+#[test]
+fn an_append_to_a_staging_file_that_is_gone_fails_naming_it() {
+    let directory = tempfile::tempdir().assured("the staging directory is created");
+    let path = directory.path().join("staging-1.arrow");
+    let schema = schema();
+
+    let refused = append(&path, 64, &schema, &[batch(&schema, &[1])], every_batch)
+        .err()
+        .assured("an append to a missing staging file fails");
+
+    assert_eq!(
+        refused.current_context(),
+        &StagingError::Append { path: path.clone() }
+    );
+    assert_eq!(
+        refused
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::NotFound)
+    );
+}
+
+#[test]
+fn reading_a_staging_file_that_is_gone_or_damaged_fails_naming_it() {
+    let directory = tempfile::tempdir().assured("the staging directory is created");
+    let path = directory.path().join("staging-1.arrow");
+    let schema = schema();
+    let read_failure = |path: &std::path::Path| StagingError::Read {
+        path: path.to_path_buf(),
+    };
+
+    let missing = read_span(&path, 64, 64..128, 1, &schema)
+        .err()
+        .assured("a missing staging file cannot be read");
+    assert_eq!(missing.current_context(), &read_failure(&path));
+
+    let schema_end = create(&path, &schema).assured("the staging file is created");
+    let Appended { ranges, end } = append(
+        &path,
+        schema_end,
+        &schema,
+        &[batch(&schema, &[1, 2]), batch(&schema, &[3])],
+        every_batch,
+    )
+    .assured("the append writes both batches");
+
+    // A schema message recorded as longer than the file holds.
+    let beyond = read_span(&path, end + 1, schema_end..end, 2, &schema)
+        .err()
+        .assured("a schema message past the file's end cannot be read");
+    assert_eq!(beyond.current_context(), &read_failure(&path));
+
+    // A span that starts inside a batch's messages instead of at their start is refused, whether
+    // its bytes fail to decode or decode to fewer batches than were staged there.
+    let inside = read_span(&path, schema_end, ranges[0].start + 8..end, 2, &schema)
+        .err()
+        .assured("a span that starts inside a message is refused");
+    assert!(
+        matches!(
+            inside.current_context(),
+            StagingError::Read { .. } | StagingError::BatchCount { .. }
+        ),
+        "a damaged span fails as a read: {inside:?}"
+    );
+
+    // A file whose first bytes are no schema message.
+    let damaged = directory.path().join("staging-2.arrow");
+    std::fs::write(&damaged, vec![0xA5_u8; 256]).assured("the damaged file is written");
+    let unreadable = read_span(&damaged, 64, 64..256, 1, &schema)
+        .err()
+        .assured("a file that holds no schema message does not decode");
+    assert_eq!(unreadable.current_context(), &read_failure(&damaged));
 }
 
 /// One generated carrier: the action of each of its rows, and whether the append that carries it
