@@ -1,9 +1,10 @@
 //! Steps for the HTTP client transport contract: a forward proxy a client may declare or the
-//! environment may name, and a real-process cluster whose environment names one.
+//! environment may name, and real-process clusters with isolated proxy or trust-store settings.
 //!
 //! Layer: test harness.
 //! - **Owns.** Starting named HTTP proxies, waiting for what each carried, asserting that one
-//!   carried nothing, and starting a real-process cluster whose environment names a proxy.
+//!   carried nothing, and starting real-process clusters with declared proxy or empty native
+//!   certificate paths.
 //! - **Depends on.** The HTTP proxy fixture, the real-process cluster fixture and the scenario's
 //!   placeholders.
 //! - **Must not know.** What a node does with its proxy settings; scenarios observe that through
@@ -166,6 +167,27 @@ async fn given_server_process_cluster_with_proxy_environment_is_started(
     );
 }
 
+/// Only the child nodes receive the empty certificate paths, so this test can run beside every
+/// other scenario without changing the runner's trust store.
+#[given(
+    expr = "a {int} node nervix-server process cluster is started with an empty host TLS trust \
+            store"
+)]
+async fn given_server_process_cluster_with_empty_trust_store_is_started(
+    world: &mut ScenarioWorld,
+    node_count: usize,
+) {
+    assert!(
+        world.server_process_cluster.is_none(),
+        "a scenario starts at most one real-process cluster"
+    );
+    initialize_scenario_identity(world);
+    let started = ServerProcessCluster::start_with_empty_trust_store(node_count).await;
+    world.server_process_cluster = Some(
+        started.unwrap_or_else(|error| panic!("failed to start the real-process cluster: {error}")),
+    );
+}
+
 /// An HTTPS receiver whose TLS offers HTTP/2 ahead of HTTP/1.1, so a client that offers HTTP/2
 /// speaks it to the receiver.
 #[given(
@@ -192,9 +214,32 @@ async fn given_https_receiver_offering_http2_is_running(
     .await;
 }
 
-/// The receiver captured a request with exactly this request line, `<METHOD> <target>`, and its
-/// client sent it over HTTP/2. Every request of one client on one route speaks the same version,
-/// so the first such request settles it.
+/// An HTTP/2 receiver that verifies the client certificate, so both directions must retain
+/// their configured client identity as well as their trust anchors and ALPN negotiation.
+#[given(
+    regex = r#"^HTTPS receiver "([^"]*)" is running with a certificate for "([^"]*)" and offers HTTP/2 with required client authentication$"#
+)]
+async fn given_https_receiver_offering_authenticated_http2_is_running(
+    world: &mut ScenarioWorld,
+    name: String,
+    hosts: String,
+) {
+    initialize_scenario_identity(world);
+    let options = ReceiverTlsOptions {
+        certificate_hosts: certificate_hosts(world, &hosts),
+        client_certificate: ClientCertificatePolicy::Required,
+        protocols: ReceiverProtocols::Http2AndHttp1,
+    };
+    start_http_receiver(
+        world,
+        name,
+        ReceiverTransport::Tls(options),
+        LengthPolicy::Lenient,
+    )
+    .await;
+}
+
+/// The receiver captured the request over the HTTP/2 version negotiated during TLS.
 #[then(
     regex = r#"^HTTP receiver "([^"]*)" eventually captures a request with request line "([^"]*)" over HTTP/2$"#
 )]

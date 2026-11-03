@@ -535,6 +535,7 @@ where
         set_flush.boxed(),
     ];
     let capabilities = S::KIND.capabilities();
+    choices.extend(envelope::alterations(&capabilities));
     if let EmitterReferenceKind::Client(_) | EmitterReferenceKind::StorageClient(_) =
         capabilities.reference
     {

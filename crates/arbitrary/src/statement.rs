@@ -17,17 +17,17 @@ use nervix_models::{
     DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource,
     DescribeTransaction, DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig,
     DomainPace, DomainTimeRate, DrainNode, DropModel, DropNode, EmitterBatchLegality,
-    EmitterBodyForm, EmitterEntityKind, EmitterReferenceKind, ExistingUserPolicy, FieldName,
-    HttpIngestorEntity, IngestorAlteration, IngestorEntityKind, InspectionFormat,
-    KafkaIngestorEntity, LookupQuery, ModelKind, ModelName, MqttIngestorEntity, NatsIngestorEntity,
-    NodeRef, PlacementPolicy, PrometheusIngestorEntity, PulsarIngestorEntity,
-    RabbitMqIngestorEntity, RebindResource, RebindResourceMembers, RebindResourceSelection,
-    RedisIngestorEntity, RelayBranching, RelayName, Relocation, RelocationMember,
-    RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
-    ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, Restore, RestoreLifecycle,
-    RestoreMode, RestoreScope, RestoreState, ShowClusterStatus, ShowCreate, ShowEmitters,
-    ShowIngestors, ShowPlacements, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
-    SqsIngestorEntity, StartDomain, Statement, StopDomain, SubscriptionBinding,
+    EmitterBodyForm, EmitterEntityKind, EmitterEnvelopeAlteration, EmitterReferenceKind,
+    EnvelopeClauseKind, EnvelopeProperty, ExistingUserPolicy, FieldName, HttpIngestorEntity,
+    IngestorAlteration, IngestorEntityKind, InspectionFormat, KafkaIngestorEntity, LookupQuery,
+    ModelKind, ModelName, MqttIngestorEntity, NatsIngestorEntity, NodeRef, PlacementPolicy,
+    PrometheusIngestorEntity, PulsarIngestorEntity, RabbitMqIngestorEntity, RebindResource,
+    RebindResourceMembers, RebindResourceSelection, RedisIngestorEntity, RelayBranching, RelayName,
+    Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
+    RelocationSelection, ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, Restore,
+    RestoreLifecycle, RestoreMode, RestoreScope, RestoreState, ShowClusterStatus, ShowCreate,
+    ShowEmitters, ShowIngestors, ShowPlacements, ShowRelayMaterializedState, ShowTransactions,
+    ShowUdfs, SqsIngestorEntity, StartDomain, Statement, StopDomain, SubscriptionBinding,
     SubscriptionLiteral, SyslogIngestorEntity, TransactionInspectionRequest,
     TransactionInspectionTarget, TransactionOperationNumber, UncordonNode, UploadResource,
     WebsocketsIngestorEntity, ZeroMqIngestorEntity,
@@ -249,6 +249,17 @@ enum EmitterOperationForm {
     DropBatch,
     SetFlush,
     SetCommit,
+    Envelope,
+}
+
+#[derive(Clone, Copy)]
+enum EnvelopeOperationForm {
+    SetPersistent,
+    DropPersistent,
+    SetTimestamp,
+    DropTimestamp,
+    SetProperties,
+    DropProperties,
 }
 
 impl Arbitrary<'_> {
@@ -1117,6 +1128,12 @@ impl Arbitrary<'_> {
             EmitterOperationForm::SetFlush,
         ];
         let capabilities = kind.capabilities();
+        if capabilities.declares_envelope_clause(EnvelopeClauseKind::Persistent)
+            || capabilities.declares_envelope_clause(EnvelopeClauseKind::Timestamp)
+            || !capabilities.properties.is_empty()
+        {
+            choices.push(EmitterOperationForm::Envelope);
+        }
         if let EmitterReferenceKind::Client(_) | EmitterReferenceKind::StorageClient(_) =
             capabilities.reference
         {
@@ -1197,6 +1214,56 @@ impl Arbitrary<'_> {
                 commit_each: self.duration(),
                 max_commit_size: self.payload_size_limit(),
             },
+            EmitterOperationForm::Envelope => AlterEmitterOperation::AlterEnvelope {
+                alteration: Box::new(self.alter_emitter_envelope(kind)),
+            },
+        }
+    }
+
+    fn alter_emitter_envelope(&mut self, kind: EmitterEntityKind) -> EmitterEnvelopeAlteration {
+        let declared = kind.capabilities();
+        let mut choices = Vec::new();
+        if declared.declares_envelope_clause(EnvelopeClauseKind::Persistent) {
+            choices.extend([
+                EnvelopeOperationForm::SetPersistent,
+                EnvelopeOperationForm::DropPersistent,
+            ]);
+        }
+        if declared.declares_envelope_clause(EnvelopeClauseKind::Timestamp) {
+            choices.extend([
+                EnvelopeOperationForm::SetTimestamp,
+                EnvelopeOperationForm::DropTimestamp,
+            ]);
+        }
+        if !declared.properties.is_empty() {
+            choices.extend([
+                EnvelopeOperationForm::SetProperties,
+                EnvelopeOperationForm::DropProperties,
+            ]);
+        }
+        let count = NonZeroUsize::new(choices.len())
+            .assured("the caller selected an entity with targeted envelope edits");
+        match choices[self.entropy.index(count)] {
+            EnvelopeOperationForm::SetPersistent => EmitterEnvelopeAlteration::SetPersistent,
+            EnvelopeOperationForm::DropPersistent => EmitterEnvelopeAlteration::DropPersistent,
+            EnvelopeOperationForm::SetTimestamp => EmitterEnvelopeAlteration::SetTimestamp {
+                expression: self.expression(),
+            },
+            EnvelopeOperationForm::DropTimestamp => EmitterEnvelopeAlteration::DropTimestamp,
+            EnvelopeOperationForm::DropProperties => EmitterEnvelopeAlteration::DropProperties,
+            EnvelopeOperationForm::SetProperties => {
+                let mut properties = self.emitter_envelope(&[], declared.properties).properties;
+                if properties.is_empty() {
+                    let count = NonZeroUsize::new(declared.properties.len())
+                        .assured("this edit requires declared properties");
+                    let property = declared.properties[self.entropy.index(count)];
+                    properties.push(EnvelopeProperty {
+                        name: property.name.to_owned(),
+                        expression: self.expression(),
+                    });
+                }
+                EmitterEnvelopeAlteration::SetProperties { properties }
+            }
         }
     }
 

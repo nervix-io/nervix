@@ -1753,6 +1753,30 @@ as `AppError::ApplyStartupRuntime`; the last two name the domain. Each keeps the
 runtime's report beneath it, so the node's exit renders the whole chain rather than the top context
 of the failure.
 
+## Cluster Parameter Refusals
+
+Parameter definitions own positive duration and numeric range errors, and structured assignments
+own empty or duplicate-key refusals. The registry names the exact parameter, domain/model or
+resource, actual requirement and candidate maximum when a lowered cap cannot hold committed
+state. Consensus compares captured inputs and reports a typed stale-input conflict before any
+publication. Bootstrap seed refusal names the parameter and `ALTER CLUSTER SET`. A failed seed
+append is logged with its complete consensus report, including the typed causes beneath it.
+HTTP polling's literal header requirements use the same model-limit refusal as emitter headers;
+the header-count definition also refuses values beyond the native request map's capacity.
+
+A live publication that disagrees with an equal applied revision is a typed installation failure,
+not a default or retry interpretation. Invalid current consensus metadata preserves its decoder
+cause beneath a typed node-state recreation error.
+
+`ClusterParameterAdmissionError` distinguishes awaiting a live publication, awaiting local catch-up,
+and completing initialization. These are ordinary request refusals before policy-dependent work
+begins. A durable command projects this temporary absence into
+`OutcomeUnknown(NotYetAuthoritative)` because its reference may already name a committed execution;
+a read-only request can be refused definitively. An inconsistent equal-revision publication
+preserves its typed publication error. Public
+cluster inspection remains available while these refusals apply; transfer boundaries project the
+refusal into their existing installation, staging or read failure with its full message.
+
 ## Runtime Message Errors
 
 ### The Message Error Record
@@ -1879,6 +1903,12 @@ warning instead of inventing per-record rejections. An OTLP/gRPC export the rece
 retries, whatever code tonic reports for it. An answered status other than `INVALID_ARGUMENT`,
 `RESOURCE_EXHAUSTED` or a code the OTLP specification lists as retryable is a misconfiguration
 failure, which the host does not retry.
+
+The shared HTTP client builder adds `HttpClientConfigError::Tls` above the
+`TlsClientConfigError` the common rustls configuration owner returns. HTTP polling, Prometheus,
+Sentry and OTEL HTTP therefore retain that owner's CA-file or client-identity classification
+instead of rebuilding the TLS failure from text. Native-root loading remains the TLS owner's
+diagnostic; its bundled roots still permit client construction when the native store is empty.
 
 An HTTP polling request whose response exceeds `MAX BODY SIZE` fails that poll with a typed
 `ResponseTooLarge` cause. DNS, connection, TLS, response-body and timeout failures retain their
@@ -3325,26 +3355,10 @@ record. Renaming and grouping entity owners changes neither retry classification
 rendered at the boundary. The ingestor planner's input identity/kind errors cover client, endpoint
 and native schema references before composition.
 
-## Cluster Parameter Refusals
-
-Parameter definitions own positive duration and numeric range errors, and structured assignments
-own empty or duplicate-key refusals. The registry names the exact parameter, domain/model or
-resource, actual requirement and candidate maximum when a lowered cap cannot hold committed
-state. Consensus compares captured inputs and reports a typed stale-input conflict before any
-publication. Bootstrap seed refusal names the parameter and `ALTER CLUSTER SET`. A failed seed
-append is logged with its complete consensus report, including the typed causes beneath it.
-HTTP polling's literal header requirements use the same model-limit refusal as emitter headers;
-the header-count definition also refuses values beyond the native request map's capacity.
-
-A live publication that disagrees with an equal applied revision is a typed installation failure,
-not a default or retry interpretation. Invalid current consensus metadata preserves its decoder
-cause beneath a typed node-state recreation error.
-
-`ClusterParameterAdmissionError` distinguishes awaiting a live publication, awaiting local catch-up,
-and completing initialization. These are ordinary request refusals before policy-dependent work
-begins. A durable command projects this temporary absence into
-`OutcomeUnknown(NotYetAuthoritative)` because its reference may already name a committed execution;
-a read-only request can be refused definitively. An inconsistent equal-revision publication
-preserves its typed publication error. Public
-cluster inspection remains available while these refusals apply; transfer boundaries project the
-refusal into their existing installation, staging or read failure with its full message.
+RabbitMQ emitter property preparation preserves a typed refusal until the per-record reporting
+boundary. A short-string failure keeps the driver's typed cause below the property name and byte
+count; a timestamp refusal names the requirement for nonnegative whole Unix seconds. Neither
+renders the property value. The publisher projects these reports into the record's message-error
+outcome before transport and continues with representable neighbours. A wrong property name or
+type at this connector boundary remains a typed contract refusal; normal statements are already
+checked against the entity's declaration and exact types at `CREATE` and `ALTER`.

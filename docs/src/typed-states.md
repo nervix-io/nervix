@@ -643,6 +643,21 @@ interconnect's wire fingerprint fences it between nodes. Unrecognized stored sta
 and must be recreated. Complete equality properties exercise the production representations at
 their range boundaries; see [Property Testing And Fuzzing](./property-testing-and-fuzzing.md).
 
+## Parameter Authority and Installation
+
+`ClusterParameterValues` holds validated class-typed settings with a single definition for each
+default and bound. `ClusterParameterRecord` pairs them with a positive revision. The state machine
+has no record until first bootstrap; it never fills missing persisted fields from defaults.
+A node's gossip publication keeps committed and optional running records together and validates
+their revision/value relationship. A live construction record distinguishes pending catch-up from
+ready installation and rejects equal revisions with unequal values.
+
+The application shares one `NodeInitialization` publication between session admission, configured
+HTTP intake and readiness. Its private `OnceLock<()>` distinguishes initialization pending from
+completed and can publish completion once. This state is separate from the live construction
+record and quorum-confirmed runtime admission: policy can be caught up while initialization is
+still registering owners, and observation is available throughout.
+
 ## Atomic States On The Data Plane
 
 The bounded executor's worker has `Selected`, `Executing` and `Idle` states. `Selected` owns its
@@ -1174,17 +1189,10 @@ cannot be declared with a floating-point descriptor. Required, optional and requ
 presence are distinct vocabulary states. Opening an OTEL client validates its required positive
 deadline before constructing settings; the installed settings hold a duration with no absent state.
 
-## Parameter Authority and Installation
-
-`ClusterParameterValues` holds validated class-typed settings with a single definition for each
-default and bound. `ClusterParameterRecord` pairs them with a positive revision. The state machine
-has no record until first bootstrap; it never fills missing persisted fields from defaults.
-A node's gossip publication keeps committed and optional running records together and validates
-their revision/value relationship. A live construction record distinguishes pending catch-up from
-ready installation and rejects equal revisions with unequal values.
-
-The application shares one `NodeInitialization` publication between session admission, configured
-HTTP intake and readiness. Its private `OnceLock<()>` distinguishes initialization pending from
-completed and can publish completion once. This state is separate from the live construction
-record and quorum-confirmed runtime admission: policy can be caught up while initialization is
-still registering owners, and observation is available throughout.
+RabbitMQ emitter envelopes distinguish an absent timestamp from the Unix epoch: `None` omits the
+AMQP timestamp and `Some` of the epoch writes zero. Conversion accepts only nonnegative whole
+seconds representable by the transport; it never defaults, clamps or truncates a failed conversion.
+String properties retain their exact declared type and cross the AMQP short-string bound before a
+message is sent. Targeted emitter alterations represent setting and dropping persistence,
+timestamps and the whole property set as separate semantic operations, and preserve the envelope
+fields each operation does not address.
