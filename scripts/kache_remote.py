@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """The shared kache remote of a CI job: its configuration, its daemon and its publication.
 
-`configure PATH` writes the file every kache process reads: the remote, and the budget of the local
-store, a quarter of the volume that holds the cache directory.
+`configure PATH` writes the file every kache process reads: the remote, the budget of the local
+store, a quarter of the volume that holds the cache directory, and the store's index mode.
 
 `start` configures that remote and store for the current GitHub Actions job, prepares the store's
 disk, exports the environment later steps need, starts the job's daemon and fails unless the daemon
 runs with that remote.
 
-`prepare-index --memory DIR` and `restore-index` move kache's index into a tmpfs before any kache
-process opens it, and back once none has it open, for a builder whose store outlives the tmpfs.
 `lighten-volume PATH` remounts the ext4 volume holding PATH without access times and write
 barriers, for a volume no job step prepares through `start`, such as the image builder's.
 
@@ -240,20 +238,21 @@ class LocalStore:
 
     def configuration(self) -> str:
         """The store's table of the configuration file."""
-        return f"[cache]\nlocal_max_size = {toml_string(f'{self.max_size_gib}GiB')}\n"
+        return (
+            "[cache]\n"
+            f"local_max_size = {toml_string(f'{self.max_size_gib}GiB')}\n"
+            f"index_mode = {toml_string(INDEX_MODE)}\n"
+        )
 
 
 # A single-use runner's store needs no crash consistency: the machine and everything on it end with
 # the job. On Boat, kache's downloads spent most of their time waiting for the lock of its SQLite
-# index, whose holders wait on the disk, so a job keeps the index in memory and lets the other
-# writes on the store's volume skip the disk's write barrier.
-MEMORY_DIRECTORY = Path("/dev/shm")
-MEMORY_INDEX = "kache-index"
-# The index and the files SQLite keeps beside it in write-ahead-log mode. SQLite resolves a
-# symlinked database and keeps those files next to its target.
-INDEX_FILES = ("index.db", "index.db-wal", "index.db-shm")
-# The least free memory the index may move to.
-MEMORY_INDEX_FREE_BYTES = GIB
+# index, whose holders wait on the disk, so the index never synchronizes with the disk, which kache
+# selects only when told, and the other writes on the store's volume skip the disk's write barrier.
+# A killed process loses nothing either way; after a kernel crash or power loss kache quarantines
+# an index it finds corrupt and rebuilds it from the stored entries, which an image builder's
+# cache mount, the one store that outlives its job, may meet.
+INDEX_MODE = "off"
 SYSTEM_COMMAND_SECONDS = 30.0
 # What remounting the store's ext4 volume adds: no access-time writes, and no write barrier, so an
 # fsync returns once the device has the data instead of after its cache is flushed too.
@@ -309,22 +308,6 @@ class Mount:
         return cls(target=fields[0], filesystem=fields[1], options=tuple(fields[2].split(",")))
 
 
-def keep_index_in_memory(cache_dir: Path, memory: Path) -> str:
-    """Move kache's index into `memory` behind a symlink. Only before any kache process opens it."""
-    index = cache_dir / INDEX_FILES[0]
-    if index.is_symlink():
-        return f"kache's index already lives at {os.readlink(index)}."
-    directory = memory / MEMORY_INDEX
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    for name in INDEX_FILES:
-        source = cache_dir / name
-        if source.exists():
-            shutil.move(source, directory / name)
-    index.symlink_to(directory / INDEX_FILES[0])
-    return f"kache's index and its write-ahead log live in memory, in {directory}."
-
-
 def lighten_volume(path: Path, environment: Mapping[str, str]) -> str:
     """Remount the ext4 volume that holds `path` without access times and write barriers."""
     mount = Mount.holding(path, environment)
@@ -346,42 +329,11 @@ def lighten_volume(path: Path, environment: Mapping[str, str]) -> str:
     return f"{volume} is remounted with {','.join(remounted.options)}."
 
 
-def prepare_index(environment: Mapping[str, str], memory: Path) -> str:
-    """Keep the store's index in `memory` when it is a tmpfs with room for it, before any kache
-    process opens the index; say what was done."""
-    memory_mount = Mount.holding(memory, environment)
-    if memory_mount is None or memory_mount.filesystem != "tmpfs":
-        return f"kache's index stays on disk: {memory} is not a tmpfs."
-    if shutil.disk_usage(memory).free < MEMORY_INDEX_FREE_BYTES:
-        return f"kache's index stays on disk: {memory} has less than 1 GiB free."
-    return keep_index_in_memory(cache_directory(environment), memory)
-
-
-def restore_index(cache_dir: Path) -> str:
-    """Move kache's index from memory back into the cache directory, once no kache process has it
-    open, so a store that outlives the memory, such as an image builder's cache mount, keeps it."""
-    index = cache_dir / INDEX_FILES[0]
-    if not index.is_symlink():
-        return "kache's index is already in the cache directory."
-    target = cache_dir / os.readlink(index)
-    index.unlink()
-    if not target.exists():
-        return f"kache's index in memory, {target}, is gone; kache starts a new one in {cache_dir}."
-    for name in INDEX_FILES:
-        source = target.parent / name
-        if source.exists():
-            shutil.move(source, cache_dir / name)
-    return f"kache's index is back in {cache_dir}."
-
-
-def prepare_store(environment: Mapping[str, str], memory: Path = MEMORY_DIRECTORY) -> list[str]:
-    """Keep the store's index in memory and lighten its volume's writes, before the job's daemon
-    opens the index. Neither is required: a runner where one does not apply keeps kache's default,
-    and the lines returned say what was done."""
-    return [
-        prepare_index(environment, memory),
-        lighten_volume(cache_directory(environment), environment),
-    ]
+def prepare_store(environment: Mapping[str, str]) -> list[str]:
+    """Lighten the store's volume's writes before the job's daemon opens the store. It is not
+    required: a runner where it does not apply keeps the volume's options, and the lines returned
+    say what was done."""
+    return [lighten_volume(cache_directory(environment), environment)]
 
 
 @dataclass(frozen=True)
@@ -1043,11 +995,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_parser = commands.add_parser("configure", help="write the configuration file of kache's remote and store")
     configure_parser.add_argument("path", type=Path)
     commands.add_parser("start", help="configure the job's remote and start its kache daemon")
-    prepare_parser = commands.add_parser(
-        "prepare-index", help="keep kache's index in a tmpfs before any kache process opens it"
-    )
-    prepare_parser.add_argument("--memory", type=Path, required=True)
-    commands.add_parser("restore-index", help="move kache's index back into its cache directory")
     lighten_parser = commands.add_parser(
         "lighten-volume", help="remount the ext4 volume holding a path without access times and write barriers"
     )
@@ -1065,10 +1012,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             Configuration(store=store, remote=remote).write(arguments.path)
         elif arguments.command == "start":
             start(environment)
-        elif arguments.command == "prepare-index":
-            print(prepare_index(environment, arguments.memory), flush=True)
-        elif arguments.command == "restore-index":
-            print(restore_index(cache_directory(environment)), flush=True)
         elif arguments.command == "lighten-volume":
             print(lighten_volume(arguments.path, environment), flush=True)
         else:

@@ -604,7 +604,7 @@ including their instrumented builds. Coverage flags do not replace Wild linker s
 The suite has one pool of **run slots**. Its size is the number of CPUs times the concurrency
 factor, set by `NERVIX_TEST_CONCURRENCY_FACTOR` or `--concurrency-factor` and `1` by default;
 `--concurrency` sets an absolute slot count. Each CI `scenarios` shard uses factor `3`, so its
-16-CPU runner has 48 slots. Cucumber may take up all parsed scenarios without charging a slot.
+8-CPU runner has 24 slots. Cucumber may take up all parsed scenarios without charging a slot.
 
 The slots are the suite's capacity, and the measurement of 26 October 2026 set their number. Over
 the retained artifacts of 20 Check runs, an ordinary run of one inventory of about 3,620 attempts
@@ -627,11 +627,13 @@ that thread ran on a CPU for 86 percent of the run, every scenario took about 1.
 median across the factor `3` runs, and the run needed 279,439 slot-seconds where 48 slots had
 needed at most 215,000. More slots added no throughput, so the job keeps factor `3`. Memory was no
 limit on those runs' runner, which used at most 28 GiB of its 62. The archive build runs on
-`blacksmith-16vcpu-ubuntu-2404`, and its unit-test and scenario readers on `boat-xlarge`, whose
-32 GB and 4 GB of swap stay above that peak with less to spare. Each scenario shard keeps 16 CPUs,
-48 slots and every product and harness deadline. A Boat runner can lose a fifth of its CPU to its host: in Check 41157008321 two of three
-shards averaged 18% and 20% CPU steal with 54 and 64 retries, and the third averaged 0.9% with one.
-The runner load record shows how close a run comes on memory and how much CPU it lost.
+`blacksmith-16vcpu-ubuntu-2404`, the unit tests on GitHub's hosted `ubuntu-24.04`, and the scenario shards on
+`blacksmith-8vcpu-ubuntu-2404`, whose 32 GB give each of its 24 slots the memory that runner gave
+each of 48. Each of the three shards keeps every product and harness deadline on 8 CPUs and 24
+slots, half the slots a 16-CPU shard held, so a shard takes about twice as long. The shards left Boat because a Boat
+runner can lose a fifth of its CPU to its host: in Check 41157008321 two of three shards averaged
+18% and 20% CPU steal with 54 and 64 retries, and the third averaged 0.9% with one. The runner load
+record shows how close a run comes on memory and how much CPU it lost.
 
 Admission grants feature capacity and the attempt's share of the run slots in one decision, after
 both are available. A scenario holds both through the end of teardown. The `@slots_N` tag declares
@@ -644,14 +646,16 @@ An attempt holds the larger of its declared weight and its retry share, capped a
 pool, rounded down, and at least one slot. A weight above the pool's capacity therefore still
 admits in a small local run. In a 48-slot pool, weight four holds four slots on the first attempt
 and first retry, and six on the second retry; a weight above twelve holds twelve on every attempt.
+In a CI shard's 24-slot pool, weight four holds four slots on every attempt, and a weight above six
+holds six.
 Pools of one, two or three slots give every attempt one. The cap preserves concurrent admission;
 no weight makes a scenario exclusive.
 
 A retry can hold a larger share, so it runs beside fewer scenarios than the run that failed. The first
 retry holds a sixteenth of the pool, and each later retry holds twice the share of the run before
 it. With Cucumber's two retries, the second retry holds an eighth, so an unweighted scenario's
-shares are 1, 3 and 6 of CI's 48 slots. Every run holds at least one slot, so a pool of fewer than
-sixteen slots gives its first retry one. A run past the configured retries, as a `--retry` override
+shares are 1, 1 and 3 of a CI shard's 24 slots, and 1, 3 and 6 of a 48-slot pool. Every run holds
+at least one slot, so a pool of fewer than sixteen slots gives its first retry one. A run past the configured retries, as a `--retry` override
 allows, keeps the last retry's share. An eligible attempt whose share is not yet free keeps the
 slots that free up until its share fits. This applies to weighted first attempts as well as
 retries: smaller attempts behind it cannot consume those slots one at a time and starve it.
@@ -795,8 +799,9 @@ physical SSD latency. Reported MHz and cpufreq policy values do not measure effe
 clocks. Low steal alone does not show a host is fast: CPU execution, cache/memory contention and
 storage can slow work without stolen time. The samples support comparison, not a specific cause.
 
-Every kache-backed job uses kache 1.2.2, records `doctor` output without making it a test failure,
-and publishes a cache report whatever its outcome, a timeout included. The report reads the last six
+Every kache-backed job uses kache 2.0.0, records `doctor` output without making it a test failure,
+and publishes a cache report whatever its outcome, a timeout included. The report names the index
+mode the job's configuration selects. The report reads the last six
 hours of kache's events for every build on the machine: no kache-backed job may run longer, and each
 runs on a machine of its own, so the report covers the whole job, its tool builds included, and
 nothing before it. Filtering by the checkout's build tree would also drop the remote transfers,
@@ -841,10 +846,7 @@ holds every kache-backed job and Docker image build to the bucket of its `runs-o
 kache-backed job passes its bucket's settings, as kache's `KACHE_S3_*` environment variables, to
 `python3 scripts/kache_remote.py start` right after the setup action. Docker image builds pass the
 same settings to their builder, whose build command runs `scripts/kache_remote.py configure` before
-it starts the daemon. The build step also mounts a tmpfs at `/kache-index`: `prepare-index` moves
-the store's index into it before the daemon starts, and the step's exit trap runs `restore-index`
-once the daemon has stopped, moving the index back into the BuildKit cache mount, which outlives the
-step. Before the build, the job's `Lighten the build volume` step remounts the ext4 volume holding
+it starts the daemon. Before the build, the job's `Lighten the build volume` step remounts the ext4 volume holding
 Docker's root directory, where BuildKit keeps that cache mount, with `noatime` and `barrier=0`, as
 the start step does for the store of every other kache-backed job. Either way the service URL is
 written into the daemon's TOML configuration before startup.
@@ -874,23 +876,26 @@ builds. Within the budget the daemon applies its normal eviction while the compi
 shared remote stay enabled. The `Start kache remote` step that follows the action:
 
 1. writes the daemon's configuration, `$RUNNER_TEMP/kache-remote.toml`, with the local store's
-   budget and the bucket, region, service URL, base prefix and pull-request prefix. The credentials
-   stay in the environment.
+   budget, its index mode and the bucket, region, service URL, base prefix and pull-request prefix.
+   The credentials stay in the environment. Nothing on a single-use runner needs to survive a
+   crash, and on Boat kache's downloads spent most of their time waiting for the lock of its SQLite
+   index, whose holders wait on the disk, so the configuration sets `index_mode = "off"`: SQLite
+   never synchronizes the index with the disk. Kache selects that mode only when a configuration
+   names it, in CI as well. A killed process loses nothing in either mode; after a kernel crash or
+   power loss kache quarantines an index it finds corrupt and rebuilds it from the stored entries,
+   best effort. The Docker builder writes the same configuration, so its index, in a BuildKit cache
+   mount that can outlive the job on a builder that persists, follows the same mode, and the
+   report's `kache doctor` output shows the mode each process applies.
 2. exports `KACHE_CONFIG`, the credentials, and the job's `KACHE_MANIFEST_KEY` and
    `KACHE_NAMESPACE` to the job's later steps. A matrix job's key includes its matrix value, so
    every build variant keeps its own manifest and shards. `scenarios-build` keeps the key
    `scenarios-<os>-<arch>` it had before the suite split into shards, also for the unit tests it
    builds now: a key with no manifest starts a job with nothing to prefetch.
-3. prepares the store before any kache process opens it. Nothing on a single-use runner needs to
-   survive a crash, and on Boat kache's downloads spent most of their time waiting for the lock of
-   its SQLite index, whose holders wait on the disk. When `/dev/shm` is a tmpfs with at least a GiB
-   free, the step moves the index, with the write-ahead log and shared-memory files SQLite keeps
-   beside it, into `/dev/shm/kache-index` and leaves a symlink in the cache directory; SQLite
-   resolves the symlink and keeps those files next to its target, so the index never touches the
-   disk. When the store's volume is ext4, the step remounts it with `noatime` and `barrier=0`
-   through passwordless `sudo`, so an fsync returns once the device has the data instead of after
-   its cache is flushed too. A runner where either step does not apply, or where it fails, keeps
-   kache's default, and the step prints what it did.
+3. prepares the store before any kache process opens it. When the store's volume is ext4, the
+   step remounts it with `noatime` and `barrier=0` through passwordless `sudo`, so an fsync of the
+   store's other writes returns once the device has the data instead of after its cache is flushed
+   too. A runner where that does not apply, or where it fails, keeps the volume's options, and the
+   step prints what it did.
 4. starts the daemon, and fails the job unless `kache --json daemon status` reports it running with
    that file and `kache --json stats` reports that the file names `s3://<bucket>/artifacts`. A
    daemon gets a minute to answer, polled every two seconds, because a loaded runner can start it
@@ -911,7 +916,7 @@ lock, so Cargo recognizes it for guarded cleanup. Later phases rebuild any requi
 through the configured cache.
 
 Native CI jobs and the BuildKit builder also set `KACHE_AUTO_RECOVER_MIN_FREE_BYTES=68719476736`
-(64 GiB). Kache 1.2.2 otherwise disables free-space recovery in CI. This floor enables reclamation
+(64 GiB). Kache 2.0.0 otherwise disables free-space recovery in CI. This floor enables reclamation
 of eligible cached artifacts when free space falls below it, while the cache budget above scales
 with the actual cache filesystem. Artifacts still shared with active build targets are retained;
 target-directory recovery stays disabled. The floor is a trigger checked at kache's existing
@@ -3143,11 +3148,10 @@ for one build at a time, so the recipe builds each helper beside the suite in a 
 below `target/llvm-cov-tools`, and then installs it into the target directory of `cargo llvm-cov`. `scripts/scenario_shards.py`
 names what the archive holds: every executable `cargo llvm-cov report` reads as an object, the
 Playwright driver whose path the scenario executable holds, the ONNX fixtures and runtime, and the
-WASM guests. Each `scenarios (I of N)` job checks out the same revision and bind-mounts it at the
-path the build publishes, which the executables' absolute paths require, because the build and the
-shards run on different providers. It then restores the archive from there with
-`just test-scenarios-coverage-unpack`. The restore refuses an archive of another revision or
-checkout path, a file restored at another size, and an executable whose shared libraries the runner
+WASM guests. Each `scenarios (I of N)` job checks out the same revision on the build's provider,
+at the path the build checked out, which the executables' absolute paths require. It then restores
+the archive there with `just test-scenarios-coverage-unpack`. The restore refuses an archive of
+another revision or checkout path, a file restored at another size, and an executable whose shared libraries the runner
 lacks, before any scenario starts. Before it, the shard remounts the ext4 volumes holding `/tmp`,
 where its nodes sync their storage, and the checkout with `noatime` and `barrier=0`, as the build
 job's kache start step remounts its store's volume: a single-use runner needs no crash consistency. The shard then runs `just test-scenarios-coverage-shard I/N`. A
@@ -3171,9 +3175,10 @@ also has a different effective cap in different local slot pools, so it is not a
 
 `SCENARIO_SHARDS` in the Check workflow sets the number of shards, and `scenarios-build` turns it
 into the shards' matrix. In that run, a third of the 240,698 slot-seconds of work fills 48 slots
-for 28.5 minutes, while the longest attempt ran for 37.5 minutes, so the longest attempt bounds a
-shard of three. More shards shorten each shard's work but not that attempt; fewer make each shard
-longer, and the suite budget below assumes three. Each shard uploads its own coverage report,
+for 28.5 minutes and a shard's 24 slots for 57 minutes, while the longest attempt ran for 37.5
+minutes, so on 24 slots a shard of three is bounded by its work rather than by that attempt. More
+shards shorten each shard's work down to that attempt; fewer make each shard longer, and the suite
+budget below assumes three shards of 24 slots. Each shard uploads its own coverage report,
 `coverage-scenarios-<I>`, its logs, `scenario-logs-<I>`, and its runner load. The coverage job
 merges the report of every shard the workflow runs and fails when one is missing. A shard's suite
 summary names the shard, and its standard output and scenario log name how many of the runs it read
