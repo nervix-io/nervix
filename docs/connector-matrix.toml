@@ -30,7 +30,7 @@ properties = "This entity declares no typed PROPERTIES block; any encoded record
 [entity."MQTT TOPIC"]
 emit_headers = "A publication carries its topic, payload and quality of service; this implementation writes no MQTT 5 user property on it."
 envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
-mirror = "Subscription options select the session and inbound QoS; emitter QoS is part of its publishing mode. Ingestion reads a delivered publish's MQTT 5 properties and user properties; publication writes neither."
+mirror = "Subscription options select the session and inbound QoS, and the emitter's QOS option its outbound QoS. Ingestion reads a delivered publish's MQTT 5 properties and user properties; publication writes neither."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."NATS SUBJECT"]

@@ -2066,7 +2066,7 @@ Ordinary `STOP`, reconnect and ownership transfer retain persistent broker sessi
 `SUSPEND` is valid only with `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. CREATE refuses any other
 pairing with `MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT and QOS 1 or 2`, underlining
 `SUSPEND`. An unsupported QoS number is refused with the supplied value and the accepted ingestor
-levels, such as `MQTT ingestor QOS must be 0, 1 or 2, found 3`. Completion offers only the
+levels, such as `MQTT QOS must be 0, 1 or 2, found 3`. Completion offers only the
 session's valid quiesce choices.
 
 `SUSPEND` disconnects while asking the broker to

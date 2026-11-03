@@ -114,7 +114,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | MQTT TOPIC | Compare `MQTT TOPIC`: locator, options, modes, headers, ingest metadata. Subscription options select the session and inbound QoS; emitter QoS is part of its publishing mode. Ingestion reads a delivered publish's MQTT 5 properties and user properties; publication writes neither. |
+| Entity | MQTT TOPIC | Compare `MQTT TOPIC`: locator, options, modes, headers, ingest metadata. Subscription options select the session and inbound QoS, and the emitter's QOS option its outbound QoS. Ingestion reads a delivered publish's MQTT 5 properties and user properties; publication writes neither. |
 | Reference | MQTT client |  |
 | Locator and validation rule | TOPIC 'devices/+/orders' (mqtt_topic_filter) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2)<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2) |  |
@@ -463,11 +463,11 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | MQTT TOPIC | Compare `MQTT TOPIC`: locator, options, modes, headers. Subscription options select the session and inbound QoS; emitter QoS is part of its publishing mode. Ingestion reads a delivered publish's MQTT 5 properties and user properties; publication writes neither. |
+| Entity | MQTT TOPIC | Compare `MQTT TOPIC`: locator, options, modes, headers. Subscription options select the session and inbound QoS, and the emitter's QOS option its outbound QoS. Ingestion reads a delivered publish's MQTT 5 properties and user properties; publication writes neither. |
 | Reference | MQTT client |  |
 | Locator and validation rule | TOPIC 'devices/Orders' (mqtt_topic) |  |
-| Modes (complete bodies after MODE) | QOS 0 RETRY POLICY BACKOFF 1s MAX 30s<br>QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>QOS 2 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
-| Options in statement order | No entity-specific options. |  |
+| Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 0)<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 1 or 2) |  |
+| Options in statement order | `QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |  |
 | Headers | Not offered: A publication carries its topic, payload and quality of service; this implementation writes no MQTT 5 user property on it. |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
 | BATCH | optional |  |
@@ -475,9 +475,9 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Batch transformation required | no |  |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
-| Buffers | publishes queued for the driver: set by 1 under QOS 0, ACK PARALLEL MAX under QOS 1 and 2; when full, fails the publish for the host to retry |  |
+| Buffers | publishes queued for the driver: set by 1 under NO ACK and ACK SEQUENTIAL, ACK PARALLEL MAX under ACK PARALLEL; when full, fails the publish for the host to retry |  |
 | Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>answers to QOS 1 and 2 publishes: `ACK TIMEOUT`<br>writes to the connection: unbounded<br>a silent connection: client key `keep_alive_ms`; two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 s when omitted |  |
-| Driver limits | Packets above the broker's maximum packet size are rejected. |  |
+| Driver limits | Packets above the broker's maximum packet size are rejected.<br>QOS 0 connects a clean session; QOS 1 and 2 connect a persistent one with the maximum Session Expiry Interval, and SESSION is not an emitter option: a publisher without acknowledgement needs no session, and an acknowledged one always keeps it.<br>The client resumes its own session across reconnects, and a new client is refused while the broker keeps a session under its identity, since it holds no state to resume it with. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### NATS SUBJECT emit
