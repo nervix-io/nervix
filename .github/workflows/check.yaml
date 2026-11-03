@@ -11,13 +11,14 @@ env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   # scripts/kache_remote.py lets each job's local store hold a quarter of its cache volume, so a
   # runner's disk still sets the store's budget.
-  KACHE_VERSION: "1.2.2"
+  KACHE_VERSION: "2.0.0"
   KACHE_REMOTE_KEY_LISTING: "false"
   # Kache disables free-space recovery in CI unless a decimal-byte floor is explicit: 64 GiB.
   KACHE_AUTO_RECOVER_MIN_FREE_BYTES: "68719476736"
   TINYGO_VERSION: "0.41.1"
   # How many shards run the scenario suite: scenarios-build plans a matrix of this many, and each
   # shard runs its share of the scenario runs. More shards shorten each shard down to its longest
+  # scenario; see the shards in docs/src/integration-test-lifecycle.md.
   SCENARIO_SHARDS: "3"
 
 permissions:
@@ -775,7 +776,7 @@ jobs:
       contents: read
     outputs:
       shards: ${{ steps.shards.outputs.shards }}
-      # The jobs that restore the archives run on another provider, at this path.
+      # The tests job restores its archive on another provider, at this path.
       checkout: ${{ github.workspace }}
     env:
       NO_COLOR: "1"
@@ -1035,7 +1036,7 @@ jobs:
   # the scenario executable's --shard option deals out. SCENARIO_SHARDS sets how many shards run.
   # A shard compiles nothing, so it needs neither the build's toolchain setup nor the cache.
   # The scenarios are timing sensitive, so the shards run on Blacksmith, where the build runs and
-  # its checkout path is theirs too: Boat's runners lost up to half their CPU to their hosts.
+  # its checkout path is theirs too: Boat's runners lost up to 58% of their CPU to their hosts.
   scenarios:
     name: scenarios (${{ matrix.shard }} of ${{ strategy.job-total }})
     needs: [scenarios-build]
@@ -1077,8 +1078,7 @@ jobs:
         with:
           tool: just@latest,cargo-llvm-cov
 
-      # Boat's own Node.js comes from nvm, which a job's shell may not load, so a global install
-      # goes into the Node.js this step pins instead.
+      # Playwright's global install goes into the Node.js this step pins.
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -1101,16 +1101,6 @@ jobs:
       # The nodes a scenario starts sync their storage below /tmp. A single-use runner needs no crash
       # consistency, so the volumes holding it and the checkout drop their write barriers, as the
       # build job's kache start step drops them for its store.
-      # The archives restore only at the checkout path they were built in, and Blacksmith's differs
-      # from Boat's, so this checkout also appears at the build's path. A bind mount, unlike a
-      # symbolic link, keeps that path through `pwd -P` and the path of a running executable.
-      - name: Mount the checkout at the build's path
-        env:
-          BUILD_CHECKOUT: ${{ needs.scenarios-build.outputs.checkout }}
-        run: |
-          sudo mkdir -p "${BUILD_CHECKOUT}"
-          sudo mount --bind "${GITHUB_WORKSPACE}" "${BUILD_CHECKOUT}"
-
       - name: Lighten the scenario volume
         run: |
           python3 scripts/kache_remote.py lighten-volume /tmp
@@ -1138,13 +1128,11 @@ jobs:
           path: ${{ runner.temp }}/scenario-suite
 
       - name: Restore the scenario suite
-        working-directory: ${{ needs.scenarios-build.outputs.checkout }}
         run: |
           just test-scenarios-coverage-unpack "${RUNNER_TEMP}/scenario-suite/scenario-suite.tar.zst"
           rm "${RUNNER_TEMP}/scenario-suite/scenario-suite.tar.zst"
 
       - name: Scenario coverage
-        working-directory: ${{ needs.scenarios-build.outputs.checkout }}
         env:
           SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
         run: just test-scenarios-coverage-shard "${SHARD}"

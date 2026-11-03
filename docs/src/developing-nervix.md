@@ -314,23 +314,22 @@ enough Clippy compilations to pass the runner's 32 GB and one was killed. The ty
 admission queue admits its server analyses as if nothing else ran: beside the lints, the kernel's
 out-of-memory killer ended the ratchet's Shuttle analysis of the server in Check 41066649586.
 
-Each package and configuration is a separate parallel dependency of one shared Clippy recipe.
-The `[parallel]` groups map package lists onto that recipe, including the packages checked with
-`--all-features` and the compiler tooling packages. Feature, target, profile and compiler selections
-stay separate, so mutually exclusive execution modes never share a Cargo invocation.
-
-Clippy builds in sixteen directories, `clippy/0` to `clippy/f` beneath `CARGO_TARGET_DIR`, or the
-repository's `target` directory when that variable is unset. The last hexadecimal digit of the
-SHA-256 of a configuration's package, Cargo arguments and toolchain selects its directory, so each
-run of a configuration returns to the directory that holds its artifacts. The configurations in a
-directory share the dependencies they build, build scripts included, and Cargo keeps the artifacts
-of different features, profiles, targets and flags, and of the stable and nightly compilers, apart
-there. Configurations in the same directory take turns on its build directory lock, so two of them
-selected at once run one after the other; sixteen directories let up to sixteen build at once, where
-four left a 16-CPU runner mostly idle behind the server's long compilations. Nothing deletes these
-directories, locally or on CI: the sixteen of them bound what a lint leaves on disk. `just
-cargo-clippy-package <package> [arguments ...]` runs a focused check of all targets through the same
-recipe. The compiler driver builds keep their separate `typed-ratchet/driver` directory. All builds
+Each package and configuration is a dependency of one shared Clippy recipe, and the configurations
+run in lanes. A lane holds the configurations that can reuse one another's build artifacts: one
+execution mode, one target and compiler, and packages that share most of their dependency graph,
+such as the Plexus language and its clients, the vocabulary and engines below them, the server with
+the cluster's network stack, the connectors of HTTP and database services, and those of message
+brokers. Mutually exclusive execution modes never share a Cargo invocation or a lane. A lane runs
+its configurations one after another in its own directory beneath `CARGO_TARGET_DIR`, or the
+repository's `target` directory when that variable is unset, at `clippy/<lane>`, so each finds fresh
+what the configurations before it compiled alike, build scripts included. Lanes run in parallel, as
+many at once as the job limit allows, and no configuration waits for another lane's build directory
+lock or holds a job slot while it waits; the longest lane bounds a run, so a lane that outgrows the
+others splits along its dependency families. Nothing deletes these directories, locally or on CI:
+the lanes bound what a lint leaves on disk. `just cargo-clippy-package <package> [arguments ...]`
+runs a focused check of all targets through the same recipe, in a `clippy/package` directory that
+repeated focused checks share. The compiler driver builds keep their separate `typed-ratchet/driver`
+directory, and the compiler tooling's own Clippy lane builds on the analysis nightly. All builds
 retain the configured kache wrapper. Cargo's compiler job limit applies separately within each
 invocation.
 
