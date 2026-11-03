@@ -313,12 +313,28 @@ pub fn sequential_ack_window<'src>()
 /// The positive bound in `PARALLEL MAX <n>`, shared by ingestor and emitter modes.
 pub fn parallel_ack_window<'src>()
 -> impl Parser<'src, &'src [Token], NonZeroU64, extra::Err<ParseError<'src>>> + Clone {
+    parallel_ack_window_of(parallel_max_count())
+}
+
+/// The `n` of `PARALLEL MAX <n>`: any positive count.
+pub fn parallel_max_count<'src>()
+-> impl Parser<'src, &'src [Token], NonZeroU64, extra::Err<ParseError<'src>>> + Clone {
+    nonzero_u64_value(
+        "max_in_flight",
+        "parallel max in-flight must be greater than zero",
+    )
+}
+
+/// `PARALLEL MAX <n>` whose `n` `count` reads. An entity whose transport bounds the window more
+/// narrowly than any positive count reads `n` with that bound, so a larger `n` is refused where it
+/// is written: past the point where every other mode's alternative fails, so the refusal names the
+/// bound rather than another mode.
+pub fn parallel_ack_window_of<'src, T: 'src>(
+    count: impl Parser<'src, &'src [Token], T, extra::Err<ParseError<'src>>> + Clone + 'src,
+) -> impl Parser<'src, &'src [Token], T, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Parallel)
         .ignore_then(kw(Identifier::Max))
-        .ignore_then(nonzero_u64_value(
-            "max_in_flight",
-            "parallel max in-flight must be greater than zero",
-        ))
+        .ignore_then(count)
         .boxed()
 }
 

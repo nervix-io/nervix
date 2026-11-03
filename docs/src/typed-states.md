@@ -62,6 +62,11 @@ required, validates it there, and passes the resulting typed value to the next l
 the registry, execution plans, runtime, clients, and diagnostics from assigning different meanings
 to the same raw value.
 
+Materialized relay inspection requires the payload schema and resolved branching from its
+captured schedule. Incomplete scheduled metadata is an inspection failure, never an empty
+sensitivity set. The prepared sensitivity governs local, stored and remote record rendering;
+the declared unbranched variant has no concrete key to render.
+
 A backup cut's active phase is a typed state. Its completed phase measurements are an ordered
 sequence of typed phases and durations; an empty sequence means the first phase is still active.
 These task-owned measurements are volatile diagnostics and do not enter stored configuration,

@@ -1,85 +1,14 @@
-//! What became of a command: `nx_outcome`.
+//! `nx_outcome`: what became of a command, as a host reads it.
 //!
-//! - **Owns.** The dispositions the header names and reading an outcome's message, diagnostics,
-//!   execution reference, opened subscription, backup archive and restore report.
-//! - **Depends on.** The Rust client's command outcome.
+//! - **Owns.** Reading an outcome's disposition, message, diagnostics, execution reference,
+//!   opened subscription, backup archive and restore report, and freeing it.
+//! - **Depends on.** The shared outcome, the Rust client's command outcome, the schema handle and
+//!   the C ABI boundary.
 //! - **Must not know.** How the command was sent, retried or redirected.
 
-use arch_into::ArchInto as _;
-use meticulous::OptionExt as _;
-use nervix_client_core::{CommandDisposition, CommandOutcome, RestoreMode};
-use nervix_primitives::sync::Arc;
+use nervix_client_host::{Disposition, Failure, FailureKind, Outcome, Schema};
 
-use crate::{
-    abi,
-    failure::{Failure, FailureKind},
-    schema::Schema,
-};
-
-/// What became of a command, with the header's values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i32)]
-pub enum Disposition {
-    Completed = 1,
-    Failed = 2,
-    NotLeader = 3,
-    TransactionDetached = 4,
-    TransactionTakenOver = 5,
-    OutcomeUnknown = 6,
-    ExecutionReferenceConflict = 7,
-    ExecutionReferenceExpired = 8,
-    PreviewStale = 9,
-}
-
-impl From<&CommandDisposition> for Disposition {
-    fn from(disposition: &CommandDisposition) -> Self {
-        match disposition {
-            CommandDisposition::Completed { .. } => Self::Completed,
-            CommandDisposition::Failed => Self::Failed,
-            CommandDisposition::NotLeader(_) => Self::NotLeader,
-            CommandDisposition::TransactionDetached { .. } => Self::TransactionDetached,
-            CommandDisposition::TransactionTakenOver { .. } => Self::TransactionTakenOver,
-            CommandDisposition::OutcomeUnknown(_) => Self::OutcomeUnknown,
-            CommandDisposition::ExecutionReferenceConflict(_) => Self::ExecutionReferenceConflict,
-            CommandDisposition::ExecutionReferenceExpired => Self::ExecutionReferenceExpired,
-            CommandDisposition::PreviewStale { .. } => Self::PreviewStale,
-        }
-    }
-}
-
-/// A command's outcome, and the schema of the subscription it opened, when it opened one.
-#[derive(Debug, Clone)]
-pub struct Outcome {
-    outcome: CommandOutcome,
-    schema: Option<Schema>,
-}
-
-impl Outcome {
-    pub(crate) fn new(outcome: CommandOutcome) -> Self {
-        let schema = outcome
-            .subscription
-            .as_ref()
-            .map(|opened| Schema::new(Arc::new(opened.schema.clone())));
-        Self { outcome, schema }
-    }
-
-    pub fn disposition(&self) -> Disposition {
-        Disposition::from(&self.outcome.disposition)
-    }
-
-    pub fn command(&self) -> &CommandOutcome {
-        &self.outcome
-    }
-
-    fn schema(&self) -> Result<&Schema, Failure> {
-        self.schema.as_ref().ok_or_else(|| {
-            Failure::new(
-                FailureKind::InvalidArgument,
-                "the command did not open a subscription",
-            )
-        })
-    }
-}
+use crate::abi;
 
 /// # Safety
 ///
@@ -102,7 +31,7 @@ pub unsafe extern "C" fn nx_outcome_message(
     // SAFETY: the header requires a live outcome and writable out-parameters.
     unsafe {
         let outcome = abi::accessor(outcome);
-        abi::write_bytes(message, message_len, outcome.outcome.message.as_bytes());
+        abi::write_bytes(message, message_len, outcome.command().message.as_bytes());
     }
 }
 
@@ -117,7 +46,7 @@ pub unsafe extern "C" fn nx_outcome_execution_reference(
 ) -> bool {
     // SAFETY: the header requires a live outcome.
     let outcome = unsafe { abi::accessor(outcome) };
-    let Some(execution_reference) = &outcome.outcome.execution_reference else {
+    let Some(execution_reference) = &outcome.command().execution_reference else {
         return false;
     };
     // SAFETY: the header requires writable out-parameters.
@@ -137,7 +66,10 @@ pub unsafe extern "C" fn nx_outcome_execution_reference(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nx_outcome_diagnostic_count(outcome: *const Outcome) -> usize {
     // SAFETY: the header requires a live outcome.
-    unsafe { abi::accessor(outcome) }.outcome.diagnostics.len()
+    unsafe { abi::accessor(outcome) }
+        .command()
+        .diagnostics
+        .len()
 }
 
 /// # Safety
@@ -173,7 +105,7 @@ unsafe fn write_diagnostic(
 ) -> Result<(), Failure> {
     // SAFETY: the caller guarantees a live outcome.
     let outcome = unsafe { abi::handle(outcome, "outcome") }?;
-    let diagnostics = &outcome.outcome.diagnostics;
+    let diagnostics = &outcome.command().diagnostics;
     let Some(diagnostic) = diagnostics.get(index) else {
         return Err(Failure::new(
             FailureKind::InvalidArgument,
@@ -207,7 +139,7 @@ pub unsafe extern "C" fn nx_outcome_subscription(
 ) -> bool {
     // SAFETY: the header requires a live outcome.
     let outcome = unsafe { abi::accessor(outcome) };
-    let Some(opened) = &outcome.outcome.subscription else {
+    let Some(opened) = &outcome.command().subscription else {
         return false;
     };
     // SAFETY: the header requires writable out-parameters.
@@ -230,7 +162,7 @@ pub unsafe extern "C" fn nx_outcome_backup(
 ) -> bool {
     // SAFETY: the header requires a live outcome.
     let outcome = unsafe { abi::accessor(outcome) };
-    let Some(summary) = &outcome.outcome.backup else {
+    let Some(summary) = &outcome.command().backup else {
         return false;
     };
     // SAFETY: the header requires writable out-parameters.
@@ -255,27 +187,16 @@ pub unsafe extern "C" fn nx_outcome_restore(
 ) -> bool {
     // SAFETY: the header requires a live outcome.
     let outcome = unsafe { abi::accessor(outcome) };
-    let Some(report) = &outcome.outcome.restore else {
+    let Some(summary) = outcome.restore_summary() else {
         return false;
     };
-    let mut version_count = 0_u64;
-    let mut model_count = 0_u64;
-    for domain in &report.domains {
-        version_count = version_count
-            .checked_add(domain.resource_versions)
-            .assured("a report's versions are counted from lists a node held in memory");
-        model_count = model_count
-            .checked_add(domain.models)
-            .assured("a report's models are counted from lists a node held in memory");
-    }
-    let domain_count: u64 = report.domains.len().arch_into();
     // SAFETY: the header requires writable out-parameters.
     unsafe {
-        abi::write(dry_run, report.mode == RestoreMode::DryRun);
-        abi::write(domains, domain_count);
-        abi::write(resource_versions, version_count);
-        abi::write(models, model_count);
-        abi::write(failed, report.failed_step().is_some());
+        abi::write(dry_run, summary.dry_run);
+        abi::write(domains, summary.domains);
+        abi::write(resource_versions, summary.resource_versions);
+        abi::write(models, summary.models);
+        abi::write(failed, summary.failed);
     }
     true
 }
