@@ -270,12 +270,16 @@ pub(super) fn stream(batch: &SharedBatch) -> Vec<u8> {
 fn delivered(schema: &Schema, ipc: Vec<u8>) -> SharedBatch {
     let mut reader =
         StreamReader::try_new(Cursor::new(ipc.clone()), None).assured("a written stream opens");
-    let batch = reader
+    let rows = reader
         .next()
         .assured("a written stream holds a batch")
-        .assured("a written batch decodes");
+        .assured("a written batch decodes")
+        .num_rows();
     assert!(reader.next().is_none(), "a written stream holds one batch");
-    SharedBatch(Batch::decoded(batch, schema.clone(), Bytes::from(ipc)).into_shared())
+    let rows = u32::try_from(rows).assured("a test batch holds few rows");
+    let batch = Batch::decode(Bytes::from(ipc), schema.clone(), rows)
+        .assured("a written stream decodes as a delivery's would");
+    SharedBatch(crate::abi::into_shared(batch))
 }
 
 fn native<const WIDTH: usize>(values: impl IntoIterator<Item = [u8; WIDTH]>) -> Vec<u8> {

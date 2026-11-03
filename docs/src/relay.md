@@ -343,7 +343,10 @@ scheduler-selected state replicas before the materialized entries or empty-state
 partitioned relay reports its partitions instead of one owner, as `DESCRIBE RELAY` does, and gathers
 each partition's entries from its owner. Each
 entry keeps its typed branch key through collection and renders it at this reporting boundary;
-unbranched entries render as `key=(root)`. An entry's payload is written as JSON, which has no
+fields declared `SENSITIVE` in the relay schema and in the branch-key schema render as
+`"<masked>"`, using the same policy as session subscriptions. Non-sensitive fields retain their
+values. This applies both on the relay owner and when another node reads its state. Unbranched
+entries render as `key=(root)`. An entry's payload is written as JSON, which has no
 number for a NaN or an infinity, so a float field holding one is written as the string `NaN`,
 `Infinity` or `-Infinity`. A record holds one when a payload's number rounds past its `F32` field's
 range, or when an Avro payload or a producer's Arrow batch carries one.

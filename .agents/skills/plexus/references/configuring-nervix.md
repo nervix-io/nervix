@@ -652,7 +652,8 @@ Choose checks relevant to the configured graph:
   one owner line per partition of a partitioned relay;
   `DESCRIBE RELAY <relay> WHERE (...);` is owner-authoritative for concrete branch state and names
   the key's partition and its owner.
-- `SHOW RELAY <relay> MATERIALIZED STATE;` inspects materialized data and placement.
+- `SHOW RELAY <relay> MATERIALIZED STATE;` inspects materialized data and placement, masking
+  `SENSITIVE` payload fields and branch-key fields on both the owner and other nodes.
 - `DESCRIBE INGESTOR`, `DESCRIBE JUNCTION`, other processor-specific `DESCRIBE` commands, and
   `DESCRIBE EMITTER` inspect runtime state and edge metrics. `SHOW INGESTORS;` lists every ingestor
   with the connector and entity it reads (`from=<CONNECTOR> <ENTITY>`), its owner and state, and a

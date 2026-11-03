@@ -74,7 +74,9 @@ over the interconnect, and that node encodes Row frames for its own sessions.
 | Control plane | Subscription delivery | The delivery of one subscription generation to its session, and the interest lease it holds on its relay. |
 | Data plane | Relay subscription fan-out | The subscribers of one relay, the definition they were attached under, and ending every subscriber before a batch of another definition can reach it. |
 | Edges | The Rust client, `nervix-client-core` | Connecting, TLS selection, the dispatcher that pairs replies with requests, execution identity across retries, redirect and reconnect, transaction binding and previews, desired subscriptions and their restoration, followed domain clocks, uploads, and backup downloads verified against their summary. |
-| Edges | The shared binding, `nervix-client-ffi` | The C ABI through which C, C++, Python, JVM and Ruby hosts drive the Rust client's state machine, with borrowed frame access, bulk column copies, retained domain clock events, retained reads of the clock of each followed domain with its projections, and the Rust client's producers and consumers with their typed outcomes, settlements and Arrow batches built and read one column level at a time. |
+| Edges | The host session runtime, `nervix-client-host` | What every binding shares: the session runtime a host's thread blocks on, cancellation and deadlines, the classification of every client failure by its report's context, subscription events with bulk column access to their verified frames, domain clock events and the clock of each followed domain with its projections, field descriptions, and the Rust client's producers and consumers with their typed outcomes, settlements and Arrow batches built and read one column level at a time. |
+| Edges | The C ABI, `nervix-client-ffi` | The C ABI through which C, C++, JVM and Ruby hosts drive the host session runtime: the handles a host holds, retains and releases, borrowed frame access, and bulk column copies into memory the host passes. |
+| Edges | The Python package, `nervix-client-python` | `nervix_client`, through which CPython hosts drive the host session runtime on pyo3: objects whose lifetimes are Python's, waits that release the GIL, typed exceptions, connection options, columns read as Python values, and Arrow batches exchanged through the Arrow PyCapsule interface. |
 | Edges | The web console and the CLI | Consumers of the same protocol with bounded buffers of their own. The console speaks it over its WebSockets: the session, and one per backup download or restore stream, whose archive it verifies or measures itself; the CLI uses the Rust client. |
 
 The server is the composition root: it is the only crate that names the wire crate, the command
@@ -1922,15 +1924,18 @@ it restores them.
 
 ## Bindings For Other Hosts
 
-A host language reaches the protocol in one of two ways. It loads the shared Rust binding,
-`nervix-client-ffi`, whose C ABI is `crates/client-ffi/include/nervix_client.h`, or it implements
-the protocol itself from the schema. The binding is the supported path for C, C++, Python, JVM, and
-Ruby hosts. It drives the Rust client's own state machine, so request correlation, leader redirects,
-reconnection, execution identity across retries, and desired-subscription restoration are decided
-once, in the library, and a host never retries, reroutes, or reinterprets an outcome on its own. A
-separate SDK per language would have to reimplement each of those decisions and be qualified again.
+A host language reaches the protocol in one of two ways. It uses the shared Rust binding, or it
+implements the protocol itself from the schema. The binding is the supported path: C, C++, JVM and
+Ruby hosts load its C ABI, `nervix-client-ffi`, whose contract is
+`crates/client-ffi/include/nervix_client.h`, and CPython hosts import its Python package,
+`nervix_client`. Both drive the host session runtime every binding of the Rust client shares,
+`nervix-client-host`, and through it the Rust client's own state machine, so request correlation,
+leader redirects, reconnection, execution identity across retries, and desired-subscription
+restoration are decided once, in the library, and a host never retries, reroutes, or reinterprets
+an outcome on its own. A separate SDK per language would have to reimplement each of those
+decisions and be qualified again.
 
-The binding's lifecycle follows from that choice:
+The C ABI's lifecycle follows from that choice:
 
 - **Handles.** A host opens a session with `nx_session_connect` and releases it with
   `nx_session_free`; outcomes, events and batches read from a session stay valid after it is freed,
@@ -1997,7 +2002,7 @@ The binding's lifecycle follows from that choice:
   `BackupDownloadError` beneath that context, never by text, and `nx_error_message` returns the
   report's whole chain.
 
-The binding connects with the Rust client's default options. It exposes no seeds, timeouts, or
+The C ABI connects with the Rust client's default options. It exposes no seeds, timeouts, or
 certificate authority, so it reaches a node over plaintext and connects to it directly. It exposes
 commands, completion, subscriptions and their events, domain clock events and attached clocks,
 bulk row access, and producers and consumers of client endpoints with their batches, but not the
@@ -2010,13 +2015,42 @@ scalar, string, and bytes fields; a list field of a subscription reports its lev
 are read from the borrowed frame with generated code, while an endpoint batch's lists are read one
 level at a time.
 
+A CPython host imports the Python package instead, `nervix_client`, which `crates/client-python`
+builds on pyo3 for CPython 3.12 and later with the stable ABI. It drives the same host session
+runtime, so every decision above is the C ABI's, and it differs from the C ABI only where a Python
+host differs from a C one:
+
+- **Lifetimes.** An object owns its share of the session and releases it when Python collects it;
+  no application retain or release call exists. A producer, a consumer and a delivery keep their
+  session running until they are collected, and a `memoryview` of an event's frame or a batch's or
+  delivery's stream keeps that object alive.
+- **Threads.** Every call that waits runs on the calling Python thread with the GIL released for
+  as long as it waits, and the library never calls Python from a thread of its own. A `Cancel`
+  triggered from another thread ends a wait with `CancelledError`, and one created with a deadline
+  ends it with `DeadlineError`.
+- **Failures.** A failure raises the exception class of its kind, under `ClientError`, classified
+  by the report's context exactly as the C ABI classifies it, with the whole chain as its message,
+  the command's execution reference on `execution_reference` and an open's refusal on
+  `open_refusal`.
+- **Connection options.** A session takes the Rust client's TLS requirement, certificate
+  authority, seed servers and timeouts, and the message and wait of a refused restoration are read
+  from the event that reports it.
+- **Data.** Columns of an event or a batch read as Python values, one level at a time, or, for an
+  event, in native byte order. A batch exports itself and a submission is imported through the
+  Arrow PyCapsule interface, so pyarrow and polars read and build batches without a copy, and a
+  rows event's rows export as one Arrow batch whose sensitive fields are nullable.
+
 Independent implementations exist as qualification clients rather than supported SDKs. The Go client
 speaks native gRPC with `flatc --go` output and `google.golang.org/grpc`, and the TypeScript client
 speaks the console WebSocket with `flatc --ts` output, unchanged under Node.js and Bun. They
 correlate replies by request identity, follow a leader redirect with the same execution reference,
-and fail rather than report success when an outcome is unknown. Neither restores subscriptions or
-domain clock attachments after reconnection; that recovery belongs to the Rust client and, through
-it, to every binding host. The FlatBuffers runtimes for Go and TypeScript have no verifier, so those
+and fail rather than report success when an outcome is unknown. Their three-node row-conformance
+examples start on a confirmed follower and create an otherwise unused schema to require the leader.
+They compare the original, repeated and terminal-outcome references with the UUIDv7 reference
+supplied by the harness. Go follows a command reply's redirect; TypeScript follows the console's `SessionEnding{LeaderRedirect}` and opens its subscription on the
+replacement session. One-node examples provide direct-connection controls. Neither restores
+subscriptions or domain clock attachments after reconnection; that recovery belongs to the Rust
+client and, through it, to every binding host. The FlatBuffers runtimes for Go and TypeScript have no verifier, so those
 clients check each frame's identifier and every union discriminant and required value they read, and
 the Rust verifier remains the only full structural verification. [Conformance
 Evidence](./client-implementation-manual.md#conformance-evidence) lists the probes, the runtimes
