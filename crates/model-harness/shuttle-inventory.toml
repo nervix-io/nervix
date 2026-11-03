@@ -98,6 +98,7 @@ name = "nervix-connector-redis"
 
 [[package]]
 checks = [
+  "queue::ingestor::shuttle_tests::shuttle_a_cancelled_parallel_read_hands_over_every_message_its_receives_gathered",
   "queue::ingestor::shuttle_tests::shuttle_a_cancelled_read_hands_over_every_message_its_receives_took",
   "queue::ingestor::shuttle_tests::shuttle_a_cancelled_read_waits_for_an_unanswered_receive_only_until_its_budget",
 ]
