@@ -1318,6 +1318,37 @@ fn a_join_failure_is_a_refusal_only_when_the_broker_answered_one() {
 }
 
 #[nervix_primitives::test]
+async fn a_join_failure_the_broker_did_not_answer_keeps_the_driver_error_beneath_the_subscribe() {
+    let broker = LoopbackBroker::start(0, AckAnswer::Confirm).await;
+    let plan = plan(
+        &broker,
+        PulsarAckReceipts::Awaited,
+        PulsarSubscriptionOwnership::Ingestor {
+            start_at: nervix_models::IngestStartPosition::Earliest,
+        },
+    )
+    .await;
+
+    let failure = plan.join_failure(PulsarError::Connection(PulsarConnectionError::Disconnected));
+
+    let PulsarTopicIngestorError::Subscribe { topic } = failure.current_context() else {
+        panic!("a join the broker did not refuse fails as a subscribe: {failure:?}");
+    };
+    assert_eq!(topic, TOPIC);
+    assert!(
+        !failure.current_context().holds_only_for_now(),
+        "only a refusal the broker answered can pass on a later join"
+    );
+    assert!(
+        matches!(
+            failure.downcast_ref::<PulsarError>(),
+            Some(PulsarError::Connection(PulsarConnectionError::Disconnected))
+        ),
+        "the driver's error stays beneath the subscribe: {failure:?}"
+    );
+}
+
+#[nervix_primitives::test]
 async fn a_provisioned_subscription_is_verified_then_joined_on_resume() {
     let mut broker =
         LoopbackBroker::start_with(1, AckAnswer::Confirm, SubscriptionAnswers::PROVISIONED).await;
