@@ -932,7 +932,7 @@ mod tests;
     )
 )]
 mod shuttle_checks {
-    use nervix_model_harness::shuttle::{self, check_pct, check_random};
+    use nervix_model_harness::shuttle::{check_pct, check_random};
 
     use super::*;
 
