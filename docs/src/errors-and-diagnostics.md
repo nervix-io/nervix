@@ -1074,12 +1074,15 @@ client accepts under one name, such as `metadata.broker.list` for `bootstrap.ser
 librdkafka's `topic.` prefix is `ClientConfigSchemaError::DriverPrefix`, naming the key and the
 prefix. Both refusals sit beneath the same client context and carry no configured value.
 
-A Kafka record timestamp outside the signed Unix-nanosecond range retains
-`TimestampError::ArithmeticOverflow` beneath `KafkaTopicIngestorError::RecordTimestamp`, naming
-the topic, partition and offset, beneath `IngestorError::Read`. It is a source read failure, not
-a codec rejection, and never becomes a wrapped or absent metadata instant. When a later record
-in a collected read fails that conversion, the source returns the valid gathered prefix first and
-keeps exactly one report for its next admitted read. A cancelled read leaves that report pending.
+A Kafka record timestamp outside the instants a `DATETIME` holds is not a source failure. The
+message hands it over as an unrepresentable `metadata.timestamp` value described by its
+milliseconds, never as a wrapped or absent instant, and the host refuses the record as a message
+error with code `validation` and operation `admit` only where a route or `TIMESTAMP AT` reads that
+field. A record at the last offset Kafka's signed offsets reach has no next position, which is
+`KafkaTopicIngestorError::OffsetOverflow`, naming the topic and partition, beneath
+`IngestorError::Read`: a source read failure, not a codec rejection. When a later record in a
+collected read fails that way, the source returns the valid gathered prefix first and keeps
+exactly one report for its next admitted read. A cancelled read leaves that report pending.
 
 A Kafka source keeps librdkafka's `KafkaError` beneath `KafkaTopicIngestorError::CommitOffset`, which names
 the consumer group, when the group's coordinator refuses an offset commit. A commit the coordinator
@@ -1779,10 +1782,10 @@ failure. An error handler whose own construction fails does not recursively invo
 Paced ingest admission reports a rejected event timestamp as a message error with code
 `validation` and operation `admit`. A null declared timestamp has the same classification and
 names its field. So does a transport metadata value its connector hands over as unrepresentable,
-with a description of it, such as an AMQP timestamp after the last `DATETIME` instant, wherever
-the ingestor's programs or its `TIMESTAMP AT` read that field: the host refuses the message after
-`FILTER WHERE` and before event-time selection, and the message names `metadata.<field>` and that
-description, never a payload value.
+with a description of it, such as an AMQP or Kafka timestamp after the last `DATETIME` instant,
+wherever the ingestor's programs or its `TIMESTAMP AT` read that field: the host refuses the
+message after `FILTER WHERE` and before event-time selection, and the message names
+`metadata.<field>` and that description, never a payload value.
 The host keeps the rejected row's source metadata and ACK attached while each output route applies
 its message-error policy. Accepted rows from the same decoded group continue through their normal
 routes.

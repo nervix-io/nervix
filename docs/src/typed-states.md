@@ -87,9 +87,10 @@ and FIFO sequence numbers keep their textual representation. The shared metadata
 retained row and Arrow projection preserve the count as `U32` throughout its in-memory lifetime.
 
 A Kafka record keeps an unavailable timestamp distinct from its create-time and log-append-time
-variants. A present variant carries a validated signed-nanosecond timestamp converted exactly from
-the driver's milliseconds. Kafka's external unavailable encoding is resolved at this boundary;
-an out-of-range present timestamp is a typed conversion failure. Missing binary keys are `None`,
+variants. A present variant carries the driver's signed Unix milliseconds. They name a `Timestamp`
+exactly when a signed count of nanoseconds holds them, and are otherwise handed over as an
+unrepresentable value with their description, never a clamped instant, a substitute or an absence.
+Kafka's external unavailable encoding is resolved at this boundary. Missing binary keys are `None`,
 empty keys remain present empty bytes, and the null-payload tombstone flag preserves the distinction
 from a present empty payload when both lend an empty slice to a codec.
 
