@@ -1,18 +1,19 @@
-//! A forwarder a scenario stands in front of the MQTT broker to drop chosen PUBLISH packets.
+//! A forwarder a scenario stands in front of the MQTT broker to drop chosen client packets.
 //!
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
 //! - **Owns.** One loopback listener, the connections it forwards to the broker, the MQTT packet
-//!   framing of what a client sends through it, and the payload whose PUBLISH packets it drops.
+//!   framing of what a client sends through it, and which of those packets it drops.
 //! - **Depends on.** Tokio's TCP sockets and I/O traits, and the boundary's tasks, cancellation and
 //!   watch channel.
 //! - **Must not know.** Nervix, what the broker answers, or what a packet carries beyond its type
 //!   and its bytes.
 //!
-//! A dropped PUBLISH never reaches the broker, which therefore neither delivers nor answers it.
-//! Every other packet the client sends, and everything the broker sends back, passes unchanged, so
-//! a scenario can keep one record's answer from ever coming while the broker answers the records
-//! around it.
+//! A dropped PUBLISH never reaches the broker, which therefore neither delivers nor answers it. A
+//! dropped PUBREL leaves a QoS 2 exchange after the broker's PUBREC, so the broker delivers the
+//! publish and never sends its PUBCOMP. Every other packet the client sends, and everything the
+//! broker sends back, passes unchanged, so a scenario can keep one record's answer from ever coming
+//! while the broker answers the records around it.
 
 use std::{io, net::SocketAddr};
 
@@ -26,17 +27,29 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// The control packet type of PUBLISH, which the high nibble of a packet's first byte holds.
 const PUBLISH: u8 = 3;
 
+/// The control packet type of PUBREL, the client's answer to a broker's PUBREC.
+const PUBREL: u8 = 6;
+
 /// The most bytes a Remaining Length takes: a variable byte integer whose bytes each carry seven
 /// value bits and a continuation bit.
 const REMAINING_LENGTH_BYTES: usize = 4;
 
-/// A listener that forwards every client connection to the broker and leaves out the PUBLISH
-/// packets that carry the payload it was told to drop.
+/// The client packets a filter leaves out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DroppedPackets {
+    /// Every PUBLISH whose bytes carry this payload.
+    PublishesCarrying(Vec<u8>),
+    /// Every PUBREL.
+    Releases,
+}
+
+/// A listener that forwards every client connection to the broker and leaves out the packets it
+/// was told to drop.
 #[derive(Debug)]
 pub(crate) struct MqttPublishFilter {
     local_addr: SocketAddr,
-    /// The payload whose PUBLISH packets are dropped, or none while every packet passes.
-    dropped_payload: watch::Sender<Option<Vec<u8>>>,
+    /// The packets dropped from now on, or none while every packet passes.
+    dropped: watch::Sender<Option<DroppedPackets>>,
     /// Cancelled to close every connection the filter forwarded, when the filter stops.
     connections: CancellationToken,
     listener: JoinHandle<()>,
@@ -47,7 +60,7 @@ impl MqttPublishFilter {
     pub(crate) async fn start(broker: SocketAddr) -> io::Result<Self> {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await?;
         let local_addr = listener.local_addr()?;
-        let (dropped_payload, dropped) = watch::channel(None);
+        let (dropped_packets, dropped) = watch::channel(None);
         let connections = CancellationToken::new();
         let listener = nervix_primitives::task::spawn(Self::accept(
             listener,
@@ -57,7 +70,7 @@ impl MqttPublishFilter {
         ));
         Ok(Self {
             local_addr,
-            dropped_payload,
+            dropped: dropped_packets,
             connections,
             listener,
         })
@@ -70,18 +83,24 @@ impl MqttPublishFilter {
 
     /// Drops, from now on, every PUBLISH packet a client sends whose bytes carry `payload`.
     pub(crate) fn drop_publishes_carrying(&self, payload: Vec<u8>) {
-        self.dropped_payload.send_replace(Some(payload));
+        self.dropped
+            .send_replace(Some(DroppedPackets::PublishesCarrying(payload)));
+    }
+
+    /// Drops, from now on, every PUBREL a client sends.
+    pub(crate) fn drop_releases(&self) {
+        self.dropped.send_replace(Some(DroppedPackets::Releases));
     }
 
     /// Forwards every packet from now on.
-    pub(crate) fn forward_every_publish(&self) {
-        self.dropped_payload.send_replace(None);
+    pub(crate) fn forward_every_packet(&self) {
+        self.dropped.send_replace(None);
     }
 
     async fn accept(
         listener: TcpListener,
         broker: SocketAddr,
-        dropped: watch::Receiver<Option<Vec<u8>>>,
+        dropped: watch::Receiver<Option<DroppedPackets>>,
         connections: CancellationToken,
     ) {
         loop {
@@ -102,7 +121,7 @@ impl MqttPublishFilter {
     async fn forward(
         client: TcpStream,
         broker: SocketAddr,
-        dropped: watch::Receiver<Option<Vec<u8>>>,
+        dropped: watch::Receiver<Option<DroppedPackets>>,
         stopped: CancellationToken,
     ) {
         let Ok(broker) = TcpStream::connect(broker).await else {
@@ -117,20 +136,22 @@ impl MqttPublishFilter {
         }
     }
 
-    /// Forwards what a client sends one whole packet at a time, leaving out each PUBLISH that
-    /// carries the dropped payload.
+    /// Forwards what a client sends one whole packet at a time, leaving out each dropped packet.
     async fn forward_client_packets(
         client: &mut (impl AsyncRead + Unpin),
         broker: &mut (impl AsyncWrite + Unpin),
-        dropped: &watch::Receiver<Option<Vec<u8>>>,
+        dropped: &watch::Receiver<Option<DroppedPackets>>,
     ) -> io::Result<()> {
         loop {
             nervix_primitives::task::consume_budget().await;
             let Some(packet) = MqttPacket::read(client).await? else {
                 return broker.shutdown().await;
             };
-            let dropped_now = match dropped.borrow().as_deref() {
-                Some(payload) => packet.is_publish_carrying(payload),
+            let dropped_now = match dropped.borrow().as_ref() {
+                Some(DroppedPackets::PublishesCarrying(payload)) => {
+                    packet.is_publish_carrying(payload)
+                }
+                Some(DroppedPackets::Releases) => packet.is_release(),
                 None => false,
             };
             if dropped_now {
@@ -197,13 +218,21 @@ impl MqttPacket {
         ))
     }
 
+    /// The control packet type this packet's first byte holds.
+    fn packet_type(&self) -> Option<u8> {
+        let first = self.bytes.first()?;
+        Some(first >> 4)
+    }
+
+    /// Whether this packet is a PUBREL.
+    fn is_release(&self) -> bool {
+        self.packet_type() == Some(PUBREL)
+    }
+
     /// Whether this packet is a PUBLISH whose bytes carry `payload`. Every PUBLISH carries an empty
     /// payload.
     fn is_publish_carrying(&self, payload: &[u8]) -> bool {
-        let Some(first) = self.bytes.first() else {
-            return false;
-        };
-        if first >> 4 != PUBLISH {
+        if self.packet_type() != Some(PUBLISH) {
             return false;
         }
         if payload.is_empty() {

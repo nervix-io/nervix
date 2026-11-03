@@ -49,6 +49,10 @@ admits is generated and none it refuses. The Model/archive, registry, consensus 
 Plexus properties preserve the session, quality of service and mode as separate written values,
 and the archive signature and consensus keyspace namespace fence this shape before decoding.
 
+MQTT TOPIC emitter generators draw `NO ACK` at QoS 0 and `ACK`, with either window, at QoS 1 or 2,
+so every pairing the declaration admits is generated and none it refuses. The same properties
+preserve the quality of service and the mode as separate written values under the same fence.
+
 Every target is registered in `tests/bolero-targets.toml` for ordinary randomized/corpus checks and
 sanitizer libFuzzer. The same bounded generators, production storage paths and complete assertions
 run in both modes. A target writes through the storage engine its boundary owns when it has one:

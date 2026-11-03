@@ -259,7 +259,7 @@ const OTEL_BOUNDS: DeclaredBounds = DeclaredBounds {
 /// What every OTEL emitter declares: an export is one request the collector answers, and its fields
 /// are mapped directly rather than encoded by a codec.
 const fn otel_capabilities(
-    publishing_modes: &'static [crate::EmitterPublishingModeKind],
+    publishing_modes: &'static [crate::DeclaredPublishing],
     options: &'static [OptionDeclaration],
 ) -> EmitterEntityCapabilities {
     EmitterEntityCapabilities {
