@@ -54,18 +54,15 @@ pub(super) fn measured_file_size(batch: &RecordBatch) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
-
     use arrow_array::{Int64Array, RecordBatch, StringArray};
-    use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
     use arrow_schema::{DataType, Field, Schema};
     use nervix_primitives::sync::StdArc;
     use parquet::{arrow::ArrowWriter, file::properties::WriterProperties};
 
-    use super::measured_file_size;
+    use super::{super::staging, measured_file_size};
 
-    /// The staged Arrow IPC file preserves every mapped row, and the Parquet measurement is the
-    /// exact size of the file that will be emitted after loading those rows.
+    /// A staging file preserves every mapped row staged in it, and the Parquet measurement is the
+    /// exact size of the file that will be emitted after loading those rows back.
     #[test]
     fn bolero_staged_iceberg_file_encoding_round_trips_and_measures_exactly() {
         let rows = bolero::generator::produce_with::<Vec<Vec<u8>>>().len(1_usize..=8);
@@ -94,16 +91,21 @@ mod tests {
                 )
                 .expect("generated rows match their staged schema");
 
-                let mut ipc = Vec::new();
-                let mut staged = StreamWriter::try_new(&mut ipc, &schema)
-                    .expect("the staged schema is an Arrow IPC schema");
-                staged.write(&batch).expect("generated rows encode to IPC");
-                staged.finish().expect("the staged IPC stream closes");
-                drop(staged);
-                let loaded = StreamReader::try_new(Cursor::new(ipc), None)
-                    .expect("the staged IPC stream reopens")
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .expect("every staged batch decodes");
+                let directory = tempfile::tempdir().expect("the staging directory is created");
+                let path = directory.path().join("staging-1.arrow");
+                let schema_end =
+                    staging::create(&path, &schema).expect("the staging file is created");
+                let appended = staging::append(
+                    &path,
+                    schema_end,
+                    &schema,
+                    std::slice::from_ref(&batch),
+                    || Ok(()),
+                )
+                .expect("generated rows are appended to the staging file");
+                let loaded =
+                    staging::read_span(&path, schema_end, appended.ranges[0].clone(), 1, &schema)
+                        .expect("the staged batch reads back");
                 assert_eq!(loaded, vec![batch.clone()]);
 
                 let measured = measured_file_size(&loaded[0])

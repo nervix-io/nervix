@@ -336,8 +336,8 @@ current connection, retry and deadline limits.
 - Size an Iceberg emitter's worst-case latency as `FLUSH EACH` plus `COMMIT EACH`: the commit
   duration starts when a flush stages rows while none are staged, not when the rows arrived.
 - Keep `MAX BATCH SIZE` well below 32 MiB on routes that feed an Iceberg emitter. A commit charges
-  its staged files to the node's 32 MiB bulk memory class and reads a larger staged batch only once
-  the whole class is free; `DESCRIBE EMITTER` shows a commit waiting for that memory as its
+  its staged batches to the node's 32 MiB bulk memory class and reads a larger staged batch only
+  once the whole class is free; `DESCRIBE EMITTER` shows a commit waiting for that memory as its
   transient error while the emitter retries.
 - Provision Iceberg table columns with names and types matching the emitter's `VALUES`. A
   required `NAMESPACE` names the catalog namespace independently of the Nervix domain; provision

@@ -33376,8 +33376,8 @@ async fn then_iceberg_table_metadata_does_not_contain(
     }
 }
 
-#[then("the temp directory eventually contains an Iceberg Arrow IPC staged batch")]
-async fn then_temp_directory_contains_iceberg_arrow_ipc_staged_batch(world: &mut ScenarioWorld) {
+#[then("the temp directory eventually contains an Iceberg staging file")]
+async fn then_temp_directory_contains_iceberg_staging_file(world: &mut ScenarioWorld) {
     let temp_root = world
         .temp_root
         .as_ref()
@@ -33385,24 +33385,24 @@ async fn then_temp_directory_contains_iceberg_arrow_ipc_staged_batch(world: &mut
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         nervix_primitives::task::consume_budget().await;
-        if path_contains_staged_iceberg_arrow_ipc_batch(temp_root.path()) {
+        if path_contains_iceberg_staging_file(temp_root.path()) {
             append_cucumber_log_line(&format!(
-                "observed Iceberg Arrow IPC staged batch under {}",
+                "observed Iceberg staging file under {}",
                 temp_root.path().display()
             ));
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for Iceberg Arrow IPC staged batch under {}",
+            "timed out waiting for an Iceberg staging file under {}",
             temp_root.path().display()
         );
         nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
-#[then("the temp directory does not contain an Iceberg Parquet staged batch")]
-async fn then_temp_directory_does_not_contain_iceberg_parquet_staged_batch(
+#[then("the temp directory does not contain an Iceberg Parquet staging file")]
+async fn then_temp_directory_does_not_contain_iceberg_parquet_staging_file(
     world: &mut ScenarioWorld,
 ) {
     let temp_root = world
@@ -33410,8 +33410,8 @@ async fn then_temp_directory_does_not_contain_iceberg_parquet_staged_batch(
         .as_ref()
         .expect("temp root must be configured by the scenario");
     assert!(
-        !path_contains_staged_iceberg_parquet_batch(temp_root.path()),
-        "observed local Iceberg Parquet staged batch under {}",
+        !path_contains_iceberg_parquet_staging_file(temp_root.path()),
+        "observed a local Iceberg Parquet staging file under {}",
         temp_root.path().display()
     );
 }
@@ -33426,15 +33426,15 @@ async fn then_object_storage_path_does_not_exist(world: &mut ScenarioWorld, path
     assert!(!exists, "object storage path {path} exists");
 }
 
-fn path_contains_staged_iceberg_arrow_ipc_batch(root: &Path) -> bool {
-    staged_iceberg_arrow_ipc_batches(root) > 0
+fn path_contains_iceberg_staging_file(root: &Path) -> bool {
+    iceberg_staging_files(root) > 0
 }
 
-/// How many complete Arrow IPC batches Iceberg emitters staged under `root`: files a staging
-/// write finished, which hold at least one record batch.
-fn staged_iceberg_arrow_ipc_batches(root: &Path) -> usize {
+/// How many Arrow IPC staging files Iceberg emitters keep under `root`: files that hold at least
+/// one staged batch after their schema.
+fn iceberg_staging_files(root: &Path) -> usize {
     staged_iceberg_batches(root, |path, name| {
-        if !name.starts_with("batch-") || !name.ends_with(".arrow") {
+        if !name.starts_with("staging-") || !name.ends_with(".arrow") {
             return false;
         }
         let Ok(file) = std::fs::File::open(path) else {
@@ -33450,9 +33450,9 @@ fn staged_iceberg_arrow_ipc_batches(root: &Path) -> usize {
     })
 }
 
-fn path_contains_staged_iceberg_parquet_batch(root: &Path) -> bool {
+fn path_contains_iceberg_parquet_staging_file(root: &Path) -> bool {
     let staged = staged_iceberg_batches(root, |_path, name| {
-        name.starts_with("batch-") && name.ends_with(".parquet")
+        name.starts_with("staging-") && name.ends_with(".parquet")
     });
     staged > 0
 }
