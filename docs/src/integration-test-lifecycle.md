@@ -1776,6 +1776,41 @@ reply ends an attachment, it retires that domain's unread frames from the pendin
 queue while preserving them in the ordered log. Assertions about events after detachment therefore
 start at the acknowledged boundary, including when ticks arrived while the client awaited the reply.
 
+### Leadership Moves
+
+A scenario moves leadership with `leadership is transferred from node … to node …`, with
+`leadership is transferred to node …`, which starts from the running leader, with the moves a
+scenario arms under a held command, and when a restore coordinator yields leadership in a
+multi-node cluster. Only the harness asks for a transfer: a node never transfers leadership on its
+own, not even when it stops. Every move ends only when its target reports itself the leader, within
+the 40-second status wait budget, so the step that follows starts from the leadership the scenario
+named.
+
+A transfer is a request, not a reservation of the next election. The leader stops sending
+heartbeats, every voter is told to grant the target's vote despite the leader's lease, and the
+target campaigns at once. Every other voter's election timeout keeps running until the target's
+votes come back, however. Under load a granted vote's reply can miss the target's vote request
+deadline, which is the minimum election timeout, or another voter's timeout can pass before the
+target's vote reaches it. That voter then campaigns and wins, and because OpenRaft orders the
+candidates of one term by node identifier, it can win even the term in which the target is
+campaigning. Raft is right to elect it, and nothing moves leadership on afterwards, so one request
+followed by a wait for the target would spend the whole budget with another node leading.
+
+A move therefore watches the leadership the target reports, a leader and its term. Each time it sees
+a leadership that is not the target's and that it has not asked yet, it asks that leader to
+transfer to the target. It never asks on a timer: it asks once per leadership it sees, it ignores a
+report of a term older than the leadership it last asked, and it never asks a target that already
+leads, because a leader asked to transfer to itself stops its heartbeats and hands leadership to
+whichever follower's election timeout passes first. Every repeated request is printed with the
+leadership that prompted it, and a move that runs out of budget names each leadership that prompted
+one and the last status the target reported.
+
+The leader-failover scenario `A leadership transfer reaches its target after another voter wins the
+election it started` blocks the target's consensus connectivity until the third voter leads. The
+election the transfer starts can then never reach the target, and the third voter wins it. The
+connectivity returns once that voter leads, and the move must still end with every node reporting
+the target as the leader.
+
 ## Node Tasks And Readiness
 
 An in-process node is the server application started as one Tokio task. That task is the node's
