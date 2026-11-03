@@ -50,7 +50,7 @@ use thiserror::Error;
 use tracing::debug;
 
 use crate::{
-    client::{Client, RecoveryMode, SessionRecovery},
+    client::{Client, RecoveryDeadline, RecoveryMode, SessionRecovery},
     error::{ClientError, RequestKind},
     exchange::{ExchangeRequests, PendingRequest, SESSION_LIMITS},
 };
@@ -539,7 +539,10 @@ impl Client {
                     if !report.current_context().retryable_session_failure() {
                         return Err(report);
                     }
-                    match self.recover_session(RecoveryMode::IfClosed).await? {
+                    match self
+                        .recover_session(RecoveryMode::IfClosed, RecoveryDeadline::RetryBudget)
+                        .await?
+                    {
                         SessionRecovery::Ready => {}
                         SessionRecovery::Unavailable => return Err(report),
                     }
@@ -993,7 +996,10 @@ impl ProducerInner {
             if let Some(end) = self.end() {
                 return Err(Report::new(ProducerError::Ended(end)));
             }
-            let recovered = self.client.recover_session(RecoveryMode::IfClosed).await;
+            let recovered = self
+                .client
+                .recover_session(RecoveryMode::IfClosed, RecoveryDeadline::RetryBudget)
+                .await;
             if !matches!(recovered, Ok(SessionRecovery::Ready)) {
                 return Err(Report::new(ProducerError::SessionUnavailable));
             }

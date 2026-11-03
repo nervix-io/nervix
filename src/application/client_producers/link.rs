@@ -472,7 +472,7 @@ impl ServingLink {
         let (sender, mut receiver) = match opened {
             Ok(opened) => opened,
             Err(error) => {
-                debug!(owner = %self.owner, error = %error, "a client producer link did not open");
+                debug!(owner = %self.owner, error = %format_args!("{error:#}"), "a client producer link did not open");
                 self.end(&mut commands);
                 return;
             }
@@ -494,7 +494,7 @@ impl ServingLink {
                         break;
                     }
                     Err(error) => {
-                        debug!(owner = %self.owner, error = %error, "a client producer link failed");
+                        debug!(owner = %self.owner, error = %format_args!("{error:#}"), "a client producer link failed");
                         break;
                     }
                 },
@@ -737,7 +737,7 @@ async fn write_link(
             _ = heartbeat.tick() => ClientProducerLinkItem::Heartbeat,
         };
         if let Err(error) = sender.send(item).await {
-            debug!(error = %error, "a client producer link refused a frame");
+            debug!(error = %format_args!("{error:#}"), "a client producer link refused a frame");
             return;
         }
     }
@@ -808,7 +808,7 @@ impl OwnerLink {
                     Err(error) => {
                         debug!(
                             serving_node = %self.serving_node,
-                            error = %error,
+                            error = %format_args!("{error:#}"),
                             "a client producer link failed"
                         );
                         break;

@@ -25,8 +25,8 @@ use nervix_primitives::time::{Instant, timeout};
 use super::{
     DescribedEmitterRetry, ICEBERG_REST_ADDR, IcebergCatalogGate, ScenarioWorld,
     common::iceberg_catalog_gate::HeldCommitArrival, current_leader_node, docstring,
-    expand_placeholders, iceberg_row_matches_expected, iceberg_table_rows, parse_duration_text,
-    run_plexus_commands_on_node, rustfs_iceberg_table, staged_iceberg_arrow_ipc_batches,
+    expand_placeholders, iceberg_row_matches_expected, iceberg_staging_files, iceberg_table_rows,
+    parse_duration_text, run_plexus_commands_on_node, rustfs_iceberg_table,
 };
 
 /// The snapshot summary property that counts every row the table holds at that snapshot.
@@ -130,19 +130,19 @@ fn when_the_catalog_gate_passes_every_commit(world: &mut ScenarioWorld) {
     catalog_gate(world).pass_commits();
 }
 
-/// What the staging directory holds now. A commit stages what it publishes before it sends the
-/// commit, so while the gate holds the commit the count cannot move.
-#[then(expr = "the temp directory holds {int} Iceberg Arrow IPC staged batches")]
-fn then_the_temp_directory_holds_staged_batches(world: &mut ScenarioWorld, expected: usize) {
+/// How many Iceberg staging files the staging directory holds now. A commit stages what it
+/// publishes before it sends the commit, so while the gate holds the commit the count cannot move.
+#[then(expr = "the temp directory holds {int} Iceberg staging files")]
+fn then_the_temp_directory_holds_staging_files(world: &mut ScenarioWorld, expected: usize) {
     let temp_root = world
         .temp_root
         .as_ref()
         .verified("the scenario configured its temp directory before the cluster started");
-    let staged = staged_iceberg_arrow_ipc_batches(temp_root.path());
+    let staged = iceberg_staging_files(temp_root.path());
     assert_eq!(
         staged,
         expected,
-        "the temp directory {} holds {staged} staged Iceberg batches",
+        "the temp directory {} holds {staged} Iceberg staging files",
         temp_root.path().display()
     );
 }
@@ -349,11 +349,11 @@ async fn then_within_the_iceberg_table_holds_rows(
 }
 
 /// What DESCRIBE EMITTER reports while an Iceberg commit waits for the whole bulk memory class to
-/// read one staged file larger than it.
+/// read one staged batch larger than it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WholeClassWait {
     capacity: u64,
-    file_bytes: u64,
+    batch_bytes: u64,
 }
 
 impl WholeClassWait {
@@ -361,24 +361,24 @@ impl WholeClassWait {
         let error = DescribedEmitterRetry::from_describe_output(output).transient_error?;
         let wait =
             error.strip_prefix("Iceberg commit waits for the whole bulk memory class of ")?;
-        let (capacity, file) = wait.split_once(" bytes for a staged file of ")?;
-        let file_bytes = file.strip_suffix(" bytes")?;
-        let (Ok(capacity), Ok(file_bytes)) = (capacity.parse::<u64>(), file_bytes.parse::<u64>())
+        let (capacity, batch) = wait.split_once(" bytes for a staged batch of ")?;
+        let batch_bytes = batch.strip_suffix(" bytes")?;
+        let (Ok(capacity), Ok(batch_bytes)) = (capacity.parse::<u64>(), batch_bytes.parse::<u64>())
         else {
             panic!("DESCRIBE EMITTER reports the whole-class wait in byte counts, got '{error}'");
         };
         Some(Self {
             capacity,
-            file_bytes,
+            batch_bytes,
         })
     }
 }
 
 /// Waits until DESCRIBE EMITTER reports an Iceberg commit waiting for the whole bulk memory class,
-/// requires the staged file it reads to be larger than the class, and saves the file's bytes.
+/// requires the staged batch it reads to be larger than the class, and saves the batch's bytes.
 #[then(
     expr = "within {string} DESCRIBE EMITTER {string} on the leader node reports an Iceberg \
-            commit waiting for the whole bulk memory class, whose staged file bytes are saved as \
+            commit waiting for the whole bulk memory class, whose staged batch bytes are saved as \
             placeholder {string}"
 )]
 async fn then_describe_emitter_reports_a_whole_class_wait(
@@ -400,13 +400,13 @@ async fn then_describe_emitter_reports_a_whole_class_wait(
         world.last_command_output = Some(output.clone());
         if let Some(wait) = WholeClassWait::from_describe_output(&output) {
             assert!(
-                wait.file_bytes > wait.capacity,
-                "a commit waits for the whole bulk memory class only for a staged file larger \
+                wait.batch_bytes > wait.capacity,
+                "a commit waits for the whole bulk memory class only for a staged batch larger \
                  than it, got {wait:?}"
             );
             world
                 .placeholders
-                .insert(placeholder, wait.file_bytes.to_string());
+                .insert(placeholder, wait.batch_bytes.to_string());
             return;
         }
         assert!(

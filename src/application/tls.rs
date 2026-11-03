@@ -151,7 +151,7 @@ pub(in crate::application) async fn reload_interconnect_tls(
             Err(error) => {
                 let failure = error.to_string();
                 if reported_failure.as_ref() != Some(&failure) {
-                    warn!(error = %error, "replacement interconnect TLS files are invalid");
+                    warn!(error = %format_args!("{error:#}"), "replacement interconnect TLS files are invalid");
                     reported_failure = Some(failure);
                 }
                 continue;
@@ -161,7 +161,7 @@ pub(in crate::application) async fn reload_interconnect_tls(
         if let Err(error) = transport.replace_tls(replacement).await {
             let failure = error.to_string();
             if reported_failure.as_ref() != Some(&failure) {
-                warn!(error = %error, "failed to replace interconnect TLS credentials");
+                warn!(error = %format_args!("{error:#}"), "failed to replace interconnect TLS credentials");
                 reported_failure = Some(failure);
             }
             continue;

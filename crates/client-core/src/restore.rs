@@ -35,7 +35,7 @@ use tokio::{fs::File, io::AsyncReadExt as _};
 use tonic::{Request, Response, Status, codegen::http::uri::PathAndQuery, transport::Channel};
 
 use crate::{
-    client::{Client, RecoveryMode, SessionRecovery},
+    client::{Client, RecoveryDeadline, RecoveryMode, SessionRecovery},
     connection::GrpcConnector,
     error::{ClientError, RequestKind},
     exchange::SESSION_LIMITS,
@@ -195,7 +195,10 @@ impl Client {
                 Err(AttemptFailure::Transport(status))
                     if upload_status_is_retryable(&status) && Self::await_retry(attempt).await =>
                 {
-                    match self.recover_session(RecoveryMode::Replace).await? {
+                    match self
+                        .recover_session(RecoveryMode::Replace, RecoveryDeadline::RetryBudget)
+                        .await?
+                    {
                         SessionRecovery::Ready => continue,
                         SessionRecovery::Unavailable => {
                             return Err(Report::new(ClientError::Restore(status)));
@@ -230,7 +233,10 @@ impl Client {
                 }
             };
             match outcome.routing() {
-                Routing::Redirect(leader) => self.follow_leader(leader).await?,
+                Routing::Redirect(leader) => {
+                    self.follow_leader(leader, RecoveryDeadline::RetryBudget)
+                        .await?
+                }
                 Routing::AwaitElection | Routing::AwaitOutcome
                     if Self::await_retry(attempt).await => {}
                 _ => return Ok(outcome),

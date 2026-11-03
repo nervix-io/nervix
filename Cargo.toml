@@ -632,8 +632,9 @@ pyo3-build-config = "0.30"
 # before it is written, and a broker SendError resolved with its server error; acknowledgements
 # that wait for the broker's answer when a consumer enables ack receipts, and a negative
 # acknowledgement that reports a redelivery request it could not send; received messages retain
-# the broker's optional redelivery count.
-pulsar = { git = "https://github.com/nervix-io/pulsar-rs.git", branch = "nervix-message-size-ack-receipts", default-features = false, features = [
+# the broker's optional redelivery count; a complete rustls client configuration taken from the
+# caller, a connection failure returned as it happened, and no credential in a trace.
+pulsar = { git = "https://github.com/nervix-io/pulsar-rs.git", branch = "nervix-rustls-client-config", default-features = false, features = [
   "compression",
   "tokio-rustls-runtime",
 ] }

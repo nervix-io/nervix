@@ -18,7 +18,7 @@ Feature: Pulsar topic declarations
     When these Plexus commands are executed on the leader node
       """
       CREATE PULSAR TOPIC INGESTOR intake
-        FROM pulsar_main TOPIC '<topic>' SUBSCRIPTION 'Readers (eu)' <ownership> INSTANCES 2
+        FROM pulsar_main TOPIC '<topic>' SUBSCRIPTION 'Readers (eu)' <ownership> TYPE <type> INSTANCES 2
         MODE <ingest_mode>
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL
@@ -28,7 +28,7 @@ Feature: Pulsar topic declarations
       """
     Then the last command output contains
       """
-      TOPIC '<topic>' SUBSCRIPTION 'Readers (eu)' <ownership> INSTANCES 2 MODE <ingest_mode> ON QUIESCE SUSPEND
+      TOPIC '<topic>' SUBSCRIPTION 'Readers (eu)' <ownership> TYPE <type> INSTANCES 2 MODE <ingest_mode> ON QUIESCE SUSPEND
       """
     When these Plexus commands are executed on the leader node
       """
@@ -54,13 +54,13 @@ Feature: Pulsar topic declarations
       """
 
     Examples:
-      | cluster_size | topic                                  | ownership                           | ingest_mode                                                                           | emit_mode                                                            |
-      | 1            | Orders-EU_1                            | OWNED BY INGESTOR START AT EARLIEST | NO ACK                                                                                | NO ACK RETRY POLICY BACKOFF 250ms MAX 30s                            |
-      | 3            | Orders-EU_1                            | OWNED BY INGESTOR START AT EARLIEST | NO ACK                                                                                | NO ACK RETRY POLICY BACKOFF 250ms MAX 30s                            |
-      | 1            | persistent://tenant-a/orders/Placed    | PROVISIONED                         | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                         | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s     |
-      | 3            | persistent://tenant-a/orders/Placed    | PROVISIONED                         | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                         | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s     |
-      | 1            | non-persistent://public/default/orders | OWNED BY INGESTOR START AT EARLIEST | ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | ACK PARALLEL MAX 4 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s |
-      | 3            | non-persistent://public/default/orders | OWNED BY INGESTOR START AT EARLIEST | ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | ACK PARALLEL MAX 4 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s |
+      | cluster_size | topic                                  | ownership                           | type       | ingest_mode                                                                           | emit_mode                                                            |
+      | 1            | Orders-EU_1                            | OWNED BY INGESTOR START AT EARLIEST | SHARED     | NO ACK                                                                                | NO ACK RETRY POLICY BACKOFF 250ms MAX 30s                            |
+      | 3            | Orders-EU_1                            | OWNED BY INGESTOR START AT EARLIEST | SHARED     | NO ACK                                                                                | NO ACK RETRY POLICY BACKOFF 250ms MAX 30s                            |
+      | 1            | persistent://tenant-a/orders/Placed    | PROVISIONED                         | KEY_SHARED | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                         | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s     |
+      | 3            | persistent://tenant-a/orders/Placed    | PROVISIONED                         | KEY_SHARED | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s                         | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s     |
+      | 1            | non-persistent://public/default/orders | OWNED BY INGESTOR START AT EARLIEST | SHARED     | ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | ACK PARALLEL MAX 4 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s |
+      | 3            | non-persistent://public/default/orders | OWNED BY INGESTOR START AT EARLIEST | SHARED     | ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s | ACK PARALLEL MAX 4 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s |
 
   Scenario Outline: Pulsar topic ingestors refuse a subscription without its ownership and quiesce modes the topic does not declare
     Given a <cluster_size> node nervix cluster is started
@@ -87,17 +87,19 @@ Feature: Pulsar topic declarations
       """
 
     Examples:
-      | cluster_size | subscription                                               | quiesce                                      | expected                                          |
-      | 1            |                                                            | SUSPEND                                      | expected SUBSCRIPTION, found MODE                 |
-      | 3            |                                                            | SUSPEND                                      | expected SUBSCRIPTION, found MODE                 |
-      | 1            | SUBSCRIPTION 'readers'                                     | SUSPEND                                      | PROVISIONED, found MODE                           |
-      | 3            | SUBSCRIPTION 'readers'                                     | SUSPEND                                      | PROVISIONED, found MODE                           |
-      | 1            | SUBSCRIPTION '' OWNED BY INGESTOR START AT EARLIEST        | SUSPEND                                      | invalid pulsar_subscription '': must not be empty |
-      | 3            | SUBSCRIPTION '' OWNED BY INGESTOR START AT EARLIEST        | SUSPEND                                      | invalid pulsar_subscription '': must not be empty |
-      | 1            | SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST | DROP                                         | expected SUSPEND, found DROP                      |
-      | 3            | SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST | DROP                                         | expected SUSPEND, found DROP                      |
-      | 1            | SUBSCRIPTION 'readers' PROVISIONED                         | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | expected SUSPEND, found BUFFER                    |
-      | 3            | SUBSCRIPTION 'readers' PROVISIONED                         | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | expected SUSPEND, found BUFFER                    |
+      | cluster_size | subscription                                                           | quiesce                                      | expected                                          |
+      | 1            |                                                                        | SUSPEND                                      | expected SUBSCRIPTION, found MODE                 |
+      | 3            |                                                                        | SUSPEND                                      | expected SUBSCRIPTION, found MODE                 |
+      | 1            | SUBSCRIPTION 'readers'                                                 | SUSPEND                                      | PROVISIONED, found MODE                           |
+      | 3            | SUBSCRIPTION 'readers'                                                 | SUSPEND                                      | PROVISIONED, found MODE                           |
+      | 1            | SUBSCRIPTION 'readers' PROVISIONED                                     | SUSPEND                                      | expected TYPE, found MODE                         |
+      | 3            | SUBSCRIPTION 'readers' PROVISIONED                                     | SUSPEND                                      | expected TYPE, found MODE                         |
+      | 1            | SUBSCRIPTION '' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED        | SUSPEND                                      | invalid pulsar_subscription '': must not be empty |
+      | 3            | SUBSCRIPTION '' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED        | SUSPEND                                      | invalid pulsar_subscription '': must not be empty |
+      | 1            | SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED | DROP                                         | expected SUSPEND, found DROP                      |
+      | 3            | SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED | DROP                                         | expected SUSPEND, found DROP                      |
+      | 1            | SUBSCRIPTION 'readers' PROVISIONED TYPE SHARED                         | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | expected SUSPEND, found BUFFER                    |
+      | 3            | SUBSCRIPTION 'readers' PROVISIONED TYPE SHARED                         | BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST | expected SUSPEND, found BUFFER                    |
 
   Scenario Outline: Pulsar topic names outside the topic rule are refused in both directions
     Given a <cluster_size> node nervix cluster is started
@@ -113,7 +115,7 @@ Feature: Pulsar topic declarations
     When these Plexus commands fail
       """
       CREATE PULSAR TOPIC INGESTOR refused_intake
-        FROM pulsar_main TOPIC '<topic>' SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST MODE NO ACK
+        FROM pulsar_main TOPIC '<topic>' SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -223,6 +225,89 @@ Feature: Pulsar topic declarations
       | 1            | tls_ca_file                       | /tmp/missing-pulsar-ca.pem |
       | 3            | tls_ca_file                       | /tmp/missing-pulsar-ca.pem |
 
+  Scenario Outline: Pulsar clients refuse half of a client certificate
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands fail with "client config key '<present>' requires '<missing>'"
+      """
+      CREATE PULSAR CLIENT refused CONFIG {
+        'addr' = 'pulsar+ssl://127.0.0.1:6651', '<present>' = '/mounted/identity.pem'
+      };
+      """
+
+    Examples:
+      | cluster_size | present       | missing       |
+      | 1            | tls_cert_file | tls_key_file  |
+      | 3            | tls_cert_file | tls_key_file  |
+      | 1            | tls_key_file  | tls_cert_file |
+      | 3            | tls_key_file  | tls_cert_file |
+
+  Scenario Outline: Pulsar clients refuse a client certificate on a plaintext pulsar address
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands fail
+      """
+      CREATE PULSAR CLIENT refused CONFIG {
+        'addr' = 'pulsar://127.0.0.1:6650',
+        'tls_cert_file' = '/mounted/client.pem',
+        'tls_key_file' = '/mounted/client-key.pem'
+      };
+      """
+    Then the last command error contains
+      """
+      requires 'addr' to use pulsar+ssl
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: Pulsar client inspection never shows the token it authenticates with
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE PULSAR CLIENT authenticated CONFIG {
+        'addr' = 'pulsar://127.0.0.1:6650', 'auth_token' = 'scenario-pulsar-credential'
+      };
+      """
+    When these Plexus commands are executed
+      """
+      DESCRIBE CLIENT authenticated;
+      """
+    Then the last command output contains
+      """
+      auth_token: ********
+      """
+    And the last command output does not contain
+      """
+      scenario-pulsar-credential
+      """
+    When these Plexus commands are executed
+      """
+      SHOW CREATE CLIENT authenticated;
+      """
+    Then the last command output contains
+      """
+      'auth_token' = '********'
+      """
+    And the last command output does not contain
+      """
+      scenario-pulsar-credential
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Pulsar clients refuse a namespace that is not a tenant and a namespace
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -267,12 +352,12 @@ Feature: Pulsar topic declarations
       """
 
     Examples:
-      | cluster_size | config                                                                                                              | expected                                       |
-      | 1            | 'addr' = 'pulsar+ssl://127.0.0.1:6651', 'tls_cert_file' = '/tmp/client.pem', 'tls_key_file' = '/tmp/client-key.pem' | unknown client config key 'tls_cert_file'      |
-      | 3            | 'addr' = 'pulsar+ssl://127.0.0.1:6651', 'tls_cert_file' = '/tmp/client.pem', 'tls_key_file' = '/tmp/client-key.pem' | unknown client config key 'tls_cert_file'      |
-      | 1            | 'addr' = 'pulsar://127.0.0.1:6650', 'namespcae' = 'public/default'                                                  | unknown client config key 'namespcae'          |
-      | 3            | 'addr' = 'pulsar://127.0.0.1:6650', 'namespcae' = 'public/default'                                                  | unknown client config key 'namespcae'          |
-      | 1            | 'addr' = 'http://127.0.0.1:6650'                                                                                    | invalid client config key 'addr': expected URL |
-      | 3            | 'addr' = 'http://127.0.0.1:6650'                                                                                    | invalid client config key 'addr': expected URL |
-      | 1            | 'namespace' = 'public/default'                                                                                      | missing required client config key 'addr'      |
-      | 3            | 'namespace' = 'public/default'                                                                                      | missing required client config key 'addr'      |
+      | cluster_size | config                                                                                                                                    | expected                                                      |
+      | 1            | 'addr' = 'pulsar+ssl://127.0.0.1:6651', 'tls_cert_file' = '/nervix-missing/client.pem', 'tls_key_file' = '/nervix-missing/client-key.pem' | client config file key 'tls_cert_file' is not a readable file |
+      | 3            | 'addr' = 'pulsar+ssl://127.0.0.1:6651', 'tls_cert_file' = '/nervix-missing/client.pem', 'tls_key_file' = '/nervix-missing/client-key.pem' | client config file key 'tls_cert_file' is not a readable file |
+      | 1            | 'addr' = 'pulsar://127.0.0.1:6650', 'namespcae' = 'public/default'                                                                        | unknown client config key 'namespcae'                         |
+      | 3            | 'addr' = 'pulsar://127.0.0.1:6650', 'namespcae' = 'public/default'                                                                        | unknown client config key 'namespcae'                         |
+      | 1            | 'addr' = 'http://127.0.0.1:6650'                                                                                                          | invalid client config key 'addr': expected URL                |
+      | 3            | 'addr' = 'http://127.0.0.1:6650'                                                                                                          | invalid client config key 'addr': expected URL                |
+      | 1            | 'namespace' = 'public/default'                                                                                                            | missing required client config key 'addr'                     |
+      | 3            | 'namespace' = 'public/default'                                                                                                            | missing required client config key 'addr'                     |

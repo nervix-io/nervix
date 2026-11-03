@@ -118,6 +118,11 @@ the visual draft establish that choice before planning; the plan and connector r
 defaulting a missing position. The [connector contract](./connector-contract.md#pulsar-subscription-ownership)
 owns creation and cursor retention.
 
+A Pulsar subscription's type is a required typed field of the subscription, with no default: a
+statement writes one of its four variants, and neither a Model nor a plan can leave the choice to
+the driver. The registry, not the type, refuses a single-consumer variant with more than one
+instance, because that rule holds only until partitioning defines instances for these types.
+
 The Pulsar emitter's running publishing choice keeps related state together: the `NO ACK` variant
 owns its pending receipt futures and an optional first driver failure; the `ACK` variant owns its
 confirmation settings. An empty receipt collection means there are no outstanding receipts,
@@ -280,16 +285,16 @@ platform string; connector preparation uses it only when the codec's event omits
 A polled HTTP request's header holds a literal or names a client secret as two states of one enum,
 so a value cannot be both or neither, and the Model that names a secret holds its key and never its
 value.
-The registry's `NERVIX MQTT EMIT` archive signature identifies the current Model layout, including
-an owned Pulsar subscription's required start position, a Kafka consumer group's required start
-position, the required branch partition count, Sentry platform, an ingestor's
-`TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the session and
-quality of service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an
-MQTT TOPIC emitter writes beside its publishing mode, a `REDIS PUBSUB` ingestor's subscription,
-which is either a `CHANNEL` or a `PATTERN`, and that header state. Consensus's `raft_mqtt_emit_`
-keyspaces and current state metadata encoding identify its stored shapes. An unrecognized signature,
-namespace or encoding fails with the owning storage error and requires the stored data to be
-recreated.
+The registry's `NERVIX SUB TYPES` archive signature identifies the current Model layout, including a
+Pulsar subscription's required type, an owned Pulsar subscription's required start position, a Kafka
+consumer group's required start position, the required branch partition count, Sentry platform, an
+ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the
+receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of
+service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC
+emitter writes beside its publishing mode, a `REDIS PUBSUB` ingestor's subscription, which is either
+a `CHANNEL` or a `PATTERN`, and that header state. Consensus's `raft_subscription_types_` keyspaces
+and current state metadata encoding identify its stored shapes. An unrecognized signature, namespace
+or encoding fails with the owning storage error and requires the stored data to be recreated.
 
 ## Absence And Distinct States
 

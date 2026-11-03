@@ -1,5 +1,6 @@
-//! What an Iceberg commit charges the bulk memory class for, and which staged files it publishes,
-//! driven through the emitter against Iceberg's in-memory catalog.
+//! What an Iceberg commit charges the bulk memory class for, which staged batches it publishes,
+//! and which staging files hold them, driven through the emitter against Iceberg's in-memory
+//! catalog.
 
 use ::iceberg::{
     MemoryCatalog, Namespace, NamespaceIdent, TableCommit, TableCreation, TableIdent,
@@ -233,7 +234,9 @@ async fn fixture_emitter(catalog: StdArc<dyn Catalog>, executor: Executor) -> Ic
         batch_policy: None,
         staging_dir: tempfile::tempdir().assured("the staging directory is created"),
         executor,
-        staged_sequence: 0,
+        staging_sequence: 0,
+        staging_files: BTreeMap::new(),
+        appending_to: None,
         staged_batches: Vec::new(),
         staged_rows: 0,
         staged_bytes: 0,
@@ -246,34 +249,66 @@ async fn stage(
     user_ids: &[i64],
     acknowledgements: &StdArc<RecordedAcknowledgements>,
 ) {
-    let batch = RecordBatch::try_new(
+    stage_carriers(connector, &[user_ids], acknowledgements).await;
+}
+
+/// The mapped rows of one carrier holding `user_ids`.
+fn carrier_batch(user_ids: &[i64]) -> RecordBatch {
+    RecordBatch::try_new(
         mapped_schema(),
         vec![
             StdArc::new(Int64Array::from(user_ids.to_vec())),
             StdArc::new(StringArray::from(vec!["staged"; user_ids.len()])),
         ],
     )
-    .assured("the columns match the mapped schema");
-    let selected_rows = (0..user_ids.len()).collect::<Vec<_>>();
+    .assured("the columns match the mapped schema")
+}
+
+/// Stage one write of a carrier for each of `carriers`, each holding its `user_ids` and handing
+/// the emitter its own acknowledgements in `acknowledgements` to resolve.
+async fn stage_carriers(
+    connector: &mut IcebergTableEmitter,
+    carriers: &[&[i64]],
+    acknowledgements: &StdArc<RecordedAcknowledgements>,
+) {
+    let batches = carriers
+        .iter()
+        .map(|user_ids| carrier_batch(user_ids))
+        .collect::<Vec<_>>();
+    let selected_rows = carriers
+        .iter()
+        .map(|user_ids| (0..user_ids.len()).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let mut mapped = Vec::with_capacity(carriers.len());
+    for (batch_index, (batch, selected_rows)) in batches.iter().zip(&selected_rows).enumerate() {
+        mapped.push(MappedEmitterCarrier {
+            batch_index,
+            batch,
+            selected_rows,
+            occurred_at: Timestamp::from_unix_nanos(1),
+            acknowledgements: Some(EmitterRecordAcknowledgements::new(RecordedHandover(
+                StdArc::clone(acknowledgements),
+            ))),
+        });
+    }
     let target_columns = vec!["user_id".to_string(), "action".to_string()];
     let outcome = connector
         .publish(MappedEmitterRows {
             target_columns: &target_columns,
-            carriers: vec![MappedEmitterCarrier {
-                batch_index: 0,
-                batch: &batch,
-                selected_rows: &selected_rows,
-                occurred_at: Timestamp::from_unix_nanos(1),
-                acknowledgements: Some(EmitterRecordAcknowledgements::new(RecordedHandover(
-                    StdArc::clone(acknowledgements),
-                ))),
-            }],
+            carriers: mapped,
         })
         .await;
     assert!(
         !outcome.has_infrastructure_error(),
         "the emitter stages every row it is handed"
     );
+}
+
+/// How many files the emitter's staging directory holds.
+fn staging_files(connector: &IcebergTableEmitter) -> usize {
+    std::fs::read_dir(connector.staging_dir.path())
+        .assured("the fixture's staging directory exists while its emitter does")
+        .count()
 }
 
 /// Every `user_id` the fixture table holds, in order.
@@ -368,7 +403,7 @@ pub(super) fn description<C>(report: &Report<C>) -> Option<String> {
 }
 
 #[nervix_primitives::test]
-async fn a_commit_the_bulk_class_has_no_room_for_keeps_its_staged_file_and_acknowledgements() {
+async fn a_commit_the_bulk_class_has_no_room_for_keeps_its_staged_rows_and_acknowledgements() {
     let catalog: StdArc<dyn Catalog> = StdArc::new(memory_catalog().await);
     let executor = Executor::default();
     let mut connector = fixture_emitter(StdArc::clone(&catalog), executor.clone()).await;
@@ -377,14 +412,14 @@ async fn a_commit_the_bulk_class_has_no_room_for_keeps_its_staged_file_and_ackno
     let staged = connector.staged_bytes;
     let short_by_one = staged
         .checked_sub(1)
-        .assured("a staged Arrow IPC file holds at least its schema");
+        .assured("a staged batch holds at least its message header");
     let held = hold_bulk_memory_leaving(&executor, short_by_one);
 
     let refused = connector
         .commit()
         .await
         .err()
-        .assured("a class one byte short of the staged file refuses the commit's charge");
+        .assured("a class one byte short of the staged batch refuses the commit's charge");
 
     assert_eq!(
         refused.current_context(),
@@ -405,12 +440,11 @@ async fn a_commit_the_bulk_class_has_no_room_for_keeps_its_staged_file_and_ackno
     );
     assert_eq!(connector.staged_bytes, staged);
     assert_eq!(connector.staged_rows, 2);
-    for batch in &connector.staged_batches {
-        assert!(
-            batch.path.is_file(),
-            "a refused commit keeps its staged file"
-        );
-    }
+    assert_eq!(
+        staging_files(&connector),
+        1,
+        "a refused commit keeps its staging file"
+    );
     assert_eq!(acknowledgements.acknowledged(), 0);
     assert_eq!(acknowledgements.rejected(), 0);
     assert_eq!(
@@ -454,19 +488,19 @@ async fn a_staged_total_larger_than_the_bulk_class_commits_in_groups_within_one_
     for user_id in [1, 2, 3] {
         stage(&mut connector, &[user_id], &acknowledgements).await;
     }
-    let file_bytes = connector
+    let batch_bytes = connector
         .staged_batches
         .iter()
-        .map(|batch| batch.bytes)
+        .map(IcebergStagedBatch::bytes)
         .max()
-        .assured("three files are staged");
-    // Two staged files fit the class together and the third does not.
-    let two_files = file_bytes
+        .assured("three batches are staged");
+    // Two staged batches fit the class together and the third does not.
+    let two_batches = batch_bytes
         .checked_mul(2)
-        .assured("a staged file of one row is small");
-    let capacity = two_files
-        .checked_add(file_bytes / 2)
-        .assured("a staged file of one row is small");
+        .assured("a staged batch of one row is small");
+    let capacity = two_batches
+        .checked_add(batch_bytes / 2)
+        .assured("a staged batch of one row is small");
     let executor = executor_with_bulk_capacity(capacity);
     connector.executor = executor.clone();
 
@@ -489,7 +523,7 @@ async fn a_staged_total_larger_than_the_bulk_class_commits_in_groups_within_one_
 }
 
 #[nervix_primitives::test]
-async fn a_staged_file_larger_than_the_whole_bulk_class_commits_once_the_whole_class_is_free() {
+async fn a_staged_batch_larger_than_the_whole_bulk_class_commits_once_the_whole_class_is_free() {
     let catalog: StdArc<dyn Catalog> = StdArc::new(memory_catalog().await);
     let mut connector = fixture_emitter(StdArc::clone(&catalog), Executor::default()).await;
     let acknowledgements = StdArc::new(RecordedAcknowledgements::default());
@@ -497,7 +531,7 @@ async fn a_staged_file_larger_than_the_whole_bulk_class_commits_once_the_whole_c
     let staged = connector.staged_bytes;
     let capacity = staged
         .checked_sub(1)
-        .assured("a staged Arrow IPC file holds at least its schema");
+        .assured("a staged batch holds at least its message header");
     let executor = executor_with_bulk_capacity(capacity);
     connector.executor = executor.clone();
     // Other bulk work holds one byte, so the class is short of the whole of itself.
@@ -510,7 +544,7 @@ async fn a_staged_file_larger_than_the_whole_bulk_class_commits_once_the_whole_c
         .commit()
         .await
         .err()
-        .assured("a staged file larger than the class waits until the whole class is free");
+        .assured("a staged batch larger than the class waits until the whole class is free");
 
     assert_eq!(
         refused.current_context(),
@@ -527,16 +561,15 @@ async fn a_staged_file_larger_than_the_whole_bulk_class_commits_once_the_whole_c
         description(&refused),
         Some(format!(
             "Iceberg commit waits for the whole bulk memory class of {capacity} bytes for a \
-             staged file of {staged} bytes"
+             staged batch of {staged} bytes"
         ))
     );
     assert_eq!(connector.staged_bytes, staged);
-    for batch in &connector.staged_batches {
-        assert!(
-            batch.path.is_file(),
-            "a refused commit keeps its staged file"
-        );
-    }
+    assert_eq!(
+        staging_files(&connector),
+        1,
+        "a refused commit keeps its staging file"
+    );
     assert_eq!(acknowledgements.acknowledged(), 0);
     assert_eq!(acknowledgements.rejected(), 0);
     assert_eq!(
@@ -549,12 +582,12 @@ async fn a_staged_file_larger_than_the_whole_bulk_class_commits_once_the_whole_c
         "a refused charge takes nothing"
     );
 
-    // The whole class is free now, and the file is read charged with all of it.
+    // The whole class is free now, and the batch is read charged with all of it.
     drop(held);
     let report = connector
         .commit()
         .await
-        .assured("a free class admits a staged file larger than itself")
+        .assured("a free class admits a staged batch larger than itself")
         .assured("the commit publishes the staged rows");
 
     assert_eq!(report.messages, 8);
@@ -612,4 +645,135 @@ async fn rows_staged_after_a_refused_append_are_written_before_they_are_acknowle
     assert_eq!(first.rejected() + second.rejected(), 0);
     assert!(connector.staged_batches.is_empty());
     assert_eq!(connector.staged_rows, 0);
+}
+
+#[nervix_primitives::test]
+async fn every_batch_staged_before_a_commit_begins_shares_one_staging_file() {
+    let catalog: StdArc<dyn Catalog> = StdArc::new(memory_catalog().await);
+    let mut connector = fixture_emitter(StdArc::clone(&catalog), Executor::default()).await;
+    let acknowledgements = StdArc::new(RecordedAcknowledgements::default());
+
+    // One write of three carriers, as a flush of three source batches hands it over, and a second
+    // write, as the next flush does.
+    stage_carriers(&mut connector, &[&[1], &[2, 3], &[4]], &acknowledgements).await;
+    stage(&mut connector, &[5], &acknowledgements).await;
+
+    assert_eq!(
+        staging_files(&connector),
+        1,
+        "every batch staged before a commit begins is appended to one staging file"
+    );
+    assert_eq!(connector.staged_rows, 5);
+    let report = connector
+        .commit()
+        .await
+        .assured("the in-memory catalog accepts the append")
+        .assured("the commit publishes the staged rows");
+    assert_eq!(report.messages, 5);
+    assert_eq!(
+        committed_user_ids(catalog.as_ref()).await,
+        vec![1, 2, 3, 4, 5]
+    );
+    assert_eq!(
+        appended_data_files(catalog.as_ref()).await,
+        "1",
+        "the rows of every staged batch the class holds together share one data file"
+    );
+    assert_eq!(acknowledgements.acknowledged(), 4);
+    assert_eq!(acknowledgements.rejected(), 0);
+    assert_eq!(
+        staging_files(&connector),
+        0,
+        "a commit removes the staging file it published"
+    );
+
+    // Rows staged after that commit start a staging file of their own.
+    stage(&mut connector, &[6], &acknowledgements).await;
+    assert_eq!(staging_files(&connector), 1);
+}
+
+#[nervix_primitives::test]
+async fn a_commit_that_began_seals_its_staging_file_and_later_rows_start_another() {
+    let catalog: StdArc<dyn Catalog> = StdArc::new(RefusingFirstAppend {
+        inner: memory_catalog().await,
+        refused: AtomicBool::new(false),
+    });
+    let mut connector = fixture_emitter(StdArc::clone(&catalog), Executor::default()).await;
+    let first = StdArc::new(RecordedAcknowledgements::default());
+    stage_carriers(&mut connector, &[&[1], &[2]], &first).await;
+    let refused = connector
+        .commit()
+        .await
+        .err()
+        .assured("the fixture catalog refuses the first append");
+    assert_eq!(
+        refused.current_context(),
+        &EmitterWriteError::Commit { connector: ICEBERG }
+    );
+
+    // The refused commit covers the file it began with, so what the host stages before it retries
+    // is appended to a new file that a commit of its own publishes.
+    let second = StdArc::new(RecordedAcknowledgements::default());
+    stage_carriers(&mut connector, &[&[3], &[4]], &second).await;
+    assert_eq!(staging_files(&connector), 2);
+    let report = connector
+        .commit()
+        .await
+        .assured("the catalog accepts the retried append")
+        .assured("the retry publishes the staged rows");
+
+    assert_eq!(report.messages, 4);
+    assert_eq!(committed_user_ids(catalog.as_ref()).await, vec![1, 2, 3, 4]);
+    assert_eq!(first.acknowledged(), 2);
+    assert_eq!(second.acknowledged(), 2);
+    assert_eq!(staging_files(&connector), 0);
+}
+
+#[test]
+fn a_load_group_reads_one_span_from_each_staging_file_it_takes_batches_from() {
+    let staged = |file: u64, range: Range<u64>| IcebergStagedBatch {
+        file,
+        range,
+        rows: 1,
+        acknowledgements: None,
+        domain_timestamp: Timestamp::from_unix_nanos(1),
+    };
+    let staging_file = |path: &str, end: u64, batches: usize| IcebergStagingFile {
+        path: PathBuf::from(path),
+        schema_end: 64,
+        end,
+        batches,
+    };
+    let files = BTreeMap::from([
+        (1, staging_file("staging-1.arrow", 300, 2)),
+        (2, staging_file("staging-2.arrow", 164, 1)),
+    ]);
+    let group = [staged(1, 64..200), staged(1, 200..300), staged(2, 64..164)];
+
+    assert_eq!(
+        IcebergTableEmitter::staged_spans(&files, &group),
+        vec![
+            staging::Span {
+                path: PathBuf::from("staging-1.arrow"),
+                schema_end: 64,
+                bytes: 64..300,
+                batches: 2,
+            },
+            staging::Span {
+                path: PathBuf::from("staging-2.arrow"),
+                schema_end: 64,
+                bytes: 64..164,
+                batches: 1,
+            },
+        ]
+    );
+    assert_eq!(
+        IcebergTableEmitter::staged_spans(&files, &group[1..2]),
+        vec![staging::Span {
+            path: PathBuf::from("staging-1.arrow"),
+            schema_end: 64,
+            bytes: 200..300,
+            batches: 1,
+        }]
+    );
 }
