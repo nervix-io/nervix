@@ -998,8 +998,15 @@ bounds and then sends a valid completion and command on the same session.
 
 The conformance probes are complete, runnable clients, and each prints the same report as every
 other probe. They are qualification clients rather than supported SDKs. The Go and TypeScript probes
-each keep one request in flight and run no persistent command, so they use execution references that
-are not UUIDv7, which E-1 allows only for reads.
+each keep one request in flight. They use a harness-supplied UUIDv7 reference for the leader-only
+schema creation that proves redirect handling, and a separate reference for each later read or
+deliberately malformed request.
+
+Their three-node row scenarios start on a confirmed follower. The harness supplies the leader-only
+command's reference and requires the redirect report's original request, repeated request and
+terminal outcome to name that same reference. The native Go probe follows a command reply;
+TypeScript follows the console's `SessionEnding{LeaderRedirect}` before opening its subscription on
+the replacement session. The one-node examples are direct-connection controls.
 
 | Probe | Shows |
 | --- | --- |

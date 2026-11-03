@@ -59,6 +59,11 @@ waiting for frames. Closing the registry drops that sender and its pending reply
 The closed variant owns neither: reader termination follows the typed state's lifetime, without a
 second boolean that can disagree with whether requests are admitted.
 
+Materialized relay inspection requires the payload schema and resolved branching from its
+captured schedule. Incomplete scheduled metadata is an inspection failure, never an empty
+sensitivity set. The prepared sensitivity governs local, stored and remote record rendering;
+the declared unbranched variant has no concrete key to render.
+
 A backup cut's active phase is a typed state. Its completed phase measurements are an ordered
 sequence of typed phases and durations; an empty sequence means the first phase is still active.
 These task-owned measurements are volatile diagnostics and do not enter stored configuration,

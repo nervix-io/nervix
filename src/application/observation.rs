@@ -16,6 +16,8 @@
     )
 )]
 
+mod materialized_state;
+
 use std::{collections::BTreeSet, num::NonZeroU64, time::Duration};
 
 use arch_into::ArchInto;
@@ -46,7 +48,7 @@ use nervix_models::{
     InspectionFormat, LookupName, LookupQuery, Model, ModelKind, ModelName, NodeRef, ParseAsType,
     RelayName, ResourceDescription, ResourceId, ResourceName, ResourceUsage, ResourceVersion,
     ResourceVersionDescription, ResourceVersionEntries, ScheduledNode, SchemaName,
-    ShowRelayMaterializedState, UniquelyKindedModel, WasmStateInspection,
+    UniquelyKindedModel, WasmStateInspection,
 };
 use nervix_vm::window::{WindowAggregateProgram, lower_window_assignments};
 use tracing::{debug, warn};
@@ -59,13 +61,13 @@ use super::{
         format_emitter_describe_output, format_endpoint_describe_output,
         format_ingestor_describe_output, format_ingestor_listing_line,
         format_junction_describe_output, format_lookup_describe_output,
-        format_materialized_stream_state_output, format_placement_runtime_node,
-        format_placement_runtime_nodes, format_placement_runtime_nodes_in_context,
-        format_reingestor_describe_output, format_relay_describe_output,
-        format_reorderer_describe_output, format_resource_description, format_resource_entry_lines,
-        format_resource_usage_lines, format_wasm_processor_describe_output,
-        format_window_processor_describe_output, ordered_placement_corridor, placement_claim_owner,
-        placement_group_host, placement_groups_claimed_by_rule, placement_rule_coverage_status,
+        format_placement_runtime_node, format_placement_runtime_nodes,
+        format_placement_runtime_nodes_in_context, format_reingestor_describe_output,
+        format_relay_describe_output, format_reorderer_describe_output,
+        format_resource_description, format_resource_entry_lines, format_resource_usage_lines,
+        format_wasm_processor_describe_output, format_window_processor_describe_output,
+        ordered_placement_corridor, placement_claim_owner, placement_group_host,
+        placement_groups_claimed_by_rule, placement_rule_coverage_status,
         placement_rule_endpoint_nodes, placement_rule_runtime_nodes,
         runtime_ingestor_describe_from_envelope, runtime_ingestor_describe_to_envelope,
     },
@@ -1967,84 +1969,6 @@ impl SessionServiceImpl {
         runtime_schema::RuntimeRecordBatch::decode_arrow_ipc(executor, body)
             .await
             .change_context(ObservationError::LookupDecode)
-    }
-
-    pub(in crate::application) async fn show_stream_materialized_state(
-        &self,
-        domain: &DomainName,
-        show: ShowRelayMaterializedState,
-    ) -> CommandResult {
-        let schedule = self.inner.consensus.current_schedule().await;
-        let Some(domain_schedule) = schedule.domain(domain) else {
-            return command_error(format!(
-                "domain '{}' has no active schedule",
-                domain.as_str()
-            ));
-        };
-        let Some(relay_node) = domain_schedule
-            .nodes
-            .get(&NodeRef::new(
-                ModelKind::Relay,
-                ModelName::from(&show.relay),
-            ))
-            .filter(|node| {
-                matches!(node.config.as_ref(), Model::Relay(relay) if relay.materialized_state.is_some())
-            })
-        else {
-            return command_error(format!(
-                "stream '{}' in domain '{}' is not materialized",
-                show.relay.as_str(),
-                domain.as_str()
-            ));
-        };
-
-        let entries = match self
-            .inner
-            .runtime
-            .local_materialized_stream_state(domain, &show.relay)
-            .await
-        {
-            Ok(entries) if !entries.is_empty() => entries,
-            Ok(_) if !relay_node.executes_on(self.inner.consensus.local_node_id()) => {
-                if let Some(primary_node) = relay_node.primary_node() {
-                    match self
-                        .inner
-                        .runtime
-                        .remote_materialized_stream_state(primary_node, domain, &show.relay)
-                        .await
-                    {
-                        Ok(entries) => entries,
-                        Err(error) => return command_error(error.to_string()),
-                    }
-                } else {
-                    Vec::new()
-                }
-            }
-            Ok(entries) => entries,
-            Err(error) => return command_error(error.to_string()),
-        };
-
-        let message = if entries.is_empty() {
-            format_materialized_stream_state_output(&show.relay, relay_node, Vec::new())
-        } else {
-            let entry_lines = entries
-                .into_iter()
-                .map(|record| {
-                    format!(
-                        "key={} payload={} low={} high={}",
-                        match record.branch.as_ref() {
-                            Some(branch) => branch.as_str(),
-                            None => "(root)",
-                        },
-                        record.payload,
-                        record.ingested_at_low_watermark,
-                        record.ingested_at_high_watermark
-                    )
-                })
-                .collect::<Vec<_>>();
-            format_materialized_stream_state_output(&show.relay, relay_node, entry_lines)
-        };
-        command_ok(message)
     }
 
     pub(in crate::application) fn describe_udf(
