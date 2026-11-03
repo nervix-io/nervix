@@ -366,6 +366,10 @@ the identity of the connection, whichever address accepted it:
   and a literal IPv4 or IPv6 host is verified as an IP address. The interconnect additionally
   requires the peer's cluster identity, as
   [Peer Identity And Authentication](./interconnect.md#peer-identity-and-authentication) describes.
+  HTTP polling and emission use the same trust configuration: bundled Mozilla roots plus native
+  roots and any `tls_ca_file`, with the same optional client identity. The shared Reqwest builder
+  gives Prometheus, Sentry and OTEL HTTP that trust policy too. Installing this TLS configuration
+  leaves the node's DNS hook, the configured host and HTTP authority intact.
 - **HTTP authority.** The `Host` header, the HTTP/2 `:authority`, the WebSocket upgrade's URL, and
   the request path and query stay as configured. A literal IPv6 host is written in brackets there.
 - **Proxies.** An HTTP client sends every request, of HTTP polling and of the HTTP request

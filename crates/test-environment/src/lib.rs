@@ -58,6 +58,7 @@ pub mod dns_authority;
 mod http_readiness;
 mod postgres_clients;
 mod reaper;
+pub mod restartable_rabbitmq;
 
 use collector_output::{CollectorFollower, CollectorOutput};
 use http_readiness::HttpReadiness;

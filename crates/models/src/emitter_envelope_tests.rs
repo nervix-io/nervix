@@ -241,6 +241,74 @@ fn a_clause_holds_an_expression_exactly_where_its_form_is_one() {
 }
 
 #[test]
+fn targeted_edits_require_their_entity_declaration_even_when_dropping() {
+    let entity = EmitterEntityKind::Sqs(crate::SqsEmitterEntity::Queue);
+    let original = EmitterEnvelope::default();
+    for alteration in [
+        EmitterEnvelopeAlteration::SetPersistent,
+        EmitterEnvelopeAlteration::DropPersistent,
+        EmitterEnvelopeAlteration::SetTimestamp {
+            expression: text("timestamp"),
+        },
+        EmitterEnvelopeAlteration::DropTimestamp,
+        EmitterEnvelopeAlteration::SetProperties {
+            properties: vec![property("content_type")],
+        },
+        EmitterEnvelopeAlteration::DropProperties,
+    ] {
+        let mut envelope = original.clone();
+        let error = envelope
+            .apply_alteration(entity, &alteration)
+            .expect_err("the entity declares none of these targeted edits");
+        assert!(matches!(
+            error.current_context(),
+            EnvelopeDeclarationError::UndeclaredClause { entity: actual, .. }
+                | EnvelopeDeclarationError::UndeclaredProperties { entity: actual }
+                if *actual == entity
+        ));
+        assert_eq!(envelope, original);
+    }
+}
+
+#[test]
+fn a_refused_property_replacement_keeps_the_complete_envelope() {
+    let entity = EmitterEntityKind::RabbitMq(crate::RabbitMqEmitterEntity::Queue);
+    let original = EmitterEnvelope {
+        persistent: true,
+        mandatory: true,
+        timestamp: Some(text("timestamp")),
+        properties: vec![property("content_type")],
+        ..Default::default()
+    };
+    for (properties, expected) in [
+        (Vec::new(), EnvelopeDeclarationError::EmptyProperties),
+        (
+            vec![property("unrecognized")],
+            EnvelopeDeclarationError::UndeclaredProperty {
+                entity,
+                name: "unrecognized".to_owned(),
+            },
+        ),
+        (
+            vec![property("priority"), property("priority")],
+            EnvelopeDeclarationError::DuplicateProperty {
+                name: "priority".to_owned(),
+            },
+        ),
+    ] {
+        let mut envelope = original.clone();
+        let error = envelope
+            .apply_alteration(
+                entity,
+                &EmitterEnvelopeAlteration::SetProperties { properties },
+            )
+            .expect_err("the property set must use distinct declared keys");
+        assert_eq!(error.current_context(), &expected);
+        assert_eq!(envelope, original);
+    }
+}
+
+#[test]
 fn an_emitter_presents_the_envelope_it_writes_among_its_inspection_rows() {
     let entity =
         crate::EmitterEntity::ZeroMq(crate::ZeroMqEmitter::Push(crate::ZeroMqPushEmitter {
