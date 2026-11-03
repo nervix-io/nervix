@@ -522,7 +522,7 @@ Feature: MQTT ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_ack_out_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'notifications_ack_out_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -607,7 +607,7 @@ Feature: MQTT ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'keepalive_ack_out_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 1s ENCODE USING notification_codec
+        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out TOPIC 'keepalive_ack_out_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 1s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -692,7 +692,7 @@ Feature: MQTT ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications WHERE input.user_id = 61 OR input.user_id = 63 TO mqtt_out TOPIC 'overflow_ack_out_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 1s ENCODE USING notification_codec
+        CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications WHERE input.user_id = 61 OR input.user_id = 63 TO mqtt_out TOPIC 'overflow_ack_out_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 1s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

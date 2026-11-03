@@ -289,6 +289,17 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
         }));
     }
 
+    if let Some(unmet) = emitter.connector.unmet_publishing() {
+        return Err(Report::new(RegistryError::InvalidConnectorDeclaration {
+            domain: domain.clone(),
+            node: nervix_models::NodeRef::new(
+                nervix_models::ModelKind::Emitter,
+                identifier.clone(),
+            ),
+            issue: ConnectorDeclarationIssue::Publishing(unmet),
+        }));
+    }
+
     emitter
         .validate_batch()
         .map_err(|error| invalid(error.current_context().to_string()))?;

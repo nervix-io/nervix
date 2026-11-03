@@ -342,7 +342,10 @@ fn emitter(kind: EmitterEntityKind) -> Value {
         EmitterBatchLegality::Unavailable { reason } => (format!("unavailable: {reason}"), None),
     };
     let maximum = maximum.map(|limit| limit.to_string());
-    let modes: Vec<_> = publishing_modes.iter().map(|mode| mode.example()).collect();
+    let modes: Vec<_> = publishing_modes
+        .iter()
+        .map(|mode| format!("{}{}", mode.kind.example(), requirements(mode.requires)))
+        .collect();
     let options: Vec<_> = options.iter().map(option).collect();
     let envelope: Vec<_> = envelope.iter().map(|clause| clause.example()).collect();
     let properties: Vec<_> = properties

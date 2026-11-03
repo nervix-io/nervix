@@ -598,11 +598,11 @@ fn every_publishing_mode_body_parses_and_canonical_round_trips() {
          TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s",
         "RABBITMQ QUEUE EMITTER emit FROM p99 TO broker QUEUE 'events' MODE NO ACK RETRY POLICY \
          BACKOFF 250ms MAX 30s",
-        "MQTT TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE QOS 0 RETRY POLICY \
+        "MQTT TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' QOS 0 MODE NO ACK RETRY POLICY \
          BACKOFF 250ms MAX 30s",
-        "MQTT TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE QOS 1 ACK SEQUENTIAL ACK \
+        "MQTT TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' QOS 1 MODE ACK SEQUENTIAL ACK \
          TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s",
-        "MQTT TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE QOS 2 ACK PARALLEL MAX 8 \
+        "MQTT TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' QOS 2 MODE ACK PARALLEL MAX 8 \
          ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s",
         "NATS SUBJECT EMITTER emit FROM p99 TO broker SUBJECT 'events' MODE NO ACK RETRY POLICY \
          BACKOFF 250ms MAX 30s",
@@ -670,7 +670,7 @@ fn rejects_missing_incomplete_or_foreign_publishing_modes() {
              ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s",
         ),
         complete_codec_emitter(
-            "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE QOS 1 ACK SEQUENTIAL \
+            "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' QOS 1 MODE ACK SEQUENTIAL \
              ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s",
         ),
         "CREATE CLICKHOUSE TABLE EMITTER emit FROM p99 TO db TABLE 'events' MODE ACK RETRY POLICY \
@@ -713,16 +713,18 @@ fn nats_jetstream_completion_uses_the_complete_mode_phrase() {
 }
 
 #[test]
-fn mqtt_mode_completion_requires_qos_before_the_level() {
-    let input = "CREATE MQTT TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE ";
+fn mqtt_completion_requires_the_quality_of_service_before_its_mode() {
+    let input = "CREATE MQTT TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' ";
     let suggestions = suggest_create_emitter(input, input.len());
+    assert_eq!(suggestions, vec!["QOS".to_string()]);
 
-    assert!(suggestions.contains(&"QOS".to_string()));
-    assert!(!suggestions.contains(&"mqtt_qos".to_string()));
-
-    let input = "CREATE MQTT TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE QOS ";
+    let input = "CREATE MQTT TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' QOS ";
     let suggestions = suggest_create_emitter(input, input.len());
     assert_eq!(suggestions, vec!["mqtt_qos".to_string()]);
+
+    let input = "CREATE MQTT TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' QOS 1 ";
+    let suggestions = suggest_create_emitter(input, input.len());
+    assert_eq!(suggestions, vec!["MODE".to_string()]);
 }
 
 #[test]
@@ -2244,7 +2246,7 @@ fn parses_create_emitter_mqtt() {
     let input = r#"
         CREATE ATTACHED MQTT TOPIC EMITTER emit
             FROM p99
-            TO broker1 TOPIC 'topic' MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s
+            TO broker1 TOPIC 'topic' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
             ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
     "#;
 
@@ -2262,6 +2264,7 @@ fn parses_create_emitter_mqtt() {
         destination.topic,
         nervix_models::MqttTopicName::try_from("topic").expect("valid topic identifier")
     );
+    assert_eq!(destination.qos, nervix_models::MqttQos::Qos0);
 }
 
 #[test]
@@ -2541,7 +2544,7 @@ fn every_emitter_family_accepts_an_optional_batch_clause_and_round_trips_it() {
          BACKOFF 250ms MAX 30s",
         "REDIS PUBSUB EMITTER emit FROM p99 TO broker CHANNEL 'events' MODE NO ACK RETRY POLICY \
          BACKOFF 250ms MAX 30s",
-        "MQTT TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE QOS 1 ACK SEQUENTIAL ACK \
+        "MQTT TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' QOS 1 MODE ACK SEQUENTIAL ACK \
          TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s",
         "NATS SUBJECT EMITTER emit FROM p99 TO broker SUBJECT 'events' MODE NO ACK RETRY POLICY \
          BACKOFF 250ms MAX 30s",

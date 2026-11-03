@@ -477,6 +477,12 @@ macro_rules! connector_emitters {
                     $(Self::$Variant(connector) => $crate::EmitterEntityBody::routing_key(connector),)+
                 }
             }
+
+            fn chosen(&self, option: &str) -> Option<&'static str> {
+                match self {
+                    $(Self::$Variant(connector) => $crate::EmitterEntityBody::chosen(connector, option),)+
+                }
+            }
         }
 
         $(
