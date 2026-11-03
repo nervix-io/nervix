@@ -143,7 +143,7 @@ Feature: RabbitMQ delivery metadata
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE MQTT TOPIC EMITTER mqtt_forward FROM notifications TO mqtt_out
-        TOPIC 'redelivered_out_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s
+        TOPIC 'redelivered_out_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING notification_codec
         INHERIT ALL EXCEPT redelivered
         FLUSH IMMEDIATE

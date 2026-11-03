@@ -3005,19 +3005,6 @@ impl EmitterPublishing<'_> {
                 ack_timeout,
                 retry_policy,
             } => confirmed("ACK", window, ack_timeout, retry_policy),
-            EmitterPublishing::MqttQos0 { retry_policy } => {
-                format!("QOS 0 {}", retry(retry_policy))
-            }
-            EmitterPublishing::MqttQos1 {
-                window,
-                ack_timeout,
-                retry_policy,
-            } => confirmed("QOS 1 ACK", window, ack_timeout, retry_policy),
-            EmitterPublishing::MqttQos2 {
-                window,
-                ack_timeout,
-                retry_policy,
-            } => confirmed("QOS 2 ACK", window, ack_timeout, retry_policy),
             EmitterPublishing::NatsJetStream {
                 window,
                 ack_timeout,
@@ -4431,7 +4418,7 @@ mod tests {
             ),
             (
                 EmitterEntity::Mqtt(MqttEmitter::Topic(MqttTopicEmitter {
-                    mode: crate::MqttTopicPublishingMode::Qos0 {
+                    mode: crate::MqttTopicPublishingMode::NoAck {
                         retry_policy: crate::RetryPolicy {
                             backoff: "250ms".to_string(),
                             max_backoff: "30s".to_string(),
@@ -4439,8 +4426,9 @@ mod tests {
                     },
                     client: named("mqtt_main"),
                     topic: named("orders_topic"),
+                    qos: MqttQos::Qos0,
                 })),
-                "mqtt_main TOPIC 'orders_topic'",
+                "mqtt_main TOPIC 'orders_topic' QOS 0",
             ),
             (
                 EmitterEntity::Nats(NatsEmitter::Subject(NatsSubjectEmitter {
