@@ -2068,7 +2068,7 @@ impl SessionServiceImpl {
         for record in entries {
             let key = match record.branch.as_ref() {
                 Some(branch) => branch.to_json_string_masking(&branch_sensitivity),
-                None => "(root)".to_owned(),
+                None => std::borrow::Cow::Borrowed("(root)"),
             };
             entry_lines.push(format!(
                 "key={key} payload={} low={} high={}",

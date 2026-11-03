@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use error_stack::ResultExt as _;
 use nervix_models::SchemaField;
 
@@ -178,8 +180,15 @@ impl BranchKey {
     }
 
     /// The key's public JSON projection, with fields masked by their declared sensitivity.
-    /// The canonical key remains the identity used for routing and storage.
-    pub(crate) fn to_json_string_masking(&self, sensitivity: &VmSchemaSensitivity) -> String {
+    /// A key with no sensitive fields borrows its canonical text, which remains the identity used
+    /// for routing and storage.
+    pub(crate) fn to_json_string_masking(&self, sensitivity: &VmSchemaSensitivity) -> Cow<'_, str> {
+        if !sensitivity
+            .field_names()
+            .any(|field| self.0.fields.contains_key(field))
+        {
+            return Cow::Borrowed(self.as_str());
+        }
         let mut object = serde_json::Map::new();
         for (field, value) in &self.0.fields {
             let rendered = if sensitivity.is_sensitive(field.as_str()) {
@@ -189,7 +198,7 @@ impl BranchKey {
             };
             object.insert(field.as_str().to_owned(), rendered);
         }
-        serde_json::Value::Object(object).to_string()
+        Cow::Owned(serde_json::Value::Object(object).to_string())
     }
 
     /// The non-sensitive identity the control plane names this concrete branch by.
@@ -383,10 +392,9 @@ mod tests {
             key.to_json_string_masking(&sensitivity),
             r#"{"account":"<masked>","tenant":"<masked>","zone":"east"}"#
         );
-        assert_eq!(
-            key.to_json_string_masking(&VmSchemaSensitivity::default()),
-            key.as_str()
-        );
+        let plain = key.to_json_string_masking(&VmSchemaSensitivity::default());
+        assert_eq!(plain, key.as_str());
+        assert!(matches!(plain, Cow::Borrowed(_)));
     }
 
     /// A branch is named by the lowercase hexadecimal fingerprint of its key, the text `DESCRIBE`
