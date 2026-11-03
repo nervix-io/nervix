@@ -256,6 +256,7 @@ class InventoryTests(unittest.TestCase):
             "syslog-stream-framing",
             "syslog-listener-metadata",
             "rabbitmq-client-address",
+            "rabbitmq-amqp-properties",
             "syslog-structured-data",
             "replica-progress",
             "replica-catch-up",
@@ -385,6 +386,7 @@ class InventoryTests(unittest.TestCase):
             "kafka-partition-offsets",
             "kafka-record-create-times",
             "kafka-record-metadata",
+            "pulsar-message-metadata",
             "ingestor-describe-envelope",
             "dns-operation-budget",
         })
