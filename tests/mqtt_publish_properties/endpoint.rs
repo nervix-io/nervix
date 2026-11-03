@@ -89,7 +89,11 @@ impl Endpoint {
         captured: mpsc::Sender<CapturedPublish>,
         stopped: CancellationToken,
     ) {
-        let Ok(broker) = TcpStream::connect(broker).await else {
+        let connected = nervix_primitives::select! {
+            _ = stopped.cancelled() => return,
+            connected = TcpStream::connect(broker) => connected,
+        };
+        let Ok(broker) = connected else {
             return;
         };
         let (mut client_read, mut client_write) = client.into_split();
