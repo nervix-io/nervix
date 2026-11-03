@@ -1225,7 +1225,9 @@ futures and messages exclusively. A driver confirm can carry another message's r
 owner collects the set before attributing returns and refilling it. An interrupted mandatory
 window retains positive answers whose return attribution remains unknown, rather than reporting
 delivery; known returns and safe nonmandatory answers are settled once. The lookup borrows payload
-contents and uses no shared map or tracked lock. The Shuttle checks
+contents and compares each message's complete prepared AMQP properties, including persistence and
+timestamp. These immutable values come from its retained envelope and are reused on retransmission;
+attribution adds no shared map or tracked lock. The Shuttle checks
 `shuttle_a_return_followed_by_a_multiple_ack_rejects_only_its_message` and
 `shuttle_a_deadline_never_delivers_a_partially_attributed_mandatory_window` drive this production
 owner with selected callbacks and deadline events. They qualify the owner, not Lapin's opaque locks

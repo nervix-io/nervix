@@ -258,6 +258,7 @@ class InventoryTests(unittest.TestCase):
             "syslog-stream-framing",
             "syslog-listener-metadata",
             "rabbitmq-client-address",
+            "rabbitmq-amqp-properties",
             "syslog-structured-data",
             "replica-progress",
             "replica-catch-up",

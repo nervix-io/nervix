@@ -222,7 +222,8 @@ pub use emitter_batch::{
     EmitterBatchLimitError, EmitterBatchPolicy, PayloadSizeError, PayloadSizeLimit,
 };
 pub use emitter_envelope::{
-    EmitterEnvelope, EnvelopeClause, EnvelopeDeclarationError, EnvelopeProperty,
+    EmitterEnvelope, EmitterEnvelopeAlteration, EnvelopeClause, EnvelopeDeclarationError,
+    EnvelopeProperty,
 };
 pub use expression::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, CaseBranch, Expression,

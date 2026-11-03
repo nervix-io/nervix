@@ -547,7 +547,7 @@ current connection, retry and deadline limits.
   nothing. A `gzip`, `deflate` or `br` response arrives decompressed and without its
   `content-encoding` and `content-length` headers. Read `Ingestors` → `HTTP REQUEST` for the
   request, responses, failures and the shared client keys, and `Emitters` → `HTTP client transport`
-  for redirects and proxies.
+  for redirects, proxies and the common TLS trust policy used by polling and emitting.
 - Every `PROMETHEUS CLIENT` sets `addr` to the API root, an `http` or `https` URL without a
   query string or fragment, and a positive `timeout_ms`. It sets no key beyond `tls_ca_file` and
   the paired `tls_cert_file` and `tls_key_file`; `CREATE PROMETHEUS CLIENT` refuses any other. It

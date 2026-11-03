@@ -75,6 +75,20 @@ pub struct EmitterEnvelope {
     pub properties: Vec<EnvelopeProperty>,
 }
 
+/// A targeted envelope edit. `SET PROPERTIES` replaces the complete property set; other edits
+/// preserve every envelope field they do not name.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum EmitterEnvelopeAlteration {
+    SetPersistent,
+    DropPersistent,
+    SetTimestamp { expression: Expression },
+    DropTimestamp,
+    SetProperties { properties: Vec<EnvelopeProperty> },
+    DropProperties,
+}
+
 /// One clause an envelope writes, with what the statement writes after its keywords.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvelopeClause<'a> {
@@ -142,9 +156,61 @@ pub enum EnvelopeDeclarationError {
     },
     #[error("PROPERTIES sets key '{name}' more than once")]
     DuplicateProperty { name: String },
+    #[error("{entity} emitters declare no PROPERTIES")]
+    UndeclaredProperties { entity: EmitterEntityKind },
+    #[error("SET PROPERTIES requires at least one key")]
+    EmptyProperties,
 }
 
 impl EmitterEnvelope {
+    /// Applies a declared targeted edit atomically, including its closed property-key check.
+    pub(crate) fn apply_alteration(
+        &mut self,
+        entity: EmitterEntityKind,
+        alteration: &EmitterEnvelopeAlteration,
+    ) -> error_stack::Result<(), EnvelopeDeclarationError> {
+        let declared = entity.capabilities();
+        let clause = match alteration {
+            EmitterEnvelopeAlteration::SetPersistent
+            | EmitterEnvelopeAlteration::DropPersistent => Some(EnvelopeClauseKind::Persistent),
+            EmitterEnvelopeAlteration::SetTimestamp { .. }
+            | EmitterEnvelopeAlteration::DropTimestamp => Some(EnvelopeClauseKind::Timestamp),
+            EmitterEnvelopeAlteration::SetProperties { .. }
+            | EmitterEnvelopeAlteration::DropProperties => None,
+        };
+        if let Some(clause) = clause {
+            if !declared.declares_envelope_clause(clause) {
+                return Err(Report::new(EnvelopeDeclarationError::UndeclaredClause {
+                    entity,
+                    clause,
+                }));
+            }
+        } else if declared.properties.is_empty() {
+            return Err(Report::new(
+                EnvelopeDeclarationError::UndeclaredProperties { entity },
+            ));
+        }
+        let mut candidate = self.clone();
+        match alteration {
+            EmitterEnvelopeAlteration::SetPersistent => candidate.persistent = true,
+            EmitterEnvelopeAlteration::DropPersistent => candidate.persistent = false,
+            EmitterEnvelopeAlteration::SetTimestamp { expression } => {
+                candidate.timestamp = Some(expression.clone())
+            }
+            EmitterEnvelopeAlteration::DropTimestamp => candidate.timestamp = None,
+            EmitterEnvelopeAlteration::SetProperties { properties } => {
+                if properties.is_empty() {
+                    return Err(Report::new(EnvelopeDeclarationError::EmptyProperties));
+                }
+                candidate.properties = properties.clone()
+            }
+            EmitterEnvelopeAlteration::DropProperties => candidate.properties.clear(),
+        }
+        candidate.check_declared(entity)?;
+        *self = candidate;
+        Ok(())
+    }
+
     /// Whether the statement writes no envelope clause and sets no property.
     pub fn is_empty(&self) -> bool {
         self.clauses().is_empty() && self.properties.is_empty()

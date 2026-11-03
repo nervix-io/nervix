@@ -241,7 +241,6 @@ mod tests {
          ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
             .to_owned()
     )]
-    #[case::undeclared_envelope_clause(exchange_statement("events", "NO ACK", "PERSISTENT", ""))]
     #[case::mandatory_before_the_payload(
         "CREATE RABBITMQ EXCHANGE EMITTER outgoing FROM events TO broker EXCHANGE 'events' ROUTING \
          KEY input.category MANDATORY MODE NO ACK RETRY POLICY BACKOFF 1s MAX 30s ENCODE USING \
@@ -289,6 +288,215 @@ mod tests {
         assert_offers_exactly(
             "CREATE RABBITMQ QUEUE EMITTER outgoing FROM events TO broker QUEUE 'Orders' ",
             &["MODE"],
+        );
+    }
+
+    #[rstest]
+    #[case::queue("QUEUE", "QUEUE 'orders'")]
+    #[case::exchange("EXCHANGE", "EXCHANGE 'events' ROUTING KEY 'orders'")]
+    fn rabbitmq_envelope_is_a_canonical_semantic_model(
+        #[case] entity: &str,
+        #[case] destination: &str,
+    ) {
+        let text = format!(
+            "CREATE RABBITMQ {entity} EMITTER outgoing FROM events TO broker {destination} MODE \
+             NO ACK RETRY POLICY BACKOFF 1s MAX 3s ENCODE USING events_codec PERSISTENT MANDATORY \
+             TIMESTAMP from_unix('second', 1700000000) PROPERTIES {{'content_type' = \
+             'application/json', 'priority' = 7 AS U8}} INHERIT ALL FLUSH IMMEDIATE ON MESSAGE \
+             ERROR LOG ON GENERAL ERROR LOG;"
+        );
+        let statement = parse_statement(&text).assured("the declared RabbitMQ envelope parses");
+        let canonical = statement
+            .to_canonical_plexus()
+            .assured("the envelope has canonical Plexus");
+        assert_eq!(
+            parse_statement(&canonical).assured("the canonical statement reparses"),
+            statement
+        );
+        let Statement::Create(create) = statement else {
+            panic!("the statement creates an emitter");
+        };
+        let Model::Emitter(emitter) = *create.body else {
+            panic!("the statement creates an emitter");
+        };
+        assert!(emitter.envelope.persistent);
+        assert!(emitter.envelope.mandatory);
+        assert!(emitter.envelope.timestamp.is_some());
+        assert_eq!(emitter.envelope.properties.len(), 2);
+        assert_eq!(emitter.envelope.properties[0].name, "content_type");
+        assert_eq!(emitter.envelope.properties[1].name, "priority");
+    }
+
+    #[rstest]
+    #[case("SET PERSISTENT")]
+    #[case("DROP PERSISTENT")]
+    #[case("SET TIMESTAMP from_unix('second', 1700000000)")]
+    #[case("DROP TIMESTAMP")]
+    #[case("SET PROPERTIES {'priority' = 9 AS U8}")]
+    #[case("DROP PROPERTIES")]
+    fn rabbitmq_targeted_envelope_alterations_round_trip(#[case] operation: &str) {
+        let text = format!("ALTER RABBITMQ QUEUE EMITTER outgoing {operation};");
+        let statement =
+            parse_statement(&text).assured("the declared RabbitMQ envelope alteration parses");
+        let canonical = statement
+            .to_canonical_plexus()
+            .assured("the alteration has canonical Plexus");
+        assert_eq!(
+            parse_statement(&canonical).assured("the canonical alteration reparses"),
+            statement
+        );
+    }
+
+    #[rstest]
+    #[case("QUEUE", "QUEUE 'orders'")]
+    #[case("EXCHANGE", "EXCHANGE 'events' ROUTING KEY 'orders'")]
+    fn rabbitmq_targeted_alterations_preserve_the_rest_of_the_emitter(
+        #[case] entity: &str,
+        #[case] destination: &str,
+    ) {
+        let text = format!(
+            "CREATE RABBITMQ {entity} EMITTER outgoing FROM events TO broker {destination} MODE \
+             ACK SEQUENTIAL ACK TIMEOUT 7s RETRY POLICY BACKOFF 1s MAX 3s ENCODE USING \
+             events_codec MANDATORY INHERIT ALL BATCH MAX MESSAGES 10 MAX SIZE 64KiB FLUSH \
+             IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+        );
+        let Statement::Create(create) = parse_statement(&text).assured("the emitter parses") else {
+            panic!("CREATE is an emitter");
+        };
+        let Model::Emitter(mut emitter) = *create.body else {
+            panic!("CREATE is an emitter");
+        };
+        let original = emitter.clone();
+        for operations in [
+            "SET PERSISTENT, SET TIMESTAMP from_unix('second', 0), SET PROPERTIES {'content_type' \
+             = 'application/json', 'priority' = 7 AS U8}",
+            "SET PROPERTIES {'message_id' = 'next'}",
+            "DROP PERSISTENT, DROP TIMESTAMP, DROP PROPERTIES",
+        ] {
+            let text = format!("ALTER RABBITMQ {entity} EMITTER outgoing {operations};");
+            let Statement::AlterEmitter(alter) =
+                parse_statement(&text).assured("the alterations parse")
+            else {
+                panic!("ALTER targets an emitter");
+            };
+            emitter
+                .apply_alter(&alter)
+                .assured("the declared operations apply atomically");
+            let mut without_envelope = emitter.clone();
+            without_envelope.envelope = original.envelope.clone();
+            assert_eq!(
+                without_envelope, original,
+                "the destination, body, route and publishing policy survive"
+            );
+            if operations.starts_with("SET PERSISTENT") {
+                assert!(emitter.envelope.persistent);
+                assert!(emitter.envelope.timestamp.is_some());
+                assert_eq!(emitter.envelope.properties.len(), 2);
+            } else if operations.starts_with("SET PROPERTIES") {
+                assert!(emitter.envelope.persistent);
+                assert!(emitter.envelope.timestamp.is_some());
+                assert_eq!(emitter.envelope.properties.len(), 1);
+                assert_eq!(emitter.envelope.properties[0].name, "message_id");
+            } else {
+                assert_eq!(emitter, original);
+            }
+        }
+    }
+
+    #[rstest]
+    #[case("PERSISTENT PERSISTENT")]
+    #[case("TIMESTAMP from_unix('second', 0) PERSISTENT")]
+    #[case("PROPERTIES {'content_type' = 'one', 'content_type' = 'two'}")]
+    #[case("PROPERTIES {'unrecognized' = 'value'}")]
+    #[case("PROPERTIES {}")]
+    fn rabbitmq_envelopes_refuse_duplicate_out_of_order_or_undeclared_values(
+        #[case] envelope: &str,
+    ) {
+        assert!(parse_statement(&exchange_statement("events", "NO ACK", envelope, "")).is_err());
+        for operation in [
+            "SET PROPERTIES {'unrecognized' = 'value'}",
+            "SET PROPERTIES {'priority' = 1 AS U8, 'priority' = 2 AS U8}",
+        ] {
+            assert!(
+                parse_statement(&format!(
+                    "ALTER RABBITMQ QUEUE EMITTER outgoing {operation};"
+                ))
+                .is_err()
+            );
+        }
+    }
+
+    #[rstest]
+    #[case("QUEUE")]
+    #[case("EXCHANGE")]
+    fn rabbitmq_envelope_alteration_completion_offers_only_declared_clauses(#[case] entity: &str) {
+        let prefix = format!("ALTER RABBITMQ {entity} EMITTER outgoing ");
+        let offered = crate::statement::suggest_statement(&prefix, prefix.len());
+        for expected in [
+            "SET PERSISTENT",
+            "DROP PERSISTENT",
+            "SET TIMESTAMP",
+            "DROP TIMESTAMP",
+            "SET PROPERTIES",
+            "DROP PROPERTIES",
+        ] {
+            assert!(
+                offered.iter().any(|item| item == expected),
+                "missing {expected}: {offered:?}"
+            );
+        }
+        for other in [
+            "SET RETAIN",
+            "DROP RETAIN",
+            "SET DELAY",
+            "DROP DELAY",
+            "SET DELIVER AFTER",
+            "DROP DELIVER AFTER",
+        ] {
+            assert!(
+                !offered.iter().any(|item| item == other),
+                "undeclared {other}: {offered:?}"
+            );
+        }
+        let properties = format!("{prefix}SET PROPERTIES {{");
+        assert_offers_exactly(
+            &properties,
+            &[
+                "\"content_type\"",
+                "\"content_encoding\"",
+                "\"message_id\"",
+                "\"correlation_id\"",
+                "\"reply_to\"",
+                "\"expiration\"",
+                "\"priority\"",
+                "\"type\"",
+                "\"app_id\"",
+                "\"user_id\"",
+            ],
+        );
+    }
+
+    #[rstest]
+    #[case("QUEUE")]
+    #[case("EXCHANGE")]
+    fn property_alteration_completion_continues_with_unwritten_keys(#[case] entity: &str) {
+        let prefix = format!(
+            "ALTER RABBITMQ {entity} EMITTER outgoing SET PROPERTIES {{ 'app_id' = 'app', "
+        );
+        assert_offers_exactly(
+            &prefix,
+            &[
+                "\"content_type\"",
+                "\"content_encoding\"",
+                "\"message_id\"",
+                "\"correlation_id\"",
+                "\"reply_to\"",
+                "\"expiration\"",
+                "\"priority\"",
+                "\"type\"",
+                "\"user_id\"",
+                "}",
+            ],
         );
     }
 }
