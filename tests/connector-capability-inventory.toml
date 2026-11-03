@@ -607,6 +607,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER pool_acquire_timeout_ms"
+entity = "MYSQL TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mysql_pool_keys.feature", scenario = "MySQL emitters report the configured pool acquire deadline on <nodes> nodes" },
+]
+
+[[capability]]
 capability = "MODE ACK"
 entity = "MYSQL TABLE EMITTER"
 scenarios = [

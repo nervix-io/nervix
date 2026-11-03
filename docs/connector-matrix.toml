@@ -140,7 +140,7 @@ properties = "This entity declares no typed PROPERTIES block; any encoded record
 [entity."MYSQL TABLE"]
 emit_headers = "The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity."
 envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
-mirror = "The MySQL connector inserts mapped rows and handles declared conflicts; it declares no binlog or query ingestor."
+mirror = "The MySQL connector inserts mapped rows and handles declared conflicts; its client declares checkout, idle/max-age and minimum-maintenance policy. It declares no binlog or query ingestor."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."MONGODB COLLECTION"]

@@ -565,6 +565,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   node, so size it for the node's whole workload rather than per emitter, and expect one pool per
   node the client is placed on. Read the dedicated `Common` → `Database Client Connection Pools`
   documentation entry before choosing values.
+- For a `MYSQL` client's checkout budget, connection lifetimes and minimum-maintenance interval,
+  read `Connection lifetimes` in `Database Client Connection Pools`. Keep the checkout budget
+  separate from the insert's operation bound, and expect maximum age to allow an active insert to finish.
 - A `REDIS` client's command pool and a `POSTGRES` client's pool take `pool_idle_timeout_ms` and
   `pool_max_lifetime_ms`, 10 and 30 minutes by default; Redis never applies them to a Pub/Sub
   ingestor's subscription connection. A `POSTGRES` client also takes `pool_acquire_timeout_ms`, 30
