@@ -1,70 +1,14 @@
-//! Cancellation and deadlines of blocking calls: `nx_cancel`.
+//! `nx_cancel`: cancellation and deadlines of blocking calls, as a host holds them.
 //!
-//! - **Owns.** The token a host triggers from any thread, its optional deadline, and bounding a
-//!   blocking call by both.
-//! - **Depends on.** Tokio's cancellation token and timer.
-//! - **Must not know.** What the bounded call does, or what cancelling it means for admitted
-//!   work; the session decides that.
+//! - **Owns.** The token handle a host creates, triggers from any thread and frees.
+//! - **Depends on.** The shared cancellation token and the C ABI boundary.
+//! - **Must not know.** What the bounded call does; the session decides that.
 
-use std::{future::Future, time::Duration};
+use std::time::Duration;
 
-use nervix_primitives::{sync::CancellationToken, time::Instant};
+use nervix_client_host::{Cancel, Failure};
 
-use crate::{abi, failure::Failure};
-
-/// The longest deadline a token accepts: one day, the longest deadline the client accepts.
-const MAX_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
-
-/// A cancellation token, with the deadline it expires at when it has one.
-#[derive(Debug, Default)]
-pub struct Cancel {
-    token: CancellationToken,
-    deadline: Option<Instant>,
-}
-
-impl Cancel {
-    /// A token that also expires `deadline` from now.
-    pub fn with_deadline(deadline: Duration) -> Result<Self, Failure> {
-        if deadline > MAX_DEADLINE {
-            return Err(Failure::invalid_argument(
-                "deadline_millis",
-                "exceeds the one-day limit",
-            ));
-        }
-        let expires = Instant::now()
-            .checked_add(deadline)
-            .ok_or_else(|| Failure::invalid_argument("deadline_millis", "overflows the clock"))?;
-        Ok(Self {
-            token: CancellationToken::new(),
-            deadline: Some(expires),
-        })
-    }
-
-    pub fn trigger(&self) {
-        self.token.cancel();
-    }
-
-    /// Runs `work` until it finishes, the token is triggered, or the deadline passes. A triggered
-    /// token wins over a result that is ready at the same time, so a host that cancelled never
-    /// reads a result as if it had not.
-    pub(crate) async fn bound<T>(
-        &self,
-        work: impl Future<Output = Result<T, Failure>>,
-    ) -> Result<T, Failure> {
-        let expiry = async {
-            match self.deadline {
-                Some(deadline) => nervix_primitives::time::sleep_until(deadline).await,
-                None => std::future::pending().await,
-            }
-        };
-        nervix_primitives::select! {
-            biased;
-            () = self.token.cancelled() => Err(Failure::cancelled()),
-            () = expiry => Err(Failure::deadline()),
-            result = work => result,
-        }
-    }
-}
+use crate::abi;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn nx_cancel_new() -> *mut Cancel {

@@ -1672,3 +1672,171 @@ entity = "WEBSOCKETS CONNECTION INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/websocket_connection_declaration.feature", scenario = "A WebSockets connection sends literal upgrade headers and exposes response headers and frame types" },
 ]
+
+[[capability]]
+capability = "PERSISTENT"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "TIMESTAMP"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES content_type"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES content_encoding"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES message_id"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES correlation_id"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES reply_to"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES expiration"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES priority"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES type"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES app_id"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES user_id"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PERSISTENT"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "TIMESTAMP"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES content_type"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES content_encoding"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES message_id"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES correlation_id"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES reply_to"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES expiration"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES priority"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES type"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES app_id"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]
+
+[[capability]]
+capability = "PROPERTIES user_id"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
+]

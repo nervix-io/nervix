@@ -65,7 +65,7 @@ pub(crate) enum ProbeRuntime {
     C,
     /// C++ over the shared Rust binding.
     Cpp,
-    /// CPython over the shared Rust binding, through ctypes.
+    /// CPython over the Python package, `nervix_client`, on pyo3.
     Python,
     /// Java over the shared Rust binding, through the Foreign Function and Memory API.
     Java,
@@ -109,7 +109,8 @@ impl ProbeRuntime {
             Self::C => Command::new(Self::artifacts()?.join("c-probe")),
             Self::Cpp => Command::new(Self::artifacts()?.join("cpp-probe")),
             Self::Python => {
-                let mut command = Command::new("python3");
+                // The CPython the package was installed into, with pyarrow beside it.
+                let mut command = Command::new(Self::artifacts()?.join("python/bin/python"));
                 command.arg(sources.join("python/probe.py"));
                 command
             }
@@ -170,16 +171,17 @@ impl ProbeRuntime {
         }
     }
 
-    /// Whether the probe loads the shared Rust binding rather than implementing the protocol.
+    /// Whether the probe loads the C ABI of the shared Rust binding, which it is told the path of.
     fn loads_binding(self) -> bool {
         match self {
-            Self::C | Self::Cpp | Self::Python | Self::Java | Self::Ruby => true,
-            Self::CAbiInProcess | Self::Go | Self::Node | Self::Bun => false,
+            Self::C | Self::Cpp | Self::Java | Self::Ruby => true,
+            Self::CAbiInProcess | Self::Python | Self::Go | Self::Node | Self::Bun => false,
         }
     }
 
-    /// Whether the probe drives the shared Rust binding, in process or loaded, and so reaches the
-    /// domain clock events and the producer and consumer handles the binding exposes.
+    /// Whether the probe drives the Rust client through the shared binding, in process, through
+    /// its C ABI or through the Python package, and so reaches the domain clock events and the
+    /// producer and consumer handles the binding exposes.
     fn drives_binding(self) -> bool {
         match self {
             Self::CAbiInProcess | Self::C | Self::Cpp | Self::Python | Self::Java | Self::Ruby => {

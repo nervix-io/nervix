@@ -3936,3 +3936,15 @@ maps lifecycle and failure-handling contracts to their executable checks.
 [Test Liveness 06](https://app.clickup.com/t/86bc2wugx) retains the historical high-parallelism run
 results, comparison with the interrupted run, startup and cleanup distributions, and CI artifacts.
 Those results qualify their recorded revision and workload.
+
+### Scenario-owned RabbitMQ restarts
+
+The RabbitMQ persistence scenario owns an ephemeral broker through the test environment. It
+provisions a durable queue explicitly, waits for the emitted message to be ready, stops the Nervix
+domain, restarts that broker with its data directory intact, refreshes its endpoint from Docker's
+current published port, and waits for a fresh authenticated AMQP
+connection within thirty seconds, closes that readiness probe and reads the message through AMQP.
+Stopping the domain before restarting the broker rules out replay by
+Nervix as the explanation for the surviving message. This broker is separate from the suite's
+shared RabbitMQ service, so the restart cannot disrupt another scenario. The after hook removes it
+explicitly after node teardown, including when the scenario fails before its restart step.
