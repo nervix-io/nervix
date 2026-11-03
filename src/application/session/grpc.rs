@@ -65,18 +65,23 @@ fn shutting_down() -> Status {
     Status::unavailable("the node is shutting down")
 }
 
-/// Runs a call until it answers or the node closes admission. A call that admission ends stops at
-/// once with [`shutting_down`]: it reads and admits nothing more, and work it already handed to a
-/// task of its own goes on without it.
-async fn until_admission_closes<T>(
+/// The future of a call that runs until it answers or the node closes admission. A call that
+/// admission ends stops at once with [`shutting_down`]: it reads and admits nothing more, and work
+/// it already handed to a task of its own goes on without it.
+fn until_admission_closes<T>(
     admission: CancellationToken,
-    call: impl Future<Output = Result<T, Status>>,
-) -> Result<T, Status> {
-    nervix_primitives::select! {
-        biased;
-        answered = call => answered,
-        _ = admission.cancelled() => Err(shutting_down()),
-    }
+    call: impl Future<Output = Result<T, Status>> + Send + 'static,
+) -> BoxFuture<T, Status>
+where
+    T: Send + 'static,
+{
+    Box::pin(async move {
+        nervix_primitives::select! {
+            biased;
+            answered = call => answered,
+            _ = admission.cancelled() => Err(shutting_down()),
+        }
+    })
 }
 
 /// The session service a gRPC server hosts.
@@ -243,7 +248,7 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for Upload {
         let service = self.service.clone();
         let limits = self.limits;
         let admission = service.inner.admission_shutdown.clone();
-        Box::pin(until_admission_closes(admission, async move {
+        until_admission_closes(admission, async move {
             let user = service
                 .authenticate_grpc_metadata(request.metadata())
                 .await
@@ -255,7 +260,7 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for Upload {
                     "the upload reply does not fit a frame: {error}"
                 ))),
             }
-        }))
+        })
     }
 }
 
@@ -273,7 +278,7 @@ impl ClientStreamingService<VerifiedFrame<RestoreFrame>> for Restore {
         let service = self.service.clone();
         let limits = self.limits;
         let admission = service.inner.admission_shutdown.clone();
-        Box::pin(until_admission_closes(admission, async move {
+        until_admission_closes(admission, async move {
             let user = service
                 .authenticate_grpc_metadata(request.metadata())
                 .await
@@ -285,7 +290,7 @@ impl ClientStreamingService<VerifiedFrame<RestoreFrame>> for Restore {
                     "the restore reply does not fit a frame: {error}"
                 ))),
             }
-        }))
+        })
     }
 }
 
@@ -310,7 +315,7 @@ impl ServerStreamingService<VerifiedFrame<BackupDownloadRequestFrame>> for Downl
         let service = self.service.clone();
         let limits = self.limits;
         let admission = service.inner.admission_shutdown.clone();
-        Box::pin(until_admission_closes(admission.clone(), async move {
+        until_admission_closes(admission.clone(), async move {
             let user = service
                 .authenticate_grpc_metadata(request.metadata())
                 .await
@@ -324,7 +329,7 @@ impl ServerStreamingService<VerifiedFrame<BackupDownloadRequestFrame>> for Downl
             let frames = frames.into_stream();
             let responses = DownloadResponse::Frames { frames, admission }.into_stream();
             Ok(Response::new(responses))
-        }))
+        })
     }
 }
 
