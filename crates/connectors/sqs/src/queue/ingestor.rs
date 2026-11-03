@@ -499,6 +499,73 @@ impl FailedEntries {
 }
 
 impl SqsQueueIngestor {
+    /// Deletes the message `position` names with one `DeleteMessage` request.
+    async fn delete(
+        &self,
+        queue_url: &str,
+        position: &SqsQueueIngestorPosition,
+    ) -> SqsQueueIngestorResult<()> {
+        let deleted = self
+            .client
+            .sdk()
+            .delete_message()
+            .queue_url(queue_url)
+            .receipt_handle(&position.receipt_handle)
+            .send()
+            .await;
+        if let Err(error) = deleted {
+            return Err(self
+                .client
+                .failed(SqsRequest::Delete, &error)
+                .report(SqsQueueIngestorError::Delete));
+        }
+        Ok(())
+    }
+
+    /// Deletes the messages of `batch`, at most ten, with one `DeleteMessageBatch` request. An
+    /// entry the service did not delete fails the deletion with the service's code.
+    async fn delete_batch(
+        &self,
+        queue_url: &str,
+        batch: &[SqsQueueIngestorPosition],
+    ) -> SqsQueueIngestorResult<()> {
+        let mut entries = Vec::with_capacity(batch.len());
+        for (index, position) in batch.iter().enumerate() {
+            let entry = DeleteMessageBatchRequestEntry::builder()
+                .id(index.to_string())
+                .receipt_handle(&position.receipt_handle)
+                .build()
+                .assured("an entry sets its id and receipt handle, every field it requires");
+            entries.push(entry);
+        }
+        let answered = self
+            .client
+            .sdk()
+            .delete_message_batch()
+            .queue_url(queue_url)
+            .set_entries(Some(entries))
+            .send()
+            .await;
+        let answer = match answered {
+            Ok(answer) => answer,
+            Err(error) => {
+                return Err(self
+                    .client
+                    .failed(SqsRequest::DeleteBatch, &error)
+                    .report(SqsQueueIngestorError::Delete));
+            }
+        };
+        let undeleted: Vec<&BatchResultErrorEntry> = answer.failed().iter().collect();
+        if let Some(failed) = FailedEntries::of(&undeleted) {
+            return Err(Report::new(SqsQueueIngestorError::DeleteRefused {
+                refused: failed.count,
+                requested: batch.len(),
+                code: failed.first_code,
+            }));
+        }
+        Ok(())
+    }
+
     /// The URL of `queue`, which must already exist.
     async fn queue_url(client: &SqsServiceClient, queue: &str) -> SqsQueueIngestorResult<String> {
         let response = match client.sdk().get_queue_url().queue_name(queue).send().await {
@@ -795,10 +862,11 @@ impl BrokerIngestorConnector for SqsQueueIngestor {
         Ok(gathered.batch)
     }
 
-    /// Deletes the acknowledged messages with one `DeleteMessageBatch` request per ten of them,
-    /// and returns once the service answered every request. A request that fails, or an entry the
-    /// service did not delete, fails the acknowledgement, and the message stays on the queue for
-    /// the rejection that follows a failed acknowledgement.
+    /// Deletes the acknowledged messages, and returns once the service answered every request. Ten
+    /// at a time take one `DeleteMessageBatch` request, and a message left alone, as every batch
+    /// `ACK SEQUENTIAL` reads is, takes one `DeleteMessage` request. A request that fails, or an
+    /// entry the service did not delete, fails the acknowledgement, and the message stays on the
+    /// queue for the rejection that follows a failed acknowledgement.
     async fn acknowledge(&mut self, positions: &[Self::Position]) -> IngestorResult<()> {
         for batch in positions.chunks(SQS_MAX_BATCH_ENTRIES) {
             nervix_primitives::task::consume_budget().await;
@@ -806,44 +874,15 @@ impl BrokerIngestorConnector for SqsQueueIngestor {
                 "a position comes from a receive, which addressed the URL `resume` looked up, and \
                  nothing clears it",
             );
-            let mut entries = Vec::with_capacity(batch.len());
-            for (index, position) in batch.iter().enumerate() {
-                let entry = DeleteMessageBatchRequestEntry::builder()
-                    .id(index.to_string())
-                    .receipt_handle(&position.receipt_handle)
-                    .build()
-                    .assured("an entry sets its id and receipt handle, every field it requires");
-                entries.push(entry);
+            if let [position] = batch {
+                self.delete(queue_url, position)
+                    .await
+                    .change_context(IngestorError::Acknowledge { connector: SQS })?;
+                continue;
             }
-            let answered = self
-                .client
-                .sdk()
-                .delete_message_batch()
-                .queue_url(queue_url)
-                .set_entries(Some(entries))
-                .send()
-                .await;
-            let answer = match answered {
-                Ok(answer) => answer,
-                Err(error) => {
-                    let failure = self
-                        .client
-                        .failed(SqsRequest::DeleteBatch, &error)
-                        .report(SqsQueueIngestorError::Delete);
-                    return Err(
-                        failure.change_context(IngestorError::Acknowledge { connector: SQS })
-                    );
-                }
-            };
-            let undeleted: Vec<&BatchResultErrorEntry> = answer.failed().iter().collect();
-            if let Some(failed) = FailedEntries::of(&undeleted) {
-                let refused = Report::new(SqsQueueIngestorError::DeleteRefused {
-                    refused: failed.count,
-                    requested: batch.len(),
-                    code: failed.first_code,
-                });
-                return Err(refused.change_context(IngestorError::Acknowledge { connector: SQS }));
-            }
+            self.delete_batch(queue_url, batch)
+                .await
+                .change_context(IngestorError::Acknowledge { connector: SQS })?;
         }
         Ok(())
     }

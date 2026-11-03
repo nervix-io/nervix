@@ -246,7 +246,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Position class | broker_redelivered |  |
 | Acknowledgement confirmation | answered |  |
 | Buffers | messages gathered for one host read: set by 1 under ACK SEQUENTIAL; ACK PARALLEL MAX otherwise, at most 10; when full, holds back what fills it |  |
-| Network waits | gathering further messages after the first under ACK PARALLEL; cancellation hands over every message already gathered: `BATCH TIMEOUT`<br>connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup, a batch deletion and a batch visibility change: `timeout_ms`; unbounded when omitted<br>a receive, after the long poll of at most one second it asks the service to hold it for: `timeout_ms`; unbounded when omitted |  |
+| Network waits | gathering further messages after the first under ACK PARALLEL; cancellation hands over every message already gathered: `BATCH TIMEOUT`<br>connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup, a deletion, a batch deletion and a batch visibility change: `timeout_ms`; unbounded when omitted<br>a receive, after the long poll of at most one second it asks the service to hold it for: `timeout_ms`; unbounded when omitted |  |
 | Driver limits | A request that stalls below 1 byte a second for 5 s is cancelled. |  |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 

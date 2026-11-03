@@ -2312,7 +2312,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | answered |
 | Buffers | messages gathered for one host read: set by 1 under ACK SEQUENTIAL; ACK PARALLEL MAX otherwise, at most 10; when full, holds back what fills it |
-| Network waits | gathering further messages after the first under ACK PARALLEL; cancellation hands over every message already gathered: `BATCH TIMEOUT`<br>connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup, a batch deletion and a batch visibility change: `timeout_ms`; unbounded when omitted<br>a receive, after the long poll of at most one second it asks the service to hold it for: `timeout_ms`; unbounded when omitted |
+| Network waits | gathering further messages after the first under ACK PARALLEL; cancellation hands over every message already gathered: `BATCH TIMEOUT`<br>connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup, a deletion, a batch deletion and a batch visibility change: `timeout_ms`; unbounded when omitted<br>a receive, after the long poll of at most one second it asks the service to hold it for: `timeout_ms`; unbounded when omitted |
 | Driver limits | A request that stalls below 1 byte a second for 5 s is cancelled. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
 
@@ -2393,8 +2393,9 @@ remains and does not wait after that, and a receive that did not wait and brough
 batch. The batch's messages then wait on their acknowledgements together. The service hides every
 message it returns from every other receive until the queue's visibility timeout ends, and the
 source deletes a batch's messages only once the batch is acknowledged, with one
-`DeleteMessageBatch` request for each ten of them, so a failed lookup or poll never removes a
-message from the queue.
+`DeleteMessageBatch` request for each ten of them and one `DeleteMessage` request for a message
+left alone, as every `ACK SEQUENTIAL` batch is, so a failed lookup or poll never removes a message
+from the queue.
 
 A batch whose acknowledgement fails or does not arrive within the mode's `ACK TIMEOUT` is rejected:
 one `ChangeMessageVisibilityBatch` request for each ten of its messages makes them visible again at
@@ -2406,7 +2407,9 @@ deletion that fails, or one the service does not carry out for a message, is a t
 `DESCRIBE INGESTOR` shows, and the batch is then rejected in the same way, so its messages are
 received again, as duplicates if the graph had already processed them. A visibility change that
 fails is a transient error too; the source does not repeat it, and such a message becomes visible
-again once its visibility timeout ends. A queue whose visibility timeout is shorter than the mode's
+again once its visibility timeout ends. Deleting needs the client's credentials to allow
+`sqs:DeleteMessage`, and rejecting needs `sqs:ChangeMessageVisibility`, so credentials without the
+latter fail each rejection this way. A queue whose visibility timeout is shorter than the mode's
 `ACK TIMEOUT` can also hand a message that still awaits its acknowledgement to another receive. A
 message the service returns without the receipt handle that settles it, or with a system attribute
 that fails its check, stays out of the batch and fails the next poll with a typed error, after the

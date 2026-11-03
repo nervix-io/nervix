@@ -138,7 +138,8 @@ const SQS_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Driver("3.1 s"),
         },
         DeclaredWait {
-            wait: "the queue URL lookup, a batch deletion and a batch visibility change",
+            wait: "the queue URL lookup, a deletion, a batch deletion and a batch visibility \
+                   change",
             bound: WaitBound::Key {
                 key: DeadlineKey::Timeout,
                 omitted: OmittedDeadline::Unbounded,

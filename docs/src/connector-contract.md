@@ -1955,7 +1955,7 @@ it did not get:
 <!-- connector-matrix:confirmation:start -->
 | Acknowledgement confirmation | Entities | Meaning |
 | --- | --- | --- |
-| `answered` | `KAFKA TOPIC`, `PULSAR TOPIC`, `SQS QUEUE` | Once the broker answered: SQS messages are acknowledged by `DeleteMessageBatch` requests of up to ten entries, and acknowledging returns once the service answered every request and deleted every entry. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. A Pulsar source in an `ACK` mode acknowledges a batch's positions of each topic in one command that carries a request id, and acknowledging returns once the broker's `CommandAckResponse` arrived, within the client's operation timeout. |
+| `answered` | `KAFKA TOPIC`, `PULSAR TOPIC`, `SQS QUEUE` | Once the broker answered: SQS messages are acknowledged by `DeleteMessageBatch` requests of up to ten entries, a message left alone by a `DeleteMessage` request, and acknowledging returns once the service answered every request and deleted every message. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. A Pulsar source in an `ACK` mode acknowledges a batch's positions of each topic in one command that carries a request id, and acknowledging returns once the broker's `CommandAckResponse` arrived, within the client's operation timeout. |
 | `none` | `CLIENT PRODUCER`, `HTTP REQUEST`, `HTTP ENDPOINT`, `NATS SUBJECT`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, `SYSLOG LISTENER` | The source acknowledges nothing on its transport. |
 | `written` | `MQTT TOPIC`, `RABBITMQ QUEUE` | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, and MQTT answers a `PUBACK` with nothing and a QoS 2 `PUBREC` only with the `PUBREL` the client completes on its own, so nothing more can be confirmed. An MQTT source returns once the client's event loop, which its connection's driver task keeps polling, has flushed every `PUBACK` and `PUBREC` the batch asks for to the connection. An MQTT subscription becomes ready only when its declared QoS is granted; a lower `SUBACK` grant fails in every mode, including `NO ACK`. |
 <!-- connector-matrix:confirmation:end -->
@@ -1986,9 +1986,10 @@ operation timeout, such as while it reconnects to a broker it cannot reach, or w
 closed first, and the broker redelivers the message once the consumer's connection is replaced.
 
 An SQS source deletes the messages of an acknowledged batch with one `DeleteMessageBatch` request
-for each ten of them, and acknowledging returns once the service answered every request. An entry
-the service did not delete fails the acknowledgement with the service's code, and the host then
-rejects the batch. An SQS rejection makes the rejected messages visible again at once with
+for each ten of them, and a message left alone, as every batch `ACK SEQUENTIAL` reads is, with one
+`DeleteMessage` request. Acknowledging returns once the service answered every request. A request
+that fails, or an entry the service did not delete, fails the acknowledgement, with the service's
+code for the entry, and the host then rejects the batch. An SQS rejection makes the rejected messages visible again at once with
 `ChangeMessageVisibilityBatch`, so the source receives them again after its `RETRY POLICY` delay
 rather than after the queue's visibility timeout. An entry the service refuses as the sender's fault
 names a receipt handle that no longer holds its message invisible, because the message was deleted

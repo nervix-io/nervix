@@ -337,6 +337,7 @@ fn scripted_service(listener: TcpListener, answers: Vec<String>) -> JoinHandle<V
     nervix_primitives::task::spawn(async move {
         let mut requests = Vec::with_capacity(answers.len());
         for body in answers {
+            nervix_primitives::task::consume_budget().await;
             let (mut stream, _) = listener
                 .accept()
                 .await
@@ -496,6 +497,61 @@ async fn acknowledging_more_than_ten_messages_sends_one_request_per_ten() {
     assert!(!second.contains(r#""receipt-1""#), "{second}");
 }
 
+/// Whether `request` is an SQS request for `action`, such as `DeleteMessage`, and no other.
+fn targets(request: &str, action: &str) -> bool {
+    let target = format!(
+        "x-amz-target: amazonsqs.{}\r\n",
+        action.to_ascii_lowercase()
+    );
+    request.to_ascii_lowercase().contains(&target)
+}
+
+#[nervix_primitives::test]
+async fn acknowledging_one_message_deletes_it_with_one_delete_message_request() {
+    let fixture = Fixture::start().await;
+    let listener = loopback().await;
+    let mut source = source_of(&fixture, &listener).await;
+    let service = scripted_service(listener, vec!["{}".to_string()]);
+
+    source
+        .acknowledge(&positions(1..=1))
+        .await
+        .expect("the service deleted the message");
+
+    let requests = service.await.expect("the stand-in does not panic");
+    let [delete] = requests.as_slice() else {
+        panic!("one message takes one deletion: {requests:?}");
+    };
+    assert!(targets(delete, "DeleteMessage"), "{delete}");
+    assert!(
+        delete.contains(r#""ReceiptHandle":"receipt-1""#),
+        "{delete}"
+    );
+    assert!(!delete.contains("Entries"), "{delete}");
+}
+
+#[nervix_primitives::test]
+async fn a_message_left_alone_after_ten_takes_its_own_delete_message_request() {
+    let fixture = Fixture::start().await;
+    let listener = loopback().await;
+    let mut source = source_of(&fixture, &listener).await;
+    let service = scripted_service(listener, vec![all_succeeded(10), "{}".to_string()]);
+
+    source
+        .acknowledge(&positions(1..=11))
+        .await
+        .expect("the service deleted every message");
+
+    let requests = service.await.expect("the stand-in does not panic");
+    let [batch, lone] = requests.as_slice() else {
+        panic!("eleven messages take a batch deletion and a deletion: {requests:?}");
+    };
+    assert!(targets(batch, "DeleteMessageBatch"), "{batch}");
+    assert!(names_every_receipt_handle(batch, 1..=10), "{batch}");
+    assert!(targets(lone, "DeleteMessage"), "{lone}");
+    assert!(lone.contains(r#""ReceiptHandle":"receipt-11""#), "{lone}");
+}
+
 #[nervix_primitives::test]
 async fn a_deletion_the_service_refuses_fails_the_acknowledgement() {
     let fixture = Fixture::start().await;
@@ -537,21 +593,28 @@ async fn a_deletion_that_cannot_reach_the_service_fails_the_acknowledgement() {
     .await;
     source.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
 
-    let Err(report) = source.acknowledge(&positions(1..=2)).await else {
-        panic!("a refused connection deletes nothing");
-    };
+    for (acknowledged, request) in [
+        (1..=1, "SQS DeleteMessage failed:"),
+        (1..=2, "SQS DeleteMessageBatch failed:"),
+    ] {
+        nervix_primitives::task::consume_budget().await;
+        let Err(report) = source.acknowledge(&positions(acknowledged)).await else {
+            panic!("a refused connection deletes nothing");
+        };
 
-    assert_eq!(
-        report.current_context(),
-        &IngestorError::Acknowledge { connector: SQS }
-    );
-    assert!(
-        matches!(
-            report.downcast_ref::<SqsQueueIngestorError>(),
-            Some(SqsQueueIngestorError::Delete)
-        ),
-        "{report:?}"
-    );
+        assert_eq!(
+            report.current_context(),
+            &IngestorError::Acknowledge { connector: SQS }
+        );
+        assert!(
+            matches!(
+                report.downcast_ref::<SqsQueueIngestorError>(),
+                Some(SqsQueueIngestorError::Delete)
+            ),
+            "{report:?}"
+        );
+        assert!(format!("{report:?}").contains(request), "{report:?}");
+    }
 }
 
 #[nervix_primitives::test]

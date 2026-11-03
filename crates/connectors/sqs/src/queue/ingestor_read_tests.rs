@@ -443,7 +443,7 @@ impl UnansweredSource {
 }
 
 #[nervix_primitives::test]
-async fn a_batch_delete_the_service_never_answers_ends_within_timeout_ms() {
+async fn a_delete_the_service_never_answers_ends_within_timeout_ms() {
     let fixture = Fixture::start().await;
     let mut unanswered = UnansweredSource::start(&fixture).await;
 
@@ -454,7 +454,37 @@ async fn a_batch_delete_the_service_never_answers_ends_within_timeout_ms() {
             .acknowledge(&[UnansweredSource::position()]),
     )
     .await
-    .expect("a batch delete the service never answers ends within the client's timeout_ms");
+    .expect("a delete the service never answers ends within the client's timeout_ms");
+
+    let Err(report) = acknowledged else {
+        panic!("a delete the service never answers acknowledges nothing");
+    };
+    assert_eq!(
+        report.current_context(),
+        &IngestorError::Acknowledge { connector: SQS }
+    );
+    assert_eq!(
+        report
+            .downcast_ref::<nervix_connector::DeadlineElapsed>()
+            .map(|elapsed| (elapsed.operation, elapsed.key, elapsed.bound)),
+        Some((
+            "an SQS delete",
+            nervix_models::DeadlineKey::Timeout,
+            unanswered.budget
+        )),
+        "{report:?}"
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_batch_delete_the_service_never_answers_ends_within_timeout_ms() {
+    let fixture = Fixture::start().await;
+    let mut unanswered = UnansweredSource::start(&fixture).await;
+    let batch = [UnansweredSource::position(), UnansweredSource::position()];
+
+    let acknowledged = timeout(GENEROUS_BUDGET, unanswered.source.acknowledge(&batch))
+        .await
+        .expect("a batch delete the service never answers ends within the client's timeout_ms");
 
     let Err(report) = acknowledged else {
         panic!("a batch delete the service never answers acknowledges nothing");
