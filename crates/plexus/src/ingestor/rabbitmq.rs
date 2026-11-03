@@ -225,7 +225,7 @@ mod tests {
         assert_eq!(source.queue.as_str(), queue);
         assert_eq!(source.client.as_str(), "broker");
         assert!(
-            matches!(source.instances, nervix_models::IngestorInstances::Count(count) if u64::from(count.get()) == expected_instances)
+            matches!(source.instances, nervix_models::IngestorInstances::Count(count) if count.get() == expected_instances)
         );
         assert_eq!(source.quiesce(), &IngestQuiesceMode::Suspend);
         let IngestAcknowledgement::Sequential { timeout, retry } = source.acknowledgement() else {
