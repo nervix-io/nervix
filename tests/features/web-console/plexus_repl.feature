@@ -1466,9 +1466,11 @@ Feature: Web console Plexus REPL
     When the command response delivery pause on node "{{old_leader}}" is released
     And selector ".repl-toolbar button:has-text('Plexus REPL')" is clicked
     Then selector ".terminal" contains "connected to leader '{{new_leader}}'"
+    And selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
+    When selector ".repl-toolbar button:has-text('Plexus REPL')" is clicked
+    Then selector ".terminal" contains "transaction reverted: dropped 0 command(s);"
     And selector ".prompt-row" does not contain "{{domain}} tx"
     When selector ".subscription-tab .tab-main[data-subscription-title='raw_metrics']" is clicked by script
-    Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
     When one http payload is posted with a completed graph acknowledgement to node "node-1" host "http-{{test_id}}.example.com" path "/metrics"
       """
       {"value":7}
