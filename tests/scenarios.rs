@@ -222,6 +222,7 @@ mod ingestion_time;
 mod kafka_metadata;
 mod materialized_state_inspection;
 mod mqtt_fixtures;
+mod mqtt_properties;
 mod mqtt_sessions;
 mod mqtt_subscription_refusal;
 mod mysql_isolation;

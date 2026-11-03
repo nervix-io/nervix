@@ -2686,7 +2686,15 @@ mod tests {
              1 MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_",
         )
         .await;
-        assert!(mqtt.is_empty(), "{mqtt:?}");
+        assert_eq!(mqtt, vec!["read_header", "read_headers"]);
+        let redis = suggestion_values(
+            &service,
+            &subscriptions,
+            "CREATE REDIS PUBSUB INGESTOR source FROM broker CHANNEL 'events' MODE NO ACK ON \
+             QUIESCE DROP DECODE USING codec TO outgoing SET value = read_",
+        )
+        .await;
+        assert!(redis.is_empty(), "{redis:?}");
 
         let kafka = suggestion_values(
             &service,
