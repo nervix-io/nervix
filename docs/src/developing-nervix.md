@@ -307,8 +307,14 @@ count, such as `just validate 2`, or use `just --jobs 2 validate` to select anot
 `JUST_JOBS` also supplies the default. Validation runs the product and compiler tooling Clippy
 recipes in one invocation, so they share the same limit. In `just validate-ci` the lints and the
 other validations run beside each other, each building in directories of its own, so none waits for
-another's directory lock, and the typed ratchet runs once they have finished. CI's `checks` job
-passes four as well, because memory limits it rather than CPUs: each recipe's Cargo already uses
+another's directory lock, and the typed ratchet runs once they have finished. `just validate-ci
+<jobs> 1/2` and `just validate-ci <jobs> 2/2` each run one part of those checks, and together they
+are every check: the first checks formatting, the ordinary, Turmoil and Deloxide lints and the
+source, dependency and documentation validations, and the second lints the Shuttle and Loom modes and
+the compiler tooling and runs the typed ratchet once its own lints have finished. CI's `checks` job
+runs the two parts as the shards `checks (1 of 2)` and `checks (2 of 2)` on two Boat runners, and the
+second also runs the script tests with the ratchet tools it built. Each passes four jobs, because
+memory limits it rather than CPUs: each recipe's Cargo already uses
 every CPU, and in Check 41126961308, which compiled the server cold, one recipe per CPU overlapped
 enough Clippy compilations to pass the runner's 32 GB and one was killed. The typed ratchet's
 admission queue admits its server analyses as if nothing else ran: beside the lints, the kernel's
@@ -324,8 +330,9 @@ its configurations one after another in its own directory beneath `CARGO_TARGET_
 repository's `target` directory when that variable is unset, at `clippy/<lane>`, so each finds fresh
 what the configurations before it compiled alike, build scripts included. Lanes run in parallel, as
 many at once as the job limit allows, and no configuration waits for another lane's build directory
-lock or holds a job slot while it waits; the longest lane bounds a run, so a lane that outgrows the
-others splits along its dependency families. Nothing deletes these directories, locally or on CI:
+lock or holds a job slot while it waits. The longest lane bounds a run, so a family too large for one
+lane splits into numbered sublanes of at most eight configurations, `clippy/<lane>-<n>`, closer
+packages together, trading the reuse between sublanes for parallelism. Nothing deletes these directories, locally or on CI:
 the lanes bound what a lint leaves on disk. `just cargo-clippy-package <package> [arguments ...]`
 runs a focused check of all targets through the same recipe, in a `clippy/package` directory that
 repeated focused checks share. The compiler driver builds keep their separate `typed-ratchet/driver`
@@ -408,7 +415,7 @@ minute, hour and day. A job's size follows the memory and disk its builds use ra
 since a Boat machine has only 2 GB of memory per CPU, with 4 GB of swap beside it:
 
 - `boat-xlarge`, with 16 CPUs, 32 GB and 251 GB of disk, runs validation, the diagnostic evidence,
-  the unit tests, the extra checks, Shuttle, Loom, the Deloxide
+  the extra checks, Shuttle, Loom, the Deloxide
   lane, the Bolero randomized properties, the image builds and the benchmarks. In October 2026 the
   extra checks used about 95 GiB of disk and the amd64 image build lost its runner on a 16 GB
   machine.
@@ -438,12 +445,15 @@ took 49 of its job's 60 minutes.
 The scenario shards are timing sensitive, and they run on Blacksmith's
 `blacksmith-8vcpu-ubuntu-2404`, with 8 CPUs, 32 GB and 160 GB of disk. On `boat-xlarge` a shard
 lost on average a tenth of its CPU to its host and up to 58% at peaks, and its failures followed
-that loss. `.github/actionlint.yaml` declares the Blacksmith labels as well.
+that loss. The unit tests run on `blacksmith-4vcpu-ubuntu-2404`, with 4 CPUs, 16 GB and 80 GB of
+disk: on Boat, on 3 November 2026, downloading their 5.1 GiB archive took 18 minutes and restoring
+its 32 GiB took another 10, so the job reached its 30-minute limit before any test ran.
+`.github/actionlint.yaml` declares the Blacksmith labels as well.
 
 An archive restores only at the checkout path it was built in, and it checks that path before it
-restores any file. The scenario build and the shards run on Blacksmith, at the same path. The build
-publishes its path, so the `tests` job on Boat bind-mounts its checkout there, and restores and runs
-from that path.
+restores any file. The scenario build, the scenario shards and the `tests` job all run on
+Blacksmith, whose runners check a repository out at the same path, so each restores and runs from
+its own checkout.
 
 A kache-backed job uses the cache bucket in its runner's region: the EU bucket on Boat's European
 machines, and the US bucket on GitHub's hosted runners and on Blacksmith's US runners.
