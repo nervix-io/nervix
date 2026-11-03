@@ -943,7 +943,9 @@ algorithm policy, the classification register and the inventory they refer to.
   does not repeat a node or a domain that a context above it names.
 - A reporting boundary renders a report with `{error:#}`. Plain `Display`, `to_string` and a
   `%error` tracing field show only the outermost context, and an attachment is not part of the
-  rendered chain.
+  rendered chain. A tracing field records a report as `%format_args!("{error:#}")`; the resolved
+  `nervix::partial_report_field` compiler diagnostic in `just ratchet` rejects one that records a
+  report by its plain `Display`.
 - A decision reads typed data: the report's current context, a typed context beneath it, or a typed
   field. It never reads rendered text.
 - A foreign trait that accepts only a standard error receives one that holds the whole report,
@@ -1502,8 +1504,8 @@ algorithm policy, the classification register and the inventory they refer to.
   count or a shorter function is not a speedup.
 - Model consumption, language dependencies, recurring cluster awaits, declared node identities,
   installation state, synchronization, failure signatures, discarded outcomes, canonical panic APIs,
-  integer/Duration clamped arithmetic and Option/Result adapter control flow use real Nervix
-  compiler diagnostics across the complete declared configuration
+  report-bearing tracing fields, integer/Duration clamped arithmetic and Option/Result adapter
+  control flow use real Nervix compiler diagnostics across the complete declared configuration
   matrix. Finite API recognition is Rust code; execution contexts and reviewed exceptions belong
   beside their source owners. Gate them with `cfg_attr(nervix_lint, ...)`. Contracts state actual
   recurring, lifecycle, observer, outside or bounded execution, with reasons and bounded identities.
@@ -1512,7 +1514,7 @@ algorithm policy, the classification register and the inventory they refer to.
   expectation widened to cover another operation fail. Generated reports are outputs under target,
   never enforcement inputs. Do not infer policy from filenames, sharing traits or method names.
 - [Architecture Rules And The Debt Ratchet](docs/src/architecture-enforcement.md) owns the complete
-  seventeen-family contract matrix, the components and the nine source-contract annotations,
+  eighteen-family contract matrix, the components and the nine source-contract annotations,
   source/compiler scope, report identity and reuse, the pinned analysis toolchain and its upgrade,
   qualification and its CI selection, what each form of evidence establishes, the workaround audit
   and review limits. A new or changed semantic rule ships with allowed/rejected compiler fixtures

@@ -17,7 +17,7 @@ Feature: Pulsar message identity and times
       CREATE RELAY events SCHEMA observed UNBRANCHED;
       CREATE PULSAR CLIENT source CONFIG { 'addr' = '{{pulsar_addr}}' };
       CREATE PULSAR TOPIC INGESTOR records FROM source TOPIC 'metadata_{{test_id}}'
-        SUBSCRIPTION 'metadata_{{test_id}}' PROVISIONED MODE NO ACK
+        SUBSCRIPTION 'metadata_{{test_id}}' PROVISIONED TYPE SHARED MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL SET topic = metadata.topic
         UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

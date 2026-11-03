@@ -1490,6 +1490,7 @@ absent. Quiescing does not change the auto-commit loss windows of `MODE NO ACK`.
 CREATE PULSAR TOPIC INGESTOR <name>
   FROM <client> TOPIC 'orders'
   (SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST | SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST | SUBSCRIPTION 'readers' PROVISIONED)
+  (TYPE SHARED | TYPE KEY_SHARED | TYPE FAILOVER | TYPE EXCLUSIVE)
   [INSTANCES 2]
   MODE <mode>
   ON QUIESCE <quiesce>
@@ -1505,7 +1506,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | PULSAR client |
 | Locator and validation rule | TOPIC 'orders' (pulsar_topic) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`INSTANCES 2` (positive count); optional; default 1 |
+| Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`TYPE SHARED` (keyword choice); `TYPE KEY_SHARED` (keyword choice); `TYPE FAILOVER` (keyword choice); `TYPE EXCLUSIVE` (keyword choice); required<br>`INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.publish_time: DATETIME OPTIONAL<br>metadata.event_time: DATETIME OPTIONAL<br>metadata.key: STRING OPTIONAL<br>metadata.ordering_key: BYTES OPTIONAL<br>metadata.producer_name: STRING OPTIONAL<br>metadata.sequence_id: I64 OPTIONAL<br>metadata.redelivery_count: I64 OPTIONAL |
@@ -1552,9 +1553,9 @@ and field. A valid prefix already gathered is delivered before that error. Pulsa
 an omitted redelivery count as zero, so the first delivery reports zero and a broker redelivery can
 report one. Every protocol `u32` count fits the declared `I64`.
 
-Pulsar ingestors read through a shared, durable subscription. The subscription name is required by
-Pulsar, but the subscription type is not exposed in Plexus. Every statement also declares who owns
-the subscription, because the broker cannot say later who created one:
+Pulsar ingestors read through a durable subscription. Every statement declares who owns the
+subscription, because the broker cannot say later who created one, and the type the ingestor reads
+it as:
 
 - `OWNED BY INGESTOR START AT EARLIEST` or `OWNED BY INGESTOR START AT LATEST`: the ingestor owns
   the subscription and declares where a newly created cursor begins. `EARLIEST` reads the topic's
@@ -1574,6 +1575,35 @@ seeking the existing cursor or discarding its backlog. The alteration is refused
 subscription and leaves its definition unchanged. `SHOW CREATE` and `DESCRIBE INGESTOR` expose the
 declared position; it is a creation policy, not a report of the current broker position.
 
+`TYPE` decides how the broker shares the topic among the consumers of the subscription. It is
+required, and a statement writes it after the subscription's owner:
+
+| `TYPE` | What the broker delivers | Instances |
+| --- | --- | --- |
+| `SHARED` | Every consumer takes messages, with no order across them. | Any number |
+| `KEY_SHARED` | Every consumer takes messages, and one consumer takes all of a key's, so a key keeps its publication order. Messages without a key all reach one consumer. | Any number |
+| `FAILOVER` | One consumer takes messages while the others stand by. When it leaves, a standby continues from what it has not acknowledged. | One |
+| `EXCLUSIVE` | The broker admits one consumer and refuses any other. | One |
+
+`FAILOVER` and `EXCLUSIVE` read through one consumer, so a statement that declares more instances
+is refused at `CREATE` and `ALTER`, as in `PULSAR subscription TYPE EXCLUSIVE reads through one
+consumer, so it refuses INSTANCES 2`. A `FAILOVER` standby is another ingestor or application that
+joins the same subscription.
+
+The broker holds one type per subscription while any consumer is connected. It refuses a consumer
+of another type, and a second consumer of an `EXCLUSIVE` subscription. The refusal is the ingestor's
+transient error, as in `the PULSAR broker refused a consumer of subscription 'readers' of topic
+'persistent://public/default/orders' with ConsumerBusy: Exclusive consumer is already connected`,
+and the instance joins again after its retry policy's backoff, or on the host's reconnect cadence
+in `MODE NO ACK`, until the broker admits it. A refusal for a subscription another consumer holds,
+or for a topic the broker has not yet loaded, does not keep the ingestor or its domain from starting.
+
+`ALTER PULSAR TOPIC INGESTOR <name> SET TYPE SHARED|KEY_SHARED|FAILOVER|EXCLUSIVE` changes the type
+the ingestor's next join reads as. The subscription keeps its cursor and its backlog, and the
+instance rule above applies to the alteration, which leaves the definition unchanged when refused.
+On a running ingestor the consumers leave and join again as the new type, and any other consumer
+of the subscription still connected under the old type is refused the same way.
+
 The check subscribes once with a non-durable cursor of the same name: the broker refuses that while
 the durable subscription exists, and otherwise opens a cursor that the check closes again. The
 driver logs the expected refusal at `ERROR`. Like a subscribe, the check of a topic the broker does
@@ -1586,7 +1616,7 @@ by the join.
 Each instance's consumer registers under `<domain>~<ingestor>-<instance>`, with zero-based instance
 indices, so ingestors of the same name in different domains are told apart in the broker's
 statistics. A consumer name does not separate what ingestors read: ingestors that name the same
-subscription of the same topic share it, and each message reaches one of them.
+subscription of the same topic share it as its type allows, and each message reaches one of them.
 
 `DROP INGESTOR` of an ingestor that owns its subscription removes the subscription, including after
 `STOP`, and so does dropping its domain. Once the ingestor's consumers have closed, the node that
@@ -1601,16 +1631,17 @@ the operator removes it or the broker expires it. `STOP`, a node restart, a relo
 keep the subscription. Replacing the source with `ALTER PULSAR TOPIC INGESTOR ... SET FROM ...`
 removes the preceding owned subscription after its consumers stop and before the replacement
 starts, unless the replacement reads the same subscription of the same qualified topic at the
-same resolved broker address. Client names, route, codec, delivery-mode and instance-count changes
-do not change that identity. Short topics use their client's namespace, so a short name and its
+same resolved broker address. Client names, route, codec, delivery-mode, subscription type and
+instance-count changes do not change that identity. Short topics use their client's namespace, so a
+short name and its
 fully qualified spelling identify the same topic. Broker addresses compare their URL scheme,
 host and effective port; an omitted port means 6650 for `pulsar` and 6651 for `pulsar+ssl`.
 Different configured host names are distinct addresses even if DNS resolves them alike.
 Declaring the retained subscription `PROVISIONED` hands its ownership to the operator and keeps
 its backlog. Removal on replacement has the same timeout and best-effort reporting as removal
 on drop; a failure does not prevent starting the replacement. `DESCRIBE INGESTOR`
-shows the subscription name, its ownership and declared start position, and `INSTANCES` together
-in the declared `options:` row.
+shows the subscription name, its ownership and declared start position, `TYPE` and `INSTANCES`
+together in the declared `options:` row.
 
 Client config currently supports:
 
@@ -1668,6 +1699,11 @@ broker does not answer it; a request the consumer cannot send, such as while it 
 broker it cannot reach, shows `the Pulsar consumer did not confirm sending a redelivery request`,
 and the broker redelivers the messages once the consumer reconnects. `MODE NO ACK` acknowledges
 each message without waiting for the broker's answer.
+
+Under `FAILOVER` and `EXCLUSIVE` the broker does not take one message back: a rejection rewinds the
+consumer to everything it has not acknowledged. The messages behind a rejected one arrive again,
+after those the consumer already received, so delivery stays at least once and neither a single
+delivery nor the topic's order holds across a rejection.
 
 Suspension disconnects the consumer. The durable subscription retains its backlog and redelivers
 unacknowledged in-flight messages. Broker message TTL, backlog quota policy, and inactive-subscription

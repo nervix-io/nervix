@@ -1312,6 +1312,16 @@ The harness keeps these boundaries explicit.
   the status path described below is harness-owned, and it is a separate test-only boundary: it
   opens its own session and never redirects, reconnects, or retries by itself, so it adds no second
   client policy.
+- **Node-local inspection.** `DESCRIBE DOMAIN`, and `DESCRIBE INGESTOR` of an ingestor that runs on
+  every live node, are answered from the metric state of the node that receives them, and the node
+  that leads can change between two steps, through a move the scenario requests or an election on
+  a loaded runner. A step that asserts one node's counters therefore sends the command to that node
+  rather than to the leader. The domain and ingestor metrics outlines post their payloads to node-1
+  and describe them on node-1 after moving leadership: on three nodes one example moves it to
+  node-1 and another to node-2, so node-1 answers both as the leader and as a follower. A step that
+  totals a counter across the cluster sends `DESCRIBE DOMAIN` to every node and keeps, for each
+  physical node, the highest value any node reports, because a node can also list another node's
+  series, such as the zero series it registers for a graph node scheduled there.
 - **Controlled command recovery.** Standalone preparation barriers retain a coordinator's
   transaction observation and its preflight result while the scenario transfers leadership.
   Node- and domain-scoped resume barriers then hold the applying command's pause until the

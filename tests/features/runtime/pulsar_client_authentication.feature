@@ -32,7 +32,7 @@ Feature: Pulsar clients authenticate to their broker
         CONFIG { <client_config> };
       CREATE PULSAR TOPIC INGESTOR authenticated_in
         FROM authenticated TOPIC 'authenticated_in_{{test_id}}'
-          SUBSCRIPTION 'authenticated_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST
+          SUBSCRIPTION 'authenticated_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
@@ -195,7 +195,7 @@ Feature: Pulsar clients authenticate to their broker
         CONFIG { <client_config> };
       CREATE PULSAR TOPIC INGESTOR relaxed_in
         FROM relaxed TOPIC 'relaxed_{{test_id}}'
-          SUBSCRIPTION 'relaxed_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST
+          SUBSCRIPTION 'relaxed_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
@@ -247,7 +247,7 @@ Feature: Pulsar clients authenticate to their broker
       CREATE PULSAR CLIENT pulsar_ingress CONFIG { 'addr' = '{{pulsar_stallable_addr}}' };
       CREATE PULSAR TOPIC INGESTOR reconnecting
         FROM pulsar_ingress TOPIC 'reconnecting_{{test_id}}'
-          SUBSCRIPTION 'reconnecting_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST
+          SUBSCRIPTION 'reconnecting_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 2s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
@@ -311,7 +311,7 @@ Feature: Pulsar clients authenticate to their broker
       CREATE PULSAR CLIENT pulsar_ingress CONFIG { 'addr' = '{{pulsar_stallable_addr}}' };
       CREATE PULSAR TOPIC INGESTOR returning
         FROM pulsar_ingress TOPIC 'returning_{{test_id}}'
-          SUBSCRIPTION 'returning_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST
+          SUBSCRIPTION 'returning_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 2s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications

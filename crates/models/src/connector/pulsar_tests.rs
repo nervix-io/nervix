@@ -14,6 +14,7 @@
 
 use meticulous::ResultExt as _;
 use rstest::rstest;
+use strum::IntoEnumIterator as _;
 
 use super::*;
 use crate::{
@@ -143,8 +144,8 @@ fn topic_declares_message_properties_and_typed_metadata() {
 #[test]
 fn the_subscription_is_required_with_its_owner_and_instances_are_optional() {
     let ingest = IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic).capabilities();
-    let [subscription, instances] = ingest.options else {
-        panic!("a Pulsar topic ingestor declares its subscription and its instance count");
+    let [subscription, subscription_type, instances] = ingest.options else {
+        panic!("a Pulsar topic ingestor declares its subscription, type and instance count");
     };
 
     assert_eq!(subscription.keywords, "SUBSCRIPTION");
@@ -160,7 +161,47 @@ fn the_subscription_is_required_with_its_owner_and_instances_are_optional() {
             Some(OptionValue::Name(PulsarSubscriptionName::DECLARATION))
         );
     }
+    assert_eq!(subscription_type.keywords, "TYPE");
+    assert_eq!(subscription_type.presence, OptionPresence::Required);
+    let OptionForm::Choice(types) = subscription_type.form else {
+        panic!("TYPE chooses one of the subscription types");
+    };
+    assert_eq!(types.len(), PulsarSubscriptionType::iter().count());
+    for (choice, kind) in types.iter().zip(PulsarSubscriptionType::iter()) {
+        assert_eq!(choice.name, kind.keyword());
+        assert_eq!(choice.value, None);
+        assert_eq!(choice.example, format!("TYPE {kind}"));
+    }
     assert_eq!(*instances, OptionDeclaration::INSTANCES);
+}
+
+#[rstest]
+#[case(PulsarSubscriptionType::Shared, false)]
+#[case(PulsarSubscriptionType::KeyShared, false)]
+#[case(PulsarSubscriptionType::Failover, true)]
+#[case(PulsarSubscriptionType::Exclusive, true)]
+fn only_the_types_that_read_through_one_consumer_refuse_more_instances(
+    #[case] kind: PulsarSubscriptionType,
+    #[case] one_consumer: bool,
+) {
+    assert_eq!(kind.reads_through_one_consumer(), one_consumer);
+
+    let mut source = PulsarTopicIngestor {
+        client: ClientName::parse("broker").assured("the fixture name is valid"),
+        topic: PulsarTopicName::parse("orders").assured("the fixture name is valid"),
+        subscription: PulsarSubscription {
+            name: PulsarSubscriptionName::parse("readers").assured("the fixture name is valid"),
+            ownership: PulsarSubscriptionOwnership::Provisioned,
+            kind,
+        },
+        instances: NonZeroU64::MIN,
+        mode: PulsarIngestMode::NoAck,
+        quiesce: IngestQuiesceMode::Suspend,
+    };
+    assert!(source.instances_fit_subscription());
+
+    source.instances = NonZeroU64::new(2).assured("two is greater than zero");
+    assert_eq!(source.instances_fit_subscription(), !one_consumer);
 }
 
 #[test]

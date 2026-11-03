@@ -324,6 +324,15 @@ alternate `Display` (`{error:#}`), including report-bearing tracing fields. A fa
 message, a runtime event, a negative acknowledgement's reason, a domain's instantiation error, the
 CLI's text and JSON reports and the C binding's error message are that chain.
 
+A tracing field records a report as `error = %format_args!("{error:#}")`. The `%error` sigil, and a
+`display` field written out, record the report's plain `Display`, which is its outermost context
+alone: a warning that a maintenance proposal failed would then say only that a consensus proposal
+failed, and not whether the leader could not confirm its lease, lost its leadership, found its log
+saturated or could not store the entry. The compiler architecture gate refuses such a field, as
+[The Reported-Error Guard](#the-reported-error-guard) describes. The transaction maintenance pass
+and the command-history reclamation report a failed commit resume, inactive-transaction expiry,
+tombstone removal or history reclamation with that whole chain.
+
 Reports remain typed until these reporting decisions; sensitivity rules continue to apply to every
 context. A boundary renders a failure once and reuses the text: a failed dead-letter dispatch
 renders its report once and uses that chain in both its runtime event and its negative
@@ -431,7 +440,11 @@ requested names when an alteration targets another Model. An ingestor alteration
 another connector and entity than the stored ingestor reads is refused with both typed kinds, which
 its message renders as their phrases, such as `the stored ingestor reads HTTP ENDPOINT, so ALTER
 KAFKA TOPIC INGESTOR cannot alter it`. A Pulsar `SET START AT` on a provisioned subscription is a
-typed vocabulary alteration refusal; the existing definition and broker cursor are unchanged.
+typed vocabulary alteration refusal; the existing definition and broker cursor are unchanged. A
+Pulsar subscription `TYPE` that reads through one consumer with more than one instance is the
+registry's typed `ConnectorDeclarationIssue::PulsarSingleConsumerType`, which `CREATE` and every
+alteration reach through the same source validation, so `SET TYPE` and `SET FROM` also leave the
+stored definition unchanged.
 An input, route, or dependency operation
 that junctions, deduplicators, reorderers, and reingestors share is reported in the altered
 processor's own error where it is detected, so the report begins at the failure rather than at a
@@ -1033,7 +1046,11 @@ from any failure to start the replacement. A provisioned
 subscription that does not exist is `PulsarTopicIngestorError::MissingSubscription` beneath the source's
 resume context, which the ingestor's transient status shows by its subscription and topic; a check
 that could not learn whether the subscription exists is `VerifySubscription` above the driver's
-error.
+error. A join the broker refuses is `SubscriptionRefused`, which holds the subscription, the topic
+and the typed `PulsarRefusal` with no driver error beneath it, so the ingestor's transient status
+shows the broker's server error and reason. `ConsumerBusy` and `ServiceNotReady` hold only for now,
+so at open they leave the instance to its first resume, which reports them; any other refusal fails
+the open. A join that fails without a refusal is `Subscribe` above the driver's error.
 
 A Kafka emitter keeps librdkafka's `KafkaError` beneath `EmitterWriteError::Publish` when a producer
 failure ends admission or a delivery report leaves a confirmed publish's record unresolved.
@@ -1636,16 +1653,20 @@ the declared `MAX SIZE` is instead a definitive per-row `validation` message err
 operation; `ON MESSAGE ERROR` routes it before the other rows are staged. A data file whose
 physical count or byte length violates a bound after a table schema change is a commit failure:
 the emitter does not append it and keeps the staged rows and acknowledgements for retry.
-Cleanup failures for incomplete staged files or a rejected data file are logged with their paths
-without replacing the original publish or commit failure.
+A failed staging append keeps the typed `StagingError` of the staging file beneath
+`EmitterWriteError::Publish`, and a failed read beneath `EmitterWriteError::Commit`, with the
+filesystem's, Arrow's or the cancellation's failure beneath it; the description the emitter shows
+names the staging file and that failure. Cleanup failures for a new staging file whose first append
+failed, for an append that could not be cut back off, or for a rejected data file are logged with
+their paths or noted on the report without replacing the original publish or commit failure.
 
-An Iceberg commit charges the bulk memory class for the staged files it reads back with
+An Iceberg commit charges the bulk memory class for the staged batches it reads back with
 `Executor::try_reserve`, so a charge the class has no room for is refused rather than queued. The
 refusal keeps the typed `AdmissionError` beneath `EmitterWriteError::Commit` and attaches the
 description the emitter shows as its transient error: `Iceberg commit waits for room in the bulk
 memory class for <bytes> staged bytes` when the class has no room now, and `Iceberg commit waits
-for the whole bulk memory class of <capacity> bytes for a staged file of <bytes> bytes` when one
-staged file is larger than the class, which charges the whole class and so waits until all of it
+for the whole bulk memory class of <capacity> bytes for a staged batch of <bytes> bytes` when one
+staged batch is larger than the class, which charges the whole class and so waits until all of it
 is free. The emitter retries either with its policy, and neither releases a staged record's
 acknowledgement.
 
@@ -2978,7 +2999,7 @@ records each failed implementation with its chain.
 
 `just validate-typed-errors`, run by `just validate`, rejects textual
 `Result<_, String>` in product code without a baseline. It remains a separate source rule,
-including inactive source. The compiler architecture gate, run by `just ratchet`, owns four
+including inactive source. The compiler architecture gate, run by `just ratchet`, owns five
 resolved Rust diagnostics:
 
 | Diagnostic | Contract it checks |
@@ -2987,6 +3008,7 @@ resolved Rust diagnostics:
 | `nervix::discarded_outcome` | A `let` wildcard, unused statement or resolved `drop` consuming a `Result`, report, owning collection or transparent wrapper states its handling or recovery class. |
 | `nervix::bare_panic` | A resolved inherent `Option` or `Result` `unwrap`/`expect` uses `meticulous` to state its guarantee. |
 | `nervix::replaced_error` | A resolved failure replacement retains its informative cause or declares an exact ordinary-outcome boundary. |
+| `nervix::partial_report_field` | A tracing field that records an `error_stack::Report`, directly or through a borrow, box or shared owner, renders its whole context chain instead of the report's plain `Display`. |
 
 The same driver emits the source-owned layer, Model, language, awaited cluster, identity and
 installation-state diagnostics described in
@@ -3067,6 +3089,12 @@ resolution; current API doctests pair supported calls with `compile_fail` exampl
 fallible site, a reviewer identifies the deciding layer, ordinary outcome or failure class,
 actionable fields, context across boundaries and the public diagnostic or recovery that ends the
 path. That classification preserves branch and sensitivity rules.
+
+The tracing field check resolves the `display` constructor that the `%` sigil names and the type
+of the value it records. A shorthand field, `%error` or `%self.error`, is named at the tokens it
+was written with, and a value an authored macro receives or owns is named where it was written. A
+debug field, a field that records a report's current context, and a value that only shares the
+report's name are not reports rendered by their plain `Display`.
 
 A recovered operation with no other witness uses `nervix_recovery::Reported::reported` at the
 decision that continues without its result. That record renders the complete context chain at

@@ -336,8 +336,8 @@ current connection, retry and deadline limits.
 - Size an Iceberg emitter's worst-case latency as `FLUSH EACH` plus `COMMIT EACH`: the commit
   duration starts when a flush stages rows while none are staged, not when the rows arrived.
 - Keep `MAX BATCH SIZE` well below 32 MiB on routes that feed an Iceberg emitter. A commit charges
-  its staged files to the node's 32 MiB bulk memory class and reads a larger staged batch only once
-  the whole class is free; `DESCRIBE EMITTER` shows a commit waiting for that memory as its
+  its staged batches to the node's 32 MiB bulk memory class and reads a larger staged batch only
+  once the whole class is free; `DESCRIBE EMITTER` shows a commit waiting for that memory as its
   transient error while the emitter retries.
 - Provision Iceberg table columns with names and types matching the emitter's `VALUES`. A
   required `NAMESPACE` names the catalog namespace independently of the Nervix domain; provision
@@ -504,9 +504,12 @@ current connection, retry and deadline limits.
 - Every `PULSAR TOPIC` ingestor states who owns its subscription after the subscription's name:
   `OWNED BY INGESTOR START AT EARLIEST` when Nervix may create it and should remove it when the ingestor or its
   domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and
-  the operator must create before the ingestor reads. Consumers register as
-  `<domain>~<ingestor>-<instance>`. Read `Ingestors` → `Pulsar` for missing subscriptions, removal
-  failures and which subscription `ALTER` retains or removes. Changing only consumer policy or
+  the operator must create before the ingestor reads. The owner is followed by a required
+  `TYPE SHARED|KEY_SHARED|FAILOVER|EXCLUSIVE`; `FAILOVER` and `EXCLUSIVE` read through one consumer,
+  so they refuse more than one instance. Consumers register as
+  `<domain>~<ingestor>-<instance>`. Read `Ingestors` → `Pulsar` for what each type delivers, missing
+  and held subscriptions, removal failures and which subscription `ALTER` retains or removes.
+  Changing only consumer policy, including `SET TYPE`, or
   handing the same subscription to `PROVISIONED` preserves its backlog; a changed broker, qualified
   topic or subscription name retires the preceding owned subscription best-effort.
 - A `PULSAR TOPIC` ingestor exposes `metadata.topic`, `message_id`, `key` and `producer_name` as

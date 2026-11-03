@@ -3,8 +3,8 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The one client both directions connect through, producer configuration, topic
-//!   qualification, the shared-subscription consumers an ingestor reads through, message
-//!   properties as ingest headers, per-message acknowledgement, record and property
+//!   qualification, the consumers of the declared subscription type an ingestor reads through,
+//!   message properties as ingest headers, per-message acknowledgement, record and property
 //!   publication, the event time and delivery time a message carries from its record, the
 //!   bounded receipts a NO ACK producer retains through finish, and the classification of a send
 //!   or its receipt, including a message the client refuses because it exceeds the maximum

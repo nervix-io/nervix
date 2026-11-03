@@ -164,7 +164,7 @@ impl<'a> PulsarClientConnection<'a> {
     }
 
     /// The driver makes one attempt at an operation, within this connection's operation timeout.
-    fn operation_retries(&self) -> OperationRetryOptions {
+    pub(super) fn operation_retries(&self) -> OperationRetryOptions {
         let mut options = OperationRetryOptions {
             max_retries: Some(0),
             ..Default::default()

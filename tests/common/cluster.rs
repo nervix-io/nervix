@@ -2626,6 +2626,24 @@ impl Cluster {
         publish_pulsar_auth(&self.dependencies, topic, payload).await
     }
 
+    /// Publishes `messages` to `topic` in order, each under its Pulsar key.
+    pub(crate) async fn publish_keyed_pulsar(
+        &self,
+        topic: &str,
+        messages: Vec<KeyedPulsarMessage>,
+    ) -> io::Result<()> {
+        publish_keyed_pulsar(&self.dependencies, topic, messages).await
+    }
+
+    /// Joins a subscription with a consumer of the scenario's own, as another application's would
+    /// be. The consumer acknowledges what it reads, and closes when its observer is dropped.
+    pub(crate) async fn hold_pulsar_consumer(
+        &self,
+        consumer: HeldPulsarConsumer<'_>,
+    ) -> io::Result<BrokerObserver> {
+        hold_pulsar_consumer(&self.dependencies, consumer).await
+    }
+
     pub(crate) async fn limit_pulsar_topic_message_size(
         &self,
         topic: &str,
@@ -3301,8 +3319,8 @@ impl Cluster {
         observe_pulsar(&self.dependencies, topic).await
     }
 
-    /// Observes `topic` through a shared subscription, the only kind a broker holds a delayed
-    /// message back from.
+    /// Observes `topic` through a shared subscription, which a broker holds a delayed message back
+    /// from, as it does a key-shared one and unlike a failover or exclusive one.
     pub(crate) async fn observe_pulsar_shared(&self, topic: &str) -> io::Result<BrokerObserver> {
         observe_pulsar_shared(&self.dependencies, topic).await
     }
@@ -6140,6 +6158,46 @@ async fn publish_pulsar_with_addr(
     }))
 }
 
+/// One message of a scenario's keyed publication: the Pulsar key a `KEY_SHARED` subscription routes
+/// by, and its payload.
+pub(crate) struct KeyedPulsarMessage {
+    pub(crate) key: String,
+    pub(crate) payload: String,
+}
+
+async fn publish_keyed_pulsar(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    messages: Vec<KeyedPulsarMessage>,
+) -> io::Result<()> {
+    let topic = pulsar_topic(topic);
+    let pulsar: Pulsar<_> = Pulsar::builder(dependencies.get(PULSAR_ADDR)?, TokioExecutor)
+        .build()
+        .await
+        .map_err(io::Error::other)?;
+    let mut producer = pulsar
+        .producer()
+        .with_topic(&topic)
+        .build()
+        .await
+        .map_err(io::Error::other)?;
+    for message in messages {
+        nervix_primitives::task::consume_budget().await;
+        let message = pulsar::producer::Message {
+            payload: message.payload.into_bytes(),
+            partition_key: Some(message.key),
+            ..Default::default()
+        };
+        producer
+            .send_non_blocking(message)
+            .await
+            .map_err(io::Error::other)?
+            .await
+            .map_err(io::Error::other)?;
+    }
+    Ok(())
+}
+
 /// Sets the `maxMessageSize` policy of an existing topic through the broker's admin API, and waits
 /// until the broker reads the policy back. The broker updates a loaded topic's policies before it
 /// serves them, so the read-back is the evidence that the next message is measured against it.
@@ -6250,12 +6308,16 @@ async fn pulsar_subscription_backlog(
 }
 
 /// One subscription of a topic as the Pulsar admin API reports it: whether its cursor is
-/// durable, which a probe's non-durable cursor is not, and the names its consumers registered
-/// under.
+/// durable, which a probe's non-durable cursor is not, the type its consumers read it as, the names
+/// they registered under, the one the broker delivers to where the type has one, and how many
+/// messages each consumer was delivered, in the order of the broker's report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PulsarSubscriptionObservation {
     pub(crate) durable: bool,
+    pub(crate) subscription_type: Option<String>,
     pub(crate) consumer_names: Vec<String>,
+    pub(crate) active_consumer: Option<String>,
+    pub(crate) consumer_deliveries: Vec<u64>,
 }
 
 /// The subscription `subscription` of `topic` as the admin API's topic stats report it, absent
@@ -6293,19 +6355,27 @@ async fn pulsar_subscription(
         )));
     };
     let mut consumer_names = Vec::new();
+    let mut consumer_deliveries = Vec::new();
     for consumer in reported["consumers"].as_array().into_iter().flatten() {
-        let Some(name) = consumer["consumerName"].as_str() else {
+        let (Some(name), Some(delivered)) = (
+            consumer["consumerName"].as_str(),
+            consumer["msgOutCounter"].as_u64(),
+        ) else {
             return Err(io::Error::other(format!(
                 "the stats of Pulsar topic '{topic}' report a consumer of subscription \
-                 '{subscription}' without a name: {stats}"
+                 '{subscription}' without a name or a delivery count: {stats}"
             )));
         };
         consumer_names.push(name.to_string());
+        consumer_deliveries.push(delivered);
     }
     consumer_names.sort();
     Ok(Some(PulsarSubscriptionObservation {
         durable,
+        subscription_type: reported["type"].as_str().map(str::to_string),
         consumer_names,
+        active_consumer: reported["activeConsumerName"].as_str().map(str::to_string),
+        consumer_deliveries,
     }))
 }
 
@@ -7296,6 +7366,87 @@ pub(crate) async fn observe_kafka_through(
     Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
+/// An observer of what `consumer` reads, which it acknowledges. Dropping the observer drops the
+/// consumer, and the driver closes a consumer it drops.
+fn forward_pulsar_messages(
+    mut consumer: pulsar::Consumer<Vec<u8>, TokioExecutor>,
+) -> BrokerObserver {
+    let (payload_tx, payload_rx) = mpsc::channel(16);
+
+    let task = nervix_primitives::task::spawn(async move {
+        while let Some(message) = consumer.next().await {
+            let received_at = host_unix_millis();
+            nervix_primitives::task::consume_budget().await;
+            let Ok(message) = message else {
+                continue;
+            };
+            let metadata = message.metadata();
+            let times = PulsarMessageTimes {
+                event_time: metadata.event_time,
+                deliver_at: metadata.deliver_at_time,
+                published_at: metadata.publish_time,
+                received_at,
+            };
+            // Pulsar keeps message properties as an unordered map, so they are compared
+            // in name order.
+            let mut properties = message
+                .metadata()
+                .properties
+                .iter()
+                .map(|property| (property.key.clone(), property.value.clone()))
+                .collect::<Vec<_>>();
+            properties.sort();
+            let observed = BrokerMessage::from_bytes(&message.payload.data, properties)
+                .with_key(message.key())
+                .with_pulsar_times(times);
+            let _ = consumer.ack(&message).await;
+            if payload_tx.send(observed).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    BrokerObserver::forwarded(payload_rx, task)
+}
+
+/// A consumer of a scenario's own beside the ingestors it tests.
+pub(crate) struct HeldPulsarConsumer<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) topic: &'a str,
+    pub(crate) subscription: &'a str,
+    pub(crate) subscription_type: PulsarSubType,
+    /// The broker's priority level, where the consumer gives way to a consumer of the default
+    /// level 0.
+    pub(crate) priority_level: Option<i32>,
+}
+
+async fn hold_pulsar_consumer(
+    dependencies: &DependencyEndpoints,
+    consumer: HeldPulsarConsumer<'_>,
+) -> io::Result<BrokerObserver> {
+    let topic = pulsar_topic(consumer.topic);
+    let pulsar: Pulsar<_> = Pulsar::builder(dependencies.get(PULSAR_ADDR)?, TokioExecutor)
+        .build()
+        .await
+        .map_err(io::Error::other)?;
+    let mut options =
+        PulsarConsumerOptions::default().with_initial_position(PulsarInitialPosition::Earliest);
+    if let Some(priority_level) = consumer.priority_level {
+        options = options.with_priority_level(priority_level);
+    }
+    let held = pulsar
+        .consumer()
+        .with_topic(&topic)
+        .with_consumer_name(consumer.name)
+        .with_subscription(consumer.subscription)
+        .with_subscription_type(consumer.subscription_type)
+        .with_options(options)
+        .build::<Vec<u8>>()
+        .await
+        .map_err(io::Error::other)?;
+    Ok(forward_pulsar_messages(held))
+}
+
 async fn observe_pulsar(
     dependencies: &DependencyEndpoints,
     topic: &str,
@@ -7388,7 +7539,7 @@ async fn observe_pulsar_with_addr(
                 builder = builder.with_auth(authentication);
             }
             let pulsar: Pulsar<_> = builder.build().await.map_err(io::Error::other)?;
-            let mut consumer = pulsar
+            let consumer = pulsar
                 .consumer()
                 .with_topic(&topic)
                 .with_subscription(&subscription)
@@ -7400,42 +7551,7 @@ async fn observe_pulsar_with_addr(
                 .build::<Vec<u8>>()
                 .await
                 .map_err(io::Error::other)?;
-            let (payload_tx, payload_rx) = mpsc::channel(16);
-
-            let task = nervix_primitives::task::spawn(async move {
-                while let Some(message) = consumer.next().await {
-                    let received_at = host_unix_millis();
-                    nervix_primitives::task::consume_budget().await;
-                    let Ok(message) = message else {
-                        continue;
-                    };
-                    let metadata = message.metadata();
-                    let times = PulsarMessageTimes {
-                        event_time: metadata.event_time,
-                        deliver_at: metadata.deliver_at_time,
-                        published_at: metadata.publish_time,
-                        received_at,
-                    };
-                    // Pulsar keeps message properties as an unordered map, so they are compared
-                    // in name order.
-                    let mut properties = message
-                        .metadata()
-                        .properties
-                        .iter()
-                        .map(|property| (property.key.clone(), property.value.clone()))
-                        .collect::<Vec<_>>();
-                    properties.sort();
-                    let observed = BrokerMessage::from_bytes(&message.payload.data, properties)
-                        .with_key(message.key())
-                        .with_pulsar_times(times);
-                    let _ = consumer.ack(&message).await;
-                    if payload_tx.send(observed).await.is_err() {
-                        break;
-                    }
-                }
-            });
-
-            Ok(BrokerObserver::forwarded(payload_rx, task))
+            Ok(forward_pulsar_messages(consumer))
         }
         .await;
 

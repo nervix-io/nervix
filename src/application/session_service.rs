@@ -333,7 +333,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                 "installing admitted cluster runtime state"
             );
             if let Err(error) = registry.synchronize_cluster_schedule(&state.schedule) {
-                warn!(error = %error, "failed to synchronize registry from admitted cluster schedule");
+                warn!(error = %format_args!("{error:#}"), "failed to synchronize registry from admitted cluster schedule");
             }
             let runtime_application = admission
                 .apply_planned_cluster_state(runtime, local_node_id, &state)
