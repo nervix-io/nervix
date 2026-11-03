@@ -371,6 +371,7 @@ class InventoryTests(unittest.TestCase):
             "http-poll-response-headers",
             "http-emitter-requests",
             "mqtt-publish-packets",
+            "mqtt-publish-metadata",
             "postgres-insert-measures",
             "mysql-insert-measures",
             "prometheus-sample-encoding",

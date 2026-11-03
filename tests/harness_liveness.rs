@@ -13,6 +13,7 @@
 //!   It also owns registration of generator cadence, paced-interconnect cadence, bounded
 //!   subscription payload observations, declared scenario weights, admission fairness and the
 //!   per-node execution readings of timed probes.
+//!   It also registers causal reply/pause ordering checks for command recovery probes.
 //! - **Depends on.** The node-liveness, node-startup, node-stop, phase-deadline, status-request,
 //!   port-pool, node-bound address, process-cluster convergence, cluster-teardown, scenario-phase,
 //!   suite-watchdog, Redis-client, HTTP-receiver, Iceberg-catalog-gate, backup phase, snapshot receive memory, gRPC-receiver,
@@ -35,6 +36,11 @@
 )]
 
 use websocket_close::reply_to_close;
+
+#[path = "common/command_probe.rs"]
+mod command_probe;
+#[path = "common/command_probe_tests.rs"]
+mod command_probe_tests;
 
 #[path = "common/snapshot_receive_memory.rs"]
 mod snapshot_receive_memory;

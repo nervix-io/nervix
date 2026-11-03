@@ -2563,6 +2563,18 @@ impl Cluster {
         publish_mqtt_with_qos(&self.dependencies, topic, payload, QoS::AtLeastOnce, true).await
     }
 
+    /// Publishes `payload` with the flags and MQTT 5 properties `options` name, and returns once
+    /// the broker answered what their QoS asks for.
+    pub(crate) async fn publish_mqtt_with_options(
+        &self,
+        topic: &str,
+        payload: &str,
+        options: PublishOptions,
+    ) -> io::Result<()> {
+        let (host, port) = dependency_host_port(&self.dependencies, MQTT_ADDR, 1883)?;
+        publish_mqtt_options_to_address(host, port, topic, payload, options).await
+    }
+
     /// Publishes `payload` at QoS 2 and returns once the broker completed its PUBCOMP exchange.
     pub(crate) async fn publish_mqtt_qos2(&self, topic: &str, payload: &str) -> io::Result<()> {
         publish_mqtt_with_qos(&self.dependencies, topic, payload, QoS::ExactlyOnce, true).await
@@ -2800,11 +2812,15 @@ impl Cluster {
         ensure_kafka_topic_partitions(&self.dependencies, topic, partitions).await
     }
 
-    /// Historical CreateTime records must survive the broker's retention scans.
+    /// Historical CreateTime records must survive the broker's retention scans, and the broker
+    /// keeps every CreateTime as its producer wrote it, however far after the broker's clock, so a
+    /// record whose timestamp no `DATETIME` holds reaches the topic whatever the broker's default.
     pub(crate) async fn create_kafka_metadata_topic(&self, topic: &str) -> io::Result<()> {
         let admin = kafka_admin_client(&self.dependencies)?;
+        let latest_create_time = i64::MAX.to_string();
         let definition = NewTopic::new(topic, 1, TopicReplication::Fixed(1))
             .set("message.timestamp.type", "CreateTime")
+            .set("message.timestamp.after.max.ms", &latest_create_time)
             .set("retention.ms", "-1")
             .set("retention.bytes", "-1");
         let options = AdminOptions::new().request_timeout(Some(Duration::from_secs(5)));
@@ -5652,6 +5668,17 @@ pub(crate) async fn publish_mqtt_to_address(
     qos: QoS,
     retain: bool,
 ) -> io::Result<()> {
+    let options = PublishOptions::new(qos).retain(retain);
+    publish_mqtt_options_to_address(host, port, topic, payload, options).await
+}
+
+async fn publish_mqtt_options_to_address(
+    host: String,
+    port: u16,
+    topic: &str,
+    payload: &str,
+    publish: PublishOptions,
+) -> io::Result<()> {
     let client_id = format!("nervix-cucumber-{}", Uuid::now_v7().as_simple());
     let options = MqttOptions::new(client_id, (host, port));
     let (client, mut eventloop) = AsyncClient::builder(options).capacity(16).build();
@@ -5668,7 +5695,7 @@ pub(crate) async fn publish_mqtt_to_address(
         // Runtime ingestors can still be attaching immediately after START. Retain the input on
         // its unique scenario topic, and keep driving until it is sent (QoS 0) or answered (QoS 1).
         let notice = client
-            .publish_tracked(topic, payload, PublishOptions::new(qos).retain(retain))
+            .publish_tracked(topic, payload, publish)
             .await
             .map_err(io::Error::other)?;
         notice
