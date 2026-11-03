@@ -27,7 +27,7 @@ mod consumers;
 mod producers;
 
 use std::{
-    num::{NonZeroU64, NonZeroUsize},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -1681,7 +1681,7 @@ fn upload_replies_keep_an_absent_version_absent() {
         diagnostics: Vec::new(),
     };
     let upload_of = |disposition: UploadDisposition| {
-        CommandOutcome::from_upload(reply(disposition), identity.clone())
+        CommandOutcome::from_upload(reply(disposition), identity.clone(), NonZeroU32::MIN)
     };
 
     let refused = upload_of(UploadDisposition::Failed {
@@ -1697,6 +1697,7 @@ fn upload_replies_keep_an_absent_version_absent() {
             version: None,
             origin: None,
             failure: Some(UploadFailure::QuotaExceeded),
+            calls: NonZeroU32::MIN,
         })
     );
 
@@ -1712,6 +1713,7 @@ fn upload_replies_keep_an_absent_version_absent() {
             version: NonZeroU64::new(3),
             origin: None,
             failure: Some(UploadFailure::InstallationFailed),
+            calls: NonZeroU32::MIN,
         })
     );
 
@@ -1730,6 +1732,39 @@ fn upload_replies_keep_an_absent_version_absent() {
             version: None,
             origin: None,
             failure: None,
+            calls: NonZeroU32::MIN,
+        })
+    );
+}
+
+#[test]
+fn an_upload_outcome_reports_the_origin_of_its_last_call_and_how_many_it_opened() {
+    let identity =
+        ResourceUploadIdentity::parse("upload-1").assured("the test upload identity is valid");
+    let version = NonZeroU64::new(4).assured("four is not zero");
+    let calls = NonZeroU32::new(3).assured("three is not zero");
+    let reply = UploadReply {
+        request_id: None,
+        disposition: UploadDisposition::Installed {
+            upload_identity: identity.clone(),
+            version,
+            origin: OutcomeOrigin::Recovered,
+        },
+        message: "uploaded resource version 4".to_string(),
+        diagnostics: Vec::new(),
+    };
+
+    let recovered = CommandOutcome::from_upload(reply, identity.clone(), calls);
+
+    assert!(recovered.succeeded());
+    assert_eq!(
+        recovered.resource_upload,
+        Some(ResourceUploadOutcome {
+            identity,
+            version: Some(version),
+            origin: Some(OutcomeOrigin::Recovered),
+            failure: None,
+            calls,
         })
     );
 }
