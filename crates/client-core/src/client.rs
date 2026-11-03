@@ -31,7 +31,9 @@ use nervix_models::{
     Restore, Statement, SubscriptionName, TransactionInspectionTarget, TransactionOperationNumber,
     TransactionPosition, TransactionPreviewIdentity, TransactionStatus, UploadResource,
 };
-use nervix_plexus::client_statement::{ClientStatement, ParsedClientStatement};
+use nervix_plexus::client_statement::{
+    ClientStatement, ClientStatementGrammar, ParsedClientStatement,
+};
 use nervix_primitives::{
     sync::{Arc, Mutex, StdArc as SharedClientArc},
     time::{Instant, sleep},
@@ -56,6 +58,18 @@ use crate::{
         RestoreAttempt, SubscriptionContract, SubscriptionLifecycle,
     },
 };
+
+nervix_primitives::thread_local! {
+    /// The grammar this thread classifies and splits statements with. Building the grammar costs
+    /// far more than parsing a statement with it, and it cannot move between threads, so each
+    /// thread that prepares a command builds it once, for its first one.
+    static STATEMENT_GRAMMAR: ClientStatementGrammar = ClientStatementGrammar::new();
+}
+
+/// Lends `read` the grammar this thread parses statements with.
+pub(crate) fn with_statement_grammar<T>(read: impl FnOnce(&ClientStatementGrammar) -> T) -> T {
+    STATEMENT_GRAMMAR.with(read)
+}
 
 /// What a command expects of the transaction it runs against.
 ///
@@ -470,7 +484,8 @@ impl Client {
     }
 
     fn route(query: &str) -> StatementRoute {
-        match nervix_plexus::client_statement::parse_client_statement_sources(query) {
+        let parsed = with_statement_grammar(|grammar| grammar.parse_sources(query));
+        match parsed {
             Ok(statements) => StatementRoute::of(query, statements),
             Err(_) => StatementRoute::Command,
         }

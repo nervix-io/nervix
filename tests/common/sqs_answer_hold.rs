@@ -1,15 +1,16 @@
 //! A forwarder a scenario stands in front of the SQS service to hold the answer that carries a
-//! chosen message.
+//! chosen message, and to count the SQS actions the requests it carries name.
 //!
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
-//! - **Owns.** One loopback listener, the connections it forwards to the service, and the one answer
-//!   it holds: the first the service sends, once a scenario arms it, whose bytes carry the text it
-//!   was told to watch for. It holds that answer from the read that brought the text until the
-//!   scenario releases it.
+//! - **Owns.** One loopback listener, the connections it forwards to the service, the one answer it
+//!   holds, and how many requests named each SQS action. It holds the first answer the service
+//!   sends, once a scenario arms it, whose bytes carry the text it was told to watch for, from the
+//!   read that brought the text until the scenario releases it.
 //! - **Depends on.** Tokio's TCP sockets and I/O traits, and the boundary's tasks, cancellation and
 //!   watch channel.
-//! - **Must not know.** Nervix, HTTP, or the SQS protocol beyond the bytes an answer carries.
+//! - **Must not know.** Nervix, or HTTP and the SQS protocol beyond the bytes an answer carries and
+//!   the action a request's `x-amz-target` header line names.
 //!
 //! The service sends an answer once it has taken the messages in it off the queue, so a held answer
 //! is a receive in flight: the messages it carries stay invisible to every other receive until the
@@ -17,7 +18,7 @@
 //! after the held one, pass unchanged. A client that gives up on the held receive loses the answer
 //! with its connection.
 
-use std::{future::Future, io, net::SocketAddr};
+use std::{collections::BTreeMap, future::Future, io, net::SocketAddr};
 
 use nervix_primitives::{
     net::{TcpListener, TcpStream},
@@ -31,6 +32,13 @@ const READ_BYTES: usize = 16 * 1024;
 /// The most bytes of the watched text that can arrive in the read before the one that completes
 /// it. A scenario watches for a short marker, so a longer tail only costs a few bytes of copying.
 const CARRIED_TAIL_BYTES: usize = 256;
+/// The most bytes of a request the forwarder keeps while it waits for the end of a line. A header
+/// line is far shorter; a longer run without a line end is a body, which never names an action.
+const REQUEST_LINE_BYTES: usize = 8 * 1024;
+/// The header whose value names a request's SQS action, as the JSON protocol sends it.
+const TARGET_HEADER: &str = "x-amz-target";
+/// What every SQS action name in a target header begins with.
+const TARGET_PREFIX: &str = "AmazonSQS.";
 
 /// Which answer the forwarder holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +57,8 @@ enum Hold {
 pub(crate) struct SqsAnswerHold {
     local_addr: SocketAddr,
     hold: watch::Sender<Hold>,
+    /// How many requests named each SQS action, by the action's name.
+    actions: watch::Sender<BTreeMap<String, usize>>,
     /// Cancelled to close every connection the forwarder carried, when the forwarder stops.
     connections: CancellationToken,
     listener: JoinHandle<()>,
@@ -60,19 +70,38 @@ impl SqsAnswerHold {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await?;
         let local_addr = listener.local_addr()?;
         let (hold, _) = watch::channel(Hold::Passing);
+        let (actions, _) = watch::channel(BTreeMap::new());
         let connections = CancellationToken::new();
         let listener = nervix_primitives::task::spawn(Self::accept(
             listener,
             service,
-            hold.clone(),
+            Carried {
+                hold: hold.clone(),
+                actions: actions.clone(),
+            },
             connections.clone(),
         ));
         Ok(Self {
             local_addr,
             hold,
+            actions,
             connections,
             listener,
         })
+    }
+
+    /// How many of the requests it carried named the SQS `action`, such as `DeleteMessageBatch`.
+    pub(crate) fn requests_naming(&self, action: &str) -> usize {
+        let actions = self.actions.borrow();
+        match actions.get(action) {
+            Some(requests) => *requests,
+            None => 0,
+        }
+    }
+
+    /// How many requests named each SQS action it carried, for a step's failure message.
+    pub(crate) fn requests_by_action(&self) -> BTreeMap<String, usize> {
+        self.actions.borrow().clone()
     }
 
     /// The loopback port clients connect to instead of the service's.
@@ -114,7 +143,7 @@ impl SqsAnswerHold {
     async fn accept(
         listener: TcpListener,
         service: SocketAddr,
-        hold: watch::Sender<Hold>,
+        carried: Carried,
         connections: CancellationToken,
     ) {
         loop {
@@ -125,7 +154,7 @@ impl SqsAnswerHold {
             nervix_primitives::task::spawn(Self::forward(
                 client,
                 service,
-                hold.clone(),
+                carried.clone(),
                 connections.clone(),
             ));
         }
@@ -135,7 +164,7 @@ impl SqsAnswerHold {
     async fn forward(
         client: TcpStream,
         service: SocketAddr,
-        hold: watch::Sender<Hold>,
+        carried: Carried,
         stopped: CancellationToken,
     ) {
         let Ok(service) = TcpStream::connect(service).await else {
@@ -145,9 +174,56 @@ impl SqsAnswerHold {
         let (mut service_read, mut service_write) = service.into_split();
         nervix_primitives::select! {
             _ = stopped.cancelled() => {}
-            _ = tokio::io::copy(&mut client_read, &mut service_write) => {}
-            _ = Self::forward_answers(&mut service_read, &mut client_write, &hold) => {}
+            _ = Self::forward_requests(&mut client_read, &mut service_write, &carried.actions) => {}
+            _ = Self::forward_answers(&mut service_read, &mut client_write, &carried.hold) => {}
         }
+    }
+
+    /// Forwards what the client sends unchanged, counting the SQS action each request names in its
+    /// `x-amz-target` header line.
+    async fn forward_requests(
+        client: &mut (impl AsyncRead + Unpin),
+        service: &mut (impl AsyncWrite + Unpin),
+        actions: &watch::Sender<BTreeMap<String, usize>>,
+    ) -> io::Result<()> {
+        let mut buffer = vec![0_u8; READ_BYTES];
+        // The bytes since the last line end, so a header line the client's writes split is still
+        // read whole.
+        let mut line = Vec::new();
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let read = client.read(&mut buffer).await?;
+            if read == 0 {
+                return service.shutdown().await;
+            }
+            let bytes = &buffer[..read];
+            for byte in bytes {
+                line.push(*byte);
+                if line.ends_with(b"\r\n") {
+                    if let Some(action) = Self::named_action(&line) {
+                        actions.send_modify(|actions| {
+                            *actions.entry(action).or_default() += 1;
+                        });
+                    }
+                    line.clear();
+                } else if line.len() > REQUEST_LINE_BYTES {
+                    line.clear();
+                }
+            }
+            service.write_all(bytes).await?;
+        }
+    }
+
+    /// The SQS action a request's header `line` names, where it is the `x-amz-target` header.
+    fn named_action(line: &[u8]) -> Option<String> {
+        let line = std::str::from_utf8(line).ok()?;
+        let (name, value) = line.split_once(':')?;
+        if !name.trim().eq_ignore_ascii_case(TARGET_HEADER) {
+            return None;
+        }
+        let target = value.trim();
+        let action = target.strip_prefix(TARGET_PREFIX).unwrap_or(target);
+        Some(action.to_string())
     }
 
     /// Forwards what the service sends, holding the read that brings the armed text, and everything
@@ -201,6 +277,14 @@ impl SqsAnswerHold {
             true
         })
     }
+}
+
+/// What every connection the forwarder carries shares with the scenario: the answer hold and the
+/// count of the actions requests named.
+#[derive(Debug, Clone)]
+struct Carried {
+    hold: watch::Sender<Hold>,
+    actions: watch::Sender<BTreeMap<String, usize>>,
 }
 
 impl Drop for SqsAnswerHold {

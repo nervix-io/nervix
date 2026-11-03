@@ -396,6 +396,26 @@ fn a_pool_checkout_is_bounded_by_its_key_with_the_default_the_schema_declares() 
 }
 
 #[test]
+fn the_test_of_a_returned_connection_is_declared_without_a_bound() {
+    let declared = PostgresTableEmitter::CAPABILITIES.bounds;
+    // The declaration lists a fixed handful of waits.
+    let returned = declared
+        .waits
+        .iter()
+        .find(|wait| {
+            wait.wait
+                .starts_with("testing a connection returned to the pool")
+        })
+        .assured("the declaration names the test the driver runs on every returned connection");
+    assert_eq!(returned.bound, WaitBound::Unbounded);
+    assert_eq!(
+        declared.deadline_keys(),
+        vec![DeadlineKey::Timeout, DeadlineKey::PoolAcquireTimeout],
+        "no client key bounds the test of a returned connection",
+    );
+}
+
+#[test]
 fn the_client_schema_owns_the_scheme_and_holds_tls_files_to_verify_full() {
     let schema = ConnectorKind::Postgres
         .client()

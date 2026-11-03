@@ -237,7 +237,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Entity | SQS QUEUE | Compare `SQS QUEUE`: options, modes, headers, ingest metadata. Receiving uses a visibility timeout and deletion; publishing sends SEND SINGLE or SEND BATCH service requests, may declare a FIFO group, and writes typed message attributes and a per-message delay or deduplication id. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix. |
 | Reference | SQS client |  |
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |  |
-| Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
+| Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 10 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |  |
 | Headers | `read_header`, `read_headers`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
@@ -245,8 +245,8 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Every live node | no; scheduled owner |  |
 | Position class | broker_redelivered |  |
 | Acknowledgement confirmation | answered |  |
-| Buffers | The connector holds no buffer between its transport and the host. |  |
-| Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup and a delete: `timeout_ms`; unbounded when omitted<br>a receive, after the one-second long poll it asks the service to hold it for: `timeout_ms`; unbounded when omitted |  |
+| Buffers | messages gathered for one host read: set by 1 under ACK SEQUENTIAL; ACK PARALLEL MAX otherwise, at most 10; when full, holds back what fills it |  |
+| Network waits | gathering further messages after the first under ACK PARALLEL; cancellation hands over every message already gathered: `BATCH TIMEOUT`<br>connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup, a deletion, a batch deletion and a batch visibility change: `timeout_ms`; unbounded when omitted<br>a receive, after the long poll of at most one second it asks the service to hold it for: `timeout_ms`; unbounded when omitted |  |
 | Driver limits | A request that stalls below 1 byte a second for 5 s is cancelled. |  |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |  |
 
@@ -410,8 +410,8 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | BATCH | optional |  |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |  |
 | Batch transformation required | no |  |
-| Envelope | MANDATORY |  |
-| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Envelope | PERSISTENT<br>MANDATORY<br>TIMESTAMP occurred_at |  |
+| PROPERTIES keys and exact types | content_type: STRING<br>content_encoding: STRING<br>message_id: STRING<br>correlation_id: STRING<br>reply_to: STRING<br>expiration: STRING<br>priority: U8<br>type: STRING<br>app_id: STRING<br>user_id: STRING |  |
 | Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>messages the broker returns unrouted under MANDATORY, until the write that published them reads them: set by the messages of one write; when full, holds back what fills it |  |
 | Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open, confirm select and the queue check: `connect_timeout_ms`; 30s when omitted<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: `timeout_ms`; unbounded when omitted |  |
 | Driver limits | A frame above the negotiated frame_max ends the connection. |  |
@@ -431,8 +431,8 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | BATCH | optional |  |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |  |
 | Batch transformation required | no |  |
-| Envelope | MANDATORY |  |
-| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
+| Envelope | PERSISTENT<br>MANDATORY<br>TIMESTAMP occurred_at |  |
+| PROPERTIES keys and exact types | content_type: STRING<br>content_encoding: STRING<br>message_id: STRING<br>correlation_id: STRING<br>reply_to: STRING<br>expiration: STRING<br>priority: U8<br>type: STRING<br>app_id: STRING<br>user_id: STRING |  |
 | Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>messages the broker returns unrouted under MANDATORY, until the write that published them reads them: set by the messages of one write; when full, holds back what fills it |  |
 | Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open, confirm select and the exchange check: `connect_timeout_ms`; 30s when omitted<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: `timeout_ms`; unbounded when omitted |  |
 | Driver limits | A frame above the negotiated frame_max ends the connection.<br>A routing key longer than the 255 bytes an AMQP short string carries is not sent; its record is rejected. |  |
@@ -699,7 +699,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |  |
-| Network waits | a pool checkout: the wait for the pool, name resolution, connection, TLS, authentication and the borrow test: `pool_acquire_timeout_ms`; 30s when omitted<br>each catalog query and each insert: `timeout_ms`; unbounded when omitted<br>closing an interrupted query connection: driver default, SQLx close-on-drop timeout, 5 s |  |
+| Network waits | a pool checkout: the wait for the pool, name resolution, connection, TLS, authentication and the borrow test: `pool_acquire_timeout_ms`; 30s when omitted<br>each catalog query and each insert: `timeout_ms`; unbounded when omitted<br>closing an interrupted query connection: driver default, SQLx close-on-drop timeout, 5 s<br>testing a connection returned to the pool, which keeps its place until the server answers: unbounded |  |
 | Driver limits | timeout_ms accepts at most 2147483647 milliseconds, PostgreSQL's statement_timeout maximum.<br>Without timeout_ms, catalog queries and inserts have no Nervix response deadline. |  |
 | Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER pool_acquire_timeout_ms` |  |
 
