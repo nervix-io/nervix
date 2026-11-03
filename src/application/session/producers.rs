@@ -639,7 +639,7 @@ impl ProducerPump {
                                 return;
                             }
                         }
-                        Err(error) => debug!(error = %error, "an admission change does not fit a frame"),
+                        Err(error) => debug!(error = %format_args!("{error:#}"), "an admission change does not fit a frame"),
                     }
                 }
             }
@@ -815,7 +815,9 @@ impl ProducerPump {
                     debug!(producer = %self.producer, "the session ended before a producer's end");
                 }
             }
-            Err(error) => debug!(error = %error, "a producer end does not fit a frame"),
+            Err(error) => {
+                debug!(error = %format_args!("{error:#}"), "a producer end does not fit a frame")
+            }
         }
     }
 }

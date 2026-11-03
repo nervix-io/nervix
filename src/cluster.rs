@@ -968,7 +968,7 @@ impl InterconnectGossipTransport {
         if let Err(error) = registration {
             debug!(
                 peer = %context.peer_node_id(),
-                error = %error,
+                error = %format_args!("{error:#}"),
                 "refused a gossip exchange from a peer that could not be registered"
             );
             return Err(GossipExchangeRefusal::PeerRegistration);
@@ -1336,7 +1336,7 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
                 }
             }
             Err(error) if has_recovered_peers => {
-                warn!(%seed, %error, "could not resolve the configured bootstrap host for gossip");
+                warn!(%seed, error = %format_args!("{error:#}"), "could not resolve the configured bootstrap host for gossip");
             }
             Err(error) => return Err(io::Error::other(error.into_error())),
         }

@@ -673,8 +673,8 @@ and the operation and attempt timeouts `timeout_ms` sets for every request of bo
 include the lookup; a receive's start after the long poll of at most one second it asks the service
 to hold it for. The client names static credentials, with `session_token` where they are temporary ones, and its
 region, so `aws-config` never consults the default credential or region chains that could reach
-IMDS, ECS, STS or SSO over HTTP. It still builds its SSO token chain, which SQS never asks for
-a token because it signs with SigV4; the loader receives the same HTTP client, so that chain would
+IMDS, ECS, STS or SSO over HTTP. It still builds its SSO token chain, which SQS never asks for a
+token, because it signs with SigV4; the loader receives the same HTTP client, so that chain would
 use the node resolver too.
 
 Both hooks give a lookup at most 30 seconds, like the Reqwest hooks; the client's own deadline
@@ -750,13 +750,13 @@ A connector runs on the host's asynchronous tasks and never blocks one. Synchron
 itself, such as writing or reading a local file, goes through the node's bounded executor, which the
 emitter host hands a connector as `EmitterHost::executor`. The connector chooses the storage or CPU class
 of its work and the memory it charges; the executor admits that work beside the rest of the node's,
-and a refusal is the connector's own typed failure. The Iceberg emitter writes and reads its staged
-Arrow IPC files on the filesystem storage workers. A staging write the node cannot take now fails
-the publish, which the host retries as it retries any other. A commit charges the bulk memory class
-for every staged byte it reads back before it reads them, or the whole class for a single staged
-file larger than the class, and takes that charge only when the class has room now, because a
-place in the class's queue would take every byte the class frees and hold the node's other bulk
-work behind the commit. A refusal fails the commit, which keeps its staged files and
+and a refusal is the connector's own typed failure. The Iceberg emitter appends to and reads its
+Arrow IPC staging files on the filesystem storage workers. A staging write the node cannot take now
+fails the publish, which the host retries as it retries any other. A commit charges the bulk memory
+class for every staged byte it reads back before it reads them, or the whole class for a single
+staged batch larger than the class, and takes that charge only when the class has room now, because
+a place in the class's queue would take every byte the class frees and hold the node's other bulk
+work behind the commit. A refusal fails the commit, which keeps its staged rows and
 acknowledgements while the host retries it. The read itself waits for a place among the filesystem
 workers instead of being refused, because nothing could present again the rows the emitter already
 accepted.
@@ -1107,17 +1107,22 @@ the pattern subscription's runtime scenario observes both metadata fields.
 
 `SQS QUEUE` shares one queue-name rule between ingestion and emission: 1 to 80 ASCII letters,
 digits, `-` and `_`, where a FIFO queue's name ends in `.fifo` within those 80 characters, passed
-through exactly as written. Its declaration permits `ACK SEQUENTIAL`, `ACK PARALLEL` with a
-window of at most the ten messages one receive returns, and `SUSPEND` for intake, since the queue
-keeps a message until the source deletes it, and `SINGLE` or `BATCH` for emission,
-where a `.fifo` queue requires `FIFO GROUP` and a standard queue refuses it. Message attributes are
-its headers in both directions, as `last_wins` exact names; the emitter declares no envelope and
-optional batching up to the 256 KiB SQS admits in one message. An SQS client declares only the keys
-its connections read, each in both directions: the required `endpoint`, `region`, `access_key_id`
-and `secret_access_key`, and the optional `session_token`, `timeout_ms`, which bounds every request,
-and `tls_ca_file`. An SQS connection trusts `tls_ca_file`, or the platform's roots without it, takes
-no proxy and presents no client certificate, so the client declares neither a proxy nor a
-client-identity key.
+through exactly as written. The ingestor declares `ACK SEQUENTIAL`, `ACK PARALLEL` with a window
+of at most the ten messages one receive returns, `INSTANCES`, and `SUSPEND` for intake, since the
+queue keeps a message until the source deletes it, and its typed metadata is the message identity,
+send and first-receive times, receive count, group and deduplication identifiers, sequence number
+and sender identifier. The emitter declares `MODE ACK` alone, a required `SEND SINGLE` or
+`SEND BATCH` request shape, and `FIFO GROUP`, which a `.fifo` queue requires and a standard queue
+refuses. The request shape is emit-only and the parallel receive ingest-only. Message attributes
+are its headers in both directions, as `last_wins` exact names: the ingestor reads each value as
+text, and the emitter writes a `STRING` as a `String`, an integer as a `Number` and `BYTES` as a
+`Binary` attribute. The emitter declares the `DELAY` and `DEDUPLICATION ID` envelope clauses, which
+the registry holds to a standard and a FIFO queue respectively, and optional batching up to the
+1 MiB SQS admits in one message. An SQS client declares only the keys its connections read, each
+in both directions: the required `endpoint`, `region`, `access_key_id` and `secret_access_key`, and
+the optional `session_token`, `timeout_ms`, which bounds every request, and `tls_ca_file`. An SQS
+connection trusts `tls_ca_file` alone, or the platform's roots without it, takes no proxy and
+presents no client certificate, so the client declares neither a proxy nor a client-identity key.
 The SQS-specific declaration tests, generated grammar conformance and one-/three-node public
 declaration scenarios qualify these facts together.
 
@@ -2495,7 +2500,7 @@ Where it can learn that limit it measures the complete message and rejects a rec
 fit before writing it, with a reason naming the size and the limit, so the rejection follows the
 message error policy instead of failing the transport: the MQTT emitter measures the `PUBLISH` packet
 against the Maximum Packet Size of the broker's latest `CONNACK` and the largest packet MQTT can
-express, the SQS emitter counts attributes and the FIFO group against 256 KiB, and the Kafka producer,
+express, the SQS emitter counts attributes and the FIFO group against 1 MiB, and the Kafka producer,
 the NATS client and the Pulsar client check `message.max.bytes`, `max_payload` and the
 `maxMessageSize` of the connection's `CommandConnected` with the key, headers or message metadata
 they write. A limit the connector cannot learn stays with the destination, and the destination's own
@@ -2630,18 +2635,30 @@ bytes; the one- and three-node Sentry scenarios qualify those bytes through a re
 after a mock endpoint's `503` response. See
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md#behavioral-properties).
 
-Iceberg is a row emitter. Without `BATCH` it stages each carrier of the run as one Arrow IPC file,
-and its commit writes the rows with the 512 MiB Parquet rollover target. With `BATCH`, the typed
+Iceberg is a row emitter. It appends every staged batch as its own Arrow IPC record-batch message
+to one local staging file, which begins with the staged schema's message, and records the exact
+byte range of each. Every write appends to the same staging file until a commit begins and seals
+it, so a commit reads one staging file however many carriers, source relays and branches its
+writes carried, and a write that follows starts the next file. Without `BATCH` each carrier of a
+write is one staged batch, and its commit writes the rows with the 512 MiB Parquet rollover target.
+With `BATCH`, the typed
 start plan hands the row and byte limits to the connector. It projects selected rows onto the
 loaded table schema, counts the complete Parquet encoding on the bounded bulk CPU workers, and
 uses the shared fallible row division to make staged Arrow IPC segments. A row whose own file is
-too large is refused alone through `ON MESSAGE ERROR`; the accepted segments become one data file
-each in the catalog commit. The connector retains a carrier's one acknowledgement handle on its
-final staged segment, so splitting files neither acknowledges at staging nor repeats a commit
-acknowledgement. If staging any segment fails, it removes the segments from that carrier's attempt
-and leaves the host's unresolved rows retryable. Commit checks the written files' physical row and
-byte counts before appending them. The property target `iceberg-staged-file-encoding` checks Arrow
-IPC readback and that the counting Parquet writer agrees with the encoded file's byte length.
+too large is refused alone through `ON MESSAGE ERROR`; each accepted segment is one staged batch,
+which becomes one data file in the catalog commit. The connector retains a carrier's one
+acknowledgement handle on its final staged batch, so splitting it into segments neither
+acknowledges at staging nor repeats a commit acknowledgement. A carrier is staged whole or not at
+all: an append that fails cuts the staging file back to where the carrier's first batch began and
+leaves the host's unresolved rows retryable, and carriers staged before it stay staged. An append
+also cuts off whatever follows the end its emitter recorded, so bytes an interrupted append left
+behind never precede a staged batch. Commit reads back the contiguous span of staged batches each
+load group takes from a staging file, decoding it after the file's schema message, and checks the
+written files' physical row and byte counts before appending them. The property target
+`iceberg-staging-file-spans` checks that every span of staged batches reads back exactly what its
+appends wrote and that a refused append leaves the file as before, and
+`iceberg-staged-file-encoding` that rows read back from a staging file count the same Parquet bytes
+the encoded data file holds.
 
 OTEL is a row request emitter, which the host hands one carrier per preparation. Without `BATCH` it
 prepares the successfully mapped rows of the carrier as one Export request. With `BATCH`, its typed
@@ -2955,7 +2972,7 @@ sequenceDiagram
   arbitrary UTF-8 text and the exact key and reason of every refusal.
 - **Iceberg emitter.** It stages Arrow data locally on the node's filesystem storage workers, prepares
   data files, and publishes a catalog update once its `COMMIT EACH` cadence, which the host measures
-  from staging, ends or its staged files reach the maximum commit size. Open loads the declared
+  from staging, ends or its staged rows reach the maximum commit size. Open loads the declared
   table from the REST catalog. A REST catalog answers a missing namespace and a missing table alike,
   so a catalog that does not hold the table is asked for the table's namespace, and the open fails
   with `EmitterOpenError::MissingExternalEntity` naming the namespace, or the table in a namespace
@@ -2970,12 +2987,12 @@ sequenceDiagram
   pairs a batch's columns with a data file's by position: a mapped column lands in the column of its
   name and an optional column `VALUES` leaves out is written as null. Staging does not complete an
   ACK; successful catalog commit does. The emitter retains ACKs and its client while a failed commit is
-  retried. A commit reads its staged files back in groups the bulk memory class can hold at once,
-  and a single file larger than the class alone, charged with the whole class. It charges each group
-  before reading it, returns the charge once the group's rows are in data files, and appends the
-  data files of every group in one catalog commit. It covers the staged files it found when it
-  began, so the retry of a failed append commits files staged since then in a commit of their own
-  instead of acknowledging them unwritten.
+  retried. A commit reads its staged batches back in groups the bulk memory class can hold at once,
+  and a single staged batch larger than the class alone, charged with the whole class. It charges
+  each group before reading it, returns the charge once the group's rows are in data files, and
+  appends the data files of every group in one catalog commit. It covers the rows staged when it
+  began and seals their staging file, so the retry of a failed append commits rows staged since then,
+  which a new staging file holds, in a commit of their own instead of acknowledging them unwritten.
   [Iceberg emission](./emitters.md#iceberg) defines the external commit and duplicate limits.
 - **RabbitMQ emitter.** `RABBITMQ QUEUE` and `RABBITMQ EXCHANGE` share one publisher, which writes a
   queue emitter's messages to the default exchange under the queue's name and an exchange emitter's

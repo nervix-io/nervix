@@ -539,7 +539,7 @@ impl SessionServiceImpl {
                 .reclaim_command_executions(finished_before, retry_fence)
                 .await
         {
-            warn!(error = %error, "failed to reclaim retained command execution history");
+            warn!(error = %format_args!("{error:#}"), "failed to reclaim retained command execution history");
         }
     }
 
@@ -1284,13 +1284,25 @@ fn statement_result(result: CommandExecutionStatementResult) -> CommandResult {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    #[cfg(feature = "testing")]
+    use nervix_consensus::{ConsensusTestProbe, StorageBoundary};
     use nervix_models::{
         CreateStatement, CreateUser, ImpactPlanningBasis, TransactionLifecycle,
         TransactionOperationAdmission, TransactionOperationNumber, TransactionPosition,
         TransactionPreviewIdentity,
     };
+    #[cfg(feature = "testing")]
+    use nervix_recovery::Discarded as _;
 
     use super::*;
+    #[cfg(feature = "testing")]
+    use crate::{
+        application::{
+            subscription::SessionSubscriptions,
+            test_fixtures::{TestService, build_test_service_with_probe, test_command_request},
+        },
+        captured_logs::CapturedLogs,
+    };
 
     fn domain() -> DomainName {
         DomainName::parse("default").assured("the test domain is an identifier-shaped literal")
@@ -1629,5 +1641,74 @@ mod tests {
         );
 
         assert_eq!(restored, result);
+    }
+
+    /// A failed reclamation of retained command history reports the proposal's whole cause chain,
+    /// so an operator can tell a storage failure from a refused proposal, and keeps the history for
+    /// a later pass.
+    #[cfg(feature = "testing")]
+    #[nervix_primitives::test]
+    async fn a_failed_command_history_reclamation_reports_its_whole_cause_chain() {
+        let probe = ConsensusTestProbe::default();
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service_with_probe(true, probe.clone()).await;
+        let mut subscriptions = SessionSubscriptions::new();
+        let request = test_command_request("CREATE SCHEMA reclaimed ( user_id U32 )", "default");
+        let reference = request.execution_reference.clone();
+        let created = service.test_command(request, &mut subscriptions).await;
+        assert!(
+            created.succeeded(),
+            "the persistent command finishes: {created:?}"
+        );
+        // The command finished before this instant, so its history is due for reclamation.
+        let finished_before = current_timestamp();
+        probe.storage_fault().fail_next(
+            "reclaim-command-executions".to_string(),
+            StorageBoundary::BeforeCommit,
+        );
+
+        let logs = CapturedLogs::default();
+        // `#[nervix_primitives::test]` runs the whole future on the calling thread, so the
+        // thread-local default the guard installs stays in force across the await.
+        let guard = tracing::subscriber::set_default(logs.subscriber());
+        service
+            .reconcile_persistent_commands(finished_before, finished_before)
+            .await;
+        drop(guard);
+        let logs = logs.contents();
+
+        // Read the reclamation's own report: the consensus engine also logs the fault it met.
+        let warning = logs
+            .lines()
+            .find(|line| line.contains("failed to reclaim retained command execution history"));
+        let Some(warning) = warning else {
+            panic!("the failed reclamation must be reported: {logs}");
+        };
+        assert!(
+            warning.contains("error=consensus storage failed: "),
+            "the report must carry the reclamation's cause, not only its outermost context: \
+             {warning}"
+        );
+        assert!(
+            warning.contains("injected consensus storage failure"),
+            "the report must reach the storage failure beneath the reclamation: {warning}"
+        );
+        assert!(
+            service
+                .inner
+                .consensus
+                .current_command_execution(&reference)
+                .await
+                .is_some(),
+            "a reclamation that was not recorded keeps the command's history"
+        );
+
+        subscriptions.stop_all().await;
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
     }
 }

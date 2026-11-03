@@ -134,7 +134,7 @@ impl SessionServiceImpl {
             Err(error) => {
                 debug!(
                     execution_reference = %reference,
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     "a retained backup archive could not be opened for download"
                 );
                 let failed = BackupDownloadFailed {

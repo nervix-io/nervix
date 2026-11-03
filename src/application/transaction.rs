@@ -883,7 +883,7 @@ impl SessionServiceImpl {
         {
             warn!(
                 transaction_id = id,
-                error = %error,
+                error = %format_args!("{error:#}"),
                 "failed to revert transaction during clean session close"
             );
         }
@@ -2511,7 +2511,7 @@ impl SessionServiceImpl {
                 {
                     warn!(
                         transaction_id = id,
-                        error = %error,
+                        error = %format_args!("{error:#}"),
                         "failed to resume replicated Plexus commit"
                     );
                 }
@@ -2565,7 +2565,7 @@ impl SessionServiceImpl {
                         Err(error) => {
                             warn!(
                                 transaction_id = transaction.id,
-                                error = %error,
+                                error = %format_args!("{error:#}"),
                                 "failed to expire inactive Plexus transaction"
                             );
                         }
@@ -2598,7 +2598,7 @@ impl SessionServiceImpl {
                 .remove_finished_transactions(finished_before)
                 .await
         {
-            warn!(error = %error, "failed to remove expired transaction tombstones");
+            warn!(error = %format_args!("{error:#}"), "failed to remove expired transaction tombstones");
         }
         self.schedule_transaction_recovery(&transactions);
     }
@@ -2646,3 +2646,7 @@ impl SessionServiceImpl {
 #[cfg(test)]
 #[path = "transaction/tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "testing"))]
+#[path = "transaction/maintenance_tests.rs"]
+mod maintenance_tests;

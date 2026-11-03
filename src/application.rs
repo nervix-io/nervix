@@ -575,7 +575,7 @@ impl Application {
             match Registry::from_database(db.clone(), Some(db_path.as_path())) {
                 Ok(registry) => registry,
                 Err(err) => {
-                    error!(db_path = db_path.display().to_string(), error = %err, "failed to open registry");
+                    error!(db_path = db_path.display().to_string(), error = %format_args!("{err:#}"), "failed to open registry");
                     return Err(err.change_context(AppError::OpenRegistry));
                 }
             },
@@ -612,7 +612,7 @@ impl Application {
             match mapping_input {
                 Ok(mapped_value) => Ok(mapped_value),
                 Err(err) => Err({
-                    error!(db_path = db_path.display().to_string(), error = %err, "failed to open resource store");
+                    error!(db_path = db_path.display().to_string(), error = %format_args!("{err:#}"), "failed to open resource store");
                     Report::new(AppError::OpenResourceStore)
                 }),
             }
@@ -622,7 +622,7 @@ impl Application {
             match mapping_input {
                 Ok(mapped_value) => Ok(mapped_value),
                 Err(err) => Err({
-                    error!(db_path = db_path.display().to_string(), error = %err, "failed to clean resource staging paths");
+                    error!(db_path = db_path.display().to_string(), error = %format_args!("{err:#}"), "failed to clean resource staging paths");
                     Report::new(AppError::OpenResourceStore)
                 }),
             }
@@ -926,7 +926,7 @@ impl Application {
                             initialized = did_initialize;
                         }
                         Err(error) => {
-                            warn!(%error, "raft bootstrap attempt failed");
+                            warn!(error = %format_args!("{error:#}"), "raft bootstrap attempt failed");
                         }
                     }
                 }
@@ -957,7 +957,7 @@ impl Application {
                     .reconcile_nodes(cluster_for_membership_reconcile.gossip_state())
                     .await
                 {
-                    warn!(%error, "raft membership reconciliation failed");
+                    warn!(error = %format_args!("{error:#}"), "raft membership reconciliation failed");
                 }
                 // Published whether or not a membership change failed: the verdicts were judged
                 // before any change was attempted, and a node that stopped leading withdraws them.
@@ -1282,7 +1282,7 @@ impl Application {
                                 Err(error) => {
                                     warn!(
                                         domain = domain.as_str(),
-                                        error = %error,
+                                        error = %format_args!("{error:#}"),
                                         "failed to resume orphaned ALTER pause"
                                     );
                                 }
@@ -1522,7 +1522,7 @@ impl Application {
                             {
                                 Ok(()) => automatic_decision_published = true,
                                 Err(error) => {
-                                    warn!(%error, "failed to republish domain schedule after node failover");
+                                    warn!(error = %format_args!("{error:#}"), "failed to republish domain schedule after node failover");
                                 }
                             }
                             break;
@@ -1636,7 +1636,7 @@ impl Application {
                                 {
                                     Ok(()) => automatic_decision_published = true,
                                     Err(error) => {
-                                        warn!(%error, "failed to republish domain schedule after membership or schedulability change");
+                                        warn!(error = %format_args!("{error:#}"), "failed to republish domain schedule after membership or schedulability change");
                                     }
                                 }
                                 break;
@@ -2404,7 +2404,7 @@ impl Application {
                         Err(error) => {
                             warn!(
                                 is_leader,
-                                error = %error,
+                                error = %format_args!("{error:#}"),
                                 "failed to synchronize registry after leadership state change"
                             );
                             nervix_primitives::select! {
@@ -2487,7 +2487,7 @@ impl Application {
                                 {
                                     warn!(
                                         %node_id,
-                                        error = %error,
+                                        error = %format_args!("{error:#}"),
                                         "failed to fan out runtime error event"
                                     );
                                 }
@@ -2663,7 +2663,7 @@ impl Application {
                                 ) {
                                     Ok(placement) => placement,
                                     Err(error) => {
-                                        warn!(error = %error, "failed to decode state replication ack placement");
+                                        warn!(error = %format_args!("{error:#}"), "failed to decode state replication ack placement");
                                         continue;
                                     }
                                 };

@@ -3,11 +3,11 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The REST catalog and object-store clients one Iceberg table is loaded and committed
-//!   through, the local Arrow IPC staging of every mapped batch, what the staged files wait for —
-//!   the `COMMIT EACH` cadence the host measures from their staging, or the maximum commit size
-//!   that makes them due at once — the Parquet data files one commit writes, the bulk memory
-//!   charge of the staged files it loads, and the acknowledgements it retains until that commit
-//!   succeeds.
+//!   through, the staged batches it appends to local Arrow IPC staging files and the file each
+//!   write continues, what the staged rows wait for — the `COMMIT EACH` cadence the host measures
+//!   from their staging, or the maximum commit size that makes them due at once — the Parquet data
+//!   files one commit writes, the bulk memory charge of the staged batches it loads, and the
+//!   acknowledgements it retains until that commit succeeds.
 //! - **Depends on.** The connector contract, the bounded executor its host hands it, vocabulary
 //!   values, Arrow arrays, `error-stack`, Tokio, `nervix-dns`, Reqwest, OpenDAL, and the `iceberg`
 //!   crates.
@@ -33,10 +33,11 @@
 mod catalog_table;
 mod offline_config;
 mod parquet_bounds;
+mod staging;
 mod storage;
 mod table_projection;
 
-use std::{fs::File, ops::Range, path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, ops::Range, path::PathBuf, time::Duration};
 
 use ::iceberg::{
     Catalog, CatalogBuilder, Error as IcebergError, ErrorKind as IcebergErrorKind,
@@ -61,7 +62,6 @@ use arrow_array::{
     RecordBatch, RecordBatchOptions, StructArray, TimestampMicrosecondArray,
     TimestampNanosecondArray,
 };
-use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::{DataType, TimeUnit};
 use arrow_select::filter::filter as filter_arrow_array;
 use catalog_table::IcebergCatalogTable;
@@ -78,7 +78,8 @@ use nervix_connector::{
 };
 use nervix_dns::DnsResolver;
 use nervix_execution::{
-    AdmissionError, CpuClass, Executor, MemoryClass, QueueAdmission, Reservation, StorageClass,
+    AdmissionError, Cancellation, CpuClass, Executor, MemoryClass, QueueAdmission, Reservation,
+    StorageClass,
 };
 use nervix_models::{
     ClientConfigEntry, EmitterBatchPolicy, IcebergCatalogProperties, IcebergStorageBackend,
@@ -140,38 +141,80 @@ pub struct IcebergTableEmitterConfig {
     pub writer: String,
 }
 
-/// What one staged write is charged. The batch is already in memory and the writer streams it to
-/// the file, so the charge only admits the write onto the filesystem workers.
+/// What one staging append is charged. The batches are already in memory and the writer streams
+/// them to the file, so the charge only admits the append onto the filesystem workers.
 const STAGED_WRITE_RESERVATION_BYTES: u64 = 1;
 
-/// The Iceberg emitter, which stages each mapped batch as a local Arrow IPC file and appends every
-/// staged file to its table in one catalog commit.
+/// The Iceberg emitter, which appends each mapped batch to a local Arrow IPC staging file and
+/// appends every staged batch to its table in one catalog commit.
 pub struct IcebergTableEmitter {
     client: IcebergTableEmitterClient,
     commit_state: IcebergCommitState,
-    /// The exact Arrow schema every staged file is written and read back with, which is the host's
-    /// mapped schema with datetime columns narrowed to the microsecond resolution Iceberg stores.
-    /// Each column keeps its expression's nullability, which a commit checks against the columns
-    /// the table requires.
+    /// The exact Arrow schema every staging file is written and read back with, which is the
+    /// host's mapped schema with datetime columns narrowed to the microsecond resolution Iceberg
+    /// stores. Each column keeps its expression's nullability, which a commit checks against the
+    /// columns the table requires.
     staged_schema: StdArc<arrow_schema::Schema>,
     commit_policy: IcebergCommitPolicy,
     batch_policy: Option<EmitterBatchPolicy>,
     staging_dir: TempDir,
-    /// The node's bounded executor, whose filesystem workers write and read the staged files.
+    /// The node's bounded executor, whose filesystem workers write and read the staging files.
     executor: Executor,
-    staged_sequence: u64,
+    /// The sequence the newest staging file is named by.
+    staging_sequence: u64,
+    /// Every staging file that holds staged batches, by the sequence it is named by.
+    staging_files: BTreeMap<u64, IcebergStagingFile>,
+    /// The staging file the next write appends to: absent until a write starts one, and again once
+    /// a commit seals it.
+    appending_to: Option<u64>,
+    /// Every staged batch in the order it was staged, which is the order the staging files hold
+    /// them in.
     staged_batches: Vec<IcebergStagedBatch>,
     staged_rows: u64,
+    /// The Arrow IPC bytes of every staged batch, which the maximum commit size counts.
     staged_bytes: u64,
 }
 
-/// One mapped batch written to local Arrow IPC, with the acknowledgements its commit resolves.
+/// One staged batch — a carrier's mapped rows, or one `BATCH` segment of them — at its byte range
+/// in a staging file, with the acknowledgements its commit resolves.
 struct IcebergStagedBatch {
-    path: PathBuf,
+    /// The sequence of the staging file that holds this batch.
+    file: u64,
+    /// The bytes of that file that hold this batch's messages.
+    range: Range<u64>,
     rows: u64,
-    bytes: u64,
     acknowledgements: Option<EmitterRecordAcknowledgements>,
     domain_timestamp: Timestamp,
+}
+
+impl IcebergStagedBatch {
+    /// The Arrow IPC bytes this batch takes, which its commit charges for reading it back.
+    fn bytes(&self) -> u64 {
+        self.range
+            .end
+            .checked_sub(self.range.start)
+            .assured("a staged batch's range ends after it starts")
+    }
+}
+
+/// One local Arrow IPC staging file: the staged schema's message, then the staged batches appended
+/// after it.
+struct IcebergStagingFile {
+    path: PathBuf,
+    /// Where the schema message ends and the file's first staged batch starts.
+    schema_end: u64,
+    /// Where the file's last staged batch ends, which is where the next append starts.
+    end: u64,
+    /// How many staged batches the file holds that no commit has published yet.
+    batches: usize,
+}
+
+/// The rows of one carrier that one append staged: the members of each staged batch, the
+/// acknowledgements the final batch retains, and when the host mapped them.
+struct IcebergStagedRows<'a> {
+    ranges: &'a [Range<usize>],
+    acknowledgements: Option<EmitterRecordAcknowledgements>,
+    occurred_at: Timestamp,
 }
 
 /// Every acknowledgement this emitter retained, as one handle the host keeps alive while it waits.
@@ -209,25 +252,25 @@ struct IcebergTableEmitterClient {
     data_file_sequence: u64,
 }
 
-/// One commit's progress: the leading staged files it publishes, the data files written for those
-/// it has loaded so far, and the append identity that recognizes those data files in the table. A
-/// failed attempt keeps it, so the retry neither writes the data files again nor publishes files
-/// staged after the commit began.
+/// One commit's progress: the leading staged batches it publishes, the data files written for
+/// those it has loaded so far, and the append identity that recognizes those data files in the
+/// table. A failed attempt keeps it, so the retry neither writes the data files again nor publishes
+/// batches staged after the commit began.
 ///
-/// A commit loads the files it covers in groups the bulk memory class can hold at once and writes
+/// A commit loads the batches it covers in groups the bulk memory class can hold at once and writes
 /// each group's rows into data files of their own; the data files of every group join the one
 /// catalog append.
 struct IcebergCommitPreparation {
     append_id: uuid::Uuid,
-    /// The leading staged files this commit publishes.
+    /// The leading staged batches this commit publishes.
     covered: usize,
-    /// The leading staged files whose rows `data_files` already hold.
+    /// The leading staged batches whose rows `data_files` already hold.
     written: usize,
     data_files: Vec<DataFile>,
 }
 
 impl IcebergCommitPreparation {
-    /// A commit of the `covered` leading staged files, none of them written yet.
+    /// A commit of the `covered` leading staged batches, none of them written yet.
     fn new(covered: usize) -> Self {
         Self::with_append_id(covered, uuid::Uuid::now_v7())
     }
@@ -341,53 +384,53 @@ impl IcebergCommitState {
     }
 }
 
-/// The staged files one load reads into memory at once, and what it charges for them.
+/// The staged batches one load reads into memory at once, and what it charges for them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct IcebergLoadGroup {
-    files: usize,
+    batches: usize,
     charge: IcebergLoadCharge,
 }
 
 impl IcebergLoadGroup {
-    /// The leading files of `unwritten` a bulk memory class of `capacity` bytes holds together, and
-    /// at least the first. A first file larger than the whole class is read alone, charged with the
-    /// whole class.
+    /// The leading batches of `unwritten` a bulk memory class of `capacity` bytes holds together,
+    /// and at least the first. A first batch larger than the whole class is read alone, charged
+    /// with the whole class.
     fn leading(unwritten: &[IcebergStagedBatch], capacity: u64) -> Self {
-        let mut files = 0_usize;
+        let mut batches = 0_usize;
         let mut bytes = 0_u64;
         for staged in unwritten {
-            let with_file = bytes
-                .checked_add(staged.bytes)
+            let with_batch = bytes
+                .checked_add(staged.bytes())
                 .assured("the total counts bytes this emitter already staged on disk");
-            if files > 0 && with_file > capacity {
+            if batches > 0 && with_batch > capacity {
                 break;
             }
-            files = files
+            batches = batches
                 .checked_add(1)
-                .assured("a group counts files this emitter already staged");
-            bytes = with_file;
+                .assured("a group counts batches this emitter already staged");
+            bytes = with_batch;
         }
         let charge = if bytes > capacity {
             IcebergLoadCharge::WholeClass {
-                file_bytes: bytes,
+                batch_bytes: bytes,
                 capacity,
             }
         } else {
             IcebergLoadCharge::Staged { bytes }
         };
-        Self { files, charge }
+        Self { batches, charge }
     }
 }
 
-/// What one load charges the bulk memory class for the staged files it reads.
+/// What one load charges the bulk memory class for the staged batches it reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IcebergLoadCharge {
-    /// Every byte of the files, which the class holds together.
+    /// Every byte of the staged batches, which the class holds together.
     Staged { bytes: u64 },
-    /// One staged file larger than the whole class, which a route on the same node can produce by
-    /// flushing batches above it. The load charges the whole class: every byte of the file the
+    /// One staged batch larger than the whole class, which a route on the same node can produce by
+    /// flushing batches above it. The load charges the whole class: every byte of the batch the
     /// class can account for, leaving none for other bulk work beside the read.
-    WholeClass { file_bytes: u64, capacity: u64 },
+    WholeClass { batch_bytes: u64, capacity: u64 },
 }
 
 impl IcebergLoadCharge {
@@ -410,12 +453,12 @@ impl IcebergLoadCharge {
             (
                 AdmissionError::BudgetExhausted { .. },
                 Self::WholeClass {
-                    file_bytes,
+                    batch_bytes,
                     capacity,
                 },
             ) => format!(
                 "Iceberg commit waits for the whole bulk memory class of {capacity} bytes for a \
-                 staged file of {file_bytes} bytes"
+                 staged batch of {batch_bytes} bytes"
             ),
             (
                 AdmissionError::ExceedsBudget { .. }
@@ -561,7 +604,9 @@ impl IcebergTableEmitter {
             batch_policy: batch,
             staging_dir,
             executor,
-            staged_sequence: 0,
+            staging_sequence: 0,
+            staging_files: BTreeMap::new(),
+            appending_to: None,
             staged_batches: Vec::new(),
             staged_rows: 0,
             staged_bytes: 0,
@@ -884,67 +929,64 @@ impl IcebergTableEmitter {
         }
     }
 
-    fn next_staged_path(&mut self) -> PathBuf {
-        self.staged_sequence = self
-            .staged_sequence
+    /// The staging file the next write appends to, and the sequence that names it: the open file,
+    /// or a new one named by the next sequence.
+    fn append_target(&mut self) -> (u64, staging::AppendTarget) {
+        if let Some(sequence) = self.appending_to {
+            let file = self
+                .staging_files
+                .get(&sequence)
+                .assured("the open staging file stays until a commit publishes what it holds");
+            let target = staging::AppendTarget::Open {
+                path: file.path.clone(),
+                schema_end: file.schema_end,
+                end: file.end,
+            };
+            return (sequence, target);
+        }
+        self.staging_sequence = self
+            .staging_sequence
             .checked_add(1)
-            .assured("an emitter cannot stage 2^64 batches in the lifetime of a node");
-        self.staging_dir
+            .assured("an emitter cannot start 2^64 staging files in the lifetime of a node");
+        let path = self
+            .staging_dir
             .path()
-            .join(format!("batch-{}.arrow", self.staged_sequence))
+            .join(format!("staging-{}.arrow", self.staging_sequence));
+        (self.staging_sequence, staging::AppendTarget::New { path })
     }
 
-    /// Write one staged file on the node's filesystem workers. The batch is already in memory and
-    /// the writer streams it to the file, so the charge only admits the write.
-    async fn write_ipc_batch(
+    /// Appends `batches` to the staging file `target` names on the node's filesystem workers,
+    /// creating it first when it is new. The batches are already in memory and the writer streams
+    /// them to the file, so the charge only admits the append.
+    async fn append_staged(
         executor: &Executor,
-        path: PathBuf,
-        batch: RecordBatch,
-    ) -> EmitterWriteResult<u64> {
-        let staged = |error: &dyn std::fmt::Display, path: &PathBuf| {
-            Report::new(EmitterWriteError::Publish { connector: ICEBERG }).attach_printable(
-                format!(
-                    "failed to write Iceberg staged Arrow IPC '{}': {error}",
-                    path.display()
-                ),
-            )
-        };
+        target: &staging::AppendTarget,
+        schema: StdArc<arrow_schema::Schema>,
+        batches: Vec<RecordBatch>,
+    ) -> EmitterWriteResult<staging::Staged> {
         let reservation = executor
             .reserve(MemoryClass::Bulk, STAGED_WRITE_RESERVATION_BYTES)
             .await
             .change_context(EmitterWriteError::Publish { connector: ICEBERG })?;
+        let target = target.clone();
         executor
             .run_storage(
                 StorageClass::Filesystem,
                 reservation,
-                move |_charge, cancellation| {
-                    cancellation
-                        .check()
-                        .change_context(EmitterWriteError::Publish { connector: ICEBERG })?;
-                    let file = File::create(&path).map_err(|error| staged(&error, &path))?;
-                    let mut writer = StreamWriter::try_new(file, batch.schema().as_ref())
-                        .map_err(|error| staged(&error, &path))?;
-                    writer
-                        .write(&batch)
-                        .map_err(|error| staged(&error, &path))?;
-                    writer.finish().map_err(|error| staged(&error, &path))?;
-                    {
-                        let mapping_input = std::fs::metadata(&path).map(|metadata| metadata.len());
-                        match mapping_input {
-                            Ok(mapped_value) => Ok(mapped_value),
-                            Err(error) => Err(staged(&error, &path)),
-                        }
-                    }
+                move |_charge, cancellation: &Cancellation| {
+                    target
+                        .append(&schema, &batches, || cancellation.check())
+                        .change_context(EmitterWriteError::Publish { connector: ICEBERG })
                 },
             )
             .await
             .change_context(EmitterWriteError::Publish { connector: ICEBERG })?
     }
 
-    /// Read the staged files at `paths` back on the node's filesystem workers once the bulk memory
-    /// class has granted their `charge`, checking before each file whether the commit stopped
-    /// waiting. The reservation comes back with the rows it covers, so it lasts for as long as the
-    /// commit holds them.
+    /// Read the contiguous staged batches each of `spans` names back on the node's filesystem
+    /// workers once the bulk memory class has granted their `charge`, checking before each span
+    /// whether the commit stopped waiting. The reservation comes back with the rows it covers, so
+    /// it lasts for as long as the commit holds them.
     ///
     /// The charge is taken only when the class has room for it now: a place in the class's queue
     /// would take every byte the class frees until it was satisfied, holding the node's other bulk
@@ -953,15 +995,9 @@ impl IcebergTableEmitter {
     async fn load_group(
         executor: &Executor,
         schema: StdArc<arrow_schema::Schema>,
-        paths: Vec<PathBuf>,
+        spans: Vec<staging::Span>,
         charge: IcebergLoadCharge,
     ) -> EmitterWriteResult<IcebergLoadedGroup> {
-        let staged = |error: String, path: &PathBuf| {
-            Report::new(EmitterWriteError::Commit { connector: ICEBERG }).attach_printable(format!(
-                "failed to read Iceberg staged Arrow IPC '{}': {error}",
-                path.display()
-            ))
-        };
         let reservation = executor
             .try_reserve(MemoryClass::Bulk, charge.reserved_bytes())
             .map_err(|refusal| charge.refused(refusal))?;
@@ -972,21 +1008,14 @@ impl IcebergTableEmitter {
                 reservation,
                 move |reservation, cancellation| {
                     let mut batches = Vec::new();
-                    for path in paths {
+                    for span in spans {
                         cancellation
                             .check()
                             .change_context(EmitterWriteError::Commit { connector: ICEBERG })?;
-                        let file =
-                            File::open(&path).map_err(|error| staged(error.to_string(), &path))?;
-                        let reader = StreamReader::try_new(file, None)
-                            .map_err(|error| staged(error.to_string(), &path))?;
-                        if reader.schema().as_ref() != schema.as_ref() {
-                            return Err(staged("schema does not match".to_string(), &path));
-                        }
-                        let path_batches = reader
-                            .collect::<Result<Vec<_>, _>>()
-                            .map_err(|error| staged(error.to_string(), &path))?;
-                        batches.extend(path_batches);
+                        let read = span
+                            .read(schema.as_ref())
+                            .change_context(EmitterWriteError::Commit { connector: ICEBERG })?;
+                        batches.extend(read);
                     }
                     Ok(IcebergLoadedGroup {
                         batches,
@@ -996,6 +1025,39 @@ impl IcebergTableEmitter {
             )
             .await
             .change_context(EmitterWriteError::Commit { connector: ICEBERG })?
+    }
+
+    /// The spans `group`'s staged batches take in `files`, one for each run of them a staging file
+    /// holds, in order. A file holds its batches back to back, so each run is one contiguous span.
+    fn staged_spans(
+        files: &BTreeMap<u64, IcebergStagingFile>,
+        group: &[IcebergStagedBatch],
+    ) -> Vec<staging::Span> {
+        let mut spans: Vec<staging::Span> = Vec::new();
+        let mut spanned_file = None;
+        for staged in group {
+            if spanned_file == Some(staged.file)
+                && let Some(last) = spans.last_mut()
+            {
+                last.bytes.end = staged.range.end;
+                last.batches = last
+                    .batches
+                    .checked_add(1)
+                    .assured("a group counts batches this emitter already staged");
+                continue;
+            }
+            let file = files
+                .get(&staged.file)
+                .assured("a staged batch's file stays until a commit publishes it");
+            spans.push(staging::Span {
+                path: file.path.clone(),
+                schema_end: file.schema_end,
+                bytes: staged.range.clone(),
+                batches: 1,
+            });
+            spanned_file = Some(staged.file);
+        }
+        spans
     }
 
     /// Every acknowledgement this emitter still holds, newest staged batch last.
@@ -1138,8 +1200,10 @@ impl IcebergTableEmitter {
             .change_context(EmitterWriteError::Publish { connector: ICEBERG })?
     }
 
-    /// Stages a carrier's accepted rows in BATCH-sized files, retaining its one acknowledgement
-    /// handle on the final file until the catalog commit publishes all of them.
+    /// Stages a carrier's accepted rows, as one batch or as BATCH-sized segments, by appending them
+    /// to the open staging file, and retains its one acknowledgement handle on its final staged
+    /// batch until the catalog commit publishes all of them. The carrier is staged whole or not at
+    /// all: a failed append is cut back off the file.
     async fn stage(
         &mut self,
         carrier: MappedEmitterCarrier<'_>,
@@ -1169,62 +1233,26 @@ impl IcebergTableEmitter {
             ranges.push(0..staged.num_rows());
         }
 
-        let mut new_files = Vec::with_capacity(ranges.len());
-        let mut staged_rows = 0_u64;
-        let mut staged_bytes = 0_u64;
-        for range in ranges {
-            let path = self.next_staged_path();
-            let rows: u64 = range.len().arch_into();
-            let batch = staged.slice(range.start, range.len());
-            let bytes = match Self::write_ipc_batch(&self.executor, path.clone(), batch).await {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    if let Err(cleanup_error) = tokio::fs::remove_file(&path).await {
-                        debug!(
-                            path = %path.display(),
-                            error = %cleanup_error,
-                            "failed to remove incomplete Iceberg staged batch"
-                        );
-                    }
-                    for file in new_files {
-                        let file: IcebergStagedBatch = file;
-                        if let Err(cleanup_error) = tokio::fs::remove_file(&file.path).await {
-                            debug!(
-                                path = %file.path.display(),
-                                error = %cleanup_error,
-                                "failed to remove staged batch after Iceberg publish error"
-                            );
-                        }
-                    }
-                    return Err(error);
-                }
+        let mut segments = Vec::with_capacity(ranges.len());
+        for range in &ranges {
+            segments.push(staged.slice(range.start, range.len()));
+        }
+        if !segments.is_empty() {
+            let (sequence, target) = self.append_target();
+            let appended = Self::append_staged(
+                &self.executor,
+                &target,
+                StdArc::clone(&self.staged_schema),
+                segments,
+            )
+            .await?;
+            let rows = IcebergStagedRows {
+                ranges: &ranges,
+                acknowledgements: carrier.acknowledgements,
+                occurred_at: carrier.occurred_at,
             };
-            new_files.push(IcebergStagedBatch {
-                path,
-                rows,
-                bytes,
-                acknowledgements: None,
-                domain_timestamp: carrier.occurred_at,
-            });
-            staged_rows = staged_rows
-                .checked_add(rows)
-                .assured("the accepted ranges are disjoint rows of one mapped batch");
-            staged_bytes = staged_bytes
-                .checked_add(bytes)
-                .assured("staged bytes fit the node's u64 byte count");
+            self.record_append(sequence, target, appended, rows);
         }
-        if let Some(last) = new_files.last_mut() {
-            last.acknowledgements = carrier.acknowledgements;
-        }
-        self.staged_batches.extend(new_files);
-        self.staged_rows = self
-            .staged_rows
-            .checked_add(staged_rows)
-            .assured("both counts total rows this emitter already staged on disk");
-        self.staged_bytes = self
-            .staged_bytes
-            .checked_add(staged_bytes)
-            .assured("both counts total bytes this emitter already staged on disk");
         for (member, row) in carrier.selected_rows.iter().enumerate() {
             if !rejected_rows[member] {
                 outcome.deliver(EmitterRecordPosition {
@@ -1233,38 +1261,109 @@ impl IcebergTableEmitter {
                 });
             }
         }
+        Ok(())
+    }
+
+    /// Records the staged batches one append wrote to the staging file `target` named by
+    /// `sequence`, holding the rows `staged` describes. A new file becomes the one later writes
+    /// append to.
+    fn record_append(
+        &mut self,
+        sequence: u64,
+        target: staging::AppendTarget,
+        appended: staging::Staged,
+        staged: IcebergStagedRows<'_>,
+    ) {
+        let staging::Staged {
+            schema_end,
+            appended,
+        } = appended;
+        match target {
+            staging::AppendTarget::Open { .. } => {
+                let file = self
+                    .staging_files
+                    .get_mut(&sequence)
+                    .assured("the open staging file stays until a commit publishes what it holds");
+                file.end = appended.end;
+                file.batches = file
+                    .batches
+                    .checked_add(appended.ranges.len())
+                    .assured("a staging file counts batches this emitter already staged");
+            }
+            staging::AppendTarget::New { path } => {
+                let file = IcebergStagingFile {
+                    path,
+                    schema_end,
+                    end: appended.end,
+                    batches: appended.ranges.len(),
+                };
+                self.staging_files.insert(sequence, file);
+                self.appending_to = Some(sequence);
+            }
+        }
+        let mut staged_rows = 0_u64;
+        let mut staged_bytes = 0_u64;
+        let first_batch = self.staged_batches.len();
+        for (members, range) in staged.ranges.iter().zip(appended.ranges) {
+            let rows: u64 = members.len().arch_into();
+            let batch = IcebergStagedBatch {
+                file: sequence,
+                range,
+                rows,
+                acknowledgements: None,
+                domain_timestamp: staged.occurred_at,
+            };
+            staged_rows = staged_rows
+                .checked_add(rows)
+                .assured("the accepted ranges are disjoint rows of one mapped batch");
+            staged_bytes = staged_bytes
+                .checked_add(batch.bytes())
+                .assured("staged bytes fit the node's u64 byte count");
+            self.staged_batches.push(batch);
+        }
+        if let Some(last) = self.staged_batches[first_batch..].last_mut() {
+            last.acknowledgements = staged.acknowledgements;
+        }
+        self.staged_rows = self
+            .staged_rows
+            .checked_add(staged_rows)
+            .assured("both counts total rows this emitter already staged on disk");
+        self.staged_bytes = self
+            .staged_bytes
+            .checked_add(staged_bytes)
+            .assured("both counts total bytes this emitter already staged on disk");
         trace!(
             rows = staged_rows,
             bytes = staged_bytes,
             "emitter staged iceberg rows"
         );
-        Ok(())
     }
 
-    /// Publishes the staged files the commit in progress covers, beginning a commit of every
-    /// staged file when none is in progress, and reports what they held.
+    /// Publishes the staged batches the commit in progress covers, beginning a commit of every
+    /// staged batch when none is in progress, and reports what they held. A commit that begins
+    /// seals the open staging file, so what later writes stage goes to a file of its own.
     async fn commit_covered(&mut self) -> EmitterWriteResult<EmitterCommitReport> {
-        let staged_files = self.staged_batches.len();
+        let staged_batches = self.staged_batches.len();
         let capacity = self.executor.memory(MemoryClass::Bulk).capacity_bytes;
+        if self.commit_state.preparation.is_none() {
+            self.appending_to = None;
+        }
         let preparation = self
             .commit_state
             .preparation
-            .get_or_insert_with(|| IcebergCommitPreparation::new(staged_files));
+            .get_or_insert_with(|| IcebergCommitPreparation::new(staged_batches));
         while !preparation.is_written() {
             nervix_primitives::task::consume_budget().await;
             let unwritten = self
                 .staged_batches
                 .get(preparation.unwritten())
-                .assured("a commit covers files that stay staged until it publishes them");
+                .assured("a commit covers batches that stay staged until it publishes them");
             let group = IcebergLoadGroup::leading(unwritten, capacity);
-            let mut paths = Vec::with_capacity(group.files);
-            for staged in unwritten.iter().take(group.files) {
-                paths.push(staged.path.clone());
-            }
+            let spans = Self::staged_spans(&self.staging_files, &unwritten[..group.batches]);
             let IcebergLoadedGroup { batches, charge } = Self::load_group(
                 &self.executor,
                 StdArc::clone(&self.staged_schema),
-                paths,
+                spans,
                 group.charge,
             )
             .await?;
@@ -1274,7 +1373,7 @@ impl IcebergTableEmitter {
                 .await?;
             // The rows the charge covered are in data files now.
             drop(charge);
-            preparation.record_written(group.files, data_files);
+            preparation.record_written(group.batches, data_files);
         }
         self.client.commit_prepared(preparation).await?;
         let covered = preparation.covered;
@@ -1282,8 +1381,9 @@ impl IcebergTableEmitter {
         Ok(self.publish_committed(covered).await)
     }
 
-    /// Removes the `covered` leading staged files a commit appended, resolves the acknowledgements
-    /// they retained, and reports what they held.
+    /// Removes the `covered` leading staged batches a commit appended, removes every staging file
+    /// that no longer holds a staged batch, resolves the acknowledgements the batches retained,
+    /// and reports what they held.
     async fn publish_committed(&mut self, covered: usize) -> EmitterCommitReport {
         let committed = self.staged_batches.drain(..covered).collect::<Vec<_>>();
         let mut messages = 0_u64;
@@ -1293,33 +1393,27 @@ impl IcebergTableEmitter {
                 .checked_add(batch.rows)
                 .assured("the total counts rows this emitter already staged on disk");
             bytes = bytes
-                .checked_add(batch.bytes)
+                .checked_add(batch.bytes())
                 .assured("the total counts bytes this emitter already staged on disk");
         }
         let domain_timestamp = committed
             .iter()
             .map(|batch| batch.domain_timestamp)
             .max()
-            .assured("a commit begins only over staged files and covers at least one");
+            .assured("a commit begins only over staged batches and covers at least one");
         self.staged_rows = self
             .staged_rows
             .checked_sub(messages)
-            .assured("the staged total counts the rows of every staged file");
+            .assured("the staged total counts the rows of every staged batch");
         self.staged_bytes = self
             .staged_bytes
             .checked_sub(bytes)
-            .assured("the staged total counts the bytes of every staged file");
+            .assured("the staged total counts the bytes of every staged batch");
         let mut acknowledgements = Vec::with_capacity(committed.len());
         for batch in committed {
             nervix_primitives::task::consume_budget().await;
             acknowledgements.extend(batch.acknowledgements);
-            if let Err(error) = tokio::fs::remove_file(&batch.path).await {
-                debug!(
-                    path = %batch.path.display(),
-                    error = %error,
-                    "failed to remove committed Iceberg staged batch"
-                );
-            }
+            self.release_staged_batch(batch.file).await;
         }
         for acknowledgements in acknowledgements {
             acknowledgements.acknowledge();
@@ -1328,6 +1422,36 @@ impl IcebergTableEmitter {
             messages,
             bytes,
             domain_timestamp,
+        }
+    }
+
+    /// Counts one staged batch of the staging file `sequence` published, and removes the file once
+    /// it holds no staged batch.
+    async fn release_staged_batch(&mut self, sequence: u64) {
+        let file = self
+            .staging_files
+            .get_mut(&sequence)
+            .assured("a staged batch's file stays until a commit publishes it");
+        file.batches = file
+            .batches
+            .checked_sub(1)
+            .assured("a staging file counts every staged batch it holds");
+        if file.batches > 0 {
+            return;
+        }
+        let file = self
+            .staging_files
+            .remove(&sequence)
+            .assured("the file this looked up is still held");
+        if self.appending_to == Some(sequence) {
+            self.appending_to = None;
+        }
+        if let Err(error) = tokio::fs::remove_file(&file.path).await {
+            debug!(
+                path = %file.path.display(),
+                error = %error,
+                "failed to remove committed Iceberg staging file"
+            );
         }
     }
 }
@@ -2210,55 +2334,60 @@ mod tests {
     }
 
     #[test]
-    fn load_groups_take_the_leading_staged_files_the_class_holds_together() {
-        let staged = |bytes: u64| IcebergStagedBatch {
-            path: PathBuf::from("batch.arrow"),
-            rows: 1,
-            bytes,
-            acknowledgements: None,
-            domain_timestamp: Timestamp::from_unix_nanos(1),
-        };
-        let files = [staged(400), staged(500), staged(300), staged(900)];
+    fn load_groups_take_the_leading_staged_batches_the_class_holds_together() {
+        let mut start = 0_u64;
+        let mut batches = Vec::new();
+        for bytes in [400_u64, 500, 300, 900] {
+            let end = start + bytes;
+            batches.push(IcebergStagedBatch {
+                file: 1,
+                range: start..end,
+                rows: 1,
+                acknowledgements: None,
+                domain_timestamp: Timestamp::from_unix_nanos(1),
+            });
+            start = end;
+        }
 
         assert_eq!(
-            IcebergLoadGroup::leading(&files, 2_100),
+            IcebergLoadGroup::leading(&batches, 2_100),
             IcebergLoadGroup {
-                files: 4,
+                batches: 4,
                 charge: IcebergLoadCharge::Staged { bytes: 2_100 },
             }
         );
         assert_eq!(
-            IcebergLoadGroup::leading(&files, 1_000),
+            IcebergLoadGroup::leading(&batches, 1_000),
             IcebergLoadGroup {
-                files: 2,
+                batches: 2,
                 charge: IcebergLoadCharge::Staged { bytes: 900 },
             }
         );
         assert_eq!(
-            IcebergLoadGroup::leading(&files[2..], 1_000),
+            IcebergLoadGroup::leading(&batches[2..], 1_000),
             IcebergLoadGroup {
-                files: 1,
+                batches: 1,
                 charge: IcebergLoadCharge::Staged { bytes: 300 },
             }
         );
-        // A first file larger than the whole class is a group of its own, charged the whole class.
-        let oversized = IcebergLoadGroup::leading(&files[3..], 800);
+        // A first batch larger than the whole class is a group of its own, charged the whole class.
+        let oversized = IcebergLoadGroup::leading(&batches[3..], 800);
         assert_eq!(
             oversized,
             IcebergLoadGroup {
-                files: 1,
+                batches: 1,
                 charge: IcebergLoadCharge::WholeClass {
-                    file_bytes: 900,
+                    batch_bytes: 900,
                     capacity: 800,
                 },
             }
         );
         assert_eq!(oversized.charge.reserved_bytes(), 800);
-        // A file larger than the whole class after a smaller one is left for a group of its own.
+        // A batch larger than the whole class after a smaller one is left for a group of its own.
         assert_eq!(
-            IcebergLoadGroup::leading(&files[2..], 800),
+            IcebergLoadGroup::leading(&batches[2..], 800),
             IcebergLoadGroup {
-                files: 1,
+                batches: 1,
                 charge: IcebergLoadCharge::Staged { bytes: 300 },
             }
         );
@@ -2748,10 +2877,10 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn staged_files_are_written_and_loaded_on_the_filesystem_workers_under_their_charge() {
+    async fn staged_batches_are_appended_and_loaded_on_the_filesystem_workers_under_their_charge() {
         let executor = Executor::default();
         let directory = tempfile::tempdir().assured("the staging directory is created");
-        let path = directory.path().join("batch-1.arrow");
+        let path = directory.path().join("staging-1.arrow");
         let schema = StdArc::new(arrow_schema::Schema::new(vec![Field::new(
             "value",
             DataType::Int64,
@@ -2763,17 +2892,29 @@ mod tests {
         )
         .assured("the column matches the schema");
 
-        let written = IcebergTableEmitter::write_ipc_batch(&executor, path.clone(), batch.clone())
-            .await
-            .assured("the filesystem workers write the staged file");
+        let staged = IcebergTableEmitter::append_staged(
+            &executor,
+            &staging::AppendTarget::New { path: path.clone() },
+            StdArc::clone(&schema),
+            vec![batch.clone()],
+        )
+        .await
+        .assured("the filesystem workers append the staged batch to a new staging file");
+        let range = staged.appended.ranges[0].clone();
+        let written = range.end - range.start;
         let IcebergLoadedGroup { batches, charge } = IcebergTableEmitter::load_group(
             &executor,
             schema,
-            vec![path],
+            vec![staging::Span {
+                path,
+                schema_end: staged.schema_end,
+                bytes: range,
+                batches: 1,
+            }],
             IcebergLoadCharge::Staged { bytes: written },
         )
         .await
-        .assured("the filesystem workers read the staged file back");
+        .assured("the filesystem workers read the staged batch back");
 
         assert!(written > 0);
         assert_eq!(batches, vec![batch]);
