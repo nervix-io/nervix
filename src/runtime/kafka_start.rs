@@ -472,7 +472,6 @@ impl Runtime {
             .reserve(MemoryClass::RestoreMetadata, capacity)
             .await
             .change_context_lazy(failure)?;
-        let state = state.clone();
         self.inner
             .executor
             .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
@@ -480,8 +479,18 @@ impl Runtime {
                     .check()
                     .change_context(RuntimePersistenceError::Cancelled)?;
                 match seed {
-                    Some((generation, selection)) => state.start_seed(generation, selection),
-                    None => state.latest_snapshot(),
+                    Some((generation, selection)) => {
+                        captured.start_seed(generation, selection, || {
+                            cancellation
+                                .check()
+                                .change_context(RuntimePersistenceError::Cancelled)
+                        })
+                    }
+                    None => captured.snapshot(|| {
+                        cancellation
+                            .check()
+                            .change_context(RuntimePersistenceError::Cancelled)
+                    }),
                 }
             })
             .await

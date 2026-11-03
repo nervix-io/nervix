@@ -485,46 +485,6 @@ impl KafkaOffsetStateRead {
         &self.state.start
     }
 
-    /// A pending unit's start positions are immutable while unit zero commits its own slice.
-    pub(super) fn start_seed(
-        &self,
-        generation: u64,
-        selection: nervix_interconnect::IngestorUnitSelection,
-    ) -> error_stack::Result<PersistedRuntimeStateEntry, RuntimePersistenceError> {
-        let nervix_models::Unit::Instance(index) = selection.unit else {
-            return Err(Report::new(KafkaOffsetCheckpointError::InstanceSelection)
-                .change_context(RuntimePersistenceError::DecodeState));
-        };
-        if index == 0 || index >= selection.count.get() {
-            return Err(Report::new(KafkaOffsetCheckpointError::InstanceSelection)
-                .change_context(RuntimePersistenceError::DecodeState));
-        }
-        self.state.assignment.serialize(|| {
-            let current = self.state.offsets.load();
-            if current.applied_start_generation != Some(generation) {
-                return Err(Report::new(KafkaOffsetCheckpointError::StartGeneration {
-                    expected: generation,
-                    observed: current.applied_start_generation,
-                })
-                .change_context(RuntimePersistenceError::DecodeState));
-            }
-            let mut seed = KafkaOffsetTable {
-                applied_start_generation: Some(generation),
-                ..KafkaOffsetTable::default()
-            };
-            for (topic, partitions) in &current.topics {
-                for (partition, offset) in partitions {
-                    if u64::from(partition.cast_unsigned()) % selection.count.get() == index {
-                        seed.record_partition(topic, *partition, offset.load(Ordering::SeqCst));
-                    }
-                }
-            }
-            Ok(PersistedRuntimeStateEntry {
-                lsm: self.state.current_lsm.current(),
-                payload: seed.encode()?,
-            })
-        })
-    }
     pub(super) fn applied_start_generation(&self) -> Option<u64> {
         self.state.offsets.load().applied_start_generation
     }
@@ -924,9 +884,24 @@ impl KafkaOffsetTable {
     }
 
     fn encode(&self) -> error_stack::Result<Vec<u8>, RuntimePersistenceError> {
+        self.encode_with(|| Ok(()))
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies cancellation between bounded native entries"
+        )
+    )]
+    fn encode_with(
+        &self,
+        mut check: impl FnMut() -> error_stack::Result<(), RuntimePersistenceError>,
+    ) -> error_stack::Result<Vec<u8>, RuntimePersistenceError> {
+        check()?;
         let mut entries = Vec::new();
         for (topic, partitions) in &self.topics {
             for (partition, slot) in partitions {
+                check()?;
                 entries.push(KafkaOffsetEntrySnapshot {
                     topic: topic.clone(),
                     partition: *partition,
@@ -1194,6 +1169,58 @@ fn write_offset_snapshot(
 }
 
 impl CapturedKafkaOffsets {
+    /// Encode exactly the retained partition topology used to calculate the allocation bound.
+    pub(super) fn snapshot(
+        &self,
+        check: impl FnMut() -> error_stack::Result<(), RuntimePersistenceError>,
+    ) -> error_stack::Result<PersistedRuntimeStateEntry, RuntimePersistenceError> {
+        Ok(PersistedRuntimeStateEntry {
+            lsm: self.lsm,
+            payload: self.table.encode_with(check)?,
+        })
+    }
+
+    /// A pending unit's start positions are immutable while unit zero commits its own slice.
+    pub(super) fn start_seed(
+        &self,
+        generation: u64,
+        selection: nervix_interconnect::IngestorUnitSelection,
+        mut check: impl FnMut() -> error_stack::Result<(), RuntimePersistenceError>,
+    ) -> error_stack::Result<PersistedRuntimeStateEntry, RuntimePersistenceError> {
+        let nervix_models::Unit::Instance(index) = selection.unit else {
+            return Err(Report::new(KafkaOffsetCheckpointError::InstanceSelection)
+                .change_context(RuntimePersistenceError::DecodeState));
+        };
+        if index == 0 || index >= selection.count.get() {
+            return Err(Report::new(KafkaOffsetCheckpointError::InstanceSelection)
+                .change_context(RuntimePersistenceError::DecodeState));
+        }
+        let current = &self.table;
+        if current.applied_start_generation != Some(generation) {
+            return Err(Report::new(KafkaOffsetCheckpointError::StartGeneration {
+                expected: generation,
+                observed: current.applied_start_generation,
+            })
+            .change_context(RuntimePersistenceError::DecodeState));
+        }
+        let mut seed = KafkaOffsetTable {
+            applied_start_generation: Some(generation),
+            ..KafkaOffsetTable::default()
+        };
+        for (topic, partitions) in &current.topics {
+            for (partition, offset) in partitions {
+                check()?;
+                if u64::from(partition.cast_unsigned()) % selection.count.get() == index {
+                    seed.record_partition(topic, *partition, offset.load(Ordering::SeqCst));
+                }
+            }
+        }
+        Ok(PersistedRuntimeStateEntry {
+            lsm: self.lsm,
+            payload: seed.encode_with(check)?,
+        })
+    }
+
     /// Reserve a checked upper bound for the artifact and for native serializer scratch. Neither
     /// depends on materializing all partition positions or encoded bytes in memory.
     pub(super) fn bounds(&self) -> error_stack::Result<(u64, u64), RuntimePersistenceError> {
@@ -1967,6 +1994,41 @@ mod tests {
                 let (maximum, _scratch) = captured
                     .bounds()
                     .assured("the checkpoint of a generated table is bounded");
+                let snapshot = captured
+                    .snapshot(|| Ok(()))
+                    .assured("the retained topology encodes as one native snapshot");
+                assert_eq!(snapshot.lsm, lsm);
+                assert_eq!(
+                    KafkaOffsetTable::decode(&snapshot.payload)
+                        .assured("the retained snapshot decodes whole")
+                        .view(),
+                    expected
+                );
+                assert!(
+                    u64::try_from(snapshot.payload.len()).assured("a checkpoint length fits u64")
+                        <= maximum
+                );
+                let checks = native_entry_checks(&expected);
+                let refusing = arbitrary.entropy().positive_count(
+                    std::num::NonZeroUsize::new(checks)
+                        .assured("the encoder checks even an empty table"),
+                );
+                let mut performed = 0_usize;
+                let refused = captured
+                    .snapshot(|| {
+                        performed += 1;
+                        if performed == refusing {
+                            return Err(Report::new(RuntimePersistenceError::Cancelled));
+                        }
+                        Ok(())
+                    })
+                    .err()
+                    .assured("cancellation stops the retained snapshot encoder");
+                assert!(matches!(
+                    refused.current_context(),
+                    RuntimePersistenceError::Cancelled
+                ));
+                assert_eq!(performed, refusing);
                 let written = native_checkpoint_properties::in_admitted_job(move |cancellation| {
                     let mut written = Vec::new();
                     captured
@@ -2093,7 +2155,13 @@ mod tests {
                         if index != 0 && initialized {
                             let seed = states[0]
                                 .read()
-                                .start_seed(generation, selection)
+                                .capture_after(None)
+                                .assured("the seed retains its partition topology")
+                                .start_seed(generation, selection, || {
+                                    cancellation
+                                        .check()
+                                        .change_context(RuntimePersistenceError::Cancelled)
+                                })
                                 .assured("an unclaimed slice exists");
                             let positions =
                                 decode_start_positions(&seed.payload, generation, cancellation)
@@ -2427,7 +2495,9 @@ mod tests {
                         };
                         let seed = root
                             .read()
-                            .start_seed(7, selection)
+                            .capture_after(None)
+                            .assured("the seed retains its partition topology")
+                            .start_seed(7, selection, || Ok(()))
                             .assured("unit one retains its pending cut");
                         let view = KafkaOffsetTable::decode(&seed.payload)
                             .assured("the seed loads")
@@ -2460,12 +2530,16 @@ mod tests {
                 };
                 let before = root
                     .read()
-                    .start_seed(7, selection)
+                    .capture_after(None)
+                    .assured("the seed retains its partition topology")
+                    .start_seed(7, selection, || Ok(()))
                     .assured("unit two's slice exists");
                 thread::yield_now();
                 let after = root
                     .read()
-                    .start_seed(7, selection)
+                    .capture_after(None)
+                    .assured("the seed retains its partition topology")
+                    .start_seed(7, selection, || Ok(()))
                     .assured("unit two's slice remains pending");
                 assert_eq!(
                     before.payload, after.payload,
