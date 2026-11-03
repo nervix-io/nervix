@@ -454,6 +454,7 @@ tags = [
   "@mqtt_emitter_pubcomp_boundary",
   "@mqtt_client_credentials_refused",
   "@pulsar_source_retirement",
+  "@pulsar_subscription_conflict",
   "@forced_failover_delivery",
   "@mqtt_parallel_gather_at_quiesce",
   "@sqs_receive_at_quiesce",
@@ -3131,6 +3132,26 @@ scenario = "Dropping a Pulsar ingestor removes the subscription it owns"
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "An owned EXCLUSIVE Pulsar join the broker refuses at open, on one and three nodes: the source host starts the ingestor with no consumer, publishes the refusal through its tracked status and resume paths, and retries until the other consumer leaves. The connector holds no tracked lock; broker I/O and async waits are outside tracked-lock detection."
+examples = 2
+feature = "tests/features/runtime/pulsar_subscription_types.feature"
+id = "scenario.pulsar-subscription-join-refused"
+invariant = "A join refused because another consumer holds the subscription leaves the ingestor started, reports the refusal as its transient status, and reaches the first resume that the broker admits."
+invocation = "scenarios"
+scenario = "A subscription another consumer holds is the ingestor's transient status until it leaves"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: an owned EXCLUSIVE Pulsar join the broker refuses at open, on one and three nodes, with the source host publishing the refusal through its tracked status and resume paths until the other consumer leaves. The connector holds no tracked lock; broker I/O and async waits are outside tracked-lock detection."
+examples = 2
+feature = "tests/features/runtime/pulsar_subscription_types.feature"
+id = "stress.pulsar-subscription-join-refused"
+invariant = "A join refused because another consumer holds the subscription leaves the ingestor started, reports the refusal as its transient status, and reaches the first resume that the broker admits."
+invocation = "stress-scenarios"
+scenario = "A subscription another consumer holds is the ingestor's transient status until it leaves"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Typed input retirement during running entity replacement after the exact source tasks stop. Broker I/O, async waits and concurrent-map internals remain outside tracked-lock detection."
 examples = 4
 feature = "tests/features/runtime/pulsar_subscriptions.feature"
@@ -3982,6 +4003,8 @@ workloads = [
   "stress.pulsar-subscription-replacement",
   "scenario.pulsar-subscription-retention",
   "stress.pulsar-subscription-retention",
+  "scenario.pulsar-subscription-join-refused",
+  "stress.pulsar-subscription-join-refused",
   "scenario.websocket-source-drop",
   "scenario.websocket-source-reconnect",
   "scenario.websocket-source-move",

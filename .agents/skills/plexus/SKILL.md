@@ -75,7 +75,7 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   fields.
 - Source and emitter: connector kinds, externally provisioned entity names, whether an operator
   provisions a Pulsar subscription or its ingestor owns it, the owned subscription's EARLIEST or
-  LATEST creation position, endpoints, delivery/ACK expectations,
+  LATEST creation position, the subscription's TYPE, endpoints, delivery/ACK expectations,
   emitter publishing mode, confirmation window and timeout where applicable, retry pacing,
   ordering, and offsets.
 - Isolation: unbranched or a concrete branch key, branch TTL, and optional instance limit. A branch

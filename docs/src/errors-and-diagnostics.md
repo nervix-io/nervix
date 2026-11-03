@@ -440,7 +440,11 @@ requested names when an alteration targets another Model. An ingestor alteration
 another connector and entity than the stored ingestor reads is refused with both typed kinds, which
 its message renders as their phrases, such as `the stored ingestor reads HTTP ENDPOINT, so ALTER
 KAFKA TOPIC INGESTOR cannot alter it`. A Pulsar `SET START AT` on a provisioned subscription is a
-typed vocabulary alteration refusal; the existing definition and broker cursor are unchanged.
+typed vocabulary alteration refusal; the existing definition and broker cursor are unchanged. A
+Pulsar subscription `TYPE` that reads through one consumer with more than one instance is the
+registry's typed `ConnectorDeclarationIssue::PulsarSingleConsumerType`, which `CREATE` and every
+alteration reach through the same source validation, so `SET TYPE` and `SET FROM` also leave the
+stored definition unchanged.
 An input, route, or dependency operation
 that junctions, deduplicators, reorderers, and reingestors share is reported in the altered
 processor's own error where it is detected, so the report begins at the failure rather than at a
@@ -1042,7 +1046,11 @@ from any failure to start the replacement. A provisioned
 subscription that does not exist is `PulsarTopicIngestorError::MissingSubscription` beneath the source's
 resume context, which the ingestor's transient status shows by its subscription and topic; a check
 that could not learn whether the subscription exists is `VerifySubscription` above the driver's
-error.
+error. A join the broker refuses is `SubscriptionRefused`, which holds the subscription, the topic
+and the typed `PulsarRefusal` with no driver error beneath it, so the ingestor's transient status
+shows the broker's server error and reason. `ConsumerBusy` and `ServiceNotReady` hold only for now,
+so at open they leave the instance to its first resume, which reports them; any other refusal fails
+the open. A join that fails without a refusal is `Subscribe` above the driver's error.
 
 A Kafka emitter keeps librdkafka's `KafkaError` beneath `EmitterWriteError::Publish` when a producer
 failure ends admission or a delivery report leaves a confirmed publish's record unresolved.
