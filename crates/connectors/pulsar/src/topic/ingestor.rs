@@ -2,12 +2,11 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The Pulsar client an ingestor configuration declares, its TLS options, topic
-//!   qualification, the consumer of the declared subscription type each instance reads through and
-//!   the name it registers under, the check that a provisioned subscription exists, the removal of
-//!   a subscription its ingestor owned, checked message metadata and ordered properties,
-//!   acknowledgements the broker answers, redelivery requests, and the classification of a join, an
-//!   acknowledgement or a redelivery request that did not take effect.
+//! - **Owns.** Topic qualification, the consumer of the declared subscription type each instance
+//!   reads through and the name it registers under, the check that a provisioned subscription
+//!   exists, the removal of a subscription its ingestor owned, checked message metadata and ordered
+//!   properties, acknowledgements the broker answers, redelivery requests, and the classification
+//!   of a join, an acknowledgement or a redelivery request that did not take effect.
 //! - **Depends on.** The connector contract, typed client configuration entries, `error-stack`,
 //!   the recovery vocabulary, Tokio and `pulsar`.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, why an
@@ -34,7 +33,7 @@ use nervix_connector::{
     BrokerIngestorConnector, IngestMessageHeaders, IngestMessageMetadata, IngestMetadataRow,
     IngestMetadataValues, IngestRowHeaders, IngestorBatch, IngestorBatchRequest, IngestorConnector,
     IngestorError, IngestorMessage, IngestorReadCancellation, IngestorResult, IngestorResume,
-    client_config_value, client_tls_paths, optional_bool_client_config_value, read_tls_file,
+    client_config_value,
 };
 use nervix_models::{
     ClientConfigEntry, ConnectorKind, PulsarSubscription, PulsarSubscriptionName,
@@ -45,18 +44,16 @@ use nervix_recovery::Reported as _;
 use pulsar::{
     ConnectionRetryOptions as PulsarConnectionRetryOptions, Consumer as PulsarConsumer,
     ConsumerBuilder as PulsarConsumerBuilder, ConsumerOptions as PulsarConsumerOptions,
-    Error as PulsarError, OperationRetryOptions as PulsarOperationRetryOptions, Pulsar,
-    SubType as PulsarSubType, TlsOptions as PulsarTlsOptions, TokioExecutor,
+    Error as PulsarError, Pulsar, SubType as PulsarSubType, TokioExecutor,
     consumer::{InitialPosition as PulsarInitialPosition, Message as PulsarMessage},
-    error::{
-        ConnectionError as PulsarConnectionError, ConsumerError as PulsarConsumerError,
-        ServiceDiscoveryError as PulsarServiceDiscoveryError,
-    },
+    error::{ConnectionError as PulsarConnectionError, ConsumerError as PulsarConsumerError},
     message::proto::ServerError as PulsarServerError,
     proto::MessageIdData,
 };
 use thiserror::Error;
 use url::Url;
+
+use super::connection::{PulsarClientConnection, PulsarRefusal};
 
 const PULSAR: &str = "pulsar";
 
@@ -69,58 +66,6 @@ mod metadata_tests;
 /// `NotAllowedError`, such as one past a topic's subscription limit, so only this reason says that
 /// the subscription exists.
 const DURABLE_SUBSCRIPTION_EXISTS: &str = "Durable subscription with the same name already exists";
-
-/// What a Pulsar broker answered when it refused a request: its server error, absent when the
-/// client does not know the error's code, and the reason it gave, absent when it gave none.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PulsarRefusal {
-    pub error: Option<PulsarServerError>,
-    pub reason: Option<String>,
-}
-
-impl PulsarRefusal {
-    /// What the broker refused a join with, when `error` says it refused the subscribe or the
-    /// topic lookup before it, and did not fail in some other way.
-    fn of_join(error: &PulsarError) -> Option<Self> {
-        let (code, reason) = match error {
-            PulsarError::Connection(PulsarConnectionError::PulsarError(code, reason))
-            | PulsarError::Consumer(PulsarConsumerError::Connection(
-                PulsarConnectionError::PulsarError(code, reason),
-            ))
-            | PulsarError::ServiceDiscovery(PulsarServiceDiscoveryError::Query(code, reason)) => {
-                (code, reason)
-            }
-            _ => return None,
-        };
-        Some(Self {
-            error: *code,
-            reason: reason.clone(),
-        })
-    }
-
-    /// Whether the broker refused for what holds right now rather than for what the statement
-    /// declares, so the same join can pass later: another consumer holds the subscription, or the
-    /// broker has not yet loaded the topic.
-    fn holds_only_for_now(&self) -> bool {
-        matches!(
-            self.error,
-            Some(PulsarServerError::ConsumerBusy | PulsarServerError::ServiceNotReady)
-        )
-    }
-}
-
-impl fmt::Display for PulsarRefusal {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.error {
-            Some(error) => formatter.write_str(error.as_str_name())?,
-            None => formatter.write_str("a server error this client does not know")?,
-        }
-        if let Some(reason) = &self.reason {
-            write!(formatter, ": {reason}")?;
-        }
-        Ok(())
-    }
-}
 
 /// Why a request of a Pulsar consumer has no outcome it can rely on: the broker may or may not
 /// have applied it.
@@ -169,11 +114,8 @@ pub enum PulsarTopicIngestorError {
         connector = ConnectorKind::Pulsar
     )]
     InvalidServiceAddress,
-    #[error(
-        "Pulsar TLS supports 'tls_ca_file' but does not support client certificate authentication"
-    )]
-    UnsupportedTlsIdentity,
-    #[error("failed to connect Pulsar client")]
+    /// The ingestor's client did not connect; [`super::PulsarClientError`] beneath says why.
+    #[error("failed to connect {connector} client", connector = ConnectorKind::Pulsar)]
     Connect,
     #[error("failed to subscribe to Pulsar topic '{topic}'")]
     Subscribe { topic: String },
@@ -410,7 +352,10 @@ impl PulsarTopicIngestorPlan {
             consumer_name,
             ack_receipts,
         } = settings;
-        let client = Self::client_from_config(config).await?;
+        let client = PulsarClientConnection::new(config, None)
+            .open()
+            .await
+            .change_context(PulsarTopicIngestorError::Connect)?;
         Ok(Self {
             client,
             topic: super::qualified_topic(config, topic),
@@ -418,78 +363,6 @@ impl PulsarTopicIngestorPlan {
             consumer_name,
             ack_receipts,
         })
-    }
-
-    async fn client_from_config(
-        config: &[ClientConfigEntry],
-    ) -> PulsarTopicIngestorResult<Pulsar<TokioExecutor>> {
-        let addr = client_config_value(config, "addr", "Pulsar")
-            .change_context(PulsarTopicIngestorError::ClientConfig)?;
-        let mut builder = Pulsar::builder(addr, TokioExecutor)
-            .with_operation_retry_options(Self::operation_retries());
-        if let Some(tls_options) = Self::tls_options_from_config(config)? {
-            if let Some(certificate_chain) = tls_options.certificate_chain {
-                builder = builder.with_certificate_chain(certificate_chain);
-            }
-            builder = builder
-                .with_allow_insecure_connection(tls_options.allow_insecure_connection)
-                .with_tls_hostname_verification_enabled(
-                    tls_options.tls_hostname_verification_enabled,
-                );
-        }
-        builder.build().await.map_err(|source| {
-            Report::new(PulsarTopicIngestorError::Connect).attach_printable(source.to_string())
-        })
-    }
-
-    /// The driver makes one attempt at an operation. It would otherwise repeat a subscribe the
-    /// broker refuses because another consumer holds the subscription, without limit and without
-    /// reporting it, so what fails reaches the host, which alone decides when to try again.
-    fn operation_retries() -> PulsarOperationRetryOptions {
-        PulsarOperationRetryOptions {
-            max_retries: Some(0),
-            ..Default::default()
-        }
-    }
-
-    fn tls_options_from_config(
-        config: &[ClientConfigEntry],
-    ) -> PulsarTopicIngestorResult<Option<PulsarTlsOptions>> {
-        let tls = client_tls_paths(config);
-        if tls.cert_file.is_some() || tls.key_file.is_some() {
-            return Err(Report::new(
-                PulsarTopicIngestorError::UnsupportedTlsIdentity,
-            ));
-        }
-
-        let allow_insecure_connection =
-            optional_bool_client_config_value(config, "tls_allow_insecure_connection")
-                .change_context(PulsarTopicIngestorError::ClientConfig)?;
-        let tls_hostname_verification_enabled =
-            optional_bool_client_config_value(config, "tls_hostname_verification_enabled")
-                .change_context(PulsarTopicIngestorError::ClientConfig)?;
-
-        if tls.ca_file.is_none()
-            && allow_insecure_connection.is_none()
-            && tls_hostname_verification_enabled.is_none()
-        {
-            return Ok(None);
-        }
-
-        let mut tls_options = PulsarTlsOptions::default();
-        if let Some(ca_file) = tls.ca_file.as_ref() {
-            tls_options.certificate_chain = Some(
-                read_tls_file(ca_file, "TLS CA certificate")
-                    .change_context(PulsarTopicIngestorError::ClientConfig)?,
-            );
-        }
-        if let Some(allow_insecure_connection) = allow_insecure_connection {
-            tls_options.allow_insecure_connection = allow_insecure_connection;
-        }
-        if let Some(tls_hostname_verification_enabled) = tls_hostname_verification_enabled {
-            tls_options.tls_hostname_verification_enabled = tls_hostname_verification_enabled;
-        }
-        Ok(Some(tls_options))
     }
 
     /// The consumer instance `instance_index` reads through. An instance of a provisioned
@@ -1081,55 +954,6 @@ mod tests {
     use pulsar::proto::KeyValue;
 
     use super::*;
-
-    fn entry(key: &str, value: &str) -> ClientConfigEntry {
-        ClientConfigEntry {
-            key: key.to_string(),
-            value: value.to_string(),
-        }
-    }
-
-    #[test]
-    fn tls_options_load_trust_and_reject_client_identities() {
-        assert!(
-            PulsarTopicIngestorPlan::tls_options_from_config(&[])
-                .expect("no TLS keys must be accepted")
-                .is_none()
-        );
-
-        let error = PulsarTopicIngestorPlan::tls_options_from_config(&[entry(
-            "tls_cert_file",
-            "client.pem",
-        )])
-        .expect_err("a client certificate must be rejected");
-        assert!(matches!(
-            error.current_context(),
-            PulsarTopicIngestorError::UnsupportedTlsIdentity
-        ));
-
-        let error = PulsarTopicIngestorPlan::tls_options_from_config(&[entry(
-            "tls_allow_insecure_connection",
-            "sometimes",
-        )])
-        .expect_err("an invalid boolean must be rejected");
-        assert!(matches!(
-            error.current_context(),
-            PulsarTopicIngestorError::ClientConfig
-        ));
-
-        let root = tempfile::tempdir().expect("temporary Pulsar TLS directory should open");
-        let ca = root.path().join("ca.pem");
-        std::fs::write(&ca, b"test CA").expect("the Pulsar CA fixture should be writable");
-        let options = PulsarTopicIngestorPlan::tls_options_from_config(&[
-            entry("tls_ca_file", &ca.to_string_lossy()),
-            entry("tls_hostname_verification_enabled", "false"),
-        ])
-        .expect("a CA file must be accepted")
-        .expect("a CA file enables TLS options");
-        assert_eq!(options.certificate_chain.as_deref(), Some(&b"test CA"[..]));
-        assert!(!options.tls_hostname_verification_enabled);
-        assert!(!options.allow_insecure_connection);
-    }
 
     /// PULSAR TOPIC ingestors declare ordered repeats with exact names: a message's properties
     /// are visited in the order the message carries them, a repeated name once for each of its

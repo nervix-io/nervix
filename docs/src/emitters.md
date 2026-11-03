@@ -1198,7 +1198,7 @@ Transport-specific expectations:
   [Redis Pub/Sub](#redis-pubsub).
 - `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`. A plaintext `mqtt://` address reads no TLS file, so `CREATE MQTT CLIENT` refuses all three with it.
 - `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
-- `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
+- `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file`, presents `tls_cert_file` with `tls_key_file` as its client certificate, and honors optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, all of which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address; see [Pulsar](./ingestors.md#pulsar).
 - `SQS`: use an `https://...` `endpoint`; Nervix trusts the platform's native roots, or only
   `tls_ca_file` when it is set, and honors optional `timeout_ms`. `CREATE SQS CLIENT` refuses a
   `tls_ca_file` that holds no certificate it could trust. An SQS connection presents no client
@@ -1496,15 +1496,24 @@ Pulsar emitters use the same client config surface as Pulsar ingestors:
 - optional `'namespace'`: the tenant and namespace, written `'tenant/namespace'`, that a short
   topic name is placed in, so `TOPIC 'orders'` writes `persistent://<namespace>/orders`; defaults
   to `public/default`. Fully qualified topic names are sent as written.
-- optional `'tls_ca_file'`: PEM-encoded CA bundle for `pulsar+ssl://...` connections
-- optional `'tls_allow_insecure_connection'`: `true` or `false`; defaults to `false`
-- optional `'tls_hostname_verification_enabled'`: `true` or `false`; defaults to `true`
+- optional `'auth_token'`: the token the client authenticates with
+- optional `'tls_ca_file'`: PEM-encoded CA bundle a `pulsar+ssl://...` connection trusts beside the
+  bundled public roots and the host's trust store
+- optional `'tls_cert_file'` and `'tls_key_file'`: the PEM-encoded client certificate the client
+  presents and its private key, written together
+- optional `'tls_allow_insecure_connection'`: `true` accepts any certificate a broker presents;
+  defaults to `false`
+- optional `'tls_hostname_verification_enabled'`: `false` accepts a certificate from a trusted
+  authority whatever address it names; defaults to `true`
 
-As the [ingestor manual](ingestors.md#pulsar) states, `CREATE PULSAR CLIENT` refuses the three TLS
-keys with a plaintext `pulsar://...` address and a `namespace` that is not exactly a tenant and a
-namespace.
+The [ingestor manual](ingestors.md#pulsar) states what each credential authenticates as and what
+each TLS key relaxes, and `CREATE PULSAR CLIENT` refuses the five TLS keys with a plaintext
+`pulsar://...` address and a `namespace` that is not exactly a tenant and a namespace.
 
-Pulsar TLS currently supports server trust configuration only. Nervix does not yet expose Pulsar client certificate authentication.
+The Pulsar driver makes one attempt at a connection or an operation, and the host owns every retry
+on the emitter's `RETRY POLICY`. An emitter whose client cannot connect shows why as its transient
+error, as in `the PULSAR broker refused the connection with AuthenticationError: ...`, and opens
+again on that policy.
 
 ### RabbitMQ
 

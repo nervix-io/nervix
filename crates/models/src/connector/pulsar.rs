@@ -52,18 +52,22 @@ const PULSAR_TLS_SCHEME: &str = "pulsar+ssl";
 ///
 /// A local topic name is placed in `namespace`, so the namespace is exactly a tenant and a
 /// namespace, the two levels a qualified topic names before the topic. A plaintext connection uses
-/// no TLS setting, so every TLS key requires a `pulsar+ssl` address.
+/// no TLS setting, so every TLS key requires a `pulsar+ssl` address. The token is a credential, and
+/// the certificate and its key are a pair.
 const CLIENT_CONFIG: crate::ClientConfigSchema = {
     use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
     ClientConfigSchema::new(
         &[
             K::required("addr", V::Url(&["pulsar", PULSAR_TLS_SCHEME])),
+            K::optional("auth_token", V::String).secret(),
             K::defaulted("namespace", V::Levels("tenant/namespace"), "public/default"),
             K::optional("tls_allow_insecure_connection", V::Boolean)
                 .only_for_scheme("addr", PULSAR_TLS_SCHEME),
             K::TLS_CA.only_for_scheme("addr", PULSAR_TLS_SCHEME),
+            K::TLS_CERT.only_for_scheme("addr", PULSAR_TLS_SCHEME),
             K::optional("tls_hostname_verification_enabled", V::Boolean)
                 .only_for_scheme("addr", PULSAR_TLS_SCHEME),
+            K::TLS_KEY.only_for_scheme("addr", PULSAR_TLS_SCHEME),
         ],
         &[],
         &[],
@@ -404,7 +408,7 @@ const PULSAR_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
         DeclaredWait {
             wait: "connection: TCP, TLS and CONNECT",
-            bound: WaitBound::Driver("10 s per address, 12 retries"),
+            bound: WaitBound::Driver("10 s per address, one attempt"),
         },
         DeclaredWait {
             wait: "topic lookup and subscribe",

@@ -1254,6 +1254,17 @@ async fn given_pulsar_is_running(world: &mut ScenarioWorld) {
     refresh_dependency_configuration(world);
 }
 
+#[given("Pulsar with authentication is running")]
+async fn given_pulsar_with_authentication_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_pulsar_auth(&world.test_id)
+        .await
+        .expect("the authenticating Pulsar test container should start");
+    refresh_dependency_configuration(world);
+}
+
 #[given("RabbitMQ is running")]
 async fn given_rabbitmq_is_running(world: &mut ScenarioWorld) {
     initialize_scenario_identity(world);
@@ -26240,6 +26251,18 @@ async fn given_pulsar_topic_is_observed(world: &mut ScenarioWorld, topic: String
     );
 }
 
+#[given(expr = "authenticated Pulsar topic {string} is observed")]
+async fn given_authenticated_pulsar_topic_is_observed(world: &mut ScenarioWorld, topic: String) {
+    let topic = expand_placeholders(world, &topic);
+    world.broker_observer = Some(
+        world
+            .cluster()
+            .observe_pulsar_auth(&topic)
+            .await
+            .expect("failed to observe the authenticated pulsar topic"),
+    );
+}
+
 #[given(expr = "Pulsar TLS topic {string} is observed")]
 async fn given_pulsar_tls_topic_is_observed(world: &mut ScenarioWorld, topic: String) {
     let topic = expand_placeholders(world, &topic);
@@ -27609,6 +27632,21 @@ async fn when_pulsar_message_is_published(
         .publish_pulsar(&topic, &payload)
         .await
         .expect("failed to publish pulsar message");
+}
+
+#[when(expr = "authenticated Pulsar message is published to topic {string}")]
+async fn when_authenticated_pulsar_message_is_published(
+    world: &mut ScenarioWorld,
+    topic: String,
+    #[step] step: &Step,
+) {
+    let topic = expand_placeholders(world, &topic);
+    let payload = expand_placeholders(world, docstring(step));
+    world
+        .cluster()
+        .publish_pulsar_auth(&topic, &payload)
+        .await
+        .expect("failed to publish the authenticated pulsar message");
 }
 
 #[when(expr = "Pulsar TLS message is published to topic {string}")]

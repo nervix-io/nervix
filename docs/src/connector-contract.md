@@ -1209,13 +1209,16 @@ ingestor names a subscription of 1 to 255 bytes with its declared owner and type
 `SUSPEND`, since the durable subscription keeps its backlog. The emitter declares `NO ACK` and
 `ACK` publishing, optional batching under the `maxMessageSize` the broker announces, the `TIMESTAMP`
 and `DELIVER AFTER` envelope clauses it writes as each message's `event_time` and `deliver_at_time`,
-and no other envelope clause or properties. Message properties are headers in both directions, `ordered_repeats` on ingestion and `last_wins` on
-emission. A Pulsar client declares only the keys both directions read. `namespace` holds exactly a
-tenant and a namespace, with the default `public/default` written once in the declaration, and topic
-qualification reads that effective value, so a namespace that cannot qualify a topic is refused at
-`CREATE`. `tls_ca_file`, `tls_allow_insecure_connection` and `tls_hostname_verification_enabled`
-require a `pulsar+ssl` address, since a plaintext connection uses none of them. The
-Pulsar-specific declaration tests, generated grammar conformance and one-/three-node public
+and no other envelope clause or properties. Message properties are headers in both directions,
+`ordered_repeats` on ingestion and `last_wins` on emission. A Pulsar client declares only the keys
+both directions read, and both directions connect through one builder in the connector, so the two
+cannot disagree on how they connect. `namespace` holds exactly a tenant and a namespace, with the
+default `public/default` written once in the declaration, and topic qualification reads that
+effective value, so a namespace that cannot qualify a topic is refused at `CREATE`. `auth_token` is
+confidential, so inspection shows it redacted. `tls_ca_file`, `tls_cert_file`, `tls_key_file`,
+`tls_allow_insecure_connection` and `tls_hostname_verification_enabled` require a `pulsar+ssl`
+address, since a plaintext connection uses none of them, and the certificate and key are a pair.
+The Pulsar-specific declaration tests, generated grammar conformance and one-/three-node public
 declaration scenarios qualify these facts together.
 
 Every-node execution is independent of the kind of reference an ingestor names. HTTP and WebSocket
@@ -2931,7 +2934,26 @@ sequenceDiagram
   command, and resolves the acknowledgement with the broker's `CommandAckResponse`, its server
   error, or the client's operation timeout. A negative acknowledgement returns whether the consumer
   sent its redelivery request, with the connection error that kept it from being sent, where the
-  released crate only logs that error.
+  released crate only logs that error. A TLS connection takes a complete rustls client
+  configuration from Nervix, because the released crate's rustls path presents no client certificate
+  and reads neither of its insecure options, so the shared TLS provider owns trust and identity for
+  this connector as it does for the others. A connection that failed for good returns its error,
+  where the released crate replaces it with a fixed message, so a broker's `AuthenticationError`
+  reaches the host, and the fork logs neither the `CONNECT` frame nor an authentication response,
+  which carry the client's credential.
+  The connector authenticates a token under the broker's `token` method. A certificate without a
+  token authenticates under `tls`, the method that makes a broker read the TLS session, and carries
+  no data. With both, the token names the role and the certificate satisfies a broker's
+  `tlsRequireTrustedClientCertOnConnect`.
+  The driver's retries are off in both directions: no connection retry and no operation retry, so
+  a `ServiceNotReady`, a refused connection or a failed consumer reconnect reaches the host at once.
+  The host owns the retry: a failed read or resume follows the source's retry policy, a failed emitter
+  open follows the emitter's, and a failed start, which an owned subscription's join or a client
+  that cannot connect ends, is retried by the node's runtime reconciliation. An unreachable broker
+  at start therefore keeps the domain from starting rather than becoming a transient status.
+  The one retry left in the driver is a partitioned topic's: a consumer of one partition whose
+  single reconnect fails ends, and the multi-topic consumer resubscribes it at its 30-second topic
+  refresh while the other partitions keep flowing.
 - **NATS source.** Each source instance owns one client and its queue subscription. The client
   reports a lost connection through its event callback, and the instance ends the subscription
   with a read failure once it has handed over every message the client received before the loss,

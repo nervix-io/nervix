@@ -174,8 +174,8 @@ defaulted acquire/maintenance intervals, and complete authored-value preservatio
 `client-config-schema` includes omitted ClickHouse connection defaults, Redis command-pool
 lifetimes, Postgres pool and statement-deadline keys and MQTT keep-alive and publish admission
 bounds, explicit typed TCP and pool intervals, lifetimes, checkout deadlines and borrow tests,
-and MQTT credentials whose
-password public inspection redacts. `mqtt-client-config` separately converts every valid MQTT
+MQTT credentials whose password public inspection redacts, and a Pulsar token, which public
+inspection also redacts, beside its paired client certificate and key files. `mqtt-client-config` separately converts every valid MQTT
 client configuration into its typed broker, transport, identity, credentials, keep-alive and
 admission bound. JSON and archive equality preserve the authored entries; the effective-default
 projection preserves those entries and is idempotent, and public inspection remains idempotent.
