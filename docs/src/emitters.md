@@ -1199,10 +1199,10 @@ Transport-specific expectations:
 - `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`. A plaintext `mqtt://` address reads no TLS file, so `CREATE MQTT CLIENT` refuses all three with it.
 - `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
-- `SQS`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file` and optional `timeout_ms`,
-  and `CREATE SQS CLIENT` refuses a `tls_ca_file` that holds no certificate it could trust. An SQS
-  connection presents no client certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and
-  `tls_key_file`.
+- `SQS`: use an `https://...` `endpoint`; Nervix trusts the platform's native roots, or only
+  `tls_ca_file` when it is set, and honors optional `timeout_ms`. `CREATE SQS CLIENT` refuses a
+  `tls_ca_file` that holds no certificate it could trust. An SQS connection presents no client
+  certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and `tls_key_file`.
 - `SENTRY`: the referenced `SENTRY CLIENT` carries an `https://...` `dsn`; its `tls_ca_file` adds
   trust roots beside Nervix's bundled Mozilla roots and the host's native roots, and
   `tls_cert_file` with `tls_key_file` presents
@@ -2181,13 +2181,17 @@ See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sq
 `-` and `_`, a FIFO queue's `.fifo` suffix included, preserved exactly as written. The
 `SQS CLIENT` it names declares the keys the [SQS ingestion section](ingestors.md#sqs) lists.
 
-`SEND` is the request shape, and every statement writes it. `SEND SINGLE` issues one `SendMessage`
-request per message. `SEND BATCH` groups messages into `SendMessageBatch` requests within SQS's
-fixed limit of ten entries and 1 MiB per request. Both shapes publish in `MODE ACK`, the mode every
-request/response emitter uses: requests are issued sequentially, and a record is acknowledged once
-the service accepts it. Per-entry transient failures retry only those entries, while invalid
-entries and a message larger than 1 MiB, counting its attributes and FIFO message group, follow
-`ON MESSAGE ERROR` individually. Nervix checks what SQS refuses before sending: a body that is not
+`SEND` is the request shape, and every statement writes it. It belongs to emission alone, as the
+parallel receive belongs to ingestion, and it is independent of the [batching clause](#batching),
+as [Broker and message emitters](#broker-and-message-emitters) describes. `SEND SINGLE` issues one
+`SendMessage` request per message. `SEND BATCH` groups messages into `SendMessageBatch` requests
+within SQS's fixed limit of ten entries and 1 MiB per request. Both shapes publish in `MODE ACK`,
+the mode every request/response emitter uses: requests are issued sequentially, and a record is
+acknowledged once the service accepts it. A record whose contents the service refuses, and a
+message larger than 1 MiB, counting its attributes and FIFO message group, follow
+`ON MESSAGE ERROR` individually. A request or a batch entry that fails for any other reason ends
+the write: the retry resends that record and every record the write had not yet sent, never one
+the service accepted or refused. Nervix checks what SQS refuses before sending: a body that is not
 UTF-8, a body or attribute value holding a character SQS forbids, more than ten attributes, an
 attribute name SQS does not allow, an empty attribute value, and an invalid FIFO message group. A
 later `write_header` of a name replaces the earlier value, so the ten are counted after repeated
@@ -2226,8 +2230,9 @@ Set the SQS client's optional `timeout_ms` CONFIG key to bound each request, the
 start and every send, as both the complete service operation and its single SDK attempt. Nervix
 disables the AWS SDK's internal retries in both directions, so a request that runs out of
 `timeout_ms` returns to the emitter, which `DESCRIBE EMITTER` shows as
-`an SQS send did not finish within timeout_ms 5s`, and the mode's declared `RETRY POLICY` owns all
-retry pacing.
+`an SQS send did not finish within timeout_ms 5s`, or under `SEND BATCH` as
+`an SQS batch send did not finish within timeout_ms 5s`, and the mode's declared `RETRY POLICY`
+owns all retry pacing.
 
 The client resolves the host of its `endpoint` through the node's asynchronous resolver each time it
 opens a connection, and tries the answers in order; a literal IPv4 or IPv6 address is dialled as
@@ -3965,7 +3970,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | Pulsar | `ACK` retry after an ambiguous broker receipt; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` does not expose broker failures after producer acceptance; retention and durability remain broker policy | None |
 | NATS | JetStream retry after an ambiguous `PubAck`; Core `NO ACK` retry after a timed-out write or a connection change, including records the server may already have received; either mode after a lost upstream ACK or attached sibling failure | Core NATS `NO ACK` confirms a local drain and flush on the write's connection, without durable stream acknowledgement; a connection failure after that completion can lose what the server has not read | None |
 | RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; `NO ACK` retry after its channel or connection is lost before a write's round trip completes; either mode after a lost upstream ACK or attached sibling failure | Without `MANDATORY`, a message no binding routes is dropped by the broker and its record reported delivered; `NO ACK` can lose a record after the broker's channel has taken it; persistence requires PERSISTENT and a provisioned durable queue | None |
-| SQS | Retry after an ambiguous `SendMessage` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; SQS retains its own at-least-once behavior | None |
+| SQS | Retry after an ambiguous `SendMessage` or `SendMessageBatch` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; SQS retains its own at-least-once behavior | On a FIFO queue, `DEDUPLICATION ID` or the queue's content-based deduplication: SQS does not deliver again a message whose id, or body, it accepted within the previous five minutes. A retry carries the id and body its first attempt carried, and an id computed from the record's own fields also covers its redelivery within that interval |
 | MQTT | QoS 1 or 2 retry after an ambiguous handshake; any mode after a lost upstream ACK or attached sibling failure | QoS 0 can lose a record after client acceptance; later delivery follows the configured broker and session guarantees | None |
 | Redis Pub/Sub | Retry after a `PUBLISH` whose answer missed the driver's 500 ms or was lost with its connection, which Redis may already have delivered; retry after Redis accepts `PUBLISH` but the Nervix ACK is lost, or after attached sibling failure | Any failure after detached relay acceptance; subscribers that are absent or disconnected miss the message | None |
 | ZeroMQ | Retry after socket send acceptance followed by lost ACK or attached sibling failure | Any failure after detached relay acceptance; socket send does not establish durable receiver storage | None |
