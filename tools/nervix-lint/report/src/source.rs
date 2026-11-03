@@ -1,5 +1,6 @@
 //! Repository tooling, outside the product layer order.
-//! Owns: compiler-independent cast syntax, struct field gates and hidden setting syntax.
+//! Owns: compiler-independent cast syntax, struct field gates, hidden setting syntax and authored
+//! cryptography paths.
 //! Depends on: the Rust source parser, source token spans and typed report boundaries.
 //! Must not know: resolved APIs, active Cargo configurations or a product location catalog.
 
@@ -65,8 +66,22 @@ pub fn scan(files: Vec<SourceInput>) -> Result<Vec<SourceSite>, error_stack::Rep
         }
         .visit_file(&parsed);
         sites.extend(tunables::scan(&input.path, &parsed)?);
+        sites.extend(crypto::scan(&input.path, &parsed));
     }
     Ok(sites.into_iter().collect())
+}
+
+/// Tooling and the four harness crates are not part of the running Nervix product.
+fn product(path: &str) -> bool {
+    !path.starts_with("tools/")
+        && ![
+            "crates/arbitrary/",
+            "crates/benchmark/",
+            "crates/model-harness/",
+            "crates/test-environment/",
+        ]
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
 }
 
 struct Scanner<'a> {
@@ -182,6 +197,47 @@ fn requires_test(meta: &Meta) -> bool {
     }
 }
 
+fn item_attributes(item: &Item) -> &[Attribute] {
+    match item {
+        Item::Const(value) => &value.attrs,
+        Item::Enum(value) => &value.attrs,
+        Item::ExternCrate(value) => &value.attrs,
+        Item::Fn(value) => &value.attrs,
+        Item::ForeignMod(value) => &value.attrs,
+        Item::Impl(value) => &value.attrs,
+        Item::Macro(value) => &value.attrs,
+        Item::Mod(value) => &value.attrs,
+        Item::Static(value) => &value.attrs,
+        Item::Struct(value) => &value.attrs,
+        Item::Trait(value) => &value.attrs,
+        Item::TraitAlias(value) => &value.attrs,
+        Item::Type(value) => &value.attrs,
+        Item::Union(value) => &value.attrs,
+        Item::Use(value) => &value.attrs,
+        _ => &[],
+    }
+}
+
+fn impl_item_attributes(item: &syn::ImplItem) -> &[Attribute] {
+    match item {
+        syn::ImplItem::Const(value) => &value.attrs,
+        syn::ImplItem::Fn(value) => &value.attrs,
+        syn::ImplItem::Type(value) => &value.attrs,
+        syn::ImplItem::Macro(value) => &value.attrs,
+        _ => &[],
+    }
+}
+
+fn trait_item_attributes(item: &syn::TraitItem) -> &[Attribute] {
+    match item {
+        syn::TraitItem::Const(value) => &value.attrs,
+        syn::TraitItem::Fn(value) => &value.attrs,
+        syn::TraitItem::Type(value) => &value.attrs,
+        syn::TraitItem::Macro(value) => &value.attrs,
+        _ => &[],
+    }
+}
+
 fn test_only(attributes: &[Attribute]) -> bool {
     attributes.iter().any(|attribute| {
         if attribute
@@ -249,27 +305,13 @@ fn testing_gate(meta: &Meta) -> bool {
 
 impl<'ast> Visit<'ast> for Scanner<'_> {
     fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
-        let attributes: &[Attribute] = match item {
-            syn::ImplItem::Const(value) => &value.attrs,
-            syn::ImplItem::Fn(value) => &value.attrs,
-            syn::ImplItem::Type(value) => &value.attrs,
-            syn::ImplItem::Macro(value) => &value.attrs,
-            _ => &[],
-        };
-        if !test_only(attributes) {
+        if !test_only(impl_item_attributes(item)) {
             visit::visit_impl_item(self, item);
         }
     }
 
     fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
-        let attributes: &[Attribute] = match item {
-            syn::TraitItem::Const(value) => &value.attrs,
-            syn::TraitItem::Fn(value) => &value.attrs,
-            syn::TraitItem::Type(value) => &value.attrs,
-            syn::TraitItem::Macro(value) => &value.attrs,
-            _ => &[],
-        };
-        if !test_only(attributes) {
+        if !test_only(trait_item_attributes(item)) {
             visit::visit_trait_item(self, item);
         }
     }
@@ -280,25 +322,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         }
     }
     fn visit_item(&mut self, item: &'ast Item) {
-        let attributes: &[Attribute] = match item {
-            Item::Const(value) => &value.attrs,
-            Item::Enum(value) => &value.attrs,
-            Item::ExternCrate(value) => &value.attrs,
-            Item::Fn(value) => &value.attrs,
-            Item::ForeignMod(value) => &value.attrs,
-            Item::Impl(value) => &value.attrs,
-            Item::Macro(value) => &value.attrs,
-            Item::Mod(value) => &value.attrs,
-            Item::Static(value) => &value.attrs,
-            Item::Struct(value) => &value.attrs,
-            Item::Trait(value) => &value.attrs,
-            Item::TraitAlias(value) => &value.attrs,
-            Item::Type(value) => &value.attrs,
-            Item::Union(value) => &value.attrs,
-            Item::Use(value) => &value.attrs,
-            _ => &[],
-        };
-        if !test_only(attributes) {
+        if !test_only(item_attributes(item)) {
             visit::visit_item(self, item);
         }
     }
@@ -332,7 +356,10 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
     }
 }
 
+mod crypto;
 mod tunables;
 
+#[cfg(test)]
+mod crypto_tests;
 #[cfg(test)]
 mod tests;
