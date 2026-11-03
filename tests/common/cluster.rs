@@ -7,7 +7,7 @@ use std::{
     fs::OpenOptions,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
 
@@ -79,8 +79,8 @@ use nervix_primitives::{
 use nervix_server::{
     FaultInjection, SchedulerMode,
     application::{
-        Application, CommandExecutionPolicy, InternalTransportMode, NodeIdentity, NodeSettings,
-        SchedulingSettings, SettingOverride, ShutdownCoordinator, ShutdownOutcome,
+        Application, CommandExecutionPolicy, GrpcTransport, InternalTransportMode, NodeIdentity,
+        NodeSettings, SchedulingSettings, SettingOverride, ShutdownCoordinator, ShutdownOutcome,
         ShutdownSettings, TransactionBounds, TransactionLimits, init_tracing_to_file,
     },
     cluster::{MembershipSettings, MembershipValues},
@@ -228,10 +228,6 @@ pub(crate) fn test_basic_auth_token_for_password(password: &str) -> String {
 
 pub(crate) fn test_basic_authorization_for_password(password: &str) -> String {
     format!("Basic {}", test_basic_auth_token_for_password(password))
-}
-
-pub(crate) fn test_basic_auth_token() -> String {
-    test_basic_auth_token_for_password(TEST_AUTH_PASSWORD)
 }
 
 pub(crate) fn test_basic_authorization() -> String {
@@ -898,6 +894,8 @@ pub(crate) struct TestClusterConfig {
     pub transaction_max_source_bytes: u64,
     pub transaction_max_open: usize,
     pub grpc_mode: InternalTransportMode,
+    /// Whether the console's reserved port serves HTTP or HTTPS in this scenario.
+    pub web_console_mode: InternalTransportMode,
     pub graceful_shutdown_drain: bool,
     pub drain_timeout: Duration,
     pub shutdown_timeout: Duration,
@@ -931,6 +929,7 @@ impl Default for TestClusterConfig {
             transaction_max_source_bytes: 1024 * 1024,
             transaction_max_open: 1024,
             grpc_mode: InternalTransportMode::Http,
+            web_console_mode: InternalTransportMode::Http,
             graceful_shutdown_drain: false,
             drain_timeout: DEFAULT_TEST_DRAIN_TIMEOUT,
             shutdown_timeout: DEFAULT_TEST_SHUTDOWN_TIMEOUT,
@@ -1071,7 +1070,13 @@ impl Cluster {
             address,
         } in planned
         {
-            let mut spec = NodeSpec::new(&roots.storage, &interconnect_ca, &node_id, index == 1)?;
+            let mut spec = NodeSpec::new(
+                &roots.storage,
+                &interconnect_ca,
+                &node_id,
+                index == 1,
+                config.grpc_mode,
+            )?;
             spec.set_interconnect_address(address);
             spec.dns = dns.as_ref().map(ClusterDns::configuration);
             fault_injection
@@ -1476,7 +1481,13 @@ impl Cluster {
                 .or_default()
                 .extend(pending.setting_overrides);
         }
-        let mut spec = NodeSpec::new(&self.roots.storage, &self.interconnect_ca, node_id, false)?;
+        let mut spec = NodeSpec::new(
+            &self.roots.storage,
+            &self.interconnect_ca,
+            node_id,
+            false,
+            config.grpc_mode,
+        )?;
         if let Some(cluster_id) = &pending.cluster_id {
             spec.claim_cluster(&self.interconnect_ca, cluster_id)?;
         }
@@ -2268,7 +2279,7 @@ impl Cluster {
             .nodes
             .get(node_id)
             .ok_or_else(|| io::Error::other(format!("unknown node '{node_id}'")))?;
-        Ok(handle.spec.web_console_url())
+        Ok(handle.spec.web_console_url(handle.config.web_console_mode))
     }
 
     pub(crate) fn http_uri(&self, node_id: &str, path: &str) -> io::Result<String> {
@@ -2288,7 +2299,9 @@ impl Cluster {
             .nodes
             .get(node_id)
             .ok_or_else(|| io::Error::other(format!("unknown node '{node_id}'")))?;
-        Ok(handle.spec.web_console_url_with_password(password))
+        Ok(handle
+            .spec
+            .web_console_url_with_password(password, handle.config.web_console_mode))
     }
 
     pub(crate) fn node_base_dir(&self, node_id: &str) -> io::Result<PathBuf> {
@@ -2297,6 +2310,20 @@ impl Cluster {
             .get(node_id)
             .ok_or_else(|| io::Error::other(format!("unknown node '{node_id}'")))?;
         Ok(handle.spec.base_dir.clone())
+    }
+
+    /// Replaces one node's provisioned files. Its running native listener retains its loaded key.
+    pub(crate) fn replace_native_tls_material(
+        &self,
+        node_id: &str,
+        certificate: &[u8],
+        private_key: &[u8],
+    ) -> io::Result<()> {
+        let directory = self.node_base_dir(node_id)?;
+        let paths = NativeSessionTlsPaths::for_node(&directory);
+        std::fs::write(paths.certificate, certificate)?;
+        std::fs::write(paths.private_key, private_key)?;
+        Ok(())
     }
 
     /// Where one node exposes its metrics, as an owned address a sampling task can keep after the
@@ -3967,25 +3994,56 @@ impl NodeHandle {
             }
             NodeTaskState::NotStarted | NodeTaskState::Terminal(_) => {}
         }
-        if self.config.grpc_mode == InternalTransportMode::Https {
-            ensure_dev_tls_assets()?;
-        }
-
         let settings = self.config.node_settings(&self.spec.node_id)?;
         let db_path = self.spec.db_path()?;
+        let grpc_transport = match self.config.grpc_mode {
+            InternalTransportMode::Http => GrpcTransport::Http,
+            InternalTransportMode::Https => {
+                let paths = NativeSessionTlsPaths::for_node(&self.spec.base_dir);
+                let listen_addr = parse_addr(&self.spec.grpc_https_addr())?;
+                GrpcTransport::Https {
+                    listen_addr,
+                    advertise_addr: listen_addr.into(),
+                    certificate: paths.certificate,
+                    private_key: paths.private_key,
+                }
+            }
+        };
+        let console_tls = matches!(self.config.web_console_mode, InternalTransportMode::Https);
+        let console_listen_addr = if console_tls {
+            SocketAddr::new(HOST, 0)
+        } else {
+            parse_addr(&self.spec.web_console_addr())?
+        };
+        let console_https_listen_addr = if console_tls {
+            Some(parse_addr(&self.spec.web_console_addr())?)
+        } else {
+            None
+        };
+        let console_certificate = if console_tls {
+            Some(self.spec.interconnect_tls_cert.clone())
+        } else {
+            None
+        };
+        let console_private_key = if console_tls {
+            Some(self.spec.interconnect_tls_key.clone())
+        } else {
+            None
+        };
         let identity = NodeIdentity::builder()
             .addr(parse_addr(&self.spec.grpc_addr())?)
-            .grpc_mode(self.config.grpc_mode)
-            .grpc_https_listen_addr(Some(parse_addr(&self.spec.grpc_https_addr())?))
+            .grpc_transport(grpc_transport)
             .http_listen_addr(parse_addr(&self.spec.http_addr())?)
             .https_listen_addr(parse_addr(&self.spec.https_addr())?)
             .observability_listen_addr(parse_addr(&self.spec.observability_addr())?)
-            .web_console_listen_addr(parse_addr(&self.spec.web_console_addr())?)
+            .web_console_listen_addr(console_listen_addr)
             .web_console_advertise_addr(Some(parse_addr(&self.spec.web_console_addr())?.into()))
+            .web_console_https_listen_addr(console_https_listen_addr)
+            .web_console_tls_cert(console_certificate)
+            .web_console_tls_key(console_private_key)
             .cluster_id(self.spec.cluster_id.clone())
             .node_id(node_name(&self.spec.node_id))
             .grpc_advertise_addr(parse_addr(&self.spec.grpc_addr())?.into())
-            .grpc_https_advertise_addr(Some(parse_addr(&self.spec.grpc_https_addr())?.into()))
             .interconnect_listen_addr(self.spec.interconnect_listen_addr())
             .interconnect_advertise_addr(
                 self.spec
@@ -4370,6 +4428,21 @@ enum NodeShutdownError {
     Deadline(NodeStopRecord),
 }
 
+/// Files explicitly provisioned for each HTTPS native listener when its node is first created.
+struct NativeSessionTlsPaths {
+    certificate: PathBuf,
+    private_key: PathBuf,
+}
+
+impl NativeSessionTlsPaths {
+    fn for_node(directory: &Path) -> Self {
+        Self {
+            certificate: directory.join("native-session.pem"),
+            private_key: directory.join("native-session-key.pem"),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct NodeSpec {
     node_id: String,
@@ -4430,11 +4503,24 @@ impl NodeSpec {
         interconnect_ca: &InterconnectTestCa,
         node_id: &str,
         allow_bootstrap: bool,
+        grpc_mode: InternalTransportMode,
     ) -> io::Result<Self> {
         let base_dir = root.path().join(node_id);
         std::fs::create_dir_all(&base_dir)?;
         let (interconnect_tls_cert, interconnect_tls_key) =
             interconnect_ca.issue_node(TEST_CLUSTER_ID, node_id, &base_dir)?;
+        if matches!(grpc_mode, InternalTransportMode::Https) {
+            ensure_dev_tls_assets()?;
+            let paths = NativeSessionTlsPaths::for_node(&base_dir);
+            std::fs::copy(
+                dev_tls_ca_file().with_file_name("node-2.pem"),
+                paths.certificate,
+            )?;
+            std::fs::copy(
+                dev_tls_ca_file().with_file_name("node-2-key.pem"),
+                paths.private_key,
+            )?;
+        }
         let ports = NodePorts::allocate()?;
         let syslog_ingestor_host = Self::syslog_ingestor_host(node_id)?;
 
@@ -4623,18 +4709,18 @@ impl NodeSpec {
         format!("http://{}:{}{path}", HOST, self.http_port)
     }
 
-    fn web_console_url(&self) -> String {
-        format!(
-            "http://{}:{}/console/?auth={}",
-            HOST,
-            self.web_console_port,
-            test_basic_auth_token()
-        )
+    fn web_console_url(&self, mode: InternalTransportMode) -> String {
+        self.web_console_url_with_password(TEST_AUTH_PASSWORD, mode)
     }
 
-    fn web_console_url_with_password(&self, password: &str) -> String {
+    fn web_console_url_with_password(&self, password: &str, mode: InternalTransportMode) -> String {
+        let scheme = match mode {
+            InternalTransportMode::Http => "http",
+            InternalTransportMode::Https => "https",
+        };
         format!(
-            "http://{}:{}/console/?auth={}",
+            "{}://{}:{}/console/?auth={}",
+            scheme,
             HOST,
             self.web_console_port,
             test_basic_auth_token_for_password(password)

@@ -62,6 +62,12 @@ pub enum AppError {
     MissingGrpcHttpsListenAddress,
     #[error("gRPC https mode requires an https advertise address")]
     MissingGrpcHttpsAdvertiseAddress,
+    #[error("gRPC https mode requires a TLS certificate")]
+    MissingGrpcTlsCertificate,
+    #[error("gRPC https mode requires a TLS private key")]
+    MissingGrpcTlsPrivateKey,
+    #[error("gRPC TLS certificate/key requires https mode")]
+    GrpcTlsRequiresHttps,
     #[error("web console https listener requires a TLS certificate")]
     MissingWebConsoleTlsCertificate,
     #[error("web console https listener requires a TLS private key")]

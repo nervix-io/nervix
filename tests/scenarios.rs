@@ -236,6 +236,7 @@ mod pulsar_subscriptions;
 mod rabbitmq_properties;
 mod restarted_voter;
 mod session_protocol;
+mod session_tls;
 mod standalone_transaction;
 mod web_console_connections;
 mod websocket_lifecycle;

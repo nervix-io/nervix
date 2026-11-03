@@ -190,10 +190,6 @@ const VHOST_TLS_KEY_PATH: &str = "tls.key";
 
 const VHOST_TLS_CA_PATH: &str = "ca.crt";
 
-const INTERNAL_TLS_CERT_FILE: &str = "node.pem";
-
-const INTERNAL_TLS_KEY_FILE: &str = "node-key.pem";
-
 /// Why a file a model reads from a resource version cannot be opened.
 #[derive(Debug, Error)]
 pub(in crate::application) enum ResourceFileError {
@@ -235,6 +231,8 @@ pub(in crate::application) enum TlsPemFailure {
 /// Why TLS material read from disk cannot be presented.
 #[derive(Debug, Error)]
 pub(in crate::application) enum TlsMaterialError {
+    #[error("failed to read {file} file")]
+    ReadFile { file: TlsFileKind },
     #[error("the {file} path cannot be resolved inside the resource")]
     ResolvePath { file: TlsFileKind },
     #[error("a required TLS file is unavailable")]
@@ -298,13 +296,6 @@ pub(in crate::application) enum HttpsListenerError {
     FaultInjected,
 }
 
-fn internal_tls_path(file_name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tls")
-        .join("dev")
-        .join(file_name)
-}
-
 pub(in crate::application) fn load_web_console_tls_server_config(
     cert_path: &Path,
     key_path: &Path,
@@ -323,17 +314,40 @@ pub(in crate::application) fn load_web_console_tls_server_config(
     Ok(StdArc::new(config))
 }
 
-pub(in crate::application) async fn load_grpc_tls_server_config()
--> Result<ServerTlsConfig, Report<AppError>> {
+pub(in crate::application) async fn load_grpc_tls_server_config(
+    cert_path: &Path,
+    key_path: &Path,
+) -> Result<ServerTlsConfig, Report<AppError>> {
     nervix_interconnect::install_rustls_crypto_provider();
-    let cert_path = internal_tls_path(INTERNAL_TLS_CERT_FILE);
-    let key_path = internal_tls_path(INTERNAL_TLS_KEY_FILE);
     let cert_pem = tokio::fs::read(cert_path)
         .await
-        .map_err(|error| Report::new(AppError::LoadGrpcTls).attach_printable(error.to_string()))?;
+        .change_context(TlsMaterialError::ReadFile {
+            file: TlsFileKind::Certificate,
+        })
+        .attach_printable_lazy(|| format!("certificate path: {}", cert_path.display()))
+        .change_context(AppError::LoadGrpcTls)?;
     let key_pem = tokio::fs::read(key_path)
         .await
-        .map_err(|error| Report::new(AppError::LoadGrpcTls).attach_printable(error.to_string()))?;
+        .change_context(TlsMaterialError::ReadFile {
+            file: TlsFileKind::PrivateKey,
+        })
+        .attach_printable_lazy(|| format!("private key path: {}", key_path.display()))
+        .change_context(AppError::LoadGrpcTls)?;
+    // Validate the exact bytes Tonic will retain before startup opens stores or listeners.
+    let cert_chain = CertificateDer::pem_slice_iter(&cert_pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| TlsMaterialError::pem(TlsFileKind::Certificate, source))
+        .change_context(AppError::LoadGrpcTls)?;
+    if cert_chain.is_empty() {
+        return Err(Report::new(TlsMaterialError::NoCertificates {
+            file: TlsFileKind::Certificate,
+        })
+        .change_context(AppError::LoadGrpcTls));
+    }
+    let private_key = PrivateKeyDer::from_pem_slice(&key_pem)
+        .map_err(|source| TlsMaterialError::pem(TlsFileKind::PrivateKey, source))
+        .change_context(AppError::LoadGrpcTls)?;
+    certified_key(cert_chain, private_key).change_context(AppError::LoadGrpcTls)?;
     Ok(ServerTlsConfig::new().identity(TonicIdentity::from_pem(cert_pem, key_pem)))
 }
 
@@ -372,6 +386,13 @@ pub(in crate::application) async fn load_vhost_tls_materials(
     load_root_store_from_pem_file(&ca_path)?;
     let cert_chain = load_certificates_from_pem_file(&cert_path, TlsFileKind::Certificate)?;
     let private_key = load_private_key_from_pem_file(&key_path)?;
+    certified_key(cert_chain, private_key)
+}
+
+fn certified_key(
+    cert_chain: Vec<CertificateDer<'static>>,
+    private_key: PrivateKeyDer<'static>,
+) -> Result<CertifiedKey, Report<TlsMaterialError>> {
     let Some(provider) = rustls::crypto::CryptoProvider::get_default() else {
         return Err(Report::new(TlsMaterialError::CryptoProvider));
     };
@@ -672,7 +693,7 @@ impl HttpsListenerCertificates {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, path::PathBuf};
+    use std::{collections::BTreeMap, io, path::PathBuf};
 
     use error_stack::Report;
     use nervix_interconnect::HttpsListenerInstallation;
@@ -687,10 +708,143 @@ mod tests {
         super::test_fixtures::{
             TestService, build_test_service, named, node_named, test_tls_files,
         },
-        HttpsListenerError, ListenerVhostKey, ListenerVhosts, ResourceFileError, ResourceStore,
-        TlsFileKind, TlsMaterialError, TlsPemFailure, VHOST_TLS_CA_PATH, VHOST_TLS_CERT_PATH,
-        VHOST_TLS_KEY_PATH, load_vhost_tls_materials,
+        AppError, HttpsListenerError, ListenerVhostKey, ListenerVhosts, ResourceFileError,
+        ResourceStore, ServerTlsConfig, TlsFileKind, TlsMaterialError, TlsPemFailure,
+        VHOST_TLS_CA_PATH, VHOST_TLS_CERT_PATH, VHOST_TLS_KEY_PATH, load_grpc_tls_server_config,
+        load_vhost_tls_materials,
     };
+
+    #[tokio::test]
+    async fn grpc_tls_loads_operator_material() {
+        let files = test_tls_files("session", &node_named("node-1"));
+        let result = load_grpc_tls_server_config(&files.certificate, &files.private_key).await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    fn assert_grpc_tls_read_failure(
+        result: Result<ServerTlsConfig, Report<AppError>>,
+        file: TlsFileKind,
+    ) {
+        let Err(error) = result else {
+            panic!("an unavailable TLS file must fail startup")
+        };
+        assert!(matches!(error.current_context(), AppError::LoadGrpcTls));
+        assert!(matches!(error.downcast_ref::<TlsMaterialError>(),
+            Some(TlsMaterialError::ReadFile { file: actual }) if *actual == file));
+        assert!(matches!(error.downcast_ref::<io::Error>(),
+            Some(cause) if cause.kind() == io::ErrorKind::NotFound));
+    }
+
+    #[tokio::test]
+    async fn grpc_tls_missing_certificate_retains_io_cause() {
+        let files = test_tls_files("session", &node_named("node-1"));
+        let missing = files.certificate.with_file_name("unavailable.pem");
+        assert_grpc_tls_read_failure(
+            load_grpc_tls_server_config(&missing, &files.private_key).await,
+            TlsFileKind::Certificate,
+        );
+    }
+
+    #[tokio::test]
+    async fn grpc_tls_missing_private_key_retains_io_cause() {
+        let files = test_tls_files("session", &node_named("node-1"));
+        let missing = files.private_key.with_file_name("unavailable.pem");
+        assert_grpc_tls_read_failure(
+            load_grpc_tls_server_config(&files.certificate, &missing).await,
+            TlsFileKind::PrivateKey,
+        );
+    }
+
+    #[tokio::test]
+    async fn grpc_tls_requires_a_nonempty_certificate_chain() -> io::Result<()> {
+        let files = test_tls_files("session", &node_named("node-1"));
+        std::fs::write(&files.certificate, b"")?;
+        let Err(error) = load_grpc_tls_server_config(&files.certificate, &files.private_key).await
+        else {
+            panic!("an empty certificate chain must fail startup");
+        };
+        assert!(matches!(
+            error.downcast_ref::<TlsMaterialError>(),
+            Some(TlsMaterialError::NoCertificates {
+                file: TlsFileKind::Certificate
+            })
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn grpc_tls_checks_every_certificate_pem_item() -> io::Result<()> {
+        let files = test_tls_files("session", &node_named("node-1"));
+        let mut chain = std::fs::read(&files.certificate)?;
+        chain.extend_from_slice(b"-----BEGIN CERTIFICATE-----\n@@@\n-----END CERTIFICATE-----\n");
+        std::fs::write(&files.certificate, chain)?;
+        let Err(error) = load_grpc_tls_server_config(&files.certificate, &files.private_key).await
+        else {
+            panic!("a malformed certificate after the leaf must fail startup");
+        };
+        assert!(matches!(
+            error.downcast_ref::<TlsMaterialError>(),
+            Some(TlsMaterialError::Pem {
+                file: TlsFileKind::Certificate,
+                kind: TlsPemFailure::Base64Decode,
+            })
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn grpc_tls_rejects_malformed_private_key_pem() -> io::Result<()> {
+        let files = test_tls_files("session", &node_named("node-1"));
+        std::fs::write(
+            &files.private_key,
+            b"-----BEGIN PRIVATE KEY-----\n@@@\n-----END PRIVATE KEY-----\n",
+        )?;
+        let Err(error) = load_grpc_tls_server_config(&files.certificate, &files.private_key).await
+        else {
+            panic!("a malformed private key must fail startup");
+        };
+        assert!(matches!(
+            error.downcast_ref::<TlsMaterialError>(),
+            Some(TlsMaterialError::Pem {
+                file: TlsFileKind::PrivateKey,
+                kind: TlsPemFailure::Base64Decode,
+            })
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn grpc_tls_requires_a_private_key_pem_item() -> io::Result<()> {
+        let files = test_tls_files("session", &node_named("node-1"));
+        std::fs::write(&files.private_key, b"")?;
+        let Err(error) = load_grpc_tls_server_config(&files.certificate, &files.private_key).await
+        else {
+            panic!("an empty private key must fail startup");
+        };
+        assert!(matches!(
+            error.downcast_ref::<TlsMaterialError>(),
+            Some(TlsMaterialError::NoPemItems {
+                file: TlsFileKind::PrivateKey
+            })
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn grpc_tls_checks_the_leaf_matches_the_private_key() {
+        let files = test_tls_files("session", &node_named("node-1"));
+        let other = test_tls_files("session", &node_named("node-2"));
+        let Err(error) = load_grpc_tls_server_config(&files.certificate, &other.private_key).await
+        else {
+            panic!("a key that does not match the leaf must fail startup");
+        };
+        assert!(matches!(
+            error.downcast_ref::<TlsMaterialError>(),
+            Some(TlsMaterialError::CertifiedKey {
+                source: rustls::Error::InconsistentKeys(rustls::InconsistentKeys::KeyMismatch),
+            })
+        ));
+    }
 
     fn vhost(name: &str, hostname: &str, tls_version: Option<u64>) -> Model {
         Model::Vhost(CreateVhost {

@@ -250,10 +250,17 @@ above it is refused before it is buffered.
 The listener serves plaintext HTTP/2 on `--addr` (`NERVIX_ADDR`, default `127.0.0.1:47391`) and
 advertises `--grpc-advertise-addr` (`NERVIX_GRPC_ADVERTISE_ADDR`), or the listen address when that
 is unset. `--grpc-mode https` (`NERVIX_GRPC_MODE`) serves the listener over TLS on
-`--grpc-https-listen-addr` instead and advertises `--grpc-https-advertise-addr`. That mode presents
-the development certificate that `scripts/generate_dev_tls.sh` writes under `tls/dev` in the source
-tree the server was built from; no option selects another certificate, and the Kubernetes deployment
-runs the listener in plaintext mode.
+`--grpc-https-listen-addr` instead and advertises `--grpc-https-advertise-addr`. HTTPS requires
+`--grpc-tls-cert` (`NERVIX_GRPC_TLS_CERT`) and `--grpc-tls-key` (`NERVIX_GRPC_TLS_KEY`), naming the
+operator's PEM certificate chain and private key. The first certificate is the server's leaf and
+must cover the advertised hostname or IP address. Every node needs its own reachable advertised
+address and provisioned identity. The Kubernetes deployment runs the listener in plaintext mode.
+
+The node validates the complete identity at startup, before opening its stores or listeners.
+Missing material, unreadable files, unusable PEM and mismatched keys fail startup with a typed
+cause; TLS files supplied in HTTP mode are refused. Certificates are loaded once, so rotation
+requires restarting the node. A running listener retains the loaded identity. Client trust remains
+explicit: the native client uses the supplied CA, while the browser uses its own trust store.
 
 ### Console WebSocket
 
@@ -263,6 +270,12 @@ and optionally a TLS listener, `--web-console-https-listen-addr` with `--web-con
 `--web-console-tls-key`. Each binary message holds exactly one frame in either direction and nothing
 else: no size prefix, never two frames, never part of one. Ping, pong, and close messages belong to
 the WebSocket connection and never carry a frame.
+
+`--web-console-advertise-addr` names the externally reachable host and port. Its advertised scheme
+is HTTPS when the HTTPS console listener is configured and HTTP otherwise. Without an explicit
+address, the HTTPS listener's address is preferred. The certificate and key are loaded once at
+startup; rotation requires a restart. Console HTTPS configuration is independent of native gRPC
+TLS configuration.
 
 The console session is served only by the leader. A console session on any other node is ended at
 once with a `SessionEnding` whose reason is a `LeaderRedirect` naming the leader, and the console

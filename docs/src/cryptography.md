@@ -30,7 +30,7 @@ debt the `non_aws_lc_crypto` count records. Nervix obtains that cryptography tod
 
 | Purpose | Where Nervix obtains it today |
 | --- | --- |
-| TLS provider | Three direct installs of AWS-LC's default provider: in the interconnect, in the connectors' shared TLS configuration and in the client core. The HTTPS listener reads the installed default. |
+| TLS provider | Three direct installs of AWS-LC's default provider: in the interconnect, in the connectors' shared TLS configuration and in the client core. The application's shared certificate/key constructor reads the installed default for native sessions and TLS VHOSTs. |
 | Security digests | RustCrypto SHA-256, for the interconnect's trust-root fingerprint and the expression function `sha256()`. |
 | Secure randomness | The operating-system generator of `rand_core`, for interconnect entropy and for password salts. |
 | Password derivation | Argon2, for user passwords. |

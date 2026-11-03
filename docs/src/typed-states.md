@@ -54,6 +54,13 @@ required, validates it there, and passes the resulting typed value to the next l
 the registry, execution plans, runtime, clients, and diagnostics from assigning different meanings
 to the same raw value.
 
+The resolved node identity distinguishes a plaintext gRPC transport from an HTTPS transport that
+carries its listen and advertised addresses and both provisioned TLS paths. The CLI edge refuses
+incomplete pairs and TLS material in HTTP mode before constructing that identity. File availability,
+PEM parsing and key consistency are checked at startup before stores or listeners open; invalid
+material is a typed failure, never a substituted identity. The [Client Session Protocol](client-session-protocol.md#native-grpc)
+owns the listener and certificate lifetime.
+
 A backup cut's active phase is a typed state. Its completed phase measurements are an ordered
 sequence of typed phases and durations; an empty sequence means the first phase is still active.
 These task-owned measurements are volatile diagnostics and do not enter stored configuration,
