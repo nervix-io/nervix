@@ -123,7 +123,7 @@ impl AcknowledgementRequests for AsyncClient {
 }
 
 /// What the driver retains after classifying one decoded publish.
-enum IngestorPacket {
+pub(super) enum IngestorPacket {
     Message(Publish),
     Oversized(Option<ManualAck>),
 }
@@ -131,7 +131,7 @@ enum IngestorPacket {
 impl IngestorPacket {
     /// Admits `publish` when its complete packet holds at most `admission` bytes, and otherwise
     /// keeps only the acknowledgement its quality of service needs under `mode`.
-    fn classify(mut publish: Publish, mode: AckMode, admission: NonZeroU32) -> Self {
+    pub(super) fn classify(mut publish: Publish, mode: AckMode, admission: NonZeroU32) -> Self {
         let packet_bytes: u64 = publish.size().arch_into();
         if packet_bytes > u64::from(admission.get()) {
             let acknowledgement = match mode {

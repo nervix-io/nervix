@@ -2536,6 +2536,18 @@ impl Cluster {
         publish_mqtt_with_qos(&self.dependencies, topic, payload, QoS::AtLeastOnce, true).await
     }
 
+    /// Publishes `payload` with the flags and MQTT 5 properties `options` name, and returns once
+    /// the broker answered what their QoS asks for.
+    pub(crate) async fn publish_mqtt_with_options(
+        &self,
+        topic: &str,
+        payload: &str,
+        options: PublishOptions,
+    ) -> io::Result<()> {
+        let (host, port) = dependency_host_port(&self.dependencies, MQTT_ADDR, 1883)?;
+        publish_mqtt_options_to_address(host, port, topic, payload, options).await
+    }
+
     /// Publishes `payload` at QoS 2 and returns once the broker completed its PUBCOMP exchange.
     pub(crate) async fn publish_mqtt_qos2(&self, topic: &str, payload: &str) -> io::Result<()> {
         publish_mqtt_with_qos(&self.dependencies, topic, payload, QoS::ExactlyOnce, true).await
@@ -5566,6 +5578,17 @@ pub(crate) async fn publish_mqtt_to_address(
     qos: QoS,
     retain: bool,
 ) -> io::Result<()> {
+    let options = PublishOptions::new(qos).retain(retain);
+    publish_mqtt_options_to_address(host, port, topic, payload, options).await
+}
+
+async fn publish_mqtt_options_to_address(
+    host: String,
+    port: u16,
+    topic: &str,
+    payload: &str,
+    publish: PublishOptions,
+) -> io::Result<()> {
     let client_id = format!("nervix-cucumber-{}", Uuid::now_v7().as_simple());
     let options = MqttOptions::new(client_id, (host, port));
     let (client, mut eventloop) = AsyncClient::builder(options).capacity(16).build();
@@ -5582,7 +5605,7 @@ pub(crate) async fn publish_mqtt_to_address(
         // Runtime ingestors can still be attaching immediately after START. Retain the input on
         // its unique scenario topic, and keep driving until it is sent (QoS 0) or answered (QoS 1).
         let notice = client
-            .publish_tracked(topic, payload, PublishOptions::new(qos).retain(retain))
+            .publish_tracked(topic, payload, publish)
             .await
             .map_err(io::Error::other)?;
         notice

@@ -93,6 +93,11 @@ an out-of-range present timestamp is a typed conversion failure. Missing binary 
 empty keys remain present empty bytes, and the null-payload tombstone flag preserves the distinction
 from a present empty payload when both lend an empty slice to a codec.
 
+An MQTT publish keeps a property its publisher left unset distinct from one it set empty: an unset
+content type, response topic, correlation data or message expiry is absent and reads as a typed
+null, while an empty string, empty bytes or a zero expiry remain values. Absence comes from the
+packet, never from an encoding of the value.
+
 A paced poll message carries a typed metadata variant. HTTP polling supplies its response status
 and scheduled poll instant in that variant, while sources with no integration fields carry the
 headers-only variant. The host copies the variant into a matching quiesce buffer and Arrow builder;

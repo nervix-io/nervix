@@ -723,6 +723,15 @@ drive a paced window from the producer's timestamp and refuse a timestamp beside
 acknowledgement and lifecycle locks. The AMQP client's reader, metadata visits and the async
 refusal step remain outside Deloxide's lock detector.
 
+MQTT publish metadata and user properties stay with the packet their message owns until the host
+has projected what its programs read, and visiting them adds no lock or shared state. The
+`mqtt-publish-metadata` Bolero property holds the complete row, the headers and their retained copy
+to the decoded and admitted packet. The registered `scenario.mqtt-*` and `stress.mqtt-*` workloads
+read every field through a real broker on one and three nodes, in `NO ACK` and `ACK SEQUENTIAL`,
+beside tracked ingestion, acknowledgement and quiesce state, and include a broker redelivery and a
+buffering quiesce. Driver polling and the event-loop task remain outside Deloxide's lock detector;
+the ingestor-host and MQTT driver Shuttle checks retain their existing scope.
+
 ### Kafka source rejection floors
 
 A Kafka source under `OFFSET BY CONSUMER GROUP` records the earliest rejected record of every
