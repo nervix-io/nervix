@@ -276,12 +276,12 @@ The registry's `NERVIX SUB TYPES` archive signature identifies the current Model
 Pulsar subscription's required type, an owned Pulsar subscription's required start position, a Kafka
 consumer group's required start position, the required branch partition count, Sentry platform, an
 ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the
-session and quality of service an MQTT TOPIC ingestor writes beside its delivery mode, the quality
-of service an MQTT TOPIC emitter writes beside its publishing mode, a `REDIS PUBSUB` ingestor's
-subscription, which is either a `CHANNEL` or a `PATTERN`, and that header state. Consensus's
-`raft_subscription_types_` keyspaces and current state metadata encoding identify its stored shapes.
-An unrecognized signature, namespace or encoding fails with the owning storage error and requires
-the stored data to be recreated.
+receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of
+service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC
+emitter writes beside its publishing mode, a `REDIS PUBSUB` ingestor's subscription, which is either
+a `CHANNEL` or a `PATTERN`, and that header state. Consensus's `raft_subscription_types_` keyspaces
+and current state metadata encoding identify its stored shapes. An unrecognized signature, namespace
+or encoding fails with the owning storage error and requires the stored data to be recreated.
 
 ## Absence And Distinct States
 
