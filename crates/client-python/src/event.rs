@@ -267,3 +267,11 @@ impl Event {
         }
     }
 }
+
+/// Adds the subscription event classes to the module.
+pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<Event>()?;
+    module.add_class::<Subscription>()?;
+    module.add_class::<RestorationFailure>()?;
+    Ok(())
+}

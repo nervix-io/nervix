@@ -408,3 +408,10 @@ impl BatchBuilder {
         }
     }
 }
+
+/// Adds the batch and batch builder classes to the module.
+pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<Batch>()?;
+    module.add_class::<BatchBuilder>()?;
+    Ok(())
+}

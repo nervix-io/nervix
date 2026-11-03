@@ -218,3 +218,12 @@ impl Fields {
         }
     }
 }
+
+/// Adds the schema and field description classes to the module.
+pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<Schema>()?;
+    module.add_class::<Field>()?;
+    module.add_class::<Level>()?;
+    module.add_class::<Fields>()?;
+    Ok(())
+}

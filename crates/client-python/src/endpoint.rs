@@ -663,3 +663,16 @@ impl Delivery {
         }
     }
 }
+
+/// Adds the producer, consumer and delivery classes to the module.
+pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<Producer>()?;
+    module.add_class::<Consumer>()?;
+    module.add_class::<Delivery>()?;
+    module.add_class::<SubmissionOutcome>()?;
+    module.add_class::<Grant>()?;
+    module.add_class::<Policy>()?;
+    module.add_class::<Reopen>()?;
+    module.add_class::<PendingSubmission>()?;
+    Ok(())
+}

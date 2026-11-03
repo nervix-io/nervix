@@ -328,3 +328,12 @@ impl DomainClock {
         admitted.map_err(|failure| errors::raise(py, failure))
     }
 }
+
+/// Adds the domain clock classes to the module.
+pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<ClockEvent>()?;
+    module.add_class::<DomainClock>()?;
+    module.add_class::<PacedClock>()?;
+    module.add_class::<Tick>()?;
+    Ok(())
+}

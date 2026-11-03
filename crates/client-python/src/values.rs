@@ -110,3 +110,11 @@ pub(crate) fn cell<'py>(py: Python<'py>, cell: CellView<'_>) -> PyResult<Bound<'
         }
     }
 }
+
+/// Adds the class of a withheld value, and `REDACTED`, which every withheld value equals, to the
+/// module.
+pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<Redacted>()?;
+    module.add("REDACTED", Redacted)?;
+    Ok(())
+}

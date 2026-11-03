@@ -43,43 +43,19 @@ mod values;
 
 use pyo3::prelude::*;
 
-/// The `nervix_client` module: every class, enumeration and exception of the package.
+/// The `nervix_client` module: every class, enumeration and exception of the package, each module
+/// adding its own.
 #[pymodule]
 fn nervix_client(module: &Bound<'_, PyModule>) -> PyResult<()> {
     errors::register(module)?;
     enums::register(module)?;
-    module.add_class::<session::Cancel>()?;
-    module.add_class::<session::Session>()?;
-    module.add_class::<session::Execution>()?;
-    module.add_class::<session::Outcome>()?;
-    module.add_class::<session::Diagnostic>()?;
-    module.add_class::<session::Backup>()?;
-    module.add_class::<session::Restore>()?;
-    module.add_class::<session::Suggestions>()?;
-    module.add_class::<session::Suggestion>()?;
-    module.add_class::<schema::Schema>()?;
-    module.add_class::<schema::Field>()?;
-    module.add_class::<schema::Level>()?;
-    module.add_class::<schema::Fields>()?;
-    module.add_class::<event::Event>()?;
-    module.add_class::<event::Subscription>()?;
-    module.add_class::<event::RestorationFailure>()?;
-    module.add_class::<clock::ClockEvent>()?;
-    module.add_class::<clock::DomainClock>()?;
-    module.add_class::<clock::PacedClock>()?;
-    module.add_class::<clock::Tick>()?;
-    module.add_class::<endpoint::Producer>()?;
-    module.add_class::<endpoint::Consumer>()?;
-    module.add_class::<endpoint::Delivery>()?;
-    module.add_class::<endpoint::SubmissionOutcome>()?;
-    module.add_class::<endpoint::Grant>()?;
-    module.add_class::<endpoint::Policy>()?;
-    module.add_class::<endpoint::Reopen>()?;
-    module.add_class::<endpoint::PendingSubmission>()?;
-    module.add_class::<batch::Batch>()?;
-    module.add_class::<batch::BatchBuilder>()?;
-    module.add_class::<values::Redacted>()?;
-    module.add("REDACTED", values::Redacted)?;
+    session::register(module)?;
+    schema::register(module)?;
+    event::register(module)?;
+    clock::register(module)?;
+    endpoint::register(module)?;
+    batch::register(module)?;
+    values::register(module)?;
     Ok(())
 }
 

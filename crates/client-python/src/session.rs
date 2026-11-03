@@ -623,3 +623,17 @@ impl Suggestions {
         self.page.outcome().continuation.as_deref()
     }
 }
+
+/// Adds the session, command, outcome and completion classes to the module.
+pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<Cancel>()?;
+    module.add_class::<Session>()?;
+    module.add_class::<Execution>()?;
+    module.add_class::<Outcome>()?;
+    module.add_class::<Diagnostic>()?;
+    module.add_class::<Backup>()?;
+    module.add_class::<Restore>()?;
+    module.add_class::<Suggestions>()?;
+    module.add_class::<Suggestion>()?;
+    Ok(())
+}
