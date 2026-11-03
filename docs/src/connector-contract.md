@@ -673,8 +673,8 @@ and the operation and attempt timeouts `timeout_ms` sets for every request of bo
 include the lookup; a receive's start after the long poll of at most one second it asks the service
 to hold it for. The client names static credentials, with `session_token` where they are temporary ones, and its
 region, so `aws-config` never consults the default credential or region chains that could reach
-IMDS, ECS, STS or SSO over HTTP. It still builds its SSO token chain, which SQS never asks for
-a token because it signs with SigV4; the loader receives the same HTTP client, so that chain would
+IMDS, ECS, STS or SSO over HTTP. It still builds its SSO token chain, which SQS never asks for a
+token, because it signs with SigV4; the loader receives the same HTTP client, so that chain would
 use the node resolver too.
 
 Both hooks give a lookup at most 30 seconds, like the Reqwest hooks; the client's own deadline
@@ -1103,17 +1103,22 @@ the pattern subscription's runtime scenario observes both metadata fields.
 
 `SQS QUEUE` shares one queue-name rule between ingestion and emission: 1 to 80 ASCII letters,
 digits, `-` and `_`, where a FIFO queue's name ends in `.fifo` within those 80 characters, passed
-through exactly as written. Its declaration permits `ACK SEQUENTIAL`, `ACK PARALLEL` with a
-window of at most the ten messages one receive returns, and `SUSPEND` for intake, since the queue
-keeps a message until the source deletes it, and `SINGLE` or `BATCH` for emission,
-where a `.fifo` queue requires `FIFO GROUP` and a standard queue refuses it. Message attributes are
-its headers in both directions, as `last_wins` exact names; the emitter declares no envelope and
-optional batching up to the 256 KiB SQS admits in one message. An SQS client declares only the keys
-its connections read, each in both directions: the required `endpoint`, `region`, `access_key_id`
-and `secret_access_key`, and the optional `session_token`, `timeout_ms`, which bounds every request,
-and `tls_ca_file`. An SQS connection trusts `tls_ca_file`, or the platform's roots without it, takes
-no proxy and presents no client certificate, so the client declares neither a proxy nor a
-client-identity key.
+through exactly as written. The ingestor declares `ACK SEQUENTIAL`, `ACK PARALLEL` with a window
+of at most the ten messages one receive returns, `INSTANCES`, and `SUSPEND` for intake, since the
+queue keeps a message until the source deletes it, and its typed metadata is the message identity,
+send and first-receive times, receive count, group and deduplication identifiers, sequence number
+and sender identifier. The emitter declares `MODE ACK` alone, a required `SEND SINGLE` or
+`SEND BATCH` request shape, and `FIFO GROUP`, which a `.fifo` queue requires and a standard queue
+refuses. The request shape is emit-only and the parallel receive ingest-only. Message attributes
+are its headers in both directions, as `last_wins` exact names: the ingestor reads each value as
+text, and the emitter writes a `STRING` as a `String`, an integer as a `Number` and `BYTES` as a
+`Binary` attribute. The emitter declares the `DELAY` and `DEDUPLICATION ID` envelope clauses, which
+the registry holds to a standard and a FIFO queue respectively, and optional batching up to the
+1 MiB SQS admits in one message. An SQS client declares only the keys its connections read, each
+in both directions: the required `endpoint`, `region`, `access_key_id` and `secret_access_key`, and
+the optional `session_token`, `timeout_ms`, which bounds every request, and `tls_ca_file`. An SQS
+connection trusts `tls_ca_file` alone, or the platform's roots without it, takes no proxy and
+presents no client certificate, so the client declares neither a proxy nor a client-identity key.
 The SQS-specific declaration tests, generated grammar conformance and one-/three-node public
 declaration scenarios qualify these facts together.
 
@@ -2486,7 +2491,7 @@ Where it can learn that limit it measures the complete message and rejects a rec
 fit before writing it, with a reason naming the size and the limit, so the rejection follows the
 message error policy instead of failing the transport: the MQTT emitter measures the `PUBLISH` packet
 against the Maximum Packet Size of the broker's latest `CONNACK` and the largest packet MQTT can
-express, the SQS emitter counts attributes and the FIFO group against 256 KiB, and the Kafka producer,
+express, the SQS emitter counts attributes and the FIFO group against 1 MiB, and the Kafka producer,
 the NATS client and the Pulsar client check `message.max.bytes`, `max_payload` and the
 `maxMessageSize` of the connection's `CommandConnected` with the key, headers or message metadata
 they write. A limit the connector cannot learn stays with the destination, and the destination's own

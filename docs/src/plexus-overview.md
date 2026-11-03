@@ -481,8 +481,9 @@ Larger batches genuinely pay only at boundaries that do work per batch rather th
 
 Broker emitters — Kafka, Pulsar, NATS, RabbitMQ, MQTT, Redis, ZeroMQ, Sentry, and syslog — encode
 and publish one record at a time whatever the batch size; wire batching there belongs to the
-client, such as Kafka's `linger.ms` and `batch.size`. SQS `BATCH` groups at most ten records per
-request, and database emitters split every flush into statements of at most the
+client, such as Kafka's `linger.ms` and `batch.size`. SQS `SEND BATCH` sends at most ten records,
+within 1 MiB, in each `SendMessageBatch` request, and database emitters split every flush into
+statements of at most the
 [batching clause's](emitters.md#batching) `MAX MESSAGES` records. On such routes a larger
 `MAX BATCH SIZE` or a longer interval buys only fewer flush
 cycles, at the cost of latency, memory, and coarser failure and retry granularity: prefer the

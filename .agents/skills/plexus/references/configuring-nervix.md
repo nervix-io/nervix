@@ -475,17 +475,22 @@ current connection, retry and deadline limits.
   subscriber can then receive twice. The Redis sections of `Ingestors` and `Emitters` state each
   window.
 - An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL`, or `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT
-  ...` with `n` at most 10, with `ON QUIESCE SUSPEND`. An emitter writes its request shape,
-  `SEND SINGLE` or `SEND BATCH`, before `MODE ACK RETRY POLICY ...`. Treat `QUEUE` as a literal,
-  case-preserving SQS name, and check `SQS CLIENT` keys against `Ingestors` → `SQS`: `endpoint`,
-  `region`, `access_key_id` and `secret_access_key` are required, and it declares no proxy or
-  client certificate keys. After `ENCODE USING`, an emitter may write
-  `DELAY <whole seconds from 1s to 900s>` for a standard queue or `DEDUPLICATION ID <string_expression>`
-  for a `.fifo` queue. Its `write_header` values may be `STRING`, an integer type or `BYTES`, sent
-  as `String`, `Number` and `Binary` attributes; read `Emitters` → `SQS`.
+  ...` with `n` at most 10, with `ON QUIESCE SUSPEND`; a rejected batch returns on its
+  `RETRY POLICY`, and a queue visibility timeout shorter than `ACK TIMEOUT` can hand a message still
+  awaiting its acknowledgement to another receive. An emitter writes its request shape,
+  `SEND SINGLE` or `SEND BATCH`, before `MODE ACK RETRY POLICY ...`; `SEND BATCH` is independent
+  of the `BATCH` clause. Treat `QUEUE` as a literal, case-preserving SQS name, and check
+  `SQS CLIENT` keys against `Ingestors` → `SQS`: `endpoint`, `region`, `access_key_id` and
+  `secret_access_key` are required, `tls_ca_file` replaces the platform's roots rather than adding
+  to them, and it declares no proxy or client certificate keys. After `ENCODE USING`, an emitter may
+  write `DELAY <whole seconds from 1s to 900s>` for a standard queue or
+  `DEDUPLICATION ID <string_expression>` for a `.fifo` queue. Its `write_header` values may be
+  `STRING`, an integer type or `BYTES`, sent as `String`, `Number` and `Binary` attributes; read
+  `Emitters` → `SQS`.
   For source identity, redelivery routing and event time, read the metadata table in `Ingestors` →
   `SQS`; use its exact field types and `TIMESTAMP AT metadata.sent_at` where appropriate. User
-  message attributes remain transport headers.
+  message attributes remain transport headers, which an ingestor reads as text, so a `Binary`
+  attribute that is not UTF-8 does not survive the read.
 - `NATS SUBJECT` ingestors use `NO ACK` with a required `QUEUE GROUP` and `INSTANCES`, and
   `BUFFER` or `DROP` quiesce. Write NATS wildcards only in an ingestor's `SUBJECT`, as whole
   tokens with `>` last; an emitter's `SUBJECT` is one literal subject. Check both against the NATS
