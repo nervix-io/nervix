@@ -9,7 +9,7 @@
 use std::{
     convert::Infallible,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    num::{NonZeroU64, NonZeroUsize},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     path::Path,
     task::{Context, Poll},
     time::Duration,
@@ -2042,6 +2042,7 @@ async fn an_upload_streams_its_archive_and_reports_the_installed_version() {
             version: NonZeroU64::new(7),
             origin: Some(OutcomeOrigin::Executed),
             failure: None,
+            calls: NonZeroU32::MIN,
         })
     );
 }
@@ -2093,6 +2094,10 @@ async fn a_lost_upload_reply_retries_with_the_same_identity_and_archive() {
     assert_eq!(second.start.resource, first.start.resource);
     assert_eq!(second.archive, first.archive);
     assert!(outcome.succeeded());
+    let upload = outcome
+        .resource_upload
+        .assured("an answered upload reports its upload outcome");
+    assert_eq!(upload.calls.get(), 2, "the lost reply's call and its retry");
 }
 
 #[nervix_primitives::test]
@@ -2129,6 +2134,14 @@ async fn an_upload_redirect_keeps_its_identity_and_archive() {
     assert_eq!(second.start.upload_identity, identity);
     assert_eq!(second.archive, first.archive);
     assert!(outcome.succeeded());
+    let upload = outcome
+        .resource_upload
+        .assured("an answered upload reports its upload outcome");
+    assert_eq!(
+        upload.calls.get(),
+        2,
+        "the redirected call and the leader's"
+    );
 }
 
 #[nervix_primitives::test]
