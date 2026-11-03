@@ -475,11 +475,12 @@ current connection, retry and deadline limits.
   meanwhile, and an emitter retries a `PUBLISH` answered later than the driver's 500 ms, which a
   subscriber can then receive twice. The Redis sections of `Ingestors` and `Emitters` state each
   window.
-- An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL` with `ON QUIESCE SUSPEND`. An emitter writes
-  its request shape, `SEND SINGLE` or `SEND BATCH`, before `MODE ACK RETRY POLICY ...`. Treat
-  `QUEUE` as a literal, case-preserving SQS name, and check `SQS CLIENT` keys against `Ingestors` →
-  `SQS`: `endpoint`, `region`, `access_key_id` and `secret_access_key` are required, and it
-  declares no proxy or client certificate keys. After `ENCODE USING`, an emitter may write
+- An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL`, or `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT
+  ...` with `n` at most 10, with `ON QUIESCE SUSPEND`. An emitter writes its request shape,
+  `SEND SINGLE` or `SEND BATCH`, before `MODE ACK RETRY POLICY ...`. Treat `QUEUE` as a literal,
+  case-preserving SQS name, and check `SQS CLIENT` keys against `Ingestors` → `SQS`: `endpoint`,
+  `region`, `access_key_id` and `secret_access_key` are required, and it declares no proxy or
+  client certificate keys. After `ENCODE USING`, an emitter may write
   `DELAY <whole seconds from 1s to 900s>` for a standard queue or `DEDUPLICATION ID <string_expression>`
   for a `.fifo` queue. Its `write_header` values may be `STRING`, an integer type or `BYTES`, sent
   as `String`, `Number` and `Binary` attributes; read `Emitters` → `SQS`.

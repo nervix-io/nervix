@@ -59,6 +59,11 @@ reply when it arrives. To submit the same logical request again, prepare it once
 `prepare_execution`, which fixes its execution reference, domain, and upload identity, and pass the
 same `ExecutionHandle` to `execute_prepared` after an uncertain, cancelled, or timed-out attempt.
 
+The client classifies a command's statements before it sends them, with the Plexus statement
+grammar. It builds the grammar once on each thread that prepares a command and keeps it for the
+life of that thread: the first command a thread prepares pays for building it, and each such thread
+holds about a megabyte and a half for it.
+
 Every call is bounded by `ConnectOptions`: `connect_timeout` for each connection attempt (10
 seconds by default), `request_timeout` for each request (120 seconds), and `retry_timeout` for the
 call with all of its retries and redirects (120 seconds). `BACKUP` uses `backup_wait_timeout`

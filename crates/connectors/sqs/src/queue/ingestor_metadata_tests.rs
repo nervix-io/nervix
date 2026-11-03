@@ -12,7 +12,6 @@
 
 use std::num::ParseIntError;
 
-use meticulous::ResultExt as _;
 use nervix_connector::{RetainedIngestMetadata, RetainedIngestMetadataValue as Value};
 
 use super::*;
@@ -144,10 +143,7 @@ impl MetadataCase {
             .visit(&mut |name, value| headers.push((name.to_string(), value.to_string())));
         assert_eq!(headers, [("trace".to_string(), self.header)]);
         assert_eq!(message.payload(), b"{\"marker\":\"metadata\"}");
-        assert_eq!(
-            message.position().receipt_handle.as_deref(),
-            Some("receipt-1")
-        );
+        assert_eq!(message.position().receipt_handle, "receipt-1");
         assert!(row.position.is_none());
     }
 }
@@ -278,7 +274,7 @@ fn system_timestamps_outside_the_nanosecond_range_keep_the_typed_range_cause() {
 struct MalformedMessage;
 
 impl QueueReceive for MalformedMessage {
-    async fn receive(&self) -> SqsQueueIngestorResult<Vec<SqsMessage>> {
+    async fn receive(&self, _receive: ReceiveRequest) -> SqsQueueIngestorResult<Vec<SqsMessage>> {
         Ok(vec![
             SqsMessage::builder()
                 .receipt_handle("receipt-1")
@@ -293,8 +289,13 @@ impl QueueReceive for MalformedMessage {
 
 #[nervix_primitives::test]
 async fn a_system_metadata_refusal_is_a_read_failure_with_its_exact_parse_cause() {
+    let request = IngestorBatchRequest {
+        max_messages: NonZeroUsize::MIN,
+        batch_timeout: None,
+    };
     let result =
-        SqsQueueIngestor::read_batch(&MalformedMessage, &IngestorReadCancellation::new()).await;
+        SqsQueueIngestor::read_batch(&MalformedMessage, request, &IngestorReadCancellation::new())
+            .await;
     let error = match result {
         Ok(_) => panic!("a receive count above u32::MAX must fail the read"),
         Err(error) => error,
