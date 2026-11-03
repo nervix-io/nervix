@@ -1018,8 +1018,8 @@ Feature: Client wire failure regressions
       CREATE VHOST edge wide-rows-{{test_id}}.example.com;
       CREATE ENDPOINT wide_ingress ON edge PATH '/records' TYPE HTTP;
       CREATE HTTP ENDPOINT INGESTOR wide_source
-        FROM wide_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 32MiB DECODE USING wide_record_codec
+        FROM wide_ingress MODE ACK MAX 1 ACK TIMEOUT 30s
+        ON QUIESCE REJECT RETRY AFTER 1s DECODE USING wide_record_codec
         TO wide_records
         SET sequence = message.sequence, note = message.note
         UNBRANCHED
@@ -1031,7 +1031,7 @@ Feature: Client wire failure regressions
       """
       CREATE SUBSCRIPTION wide_seen TO wide_records;
       """
-    And http payload is posted to node "node-1" with host "wide-rows-{{test_id}}.example.com" path "/records"
+    And http payload is acknowledged within "30s" by node "node-1" with host "wide-rows-{{test_id}}.example.com" path "/records"
       """
       {"sequence":1,"note":"{{wide_note}}"}
       """
