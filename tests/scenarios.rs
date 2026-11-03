@@ -236,6 +236,7 @@ mod pulsar_delivery;
 mod pulsar_emission;
 mod pulsar_metadata;
 mod pulsar_readiness;
+mod pulsar_subscription_types;
 mod pulsar_subscriptions;
 mod rabbitmq_envelope;
 mod rabbitmq_properties;
@@ -471,6 +472,8 @@ struct ScenarioWorld {
     last_backup: Option<backup::TestBackup>,
     /// A CLI backup paused at its quiesced cut while the scenario exercises other operations.
     background_backup: Option<AbortOnDropHandle<std::process::Output>>,
+    /// A native client's backup running while the scenario interrupts its session.
+    background_native_backup: Option<backup::BackgroundNativeBackup>,
     /// The exact CLI child started by the background-backup step, for cancellation assertions.
     background_backup_pid: Option<nix::unistd::Pid>,
     /// How the last backup download a scenario shaped itself ended.
@@ -640,6 +643,8 @@ struct ScenarioWorld {
     background_http_publish: Option<AbortOnDropHandle<std::io::Result<()>>>,
     background_https_publish: Option<BackgroundHttpsPublish>,
     stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
+    /// Consumers the scenario holds on Pulsar subscriptions beside its ingestors, by name.
+    held_pulsar_consumers: BTreeMap<String, BrokerObserver>,
     /// The Kafka broker this scenario owns, which it can make refuse writes without touching the
     /// shared test broker.
     kafka_mock_broker: Option<KafkaMockBroker>,
@@ -1246,6 +1251,17 @@ async fn given_pulsar_is_running(world: &mut ScenarioWorld) {
         .start_pulsar(&world.test_id)
         .await
         .expect("Pulsar test container should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("Pulsar with authentication is running")]
+async fn given_pulsar_with_authentication_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_pulsar_auth(&world.test_id)
+        .await
+        .expect("the authenticating Pulsar test container should start");
     refresh_dependency_configuration(world);
 }
 
@@ -9671,6 +9687,32 @@ async fn when_the_tcp_forwarder_stops(world: &mut ScenarioWorld, address: String
         .unwrap_or_else(|error| panic!("the forwarder at {address} could not stop: {error}"));
 }
 
+/// Stops the TCP forwarder at `address` and starts it again `seconds` later. Every session through
+/// it ends when it stops, and no client can open another through it until it starts again.
+#[when(expr = "the TCP forwarder at {string} stays stopped for {int} seconds and then restarts")]
+async fn when_the_tcp_forwarder_stays_stopped(
+    world: &mut ScenarioWorld,
+    address: String,
+    seconds: u64,
+) {
+    let address = address
+        .parse::<std::net::IpAddr>()
+        .assured("the scenario names a TCP forwarder address");
+    let forwarders = world
+        .tcp_forwarders
+        .as_mut()
+        .verified("the scenario started TCP forwarders");
+    forwarders
+        .stop(address)
+        .await
+        .unwrap_or_else(|error| panic!("the forwarder at {address} could not stop: {error}"));
+    nervix_primitives::time::sleep(Duration::from_secs(seconds)).await;
+    forwarders
+        .restart(address)
+        .await
+        .unwrap_or_else(|error| panic!("the forwarder at {address} could not restart: {error}"));
+}
+
 #[when(expr = "the TCP forwarder at {string} restarts")]
 async fn when_the_tcp_forwarder_restarts(world: &mut ScenarioWorld, address: String) {
     let address = address
@@ -12426,6 +12468,24 @@ async fn when_gossip_exchanges_are_blocked(
     let node_id = expand_placeholders(world, &node_id);
     let delay = parse_duration_text(&duration).assured("the scenario duration is valid");
     world.cluster().block_gossip_for_node(&node_id, delay);
+}
+
+#[when(expr = "node {string} refuses the next subscription interest visibility check it answers")]
+fn when_node_refuses_next_interest_visibility_check(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world.cluster().refuse_interest_visibility_on(&node_id);
+}
+
+#[then(expr = "node {string} refused a subscription interest visibility check")]
+fn then_node_refused_interest_visibility_check(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    assert!(
+        world
+            .cluster()
+            .interest_visibility_refusal_delivered(&node_id),
+        "node '{node_id}' never answered the subscription interest visibility check armed to be \
+         refused"
+    );
 }
 
 #[when(expr = "consensus connectivity for node {string} is blocked")]
@@ -19974,8 +20034,8 @@ impl UnacknowledgedSourceFixture {
             }
             Self::Pulsar => {
                 "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}'
-          SUBSCRIPTION 'unacknowledged_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST INSTANCES \
-                 1 MODE NO ACK
+          SUBSCRIPTION 'unacknowledged_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST TYPE \
+                 SHARED INSTANCES 1 MODE NO ACK
         ON QUIESCE SUSPEND"
             }
             Self::RedisPubSub => {
@@ -26191,6 +26251,18 @@ async fn given_pulsar_topic_is_observed(world: &mut ScenarioWorld, topic: String
     );
 }
 
+#[given(expr = "authenticated Pulsar topic {string} is observed")]
+async fn given_authenticated_pulsar_topic_is_observed(world: &mut ScenarioWorld, topic: String) {
+    let topic = expand_placeholders(world, &topic);
+    world.broker_observer = Some(
+        world
+            .cluster()
+            .observe_pulsar_auth(&topic)
+            .await
+            .expect("failed to observe the authenticated pulsar topic"),
+    );
+}
+
 #[given(expr = "Pulsar TLS topic {string} is observed")]
 async fn given_pulsar_tls_topic_is_observed(world: &mut ScenarioWorld, topic: String) {
     let topic = expand_placeholders(world, &topic);
@@ -27560,6 +27632,21 @@ async fn when_pulsar_message_is_published(
         .publish_pulsar(&topic, &payload)
         .await
         .expect("failed to publish pulsar message");
+}
+
+#[when(expr = "authenticated Pulsar message is published to topic {string}")]
+async fn when_authenticated_pulsar_message_is_published(
+    world: &mut ScenarioWorld,
+    topic: String,
+    #[step] step: &Step,
+) {
+    let topic = expand_placeholders(world, &topic);
+    let payload = expand_placeholders(world, docstring(step));
+    world
+        .cluster()
+        .publish_pulsar_auth(&topic, &payload)
+        .await
+        .expect("failed to publish the authenticated pulsar message");
 }
 
 #[when(expr = "Pulsar TLS message is published to topic {string}")]
@@ -33348,8 +33435,8 @@ async fn then_iceberg_table_metadata_does_not_contain(
     }
 }
 
-#[then("the temp directory eventually contains an Iceberg Arrow IPC staged batch")]
-async fn then_temp_directory_contains_iceberg_arrow_ipc_staged_batch(world: &mut ScenarioWorld) {
+#[then("the temp directory eventually contains an Iceberg staging file")]
+async fn then_temp_directory_contains_iceberg_staging_file(world: &mut ScenarioWorld) {
     let temp_root = world
         .temp_root
         .as_ref()
@@ -33357,24 +33444,24 @@ async fn then_temp_directory_contains_iceberg_arrow_ipc_staged_batch(world: &mut
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         nervix_primitives::task::consume_budget().await;
-        if path_contains_staged_iceberg_arrow_ipc_batch(temp_root.path()) {
+        if path_contains_iceberg_staging_file(temp_root.path()) {
             append_cucumber_log_line(&format!(
-                "observed Iceberg Arrow IPC staged batch under {}",
+                "observed Iceberg staging file under {}",
                 temp_root.path().display()
             ));
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for Iceberg Arrow IPC staged batch under {}",
+            "timed out waiting for an Iceberg staging file under {}",
             temp_root.path().display()
         );
         nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
-#[then("the temp directory does not contain an Iceberg Parquet staged batch")]
-async fn then_temp_directory_does_not_contain_iceberg_parquet_staged_batch(
+#[then("the temp directory does not contain an Iceberg Parquet staging file")]
+async fn then_temp_directory_does_not_contain_iceberg_parquet_staging_file(
     world: &mut ScenarioWorld,
 ) {
     let temp_root = world
@@ -33382,8 +33469,8 @@ async fn then_temp_directory_does_not_contain_iceberg_parquet_staged_batch(
         .as_ref()
         .expect("temp root must be configured by the scenario");
     assert!(
-        !path_contains_staged_iceberg_parquet_batch(temp_root.path()),
-        "observed local Iceberg Parquet staged batch under {}",
+        !path_contains_iceberg_parquet_staging_file(temp_root.path()),
+        "observed a local Iceberg Parquet staging file under {}",
         temp_root.path().display()
     );
 }
@@ -33398,15 +33485,15 @@ async fn then_object_storage_path_does_not_exist(world: &mut ScenarioWorld, path
     assert!(!exists, "object storage path {path} exists");
 }
 
-fn path_contains_staged_iceberg_arrow_ipc_batch(root: &Path) -> bool {
-    staged_iceberg_arrow_ipc_batches(root) > 0
+fn path_contains_iceberg_staging_file(root: &Path) -> bool {
+    iceberg_staging_files(root) > 0
 }
 
-/// How many complete Arrow IPC batches Iceberg emitters staged under `root`: files a staging
-/// write finished, which hold at least one record batch.
-fn staged_iceberg_arrow_ipc_batches(root: &Path) -> usize {
+/// How many Arrow IPC staging files Iceberg emitters keep under `root`: files that hold at least
+/// one staged batch after their schema.
+fn iceberg_staging_files(root: &Path) -> usize {
     staged_iceberg_batches(root, |path, name| {
-        if !name.starts_with("batch-") || !name.ends_with(".arrow") {
+        if !name.starts_with("staging-") || !name.ends_with(".arrow") {
             return false;
         }
         let Ok(file) = std::fs::File::open(path) else {
@@ -33422,9 +33509,9 @@ fn staged_iceberg_arrow_ipc_batches(root: &Path) -> usize {
     })
 }
 
-fn path_contains_staged_iceberg_parquet_batch(root: &Path) -> bool {
+fn path_contains_iceberg_parquet_staging_file(root: &Path) -> bool {
     let staged = staged_iceberg_batches(root, |_path, name| {
-        name.starts_with("batch-") && name.ends_with(".parquet")
+        name.starts_with("staging-") && name.ends_with(".parquet")
     });
     staged > 0
 }

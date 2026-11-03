@@ -37,7 +37,7 @@ use tonic::{Request, Status, Streaming, codegen::http::uri::PathAndQuery, transp
 use url::Url;
 
 use crate::{
-    client::{Client, RecoveryMode, SessionRecovery},
+    client::{Client, RecoveryDeadline, RecoveryMode, SessionRecovery},
     error::ClientError,
     exchange::SESSION_LIMITS,
     outcome::Routing,
@@ -226,7 +226,9 @@ impl Client {
             if let BackupDownloadError::HolderUnreachable = failure.current_context() {
                 continue;
             }
-            let recovery = self.recover_session(RecoveryMode::Replace).await;
+            let recovery = self
+                .recover_session(RecoveryMode::Replace, RecoveryDeadline::RetryBudget)
+                .await;
             match recovery {
                 Ok(SessionRecovery::Ready) => {}
                 Ok(SessionRecovery::Unavailable) => return Err(failure),
@@ -251,7 +253,7 @@ impl Client {
             }
             return Err(Report::new(BackupDownloadError::NoLeader));
         };
-        self.follow_leader(leader)
+        self.follow_leader(leader, RecoveryDeadline::RetryBudget)
             .await
             .change_context(BackupDownloadError::SessionLost)
     }
