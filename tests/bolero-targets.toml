@@ -446,6 +446,36 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/client-host/src/tests/__fuzz__/tests__arrow__bolero_host_columns_round_trip_through_the_arrow_c_data_interface/corpus"
+domain_version = 1
+features = []
+id = "client-host-arrow-columns"
+invariant = "Every batch a host builds level by level, of up to six rows of one to four nullable or required, sensitive or not columns of every scalar inside up to two LIST and FIXED_LIST levels, exports a row schema that imports as its struct type, and imports back through its exported struct array and through its exported stream as the complete original batch, down to its canonical Arrow IPC stream."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-client-host"
+random_iterations = 256
+source = "crates/client-host/src/tests/arrow.rs"
+test = "tests::arrow::bolero_host_columns_round_trip_through_the_arrow_c_data_interface"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/client-host/src/tests/__fuzz__/tests__fields__bolero_typed_field_descriptions_round_trip/corpus"
+domain_version = 1
+features = []
+id = "client-host-typed-field-descriptors"
+invariant = "Every field a binding describes as typed levels, of every scalar inside 0 to 32 LIST and FIXED_LIST levels of 1 to INT32_MAX elements, nullable or not, sensitive or not and named by the whole name rule, becomes the complete original field, and every scalar level names its scalar back through its field type's kind."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-client-host"
+random_iterations = 256
+source = "crates/client-host/src/tests/fields.rs"
+test = "tests::fields::bolero_typed_field_descriptions_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/branch-instances/src/__fuzz__/membership__tests__bolero_owned_branches_publish_exactly_the_current_owners_membership/corpus"
 domain_version = 1
 features = []

@@ -65,7 +65,7 @@ pub(crate) enum ProbeRuntime {
     C,
     /// C++ over the shared Rust binding.
     Cpp,
-    /// CPython over the shared Rust binding, through ctypes.
+    /// CPython over the Python package, `nervix_client`, on pyo3.
     Python,
     /// Java over the shared Rust binding, through the Foreign Function and Memory API.
     Java,
@@ -109,7 +109,8 @@ impl ProbeRuntime {
             Self::C => Command::new(Self::artifacts()?.join("c-probe")),
             Self::Cpp => Command::new(Self::artifacts()?.join("cpp-probe")),
             Self::Python => {
-                let mut command = Command::new("python3");
+                // The CPython the package was installed into, with pyarrow beside it.
+                let mut command = Command::new(Self::artifacts()?.join("python/bin/python"));
                 command.arg(sources.join("python/probe.py"));
                 command
             }
@@ -161,7 +162,7 @@ impl ProbeRuntime {
     }
 
     /// Whether the probe implements the protocol itself, and so can decode the corpus frames.
-    fn decodes_corpus(self) -> bool {
+    pub(crate) fn implements_protocol(self) -> bool {
         match self {
             Self::Go | Self::Node | Self::Bun => true,
             Self::CAbiInProcess | Self::C | Self::Cpp | Self::Python | Self::Java | Self::Ruby => {
@@ -170,16 +171,17 @@ impl ProbeRuntime {
         }
     }
 
-    /// Whether the probe loads the shared Rust binding rather than implementing the protocol.
+    /// Whether the probe loads the C ABI of the shared Rust binding, which it is told the path of.
     fn loads_binding(self) -> bool {
         match self {
-            Self::C | Self::Cpp | Self::Python | Self::Java | Self::Ruby => true,
-            Self::CAbiInProcess | Self::Go | Self::Node | Self::Bun => false,
+            Self::C | Self::Cpp | Self::Java | Self::Ruby => true,
+            Self::CAbiInProcess | Self::Python | Self::Go | Self::Node | Self::Bun => false,
         }
     }
 
-    /// Whether the probe drives the shared Rust binding, in process or loaded, and so reaches the
-    /// domain clock events and the producer and consumer handles the binding exposes.
+    /// Whether the probe drives the Rust client through the shared binding, in process, through
+    /// its C ABI or through the Python package, and so reaches the domain clock events and the
+    /// producer and consumer handles the binding exposes.
     fn drives_binding(self) -> bool {
         match self {
             Self::CAbiInProcess | Self::C | Self::Cpp | Self::Python | Self::Java | Self::Ruby => {
@@ -200,6 +202,8 @@ pub(crate) struct ProbeTarget {
     pub(crate) username: String,
     pub(crate) password: String,
     pub(crate) domain: String,
+    /// The leader-only operation's identity, held to its redirect and outcome by the fixture.
+    pub(crate) execution_reference: String,
     pub(crate) exercise: ProbeExercise,
 }
 
@@ -251,6 +255,10 @@ impl ProbeTarget {
             ("NERVIX_PROBE_USERNAME", self.username.clone()),
             ("NERVIX_PROBE_PASSWORD", self.password.clone()),
             ("NERVIX_PROBE_DOMAIN", self.domain.clone()),
+            (
+                "NERVIX_PROBE_EXECUTION_REFERENCE",
+                self.execution_reference.clone(),
+            ),
         ]);
         match &self.exercise {
             ProbeExercise::Subscription {
@@ -302,7 +310,7 @@ impl fmt::Debug for ClientProbe {
 impl ClientProbe {
     /// Starts an independent implementation's probe decoding the checked-in conformance corpus.
     pub(crate) async fn start_corpus(runtime: ProbeRuntime) -> io::Result<Self> {
-        if !runtime.decodes_corpus() {
+        if !runtime.implements_protocol() {
             return Err(io::Error::other(format!(
                 "the {runtime:?} probe uses the shared Rust binding and reads no frames itself"
             )));
