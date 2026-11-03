@@ -2204,8 +2204,11 @@ Stream messages expose `metadata.subject` and `metadata.reply` as well as `metad
 number of attempts to deliver this message. The timestamp is when the server accepted the
 publication and can supply `TIMESTAMP AT metadata.timestamp`. A stream delivery's reply subject
 is the server's `$JS.ACK` acknowledgement subject. Header reads preserve the received order.
-Malformed delivery metadata, a nonpositive sequence or delivery count, or a timestamp outside
-Nervix's signed Unix-nanosecond range fails the source attempt; none becomes a null or a zero.
+Delivery metadata is decoded only where a program reads it. A malformed requested field, a
+nonpositive sequence or delivery count, or a timestamp outside Nervix's signed Unix-nanosecond
+range refuses that row through `ON MESSAGE ERROR`, after `FILTER WHERE` and before event-time
+selection; none becomes a null or a zero. Unread metadata does not change settlement through the
+delivery's opaque acknowledgement subject. Buffering retains each field's typed value or failure.
 
 A lost connection ends the instance's pull as it ends a `NATS SUBJECT` instance's subscription, and
 `DESCRIBE INGESTOR` shows it as the transient error `NATS connection lost` until the instance has

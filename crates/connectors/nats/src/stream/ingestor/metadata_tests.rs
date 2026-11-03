@@ -30,6 +30,15 @@ fn metadata_delivery(reply: &str) -> NatsMessage {
 }
 
 #[test]
+fn an_opaque_acknowledgement_is_kept_before_metadata_is_requested() {
+    let reply = "application.opaque.acknowledgement";
+    let message = NatsStreamIngestorMessage::delivered(metadata_delivery(reply))
+        .expect("a delivery retains its transport acknowledgement without reading metadata");
+    assert_eq!(message.position.acknowledgement.as_str(), reply);
+    assert_eq!(message.payload(), b"{}");
+}
+
+#[test]
 fn stream_metadata_retains_the_complete_delivery_and_unsigned_boundaries() {
     let reply = "$JS.ACK._.account.orders.reader.18446744073709551615.18446744073709551615.3.\
                  1730000000000000000.0.token";
@@ -50,42 +59,67 @@ fn stream_metadata_retains_the_complete_delivery_and_unsigned_boundaries() {
 }
 
 #[test]
-fn stream_metadata_refuses_an_unrepresentable_timestamp_with_its_typed_cause() {
+fn a_timestamp_field_failure_retains_its_typed_conversion_cause() {
     let reply = "$JS.ACK._.account.orders.reader.1.7.3.100000000000000000000.0.token";
-    let failure = match NatsStreamIngestorMessage::delivered(metadata_delivery(reply)) {
-        Ok(_) => panic!("the timestamp exceeds signed Unix nanoseconds"),
-        Err(failure) => failure,
+    let message = NatsStreamIngestorMessage::delivered(metadata_delivery(reply)).unwrap();
+    let retained = RetainedIngestMetadata::capture(message.metadata().fields);
+    let Value::Invalid { ty, failure } = &retained.values()[5] else {
+        panic!("the timestamp field retains its conversion failure");
     };
-    assert!(matches!(
-        failure.current_context(),
-        NatsStreamIngestorError::PublicationTimestamp
-    ));
-    assert!(failure.contains::<std::num::TryFromIntError>());
+    assert_eq!(*ty, IngestorMetadataType::Datetime);
+    assert!(
+        failure
+            .error()
+            .source()
+            .unwrap()
+            .is::<std::num::TryFromIntError>()
+    );
+    assert_eq!(retained, RetainedIngestMetadata::capture(&retained));
 }
 
 #[test]
-fn stream_metadata_refuses_zero_coordinates_and_malformed_reply_subjects() {
-    for reply in [
-        "$JS.ACK._.account.orders.reader.0.7.3.1730000000000000000.0.token",
-        "$JS.ACK._.account.orders.reader.1.0.3.1730000000000000000.0.token",
-        "application.reply",
+fn invalid_delivery_fields_keep_their_declared_types_and_causes() {
+    for (reply, field) in [
+        (
+            "$JS.ACK._.account.orders.reader.0.7.3.1730000000000000000.0.token",
+            6,
+        ),
+        (
+            "$JS.ACK._.account.orders.reader.1.0.3.1730000000000000000.0.token",
+            4,
+        ),
+        ("application.reply", 2),
     ] {
-        assert!(NatsStreamIngestorMessage::delivered(metadata_delivery(reply)).is_err());
+        let message = NatsStreamIngestorMessage::delivered(metadata_delivery(reply)).unwrap();
+        let retained = RetainedIngestMetadata::capture(message.metadata().fields);
+        let Value::Invalid { ty, failure } = &retained.values()[field] else {
+            panic!("a requested malformed field carries a typed failure");
+        };
+        assert_eq!(
+            *ty,
+            if field == 2 {
+                IngestorMetadataType::String
+            } else {
+                IngestorMetadataType::U64
+            }
+        );
+        assert!(failure.error().is::<NatsStreamMetadataError>());
     }
 }
 
 #[test]
-fn an_invalid_delivery_number_keeps_the_drivers_typed_cause() {
+fn a_delivery_field_failure_keeps_the_drivers_typed_cause() {
     let reply = "$JS.ACK._.account.orders.reader.invalid.7.3.1730000000000000000.0.token";
-    let failure = match NatsStreamIngestorMessage::delivered(metadata_delivery(reply)) {
-        Ok(_) => panic!("the delivery count is not an unsigned integer"),
-        Err(failure) => failure,
+    let message = NatsStreamIngestorMessage::delivered(metadata_delivery(reply)).unwrap();
+    let retained = RetainedIngestMetadata::capture(message.metadata().fields);
+    let Value::Invalid { failure, .. } = &retained.values()[6] else {
+        panic!("the requested delivery count has a parsing failure");
     };
-    let NatsStreamIngestorError::DeliveryMetadata { source } = failure.current_context() else {
-        panic!("the driver owns malformed delivery metadata: {failure:?}");
+    let Some(NatsStreamMetadataError::DeliveryMetadata { source }) = failure.error().downcast_ref()
+    else {
+        panic!("the driver owns malformed delivery metadata");
     };
     assert!(source.is::<std::num::ParseIntError>());
-    assert!(format!("{failure:#}").contains("invalid digit"));
 }
 
 /// A valid delivery retains all seven fields, its body, acknowledgement identity and the exact

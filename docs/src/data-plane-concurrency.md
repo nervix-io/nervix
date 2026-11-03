@@ -3034,3 +3034,11 @@ lock, concurrent map or memory-ordering protocol. OTEL entities delegate to one 
 The HTTP and WebSockets endpoint wrappers share an intake owner whose drop still ends the exact
 binding lifetime. Their existing host Shuttle checks and lifecycle Deloxide lanes remain the
 concurrency evidence; moving these owners requires current inventory paths, not a new protocol model.
+
+NATS metadata decoding uses one stack-local `std::cell::OnceCell` during a synchronous field visit.
+The source message retains its opaque acknowledgement, and the host requests only fields its
+programs read. Typed field failures share an immutable, thin `StdArc` cause through snapshots;
+valid and unread values allocate no failure state. This reference owns diagnostic data, with no
+mutable protocol state or acknowledgement authority. The existing row-refusal map owns failures
+for read fields. No task, record or branch stores the visit cache, and no lock or concurrent map
+is added to the per-record path.

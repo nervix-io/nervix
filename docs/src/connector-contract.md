@@ -1126,9 +1126,13 @@ position class and the `answered` acknowledgement confirmation, and ordered head
 Its metadata starts with the delivered subject and reply, then the stream and consumer names,
 the `U64` stream sequence, the server's publication timestamp as `DATETIME`, and the `U64` delivery
 count. The delivered reply is the `$JS.ACK` subject used for settlement. Delivery metadata is
-validated before admission: malformed metadata, a nonpositive sequence or delivery count, and a
-timestamp outside the signed Unix-nanosecond range end the source attempt with typed causes.
-The values are borrowed and projected only where programs read them; no metadata is persisted.
+decoded only for fields a program requests. The source retains its opaque acknowledgement
+independently of metadata decoding. A malformed metadata field, a nonpositive sequence or delivery
+count, or an out-of-range publication timestamp carries a typed field failure through retention
+and replay. A requested invalid field refuses its row through `ON MESSAGE ERROR`, after
+`FILTER WHERE` and before event-time selection. An unread field refuses nothing. One synchronous
+visit borrows and parses the acknowledgement once, only if a requested stream field needs it;
+no metadata is persisted.
 Its connector looks the consumer up when an instance resumes, never creates it,
 and refuses a push consumer and one whose acknowledgement policy is not explicit. One pull request
 at a time asks for at most the host's window, and at most the consumer's `MaxRequestBatch`, and
@@ -1455,7 +1459,11 @@ validation reads that declaration for the fields an ingestor's route programs an
 connector's message hands the host the value of every declared field in declared order, one typed
 call per field into the host's value sink, so the three cannot disagree. A value is a `STRING`,
 `BYTES`, `BOOL`, `U8`, `U16`, `U32`, `I32`, `I64`, `U64` or `DATETIME`, the transport's own type
-rather than a wider or narrower one, and it is absent where the message carries none. A connector
+rather than a wider or narrower one, and it is absent where the message carries none. A field whose
+transport representation cannot be decoded carries its original typed failure. The value sink can
+request a deferred field producer; a group evaluates it only for a field its programs read, while
+an owned capture evaluates every field once. Each producer emits exactly one value. A typed failure
+retains its cause through capture and replay and refuses a row only where the field is read. A connector
 that keeps a message whose transport value its field's type cannot hold hands that value over as
 unrepresentable, with its declared type and a description of the transport value, never a
 substitute value and never an absence: `RABBITMQ QUEUE` does so for an AMQP timestamp after

@@ -81,9 +81,9 @@ pub use emitter::{
 };
 pub use http_client::{DeclaredProxy, HttpClientConfig, HttpClientConfigError};
 pub use ingest_metadata::{
-    IngestMessageHeaders, IngestMessageMetadata, IngestMetadataRow, IngestMetadataValues,
-    IngestRowHeaders, IngestTransportPosition, NoIngestHeaders, NoIngestMetadata,
-    RetainedIngestHeaders, RetainedIngestMetadata, RetainedIngestMetadataValue,
+    IngestMessageHeaders, IngestMessageMetadata, IngestMetadataFailure, IngestMetadataRow,
+    IngestMetadataValues, IngestRowHeaders, IngestTransportPosition, NoIngestHeaders,
+    NoIngestMetadata, RetainedIngestHeaders, RetainedIngestMetadata, RetainedIngestMetadataValue,
 };
 pub use ingestor::{
     BrokerIngestorConnector, IngestorAckPolicy, IngestorAcknowledgementOutcome,

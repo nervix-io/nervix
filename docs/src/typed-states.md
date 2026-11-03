@@ -861,9 +861,12 @@ they decode or publish them. A caller does not compensate for a failed lookup, a
 field, type mismatch, or conversion by supplying a default zero, empty value, or null.
 
 NATS stream metadata crosses that boundary with nonzero stream sequence and delivery counts and
-a typed publication timestamp. The delivered acknowledgement subject is validated before those
-values are exposed. A Core message's absent reply subject remains absent, and is projected as a
-typed null; a stream metadata conversion failure never takes that absence path.
+a typed publication timestamp. Requested fields are decoded from the opaque acknowledgement during
+a synchronous metadata visit. An invalid field retains its typed cause as `IngestMetadataFailure`,
+with one immutable failure identity shared by capture and replay; its equality identifies that same
+failure instance. A Core message's absent reply subject remains absent and reads as a typed null;
+a conversion failure is a distinct state and refuses a row only where the field is read. Deferred
+field producers emit exactly one value, and the host validates that boundary.
 
 The Iceberg emitter validates its configured location into a URL before creating its storage factory.
 The initialized operator belongs to that storage root: a later object path must match its scheme,

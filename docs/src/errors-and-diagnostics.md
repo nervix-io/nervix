@@ -25,10 +25,13 @@ RabbitMQ's TLS file keys declare `amqps` as their permitted address scheme. The 
 and commit, naming the key, `addr` and `amqps` without the configured values. The existing
 certificate/key pairing refusal remains independent of the scheme check.
 
-NATS stream delivery metadata is checked at the connector boundary before its values enter the
-host. A malformed acknowledgement subject retains the driver's parsing cause; a nonpositive
-sequence or delivery count and an out-of-range publication timestamp have distinct typed causes.
-These end the source attempt without acknowledging the delivery. A computed Core reply subject
+NATS stream metadata is decoded where a program requests it. A malformed acknowledgement
+subject retains the driver's parsing cause; a nonpositive sequence or delivery count and an
+out-of-range publication timestamp have distinct typed field causes. `IngestMetadataFailure`
+shares the immutable typed cause through capture and replay. The host projects it into a validation
+row outcome only for a read field, after `FILTER WHERE` and before event-time selection. A delivery
+retains its opaque transport acknowledgement independently; a missing acknowledgement remains a
+source-attempt failure. A computed Core reply subject
 that violates the publication-subject rule instead becomes a per-record rejection before hand-over.
 An invalid literal reply subject is refused by registry preflight with `NatsReplySubject` and the
 external-name validation cause, before the emitter starts.
