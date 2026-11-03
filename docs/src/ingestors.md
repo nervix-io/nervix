@@ -505,7 +505,8 @@ General notes:
   `metadata.topic`, `metadata.partition`, `metadata.offset`, `metadata.key`, `metadata.timestamp`,
   `metadata.timestamp_type`, and `metadata.tombstone`, `RABBITMQ QUEUE` declares the delivery's
   envelope and its AMQP basic properties, `SQS QUEUE` declares the message identity and its system
-  attributes, `SYSLOG LISTENER` declares
+  attributes, `PULSAR TOPIC` declares the [message identity, times, keys and delivery fields](#pulsar),
+  `SYSLOG LISTENER` declares
   `metadata.peer_addr`, `metadata.transport`, and `metadata.tls_peer`, `HTTP REQUEST` declares
   `metadata.status` and `metadata.polled_at`,
   `HTTP ENDPOINT` declares `metadata.method`, `metadata.path`, `metadata.query`,
@@ -1206,7 +1207,7 @@ ingestors and `HTTP REQUEST` emitters, and each key means the same for both:
 | `timeout_ms` | Yes | A positive whole number of milliseconds that bounds one request and the redirects it follows, as [Client Deadlines](#client-deadlines) defines. For a poll it covers name resolution, connection setup, TLS, the request and the whole response body, and for an emitted request everything up to its complete final response headers. |
 | `follow_redirects` | No | `true` follows a redirect to the client's own origin; `false`, or leaving the key out, makes a redirect the response. See [HTTP client transport](emitters.md#http-client-transport). |
 | `proxy` | No | An `http` or `https` URL with a host, naming the proxy that every request of the client goes through. User information in it is sent to the proxy alone, as `Basic` proxy credentials. |
-| `tls_ca_file` | No | A PEM certificate authority that HTTPS trusts in addition to the default roots: the platform's trust store for a poll, and the Mozilla roots Nervix ships together with the host's native roots for the emitter. |
+| `tls_ca_file` | No | PEM certificate authorities that HTTPS trusts in addition to the Mozilla roots Nervix ships and the host's native roots, for polling and emitting alike. |
 | `tls_cert_file`, `tls_key_file` | Together | The PEM certificate chain and private key the client presents to authenticate over HTTPS. |
 | `secret.<name>` | No | A confidential string the operator names after the `secret.` prefix. A polling header sends it through `CLIENT SECRET 'secret.<name>'`; an emitter sends none of them. |
 
@@ -1490,7 +1491,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
-| Metadata | Not offered: The current topic declaration exposes properties as headers but no separate typed broker metadata namespace. |
+| Metadata | metadata.topic: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.publish_time: DATETIME OPTIONAL<br>metadata.event_time: DATETIME OPTIONAL<br>metadata.key: STRING OPTIONAL<br>metadata.ordering_key: BYTES OPTIONAL<br>metadata.producer_name: STRING OPTIONAL<br>metadata.sequence_id: I64 OPTIONAL<br>metadata.redelivery_count: I64 OPTIONAL |
 | Every live node | no; scheduled owner |
 | Position class | replayable |
 | Acknowledgement confirmation | answered |
@@ -1501,6 +1502,38 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 
 See the [PULSAR TOPIC capability and mirror reference](connector-capabilities.md#pulsar-topic-ingest).
 <!-- connector-matrix:ingest-pulsar-topic:end -->
+
+A Pulsar message exposes these nullable metadata fields to routing expressions:
+
+| Field | Type | Value |
+| --- | --- | --- |
+| `topic` | `STRING` | The qualified topic the consumer received from |
+| `message_id` | `STRING` | `ledger:entry:partition`, with `:batch_index` for a batched message |
+| `publish_time` | `DATETIME` | The broker message's publish time, in milliseconds |
+| `event_time` | `DATETIME` | The producer's optional event time, in milliseconds |
+| `key` | `STRING` | The partition key text stored in the message metadata |
+| `ordering_key` | `BYTES` | The optional binary ordering key |
+| `producer_name` | `STRING` | The producer name carried by the message |
+| `sequence_id` | `I64` | The producer sequence id |
+| `redelivery_count` | `I64` | The broker's count of prior redeliveries |
+
+Combine `topic` and `message_id` when identifying messages across topics. An absent partition
+renders as Pulsar's `-1`. The acknowledgement retains the complete broker id independently of
+this display. The key is the stored text, including base64 text when the producer marks it encoded;
+`ordering_key` preserves its bytes. Missing keys read as null, while present empty keys stay empty.
+Properties remain available through `read_header` and `read_headers` with their order and repeats.
+
+For batched messages, a member's sequence id and event time take precedence when present,
+including zero. An omitted member field uses the corresponding batch value. Event time is null
+when both the member and batch omit it.
+
+`TIMESTAMP AT metadata.publish_time` or `TIMESTAMP AT metadata.event_time` uses that message time
+for admission and windows. An absent event time is null; a present zero is the Unix epoch. Nervix
+does not substitute publish time for an absent event time. Times outside the signed Unix-nanosecond
+range and sequence ids above `I64::MAX` produce a typed read error identifying the topic, message
+and field. A valid prefix already gathered is delivered before that error. Pulsar's protocol defines
+an omitted redelivery count as zero, so the first delivery reports zero and a broker redelivery can
+report one. Every protocol `u32` count fits the declared `I64`.
 
 Pulsar ingestors read through a shared, durable subscription. The subscription name is required by
 Pulsar, but the subscription type is not exposed in Plexus. Every statement also declares who owns
@@ -1890,7 +1923,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
 | Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: set by max_packet_size, 10240 bytes when omitted; when full, drops and counts what does not fit<br>ACK-mode QoS 1/2 outcomes in the packet-ordered read-ahead queue: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535; when full, holds back what fills it<br>ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the same packet-ordered read-ahead queue: at most 64 outcome; when full, drops and counts what does not fit<br>NO ACK outcomes in the packet-ordered read-ahead queue: at most 64 outcome; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE, PUBACK and PUBREC requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
-| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>retire a downgraded subscription before retrying: driver default, 5 s<br>ordinary and oversized-discard acknowledgements written to the connection: client key `keep_alive_ms`; one interval of it, or of the broker's Server Keep Alive; 60 s when omitted<br>a silent connection: client key `keep_alive_ms`; two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 s when omitted |
+| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>retire a refused or downgraded subscription before retrying: driver default, 5 s<br>ordinary and oversized-discard acknowledgements written to the connection: client key `keep_alive_ms`; one interval of it, or of the broker's Server Keep Alive; 60 s when omitted<br>a silent connection: client key `keep_alive_ms`; two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 s when omitted |
 | Driver limits | A publish above the admission bound is acknowledged before it is counted as oversized; its topic, payload and properties never enter read-ahead. The raw framing bound is MQTT's protocol maximum, separate from the admission bound.<br>ACK-mode QoS 0 overflow is counted immediately and never consumes an acknowledged outcome's reserved capacity. An oversized QoS 0 publish refused here counts as overflow only. NO ACK retains backpressure. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
@@ -1959,10 +1992,13 @@ Delivery constraints:
 A new subscription becomes ready only when the broker grants the declared QoS. A lower grant
 fails through the general error policy and `DESCRIBE INGESTOR` names the requested and granted
 levels. This applies to `NO ACK` too: its QoS still determines the broker's storage and redelivery
-contract. After a rejected grant, the next attempt first retires that broker session through a clean
-connection, unsubscription and session expiry zero. Cleanup failure keeps retirement pending, so a
-retained subscription cannot turn the rejection into a successful resume. An accepted persistent
-session keeps its original grant across reconnects; changing the filter or QoS retires that session.
+contract. An explicit subscription refusal also fails readiness, even when the broker keeps the
+empty persistent session. After either refusal, the next attempt first retires that broker session
+through a clean connection, unsubscription and session expiry zero. Cleanup failure keeps retirement pending, so a
+retained subscription cannot turn the rejection into a successful resume. Suspension preserves that
+pending retirement. Permission granted later permits a fresh subscription attempt. An accepted
+persistent session keeps its original grant across reconnects; changing the filter or QoS retires
+that session.
 
 In an `ACK` mode an ingestor acknowledges a batch once every `PUBACK` its QoS 1 publishes ask for,
 and every `PUBREC` its QoS 2 publishes ask for, is written to the connection, within one keep-alive
@@ -2553,7 +2589,7 @@ Every key of a `PROMETHEUS CLIENT`'s `CONFIG` is Nervix's own:
 | --- | --- | --- |
 | `addr` | Yes | The root of the Prometheus HTTP API: an `http` or `https` URL with a host, whose path is the prefix the API is served under, such as `/monitoring` behind a reverse proxy. Each query is sent to `api/v1/query` beneath it, so the URL carries no query string and no fragment. |
 | `timeout_ms` | Yes | A positive whole number of milliseconds that bounds one query, as [Client Deadlines](#client-deadlines) defines. It covers name resolution, connection setup, TLS and the whole response. |
-| `tls_ca_file` | No | A PEM certificate authority that HTTPS trusts in addition to the platform's native roots. |
+| `tls_ca_file` | No | PEM certificate authorities that HTTPS trusts in addition to the Mozilla roots Nervix ships and the host's native roots. |
 | `tls_cert_file`, `tls_key_file` | Together | The PEM certificate chain and private key the client presents to authenticate over HTTPS. |
 
 `CREATE PROMETHEUS CLIENT` refuses a configuration that cannot configure a query source, and names the key:

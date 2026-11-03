@@ -237,7 +237,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_plexus/corpus"
-domain_version = 36
+domain_version = 37
 features = []
 id = "plexus-model"
 invariant = "Canonical Plexus of a generated Model of every family reparses through the client and server grammars to the complete CREATE statement."
@@ -252,7 +252,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
-domain_version = 37
+domain_version = 38
 features = []
 id = "plexus-archive-model"
 invariant = "Complete cluster/domain archives preserve every ordered canonical Model document through export, production restore reads, semantic reparse and byte-exact re-export."
@@ -431,6 +431,36 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/client-host/src/tests/__fuzz__/tests__arrow__bolero_host_columns_round_trip_through_the_arrow_c_data_interface/corpus"
+domain_version = 1
+features = []
+id = "client-host-arrow-columns"
+invariant = "Every batch a host builds level by level, of up to six rows of one to four nullable or required, sensitive or not columns of every scalar inside up to two LIST and FIXED_LIST levels, exports a row schema that imports as its struct type, and imports back through its exported struct array and through its exported stream as the complete original batch, down to its canonical Arrow IPC stream."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-client-host"
+random_iterations = 256
+source = "crates/client-host/src/tests/arrow.rs"
+test = "tests::arrow::bolero_host_columns_round_trip_through_the_arrow_c_data_interface"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/client-host/src/tests/__fuzz__/tests__fields__bolero_typed_field_descriptions_round_trip/corpus"
+domain_version = 1
+features = []
+id = "client-host-typed-field-descriptors"
+invariant = "Every field a binding describes as typed levels, of every scalar inside 0 to 32 LIST and FIXED_LIST levels of 1 to INT32_MAX elements, nullable or not, sensitive or not and named by the whole name rule, becomes the complete original field, and every scalar level names its scalar back through its field type's kind."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-client-host"
+random_iterations = 256
+source = "crates/client-host/src/tests/fields.rs"
+test = "tests::fields::bolero_typed_field_descriptions_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/branch-instances/src/__fuzz__/membership__tests__bolero_owned_branches_publish_exactly_the_current_owners_membership/corpus"
 domain_version = 1
 features = []
@@ -447,7 +477,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_plexus/corpus"
-domain_version = 35
+domain_version = 36
 features = []
 id = "plexus-statement"
 invariant = "Canonical Plexus of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
@@ -477,7 +507,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
-domain_version = 35
+domain_version = 36
 features = []
 id = "plexus-statement-text"
 invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical Plexus reparses to them."
@@ -492,7 +522,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatted_documents_keep_their_statements/corpus"
-domain_version = 35
+domain_version = 36
 features = []
 id = "plexus-format-document"
 invariant = "Formatting a generated document with gaps, comments and either line ending keeps its statements and comments and is idempotent."
@@ -507,7 +537,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatter_text_is_formatted_or_rejected/corpus"
-domain_version = 34
+domain_version = 35
 features = []
 id = "plexus-format-text"
 invariant = "Edited documents are either refused as unparseable or formatted without changing their statements, idempotently."
@@ -582,7 +612,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/connectors/__fuzz__/surface__bolero_generated_entities_state_only_what_their_entity_declares/corpus"
-domain_version = 26
+domain_version = 27
 features = []
 id = "models-connector-declarations"
 invariant = "A generated ingestor and emitter of every entity state only what their entity declares: a declared delivery or publishing mode whose required option choices they make, a quiesce mode their entity honors, a body of the declared form, batching the declared legality admits, a type contract exactly for direct-value bodies and a client of a declared connector."
@@ -852,7 +882,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/models__bolero_models_and_statements_round_trip_through_their_archives/corpus"
-domain_version = 33
+domain_version = 35
 features = []
 id = "models-archived-models"
 invariant = "Every generated Model family and statement form keeps every field through its archive, and a stored Model widens to requested versions and pins back to itself."
@@ -1149,6 +1179,20 @@ source = "crates/connectors/rabbitmq/src/address/tests.rs"
 test = "address::tests::bolero_addresses_name_the_broker_written_into_them"
 test_target = "lib"
 
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/connectors/rabbitmq/src/publisher/__fuzz__/publisher__properties_tests__bolero_amqp_properties_preserve_every_declared_value_through_the_wire/corpus"
+domain_version = 1
+features = []
+id = "rabbitmq-amqp-properties"
+invariant = "The publisher's production conversion preserves every declared AMQP property, persistence, timestamp presence including epoch zero, and the independent header table through Lapin's complete AMQP serialization and parse."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-connector-rabbitmq"
+random_iterations = 256
+source = "crates/connectors/rabbitmq/src/publisher/properties_tests.rs"
+test = "publisher::properties_tests::bolero_amqp_properties_preserve_every_declared_value_through_the_wire"
+test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime_schema/__fuzz__/runtime_schema__syslog__tests__bolero_structured_data_and_headers_match_the_per_byte_reading/corpus"
@@ -3386,6 +3430,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/pulsar/src/topic/__fuzz__/topic__ingestor__metadata_tests__bolero_pulsar_message_metadata_preserves_every_field/corpus"
+domain_version = 1
+features = []
+id = "pulsar-message-metadata"
+invariant = "Every bounded current Pulsar message preserves its complete topic, message identity including partition and batch index, exact publish and optional event instants, nullable text and binary keys, producer name, sequence id, protocol redelivery count (omission means zero), ordered repeated properties, payload and acknowledgement position through its production metadata owner and retained replay."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-connector-pulsar"
+random_iterations = 256
+source = "crates/connectors/pulsar/src/topic/ingestor_metadata_tests.rs"
+test = "topic::ingestor::metadata_tests::bolero_pulsar_message_metadata_preserves_every_field"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/connectors/sentry/src/event/__fuzz__/event__envelope_properties__bolero_prepared_envelopes_preserve_complete_events_across_attempts/corpus"
 domain_version = 2
 features = []
@@ -3627,7 +3686,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_entity_presentations_keep_declared_rows_and_complete_configuration/corpus"
-domain_version = 21
+domain_version = 22
 features = []
 id = "connector-entity-presentation"
 invariant = "Every generated source and sink entity uses its declared phrase and ordered inspection rows, while the canonical Plexus built from that shared presentation reparses to its complete Model including all options, modes, payload mappings, flush and error policies."

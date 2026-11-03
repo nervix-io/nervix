@@ -36,6 +36,10 @@ direct-value sections. Nervix validates the entity's declared limits and exact m
 For MQTT sources, read [Ingestors → MQTT](../../../docs/src/ingestors.md#mqtt) before promising
 delivery during downstream stalls; it distinguishes QoS 0 overflow, acknowledged capacity and
 the counters that expose each outcome, and the refusal of a broker grant below the declared QoS.
+For Pulsar source identity, keys, redelivery and event-time windows, read
+[Ingestors → Pulsar](../../../docs/src/ingestors.md#pulsar) and its metadata table. Choose
+`TIMESTAMP AT metadata.event_time` or `TIMESTAMP AT metadata.publish_time` deliberately: an absent
+event time stays null, while an explicit epoch time is preserved.
 
 For RabbitMQ consumption choose `MODE NO ACK`, `MODE ACK SEQUENTIAL`, or
 `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
@@ -43,6 +47,9 @@ Parallel `MAX` is 1 through 65,535 and is the broker prefetch per instance. Each
 on its own graph outcome. Automatic consumption has no prefetch or transport acknowledgement;
 work already accepted by the broker can be lost before the graph completes. Read the RabbitMQ
 Ingestors section for the exact clause order, host admission and recovery limits.
+For RabbitMQ publication, read [Emitters → RabbitMQ](../../../docs/src/emitters.md#rabbitmq) for
+`PERSISTENT`, `TIMESTAMP`, exact AMQP `PROPERTIES` types, targeted envelope alterations and the
+durable-queue requirement; property writes and `write_header` have different contracts.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
@@ -570,7 +577,13 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   case kept; `ON CONFLICT (...) DO UPDATE` needs a target and a mapped column outside it, and
   `MAX SIZE` is at most `1073741822B`. Keep its optional statement `timeout_ms` separate from
   `pool_acquire_timeout_ms`; read their bounds and retry semantics in
-  [Emitters → Postgres](../../../docs/src/emitters.md#postgres).
+  [Emitters → Postgres](../../../docs/src/emitters.md#postgres). Write every connection part in
+  `addr`: the driver fills a missing port, user, password or database from the node's `PG*`
+  environment and password file, and ignores a query option it does not know. `verify-full` trusts
+  the driver's bundled Mozilla roots as well as `tls_ca_file`. Map an `ARRAY` or `VEC` value to a
+  `json`, `jsonb` or `text` column, never a native array column. Only SQLSTATE classes 21, 22 and
+  23 reject a row; a missing table or column, an unmatched conflict target or a missing privilege
+  retries on `RETRY POLICY` until it is fixed.
 - Give a `RABBITMQ` client an `amqp://` or `amqps://` `addr` that names a host and no port 0; Nervix
   refuses any other address before commit. Mounted `tls_ca_file`, `tls_cert_file` and
   `tls_key_file` require `amqps`; `CREATE` refuses these keys with `amqp`. Certificate and key must

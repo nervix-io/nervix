@@ -1225,7 +1225,9 @@ futures and messages exclusively. A driver confirm can carry another message's r
 owner collects the set before attributing returns and refilling it. An interrupted mandatory
 window retains positive answers whose return attribution remains unknown, rather than reporting
 delivery; known returns and safe nonmandatory answers are settled once. The lookup borrows payload
-contents and uses no shared map or tracked lock. The Shuttle checks
+contents and compares each message's complete prepared AMQP properties, including persistence and
+timestamp. These immutable values come from its retained envelope and are reused on retransmission;
+attribution adds no shared map or tracked lock. The Shuttle checks
 `shuttle_a_return_followed_by_a_multiple_ack_rejects_only_its_message` and
 `shuttle_a_deadline_never_delivers_a_partially_attributed_mandatory_window` drive this production
 owner with selected callbacks and deadline events. They qualify the owner, not Lapin's opaque locks
@@ -2232,6 +2234,17 @@ registrations reach the transaction impact recorder's tracked locks. The lookup,
 resume barriers use the existing async pause owner, whose ordering remains outside Deloxide's
 observation; the public outcome and dependent mutation assert recovery under the original
 execution reference.
+
+The registered `@pulsar_message_metadata` workloads cover source metadata in all three delivery
+modes, branch-local event-time windows, broker redelivery and independent broker-stored batches.
+The batch oracle checks member sequence and event-time precedence, envelope inheritance and exact
+member positions. Its bounded protocol publisher and the driver's synchronous batch expansion add
+no tracked lock. The source's checked metadata and
+single pending read failure are instance-owned. Cancellation returns any gathered prefix without
+consuming the pending failure. Borrowed visitors add no synchronization or concurrent map. Deloxide
+observes the existing host state; foreign Pulsar driver channels, borrowed visitors and asynchronous
+broker waits remain outside its tracked lock graph. The existing ingestor-host Shuttle checks
+retain responsibility for host acknowledgement and cancellation interleavings.
 
 The registered `@restarted_voter_observation` workload reaches whole-cluster restart and automatic scheduling when the leader first hears a voter through a relayed heartbeat. Its test-only watch channels and concurrent fault map are untracked. The registered native metadata restore workload exercises distributed Kafka checkpoint replication, acknowledgement, restart and exact restoration above the resident replication message budget; its stream waits and assignment atomics retain their complementary checks.
 

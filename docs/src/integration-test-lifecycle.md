@@ -64,6 +64,13 @@ with [Cluster Interconnect](./interconnect.md), client requests, redirects, reco
 recovery with [Client Session Protocol](./client-session-protocol.md), and command identity and
 completion with [Command Completion](./command-completion.md).
 
+`just test-scenarios` and `just test-scenarios-reuse` build `tests-deps`, set `ORT_DYLIB_PATH`,
+and pass each caller argument intact to the scenario binary through Cargo. Names and regular
+expressions containing spaces, and brace input globs, are single arguments when quoted by the
+caller; the recipe does not expand their contents as shell code. The reuse recipe also sets
+`NERVIX_TESTCONTAINERS_MODE=reusable`. [Developing Nervix](./developing-nervix.md#validation-and-tests)
+shows a named selection and the focused argument-forwarding check.
+
 ## What Runs Where
 
 The emitter assembly outline observes the emitter's public received-message total before each
@@ -497,6 +504,20 @@ publish through the same broker's ordinary listener and require the typed reques
 and no relay delivery on one and three nodes, including under `NO ACK`. Their direct publisher
 waits for broker confirmation without requiring ingestor readiness. A broker-pin change must
 preserve those wire grants.
+
+The MQTT subscription-refusal fixture uses the authenticating listener with valid credentials
+and client-scoped rules in the broker's built-in authorizer. Unmatched clients remain allowed;
+authorization caching is disabled and a denial leaves the connection open, so changing only the
+scenario's unique client rule takes effect on its next subscription. An independent probe
+observes a successful CONNACK, a Not Authorized SUBACK, and a retained empty session on reconnect.
+It uses a different client identity from Nervix. The one- and three-node scenarios require the
+source's reconnect backoff to grow across repeated refusals, preserve refusal through an ingestor
+hold, then deliver after the scenario grants permission. A forced drain refusal ends the codec
+alteration before replacement, so the same suspended source resumes with its current codec.
+This observes retry progress
+instead of assuming a fixed quiet interval. Each HTTP update and the complete wire probe have
+a thirty-second observation budget. The rules neither serialize scenarios nor alter another
+client's access.
 
 The reclaimed-command-identity scenario configures a 20-second retry validity for its initial
 admission and exact retry. Its reclamation wait includes the configured validity followed by
@@ -2785,6 +2806,12 @@ The second line appears only when a connection or the accept loop had to be abor
 A receiver's port is drawn with the scenario's fixture ports and goes back with them at the end of
 cleanup, once the nodes that dialed it have ended.
 
+The HTTP transport scenarios can also start one or three real node processes with
+`SSL_CERT_FILE` pointing to an empty file and `SSL_CERT_DIR` to an empty directory. The cluster
+owns those paths until its processes end; only those children's environments change. This
+exercises client construction without native trust anchors alongside the ordinary suite,
+without changing the runner's trust store or serializing scenarios.
+
 ## HTTP Proxies
 
 A scenario about the proxy an HTTP client declares, or about proxy environment variables a node
@@ -2970,6 +2997,16 @@ probe drives the shared Rust binding's C ABI from a blocking task of the binary'
 every call of the binding blocks its caller; every other probe is a child process that the fixture
 starts with its target in `NERVIX_PROBE_*` variables and its standard input closed. A probe prints
 one report line per observation on standard output, and the fixture keeps every line it read.
+
+The row-conformance exercise waits for every node to agree on its leader and starts on a different
+node when the cluster has one, logging both identities. Its independent Go, Node.js and Bun probes
+first create an otherwise unused schema, a leader-only command, and must report its redirect and
+preserve the harness-supplied UUIDv7 execution reference across the original request, the repeated
+request and the terminal outcome. The fixture compares all three
+references with its own expected value; merely completing the operation does not qualify the
+redirect. Go exercises the native command-reply redirect and TypeScript the console's
+`SessionEnding{LeaderRedirect}`, with subsequent subscription traffic on the replacement session.
+The one-node examples retain the same row oracle as direct-connection controls.
 
 A probe's waits are bounded twice. The step that starts it waits at most 180 seconds for the line
 that says its subscription is open or its clock attach completed. A later step can wait, for the
@@ -3915,3 +3952,15 @@ maps lifecycle and failure-handling contracts to their executable checks.
 [Test Liveness 06](https://app.clickup.com/t/86bc2wugx) retains the historical high-parallelism run
 results, comparison with the interrupted run, startup and cleanup distributions, and CI artifacts.
 Those results qualify their recorded revision and workload.
+
+### Scenario-owned RabbitMQ restarts
+
+The RabbitMQ persistence scenario owns an ephemeral broker through the test environment. It
+provisions a durable queue explicitly, waits for the emitted message to be ready, stops the Nervix
+domain, restarts that broker with its data directory intact, refreshes its endpoint from Docker's
+current published port, and waits for a fresh authenticated AMQP
+connection within thirty seconds, closes that readiness probe and reads the message through AMQP.
+Stopping the domain before restarting the broker rules out replay by
+Nervix as the explanation for the surviving message. This broker is separate from the suite's
+shared RabbitMQ service, so the restart cannot disrupt another scenario. The after hook removes it
+explicitly after node teardown, including when the scenario fails before its restart step.

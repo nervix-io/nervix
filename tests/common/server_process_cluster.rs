@@ -70,6 +70,29 @@ impl ServerProcessCluster {
         Self::start_in(root, node_count, options).await
     }
 
+    /// Starts isolated node processes whose native certificate paths contain no trust anchors.
+    /// The paths live with the cluster; the scenario runner's environment stays unchanged.
+    pub(crate) async fn start_with_empty_trust_store(node_count: usize) -> io::Result<Self> {
+        let root = tempfile::Builder::new()
+            .prefix("nervix-empty-trust-process-cluster-")
+            .tempdir()?;
+        let certificate_file = root.path().join("empty-certificates.pem");
+        let certificate_directory = root.path().join("empty-certificates");
+        std::fs::write(&certificate_file, b"")?;
+        std::fs::create_dir(&certificate_directory)?;
+        let options = [
+            ServerProcessOption::Environment {
+                variable: "SSL_CERT_FILE".to_string(),
+                value: certificate_file.display().to_string(),
+            },
+            ServerProcessOption::Environment {
+                variable: "SSL_CERT_DIR".to_string(),
+                value: certificate_directory.display().to_string(),
+            },
+        ];
+        Self::start_in(root, node_count, &options).await
+    }
+
     /// Starts a one- or three-node cluster of diagnostic nodes, which a scenario binary built for
     /// the `deloxide` mode spawns. Every member records its deadlock evidence in one directory
     /// under the cluster's root, each in a file of its own.

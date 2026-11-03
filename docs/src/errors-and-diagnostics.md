@@ -999,6 +999,12 @@ An MQTT broker's successful `SUBACK` with a grant below the requested QoS fails 
 policy and `DESCRIBE INGESTOR` report those levels without payload or client credentials, in
 acknowledged and `NO ACK` modes alike.
 
+An explicitly refused `SUBACK` keeps `MqttTopicIngestorError::SubscriptionRefused` beneath the
+same resume context. Both subscription refusals require session retirement before another
+attempt: an empty retained session cannot clear the failure or report readiness. Cleanup failures
+keep their typed retirement report and the pending phase, including across suspension. Once
+cleanup succeeds, the next attempt must obtain an accepted subscription grant.
+
 MQTT input retirement reports `RuntimeError::RetireIngestorEntity`, naming its domain and
 ingestor, above the connector's `MqttTopicIngestorError::RetireInstance` and instance index. The report
 keeps typed client and connection causes, an unsubscribe refusal's reason codes, or the cleanup
@@ -1174,6 +1180,13 @@ receipts still unanswered, `EmitterFinishError::Unsent` counts those receipts, r
 driver failure beneath it when present. An unanswered receipt leaves delivery unknown rather
 than proving that the broker did not store the message.
 
+Pulsar receive conversion uses `PulsarTopicIngestorError::PublishTime`, `EventTime` or `SequenceId`
+under `IngestorError::Read`, retaining `TimestampError` or `TryFromIntError` as the typed cause.
+Each field error carries the received topic and full message position. A valid batch prefix reaches
+the host before a later conversion or driver receive failure is reported on the next active read;
+cancellation leaves that pending failure available. An unsupported present value never becomes a
+missing metadata field.
+
 A Pulsar source classifies an acknowledgement or a redelivery request that did not take effect in
 `PulsarTopicIngestorError`, beneath `IngestorError::Acknowledge` or `IngestorError::Reject`. An
 acknowledgement the broker answered with a server error is `AcknowledgementRefused`, whose typed
@@ -1269,6 +1282,10 @@ branch by the fingerprint of its key, as described under
 [Sensitive Data And Observability](#sensitive-data-and-observability), and unbranched work as
 `unbranched`. [Data Plane](./data-plane.md) owns branch execution and
 [Cluster Interconnect](./interconnect.md) owns snapshot exchange.
+
+Materialized-state inspection refuses a missing scheduled payload schema or resolved branch
+metadata with the observation owner's typed error. It never substitutes an empty sensitivity
+set. Local and remote report failures retain their complete cause chain at the command boundary.
 
 The materialized installation owner refuses a lower snapshot revision with
 `RuntimeStateOperationError::MaterializedSnapshotRevision { received, current }`, a snapshot from an
@@ -1857,6 +1874,12 @@ warning instead of inventing per-record rejections. An OTLP/gRPC export the rece
 retries, whatever code tonic reports for it. An answered status other than `INVALID_ARGUMENT`,
 `RESOURCE_EXHAUSTED` or a code the OTLP specification lists as retryable is a misconfiguration
 failure, which the host does not retry.
+
+The shared HTTP client builder adds `HttpClientConfigError::Tls` above the
+`TlsClientConfigError` the common rustls configuration owner returns. HTTP polling, Prometheus,
+Sentry and OTEL HTTP therefore retain that owner's CA-file or client-identity classification
+instead of rebuilding the TLS failure from text. Native-root loading remains the TLS owner's
+diagnostic; its bundled roots still permit client construction when the native store is empty.
 
 An HTTP polling request whose response exceeds `MAX BODY SIZE` fails that poll with a typed
 `ResponseTooLarge` cause. DNS, connection, TLS, response-body and timeout failures retain their
@@ -2811,15 +2834,16 @@ is the lowercase hexadecimal digest of the branch's canonical key text, the iden
 PROCESSOR` checkpoint lines and `DESCRIBE BACKUP` print and transaction-impact reports carry for
 the same branch, so an operator matches a failure to those reports by that text. The per-branch
 statistics the execution graph carries to sessions name each branch by the same fingerprint, and
-per-branch metric series are keyed by it. A session subscription, which masks sensitive key fields,
-is where a key's other field values are read.
+per-branch metric series are keyed by it. Session subscriptions and materialized-state inspection
+mask sensitive key fields while exposing the key's non-sensitive field values.
 
 The fingerprint is a plain digest of the key text, computed without a secret. It hides a key only
 as far as the key's values are hard to guess: someone who can guess a sensitive key value can
 compute its fingerprint and confirm the guess against a diagnostic. The rule also governs only text
 that names a branch in a failure, an event, a log or a statistic. A statement or an emitter that an
 operator directs at branch data follows its own contract: `SHOW RELAY <relay> MATERIALIZED STATE`
-prints each entry's key and payload ([Relay](./relay.md)), and an SQS emitter's `FROM BRANCH` group
+prints each entry's key and payload with their declared sensitive fields masked on both local and
+remote reads ([Relay](./relay.md)), and an SQS emitter's `FROM BRANCH` group
 is the record's branch key ([Emitters](./emitters.md)).
 
 ### Log Levels
@@ -3302,3 +3326,12 @@ Connector terminology follows entity ownership: `IngestorError` and `EmitterOpen
 record. Renaming and grouping entity owners changes neither retry classification nor what is
 rendered at the boundary. The ingestor planner's input identity/kind errors cover client, endpoint
 and native schema references before composition.
+
+
+RabbitMQ emitter property preparation preserves a typed refusal until the per-record reporting
+boundary. A short-string failure keeps the driver's typed cause below the property name and byte
+count; a timestamp refusal names the requirement for nonnegative whole Unix seconds. Neither
+renders the property value. The publisher projects these reports into the record's message-error
+outcome before transport and continues with representable neighbours. A wrong property name or
+type at this connector boundary remains a typed contract refusal; normal statements are already
+checked against the entity's declaration and exact types at `CREATE` and `ALTER`.
