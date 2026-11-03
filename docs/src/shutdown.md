@@ -735,7 +735,7 @@ state; see [Forced Recovery](./wasm-state.md#forced-recovery).
 | --- | --- |
 | Single node | No replacement exists. Nothing is cordoned, no ownership moves, and all admitted work drains in place before the process exits. |
 | Follower with a reachable leader | The node asks the leader, over the cluster interconnect, to drain it, then completes what remains in place. |
-| Leader | The leader drains itself in process and commits the release of its own cordon before it stops. Leadership is not transferred first; the cluster elects a new leader after it stops. |
+| Leader | The leader drains itself in process and commits the release of its own cordon before it stops. Leadership is not transferred first. Peers elect a leader when its absence outlasts their election timeout; a quickly restarted leader can instead restore leadership in its persisted term. |
 | Last schedulable node | Same as a single node: no replacement candidate exists, so everything completes in place, including source offset commits. |
 | Only peer is itself terminating | A terminating incarnation is not a placement candidate, so the node takes the no-replacement path and completes its work in place. |
 | Every node at once | Each node advertises terminating, finds no eligible destination, and drains locally within its own drain timeout. A leader that has not yet observed a peer's advertisement can still choose that peer for a move; the peer refuses the preparation as a terminating destination, and the work completes in place on its owner. A node that asked for its drain before it saw the others terminating gives the release of its cordon only the one-second grace once it sees them terminating, because only voters that are stopping too could commit it. |
@@ -743,6 +743,12 @@ state; see [Forced Recovery](./wasm-state.md#forced-recovery).
 
 The no-replacement path is explicit in the log: `no live schedulable replacement node remains;
 admitted work completes in place`.
+
+Nervix retains OpenRaft's leader restoration on restart. Restoring the persisted leader does not
+itself establish quorum confirmation: runtime admission still requires the linearizable read to
+confirm its leadership. Under contention, a node can therefore report leadership while its
+execution revision and HTTP intake remain uninstalled until that confirmation succeeds. A final
+leader snapshot alone establishes neither election progress nor runtime readiness.
 
 A follower requests its drain, and then the release of the cordon that drain set, with the
 `stopping_node_drain` request over the

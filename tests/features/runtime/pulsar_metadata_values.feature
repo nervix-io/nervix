@@ -25,7 +25,7 @@ Feature: Pulsar transport metadata values
       CREATE RELAY events SCHEMA observed UNBRANCHED;
       CREATE PULSAR CLIENT source CONFIG { 'addr' = '{{pulsar_addr}}' };
       CREATE PULSAR TOPIC INGESTOR records FROM source TOPIC 'values_{{test_id}}'
-        SUBSCRIPTION 'values_{{test_id}}' PROVISIONED MODE <mode>
+        SUBSCRIPTION 'values_{{test_id}}' PROVISIONED TYPE SHARED MODE <mode>
         ON QUIESCE SUSPEND DECODE USING event_codec TIMESTAMP AT metadata.publish_time
         TO events INHERIT ALL
           SET topic = metadata.topic, message_id = metadata.message_id,
@@ -85,7 +85,7 @@ Feature: Pulsar transport metadata values
       CREATE RELAY summaries SCHEMA summary BRANCHED BY by_tenant;
       CREATE PULSAR CLIENT source CONFIG { 'addr' = '{{pulsar_addr}}' };
       CREATE PULSAR TOPIC INGESTOR records FROM source TOPIC 'windows_{{test_id}}'
-        SUBSCRIPTION 'windows_{{test_id}}' PROVISIONED MODE NO ACK
+        SUBSCRIPTION 'windows_{{test_id}}' PROVISIONED TYPE SHARED MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING event_codec TIMESTAMP AT metadata.event_time
         TO events INHERIT ALL SET event_time = metadata.event_time
           BRANCHED BY by_tenant SET tenant = message.tenant
@@ -147,7 +147,7 @@ Feature: Pulsar transport metadata values
       CREATE RELAY events SCHEMA observed UNBRANCHED;
       CREATE PULSAR CLIENT source CONFIG { 'addr' = '{{pulsar_addr}}' };
       CREATE PULSAR TOPIC INGESTOR records FROM source TOPIC 'redelivery_{{test_id}}'
-        SUBSCRIPTION 'redelivery_{{test_id}}' PROVISIONED
+        SUBSCRIPTION 'redelivery_{{test_id}}' PROVISIONED TYPE SHARED
         MODE ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL
