@@ -58,7 +58,7 @@ Feature: Kafka domain offsets survive intake unit layout changes
       "partition":1
       "partition":2
       """
-    And no relay subscription payload is received within "2s"
+    And the relay subscription does not receive a payload within "2s"
 
     Examples:
       | nodes | replicas |
