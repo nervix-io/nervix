@@ -1160,16 +1160,18 @@ hot-path records. Core `REPLY TO` is evaluated through the shared envelope owner
 the payload across retry. The connector checks the reply against the publication-subject rule
 before handing it to the driver. Both NATS connection builders require TLS for a `tls://` address,
 including on subsequent connections. The pinned driver owns ordered header encoding and decoding.
-Ingest clients select its validated transport projection: folded values are normalized in the
+Both product client builders select its validated transport projection: folded values are normalized in the
 existing frame allocation, which the payload already retains, and compact checked offsets make
 header visits borrow each immutable name and value directly. The offsets fit the NATS server's
 [signed 32-bit payload bound](https://github.com/nats-io/nats-server/blob/main/server/server.go);
 the decoder still reports an offset-conversion failure for a peer outside that contract. Outbound pairs move into the driver without copying names or values; the driver
 checks the complete encoded size before allocating the wire buffer. Stream-reserved message ID
 and expected-stream headers override only exactly spelled names and leave other repeats in their
-written positions. The ordinary SDK authoring map retains indexed lookup and its JSON contract,
-including keys with empty value arrays. The transport projection preserves that map's footprint;
-its borrowed visits and clones allocate nothing. Driver-owner checks cover populated shapes,
+written positions. The SDK authoring view retains indexed lookup and its JSON contract, including keys with empty
+value arrays. Header maps use a shared immutable handle, with copy-on-write for SDK authoring;
+Nervix constructs its complete outbound projection once. The handle and its optional field are
+both smaller than an inline indexed map, including for deliveries without headers. Borrowed
+transport visits and clones allocate nothing. Driver-owner checks cover populated shapes,
 long repeated names, large values, continuation folding, empty payload ownership, byte counts
 and reserved overrides. The connector never reconstructs transport order from a map.
 

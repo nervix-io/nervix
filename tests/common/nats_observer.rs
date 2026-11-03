@@ -51,6 +51,7 @@ impl NatsObserver {
         let events = Arc::clone(&connection_events);
         let observed_subject = subject.to_string();
         let client = options
+            .ordered_headers()
             .event_callback(move |event| {
                 events.record(&event);
                 tracing::info!(

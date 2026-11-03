@@ -121,7 +121,7 @@ impl BrokerMessage {
         let mut headers = Vec::new();
         if let Some(delivered) = message.headers.as_ref() {
             for (name, value) in delivered.iter_ordered() {
-                headers.push((name.to_string(), value.as_str().to_string()));
+                headers.push((name.to_string(), value.to_string()));
             }
         }
         Self::from_bytes(message.payload.as_ref(), headers)

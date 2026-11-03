@@ -388,6 +388,7 @@ impl NatsSubjectEmitter {
         let event_connected_once = connected_once.clone();
         let delay_connected_once = connected_once;
         let mut options = async_nats::ConnectOptions::new()
+            .ordered_headers()
             .event_callback(move |event| {
                 let connected_once = event_connected_once.clone();
                 async move {

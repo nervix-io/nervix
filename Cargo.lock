@@ -687,7 +687,7 @@ dependencies = [
 [[package]]
 name = "async-nats"
 version = "0.49.1"
-source = "git+https://github.com/glebpom/nats.rs.git?rev=63902f457700dc4bdf015465baf4fcdcff695c1c#63902f457700dc4bdf015465baf4fcdcff695c1c"
+source = "git+https://github.com/glebpom/nats.rs.git?rev=649282d58fb5248ea24e620385c5dabf1bdaa813#649282d58fb5248ea24e620385c5dabf1bdaa813"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",

@@ -47,7 +47,8 @@ existing ordered vector and keep size admission ahead of wire encoding. Neither 
 header visitor nor the driver's pull-control header reader constructs an indexed map. Typed SDK
 map access can initialize a message-local `std::sync::OnceLock` projection; this is an external
 SDK inspection boundary, outside those record and control paths and outside Deloxide's tracked
-primitives. Normal SDK authoring retains its indexed map. Driver-owner allocation, ownership and
+primitives. SDK authoring has an indexed copy-on-write view; both Nervix builders select the immutable
+transport view and never mutate a published projection. Driver-owner allocation, ownership and
 framing checks qualify this boundary; no concurrent map or new Nervix lock site is introduced.
 
 The metadata, request/reply, header-order and TLS scenarios are registered for active, order and

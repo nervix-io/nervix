@@ -762,7 +762,7 @@ zeromq = "0.4"
 # generation lets a Core NATS write reject a replacement connection's flush after buffer loss.
 # Header pairs retain their wire order, including interleaved names; JetStream metadata can be
 # parsed from an acknowledgement subject without constructing another client context.
-async-nats = { git = "https://github.com/glebpom/nats.rs.git", rev = "63902f457700dc4bdf015465baf4fcdcff695c1c" }
+async-nats = { git = "https://github.com/glebpom/nats.rs.git", rev = "649282d58fb5248ea24e620385c5dabf1bdaa813" }
 # rkyv 0.8.18 leaks partial allocations when semantic deserialization refuses
 # an element. Pin its 0.8.18 ownership fix until https://github.com/rkyv/rkyv/pull/710 ships.
 rkyv = { git = "https://github.com/glebpom/rkyv.git", rev = "868fa9c3c268560ad3459ddb95e271c7167bc097" }
