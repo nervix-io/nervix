@@ -22,16 +22,16 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ClickHouseEmitter, ClickHouseEmitterEntity, ClientEmitter, ClientEmitterEntity, DeclaredBounds,
-    EnvelopeClauseKind, HeaderModel, HttpEmitter, HttpEmitterEntity, IcebergEmitter,
-    IcebergEmitterEntity, KafkaEmitter, KafkaEmitterEntity, LocatorDeclaration, MongoDbEmitter,
-    MongoDbEmitterEntity, MqttEmitter, MqttEmitterEntity, MySqlEmitter, MySqlEmitterEntity,
-    NatsEmitter, NatsEmitterEntity, OptionDeclaration, OtelEmitter, OtelEmitterEntity,
-    PostgresEmitter, PostgresEmitterEntity, PropertyDeclaration, PulsarEmitter,
-    PulsarEmitterEntity, RabbitMqEmitter, RabbitMqEmitterEntity, RedisEmitter, RedisEmitterEntity,
-    RuntimeCapability, SentryEmitter, SentryEmitterEntity, SqsEmitter, SqsEmitterEntity,
-    SyslogEmitter, SyslogEmitterEntity, ZeroMqEmitter, ZeroMqEmitterEntity,
-    entity_union::emitter_destinations,
+    ChoiceRequirement, ClickHouseEmitter, ClickHouseEmitterEntity, ClientEmitter,
+    ClientEmitterEntity, DeclaredBounds, EnvelopeClauseKind, HeaderModel, HttpEmitter,
+    HttpEmitterEntity, IcebergEmitter, IcebergEmitterEntity, KafkaEmitter, KafkaEmitterEntity,
+    LocatorDeclaration, MongoDbEmitter, MongoDbEmitterEntity, MqttEmitter, MqttEmitterEntity,
+    MySqlEmitter, MySqlEmitterEntity, NatsEmitter, NatsEmitterEntity, OptionDeclaration,
+    OtelEmitter, OtelEmitterEntity, PostgresEmitter, PostgresEmitterEntity, PropertyDeclaration,
+    PulsarEmitter, PulsarEmitterEntity, RabbitMqEmitter, RabbitMqEmitterEntity, RedisEmitter,
+    RedisEmitterEntity, RuntimeCapability, SentryEmitter, SentryEmitterEntity, SqsEmitter,
+    SqsEmitterEntity, SyslogEmitter, SyslogEmitterEntity, WrittenChoice, ZeroMqEmitter,
+    ZeroMqEmitterEntity, entity_union::emitter_destinations,
 };
 use crate::{
     AlterEmitterError, ClickHouseTableEmitterMode, ClientEmitterMode, ClientName, ConnectorKind,
@@ -218,6 +218,29 @@ impl EmitterBodyForm {
     }
 }
 
+/// One publishing mode an emitter entity offers, and what a statement writes beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeclaredPublishing {
+    pub kind: EmitterPublishingModeKind,
+    /// The choices of the entity's options a statement must make to name this mode.
+    pub requires: &'static [ChoiceRequirement],
+}
+
+impl DeclaredPublishing {
+    /// The mode of `kind`, which a statement names whatever its options choose.
+    pub const fn of(kind: EmitterPublishingModeKind) -> Self {
+        Self {
+            kind,
+            requires: &[],
+        }
+    }
+
+    /// This mode, named only where a statement makes the `requires` choices.
+    pub const fn requiring(self, requires: &'static [ChoiceRequirement]) -> Self {
+        Self { requires, ..self }
+    }
+}
+
 /// What every emitter of one entity declares, whatever its statement says: everything a statement
 /// can say about it, and what it does with what a statement says.
 ///
@@ -237,8 +260,9 @@ pub struct EmitterEntityCapabilities {
     pub batch: EmitterBatchLegality,
     /// Whether a batch can only be published through the codec's `ON EMITTING BATCH` value.
     pub requires_batch_transformation: bool,
-    /// The publishing modes its emitters may name, each kind at most once.
-    pub publishing_modes: &'static [EmitterPublishingModeKind],
+    /// The publishing modes its emitters may name, each kind at most once, with the option
+    /// choices each needs written beside it.
+    pub publishing_modes: &'static [DeclaredPublishing],
     /// The name that locates what it writes, for an entity whose destination names one.
     pub locator: Option<LocatorDeclaration>,
     /// The options its destination writes after the locator, in the order a statement writes
@@ -258,11 +282,47 @@ impl EmitterEntityCapabilities {
         self.headers.is_some()
     }
 
-    /// Whether an emitter may name a publishing mode of `kind`.
+    /// The publishing mode of `kind` its emitters may name, where it declares one.
     ///
-    /// An entity declares each kind at most once, of the ten kinds there are.
+    /// An entity declares each kind at most once, so the scan is bounded by the kinds there are.
+    pub fn declared_publishing(
+        &self,
+        kind: EmitterPublishingModeKind,
+    ) -> Option<&'static DeclaredPublishing> {
+        self.publishing_modes.iter().find(|mode| mode.kind == kind)
+    }
+
+    /// The kind of every publishing mode its emitters may name, in declared order.
+    pub fn publishing_kinds(&self) -> Vec<EmitterPublishingModeKind> {
+        self.publishing_modes.iter().map(|mode| mode.kind).collect()
+    }
+
+    /// Whether an emitter may name a publishing mode of `kind`.
     pub fn accepts_publishing_mode_kind(&self, kind: EmitterPublishingModeKind) -> bool {
-        self.publishing_modes.contains(&kind)
+        self.declared_publishing(kind).is_some()
+    }
+
+    /// The requirement of the publishing mode `mode` that a statement of the pair `entity` leaves
+    /// unmet: the option choices the entity declares the mode needs written beside it, where the
+    /// statement does not make every one. `chosen` names the choice the statement makes for an
+    /// option, by the option's keywords. A mode the entity does not declare is the grammar's to
+    /// refuse, so it has no requirement here.
+    pub fn unmet_publishing(
+        &self,
+        entity: EmitterEntityKind,
+        mode: EmitterPublishingModeKind,
+        chosen: &dyn Fn(&str) -> Option<&'static str>,
+    ) -> Option<UnmetPublishingRequirement> {
+        let declared = self.declared_publishing(mode)?;
+        if ChoiceRequirement::all_met(declared.requires, chosen) {
+            return None;
+        }
+        Some(UnmetPublishingRequirement {
+            entity,
+            mode,
+            requires: declared.requires,
+            written: WrittenChoice::of(declared.requires, chosen),
+        })
     }
 
     /// The option its destination opens with `keywords`, where it declares one.
@@ -297,8 +357,8 @@ impl EmitterEntityCapabilities {
     /// each envelope clause and property.
     pub fn runtime_capabilities(&self) -> Vec<RuntimeCapability> {
         let mut capabilities = Vec::new();
-        for kind in self.publishing_modes {
-            capabilities.push(RuntimeCapability::Publishing(*kind));
+        for mode in self.publishing_modes {
+            capabilities.push(RuntimeCapability::Publishing(mode.kind));
         }
         capabilities.extend(RuntimeCapability::of_options(self.options));
         if self.batch.is_available() {
@@ -317,9 +377,47 @@ impl EmitterEntityCapabilities {
     }
 }
 
+/// A publishing mode a statement names without the option choices its entity declares the mode
+/// needs written beside it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "checking a publishing mode against its entity's declaration is a pure refusal"
+    )
+)]
+#[error(
+    "{entity} emitters name MODE {mode} only with {required}; the statement writes {written}",
+    mode = .mode.label(),
+    required = ChoiceRequirement::conjunction(.requires),
+    written = WrittenChoice::conjunction(.written)
+)]
+pub struct UnmetPublishingRequirement {
+    /// The pair the statement writes to.
+    pub entity: EmitterEntityKind,
+    /// The publishing mode the statement names.
+    pub mode: EmitterPublishingModeKind,
+    /// Every choice requirement the entity declares for the mode, all of which a statement meets.
+    pub requires: &'static [ChoiceRequirement],
+    /// The choice the statement makes for each option a requirement names, in the order the
+    /// requirements name them.
+    pub written: Vec<WrittenChoice>,
+}
+
 /// The declaration one emitter entity's Model makes for every statement of that entity.
 pub trait EmitterDeclaration {
     const CAPABILITIES: EmitterEntityCapabilities;
+
+    /// The requirement of this destination's publishing mode its statement leaves unmet, as its
+    /// entity declares the mode.
+    fn unmet_publishing(&self) -> Option<UnmetPublishingRequirement>
+    where
+        Self: EmitterEntityBody + EmitterEntityModel + Sized,
+    {
+        let mode = self.publishing().kind();
+        Self::CAPABILITIES.unmet_publishing(Self::KIND, mode, &|option| self.chosen(option))
+    }
 }
 
 /// What the body of one emitter statement states: what it publishes to and through, and the values it
@@ -356,6 +454,13 @@ pub trait EmitterEntityBody: EmitterPublication {
     /// The key the body's destination routes each record by, for a destination that computes one
     /// for every record: a `RABBITMQ EXCHANGE` emitter's `ROUTING KEY`.
     fn routing_key(&self) -> Option<&Expression> {
+        None
+    }
+
+    /// The name of the choice this body makes for the declared option its entity opens with
+    /// `option`. A body answers for the options a declared requirement names; its entity's
+    /// declaration states which those are.
+    fn chosen(&self, _option: &str) -> Option<&'static str> {
         None
     }
 }
@@ -441,6 +546,21 @@ impl EmitterEntity {
     /// The entity-owned publication policy, borrowed for inspection.
     pub fn publishing(&self) -> EmitterPublishing<'_> {
         self.body().publishing()
+    }
+
+    /// The requirement of this destination's publishing mode its statement leaves unmet: its
+    /// entity declares option choices the mode needs written beside it, and the statement does
+    /// not make every one.
+    pub fn unmet_publishing(&self) -> Option<UnmetPublishingRequirement> {
+        let kind = self.kind();
+        let mode = self.publishing().kind();
+        kind.capabilities()
+            .unmet_publishing(kind, mode, &|option| self.chosen(option))
+    }
+
+    /// The choice this destination's statement makes for the declared option opened by `option`.
+    pub fn chosen(&self, option: &str) -> Option<&'static str> {
+        self.body().chosen(option)
     }
 
     pub fn mode_change(&self) -> EmitterModeChange {

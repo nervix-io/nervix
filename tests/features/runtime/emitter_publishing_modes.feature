@@ -118,17 +118,17 @@ Feature: Emitter publishing modes
 
       CREATE MQTT TOPIC EMITTER mqtt_qos_zero FROM outgoing
         TO mqtt_main TOPIC 'mqtt_qos_zero'
-          MODE QOS 0 RETRY POLICY BACKOFF 80ms MAX 8s
+          QOS 0 MODE NO ACK RETRY POLICY BACKOFF 80ms MAX 8s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE MQTT TOPIC EMITTER mqtt_qos_one FROM outgoing
         TO mqtt_main TOPIC 'mqtt_qos_one'
-          MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 9s RETRY POLICY BACKOFF 90ms MAX 9s
+          QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 9s RETRY POLICY BACKOFF 90ms MAX 9s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE MQTT TOPIC EMITTER mqtt_qos_two FROM outgoing
         TO mqtt_main TOPIC 'mqtt_qos_two'
-          MODE QOS 2 ACK PARALLEL MAX 10 ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 10s
+          QOS 2 MODE ACK PARALLEL MAX 10 ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 10s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
 
@@ -267,7 +267,11 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      MODE QOS 0 RETRY POLICY BACKOFF 80ms MAX 8s
+      TO mqtt_main TOPIC 'mqtt_qos_zero' QOS 0
+      """
+    And the last command output contains
+      """
+      MODE NO ACK RETRY POLICY BACKOFF 80ms MAX 8s
       """
     When these Plexus commands are executed on the leader node
       """
@@ -275,7 +279,11 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 9s RETRY POLICY BACKOFF 90ms MAX 9s
+      TO mqtt_main TOPIC 'mqtt_qos_one' QOS 1
+      """
+    And the last command output contains
+      """
+      MODE ACK SEQUENTIAL ACK TIMEOUT 9s RETRY POLICY BACKOFF 90ms MAX 9s
       """
     When these Plexus commands are executed on the leader node
       """
@@ -283,7 +291,11 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      MODE QOS 2 ACK PARALLEL MAX 10 ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 10s
+      TO mqtt_main TOPIC 'mqtt_qos_two' QOS 2
+      """
+    And the last command output contains
+      """
+      MODE ACK PARALLEL MAX 10 ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 10s
       """
     When these Plexus commands are executed on the leader node
       """
@@ -519,9 +531,9 @@ Feature: Emitter publishing modes
       """
     When these Plexus commands fail with "QOS"
       """
-      CREATE KAFKA TOPIC EMITTER foreign_mode FROM outgoing
-        TO kafka_main TOPIC 'foreign_mode'
-          MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY BACKOFF 10ms MAX 1s
+      CREATE KAFKA TOPIC EMITTER foreign_option FROM outgoing
+        TO kafka_main TOPIC 'foreign_option'
+          QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """

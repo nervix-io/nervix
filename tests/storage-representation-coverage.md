@@ -49,6 +49,10 @@ admits is generated and none it refuses. The Model/archive, registry, consensus 
 Plexus properties preserve the session, quality of service and mode as separate written values,
 and the archive signature and consensus keyspace namespace fence this shape before decoding.
 
+MQTT TOPIC emitter generators draw `NO ACK` at QoS 0 and `ACK`, with either window, at QoS 1 or 2,
+so every pairing the declaration admits is generated and none it refuses. The same properties
+preserve the quality of service and the mode as separate written values under the same fence.
+
 NATS emitter generators draw the Core subject and JetStream stream entities, including the stream
 name, publication subject, acknowledged window, and optional message ID. Model/archive, registry,
 consensus, canonical Plexus and presentation properties preserve the complete destination. The

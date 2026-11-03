@@ -1060,7 +1060,10 @@ topic's `ACK` modes and its `SUSPEND` require `SESSION PERSISTENT` and `QOS 1` o
 session a broker keeps messages for, and the source answers which choices its statement made. A
 statement that names a mode without the choices it requires is refused at `CREATE` and `ALTER`
 with the vocabulary's typed `UnmetDeliveryRequirement`, which names every required choice and what
-the statement writes for each. Whether a source can honor a quiesce mode, whether
+the statement writes for each. A publishing mode declares its choices the same way: an MQTT topic's
+`NO ACK` requires `QOS 0` and its `ACK` requires `QOS 1` or `QOS 2`, the destination answers which
+choice its statement made, and `UnmetPublishingRequirement` is the refusal. Whether a source can
+honor a quiesce mode, whether
 an emitter accepts a publishing mode, whether its body needs a codec, and the batching contract with its
 maximum and its refusal for an emitter that cannot batch are all read from the declaration. The
 registry, the planner and the console keep their own copies of some of these facts until the work
@@ -1165,9 +1168,14 @@ nothing. A publication topic admits neither wildcard. Every ingestor statement w
 default. The ingestor declares `NO ACK`, and `ACK SEQUENTIAL`, `ACK PARALLEL` and `SUSPEND` only
 with `SESSION PERSISTENT` and `QOS 1` or `QOS 2`, the session a broker keeps messages for and
 redelivers after a lost connection; `BUFFER` and `DROP` stay connected under any session. Neither direction carries transport headers, and the ingestor
-projects no typed metadata field. The emitter declares QoS as its publishing mode, `QOS 0`,
-`QOS 1 ACK` or `QOS 2 ACK`, with codec payloads, no envelope clause and optional batching up to the
-Maximum Packet Size each broker declares when the client connects. The unpooled client's keys are
+projects no typed metadata field. Every emitter statement writes `QOS 0`, `QOS 1` or `QOS 2`, which
+has no default, and its modes declare what each can complete: `NO ACK` only with `QOS 0`, which
+nothing answers, and `ACK` with either window only with `QOS 1` or `QOS 2`, which a broker answers
+with `PUBACK` or `PUBCOMP`. The start plan holds the two as one value, so the connector receives no
+pairing the declaration refuses. The emitter connects a clean session at `QOS 0` and a persistent
+one otherwise, and declares that as a driver limit rather than an option, together with the session
+a new client cannot resume. It takes codec payloads, no envelope clause and optional batching up to
+the Maximum Packet Size each broker declares when the client connects. The unpooled client's keys are
 all Nervix-owned: `addr` names the broker by `mqtt` or `mqtts`, a host and a nonzero port, and
 nothing else, since a connection reads no credentials, path, query or fragment from it;
 `client_id`; and the TLS files, of which `tls_ca_file` is required exactly with `mqtts` and the
@@ -1244,11 +1252,12 @@ fails them. They cover the three statement families:
   another entity declares is refused. So is a mode written without its required choices, a statement
   that leaves a required option out, and an empty external name. Completion at the locator, the
   options, `MODE` and `ON QUIESCE` offers exactly the declared items.
-- Emitters. Every declared publishing mode, body and batching choice parses into its kind, every
-  optional option parses, and every declared object store names its storage client. A batch above
-  the declared maximum breaks the batching contract. An undeclared publishing mode, body, batching
-  clause, option, envelope clause or `PROPERTIES` block is refused. Completion at `MODE` and after
-  the destination offers exactly the declared items.
+- Emitters. Every declared publishing mode, together with the choices it requires, and every body
+  and batching choice parses into its kind, every optional option parses, and every declared object
+  store names its storage client. A batch above the declared maximum breaks the batching contract.
+  An undeclared publishing mode, body, batching clause, option, envelope clause or `PROPERTIES`
+  block is refused, and so is a mode beside a choice it does not admit. Completion at `MODE` and
+  after the destination offers exactly the declared items.
 - Clients. `POOL SIZE` is written exactly where the client declares a pool, and only the declared
   options parse.
 

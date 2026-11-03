@@ -299,6 +299,16 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   defaults, derivations, fixed-value contracts, validation, carriers, change procedures,
   capability sizing or settings enforcement keep that chapter current in the same change.
   Interconnect, consensus, connector and lifecycle chapters retain their detailed contracts.
+- [Cryptography](docs/src/cryptography.md) is the authoritative architecture reference for
+  cryptography in Nervix. Any change to how Nervix obtains a TLS provider, a digest used for
+  security, a random value or a password or key derivation, to a non-approved hash or the purpose a
+  site records for it, to a dependency that brings cryptography into the `nervix-server` product
+  graph, or to the `non_aws_lc_crypto` count must keep that chapter current in the same change. Its
+  scope includes the `nervix-crypto` boundary and what it provides, the algorithm policy, the
+  classification register of non-security hashes, the inventory of cryptography outside AWS-LC in
+  the product graph with the path that uses each, the count and what the later FIPS migration will
+  refuse. Interconnect, client session, connector, credential and backup chapters retain their
+  own contracts.
 - [Execution Plans](docs/src/execution-plans.md) is the authoritative architecture reference for
   converting a committed schedule into one typed execution revision and installing it as running
   or passive runtime state. Any change to revision construction, typed node, resource, source,
@@ -781,6 +791,29 @@ build and the existing tests, and nothing in it changes behavior.
   declarations. It counts governed numeric constants and literal policy calls outside class
   defaults and reviewed fixed contracts. Its compiler-rule replacement removes the detector
   and numeric baseline entry together.
+
+## Cryptography
+
+These rules bind every change from the moment they land, including work in flight on other
+branches and in other epics. [Cryptography](docs/src/cryptography.md) owns the boundary, the
+algorithm policy, the classification register and the inventory they refer to.
+
+- Nervix-authored cryptography comes only from the `nervix-crypto` boundary: the TLS provider,
+  digests used for security, secure randomness, and password and key derivation. Until that crate
+  exists, the boundary is the target and every authored use outside it is debt the
+  `non_aws_lc_crypto` count records.
+- Anything that protects confidentiality, integrity or authenticity uses an algorithm AWS-LC
+  provides and FIPS 140-3 approves.
+- A non-approved hash (BLAKE3, MD5, SHA-1, xxHash, CRC) is allowed only for a non-security
+  purpose. The site records that purpose, and the cryptography chapter lists it.
+- No change adds a dependency that brings a cryptography implementation other than AWS-LC into the
+  `nervix-server` product graph. A connector need that cannot be met is recorded on its connector
+  epic.
+- A second `aws-lc-*-sys` crate in the product is a defect.
+- The `non_aws_lc_crypto` count only decreases. It counts authored uses of cryptography outside
+  AWS-LC, found by the stable source parser in every configuration, and each dependency edge of the
+  `nervix-server` normal and build graph onto a crate implementing cryptography other than AWS-LC.
+  `just ratchet --show non_aws_lc_crypto` lists every site; the chapter defines what counts.
 
 ## Runtime and Infrastructure Invariants
 
@@ -1405,8 +1438,9 @@ build and the existing tests, and nothing in it changes behavior.
   complexity 30, which reads no coverage.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, actual
   Rust cast expressions, struct fields whose presence depends on `cfg(feature = "testing")`, and
-  functions whose cyclomatic complexity exceeds 30, and `hidden_tunables`, numeric policy outside
-  class-typed settings and fixed-value contracts as specified in Node Settings.
+  functions whose cyclomatic complexity exceeds 30, `hidden_tunables`, numeric policy outside
+  class-typed settings and fixed-value contracts as specified in Node Settings, and
+  `non_aws_lc_crypto`, cryptography outside AWS-LC as specified in Cryptography.
   The stable source parser sees inactive branches and named or tuple fields; raw identifiers,
   import aliases, qualified paths and conditional documentation attributes are not those facts.
   Complexity is measured by the cargo-crap version `scripts/cargo_crap.py` pins, which
@@ -1439,7 +1473,7 @@ build and the existing tests, and nothing in it changes behavior.
   expectation widened to cover another operation fail. Generated reports are outputs under target,
   never enforcement inputs. Do not infer policy from filenames, sharing traits or method names.
 - [Architecture Rules And The Debt Ratchet](docs/src/architecture-enforcement.md) owns the complete
-  sixteen-family contract matrix, the components and the nine source-contract annotations,
+  seventeen-family contract matrix, the components and the nine source-contract annotations,
   source/compiler scope, report identity and reuse, the pinned analysis toolchain and its upgrade,
   qualification and its CI selection, what each form of evidence establishes, the workaround audit
   and review limits. A new or changed semantic rule ships with allowed/rejected compiler fixtures

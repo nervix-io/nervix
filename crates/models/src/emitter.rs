@@ -441,11 +441,6 @@ pub enum EmitterPublishingModeKind {
     ClientAck,
     NoAck,
     BrokerAck,
-    MqttQos0,
-    MqttQos1,
-    MqttQos2,
-    SqsSingle,
-    SqsBatch,
     RequestAck,
 }
 
@@ -465,25 +460,6 @@ pub enum EmitterPublishing<'a> {
         ack_timeout: &'a str,
         retry_policy: &'a RetryPolicy,
     },
-    MqttQos0 {
-        retry_policy: &'a RetryPolicy,
-    },
-    MqttQos1 {
-        window: &'a AckWindow,
-        ack_timeout: &'a str,
-        retry_policy: &'a RetryPolicy,
-    },
-    MqttQos2 {
-        window: &'a AckWindow,
-        ack_timeout: &'a str,
-        retry_policy: &'a RetryPolicy,
-    },
-    SqsSingle {
-        retry_policy: &'a RetryPolicy,
-    },
-    SqsBatch {
-        retry_policy: &'a RetryPolicy,
-    },
     RequestAck {
         retry_policy: &'a RetryPolicy,
     },
@@ -495,25 +471,15 @@ impl<'a> EmitterPublishing<'a> {
             Self::ClientAck { retry_policy, .. }
             | Self::NoAck { retry_policy }
             | Self::BrokerAck { retry_policy, .. }
-            | Self::MqttQos0 { retry_policy }
-            | Self::MqttQos1 { retry_policy, .. }
-            | Self::MqttQos2 { retry_policy, .. }
-            | Self::SqsSingle { retry_policy }
-            | Self::SqsBatch { retry_policy }
             | Self::RequestAck { retry_policy } => retry_policy,
         }
     }
     pub fn ack_timeout(self) -> Option<&'a str> {
         match self {
-            Self::ClientAck { ack_timeout, .. }
-            | Self::BrokerAck { ack_timeout, .. }
-            | Self::MqttQos1 { ack_timeout, .. }
-            | Self::MqttQos2 { ack_timeout, .. } => Some(ack_timeout),
-            Self::NoAck { .. }
-            | Self::MqttQos0 { .. }
-            | Self::SqsSingle { .. }
-            | Self::SqsBatch { .. }
-            | Self::RequestAck { .. } => None,
+            Self::ClientAck { ack_timeout, .. } | Self::BrokerAck { ack_timeout, .. } => {
+                Some(ack_timeout)
+            }
+            Self::NoAck { .. } | Self::RequestAck { .. } => None,
         }
     }
     pub fn kind_label(self) -> &'static str {
@@ -524,11 +490,6 @@ impl<'a> EmitterPublishing<'a> {
             Self::ClientAck { .. } => EmitterPublishingModeKind::ClientAck,
             Self::NoAck { .. } => EmitterPublishingModeKind::NoAck,
             Self::BrokerAck { .. } => EmitterPublishingModeKind::BrokerAck,
-            Self::MqttQos0 { .. } => EmitterPublishingModeKind::MqttQos0,
-            Self::MqttQos1 { .. } => EmitterPublishingModeKind::MqttQos1,
-            Self::MqttQos2 { .. } => EmitterPublishingModeKind::MqttQos2,
-            Self::SqsSingle { .. } => EmitterPublishingModeKind::SqsSingle,
-            Self::SqsBatch { .. } => EmitterPublishingModeKind::SqsBatch,
             Self::RequestAck { .. } => EmitterPublishingModeKind::RequestAck,
         }
     }
@@ -540,11 +501,6 @@ impl EmitterPublishingModeKind {
         match self {
             Self::ClientAck | Self::BrokerAck | Self::RequestAck => "ACK",
             Self::NoAck => "NO ACK",
-            Self::MqttQos0 => "QOS 0",
-            Self::MqttQos1 => "QOS 1 ACK",
-            Self::MqttQos2 => "QOS 2 ACK",
-            Self::SqsSingle => "SINGLE",
-            Self::SqsBatch => "BATCH",
         }
     }
 
@@ -555,11 +511,6 @@ impl EmitterPublishingModeKind {
                 "ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s"
             }
             Self::NoAck => "NO ACK RETRY POLICY BACKOFF 1s MAX 30s",
-            Self::MqttQos0 => "QOS 0 RETRY POLICY BACKOFF 1s MAX 30s",
-            Self::MqttQos1 => "QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s",
-            Self::MqttQos2 => "QOS 2 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s",
-            Self::SqsSingle => "SINGLE RETRY POLICY BACKOFF 1s MAX 30s",
-            Self::SqsBatch => "BATCH RETRY POLICY BACKOFF 1s MAX 30s",
             Self::RequestAck => "ACK RETRY POLICY BACKOFF 1s MAX 30s",
         }
     }

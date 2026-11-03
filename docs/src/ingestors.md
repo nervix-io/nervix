@@ -1890,7 +1890,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | TOPIC 'devices/+/orders' (mqtt_topic_filter) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2)<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2) |
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1<br>`SESSION CLEAN` (keyword choice); `SESSION PERSISTENT` (keyword choice); required<br>`QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |
-| Headers | Not offered: Subscription options select the session and inbound QoS; emitter QoS is part of its publishing mode. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation. |
+| Headers | Not offered: Subscription options select the session and inbound QoS, and the emitter's QOS option its outbound QoS. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND (requires SESSION PERSISTENT and QOS 1 or 2)<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | Metadata | Not offered: The current topic declaration exposes the payload and configured subscription, with no typed publish-property metadata namespace. |
 | Every live node | no; scheduled owner |
@@ -2044,7 +2044,7 @@ Ordinary `STOP`, reconnect and ownership transfer retain persistent broker sessi
 `SUSPEND` is valid only with `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. CREATE refuses any other
 pairing with `MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT and QOS 1 or 2`, underlining
 `SUSPEND`. An unsupported QoS number is refused with the supplied value and the accepted ingestor
-levels, such as `MQTT ingestor QOS must be 0, 1 or 2, found 3`. Completion offers only the
+levels, such as `MQTT QOS must be 0, 1 or 2, found 3`. Completion offers only the
 session's valid quiesce choices.
 
 `SUSPEND` disconnects while asking the broker to

@@ -645,8 +645,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `WEBSOCKETS ENDPOINT`, an explicit `ON OVERFLOW DROP OLDEST|DROP NEWEST` for `BUFFER`; include
   `RETRY AFTER` for endpoint `REJECT`. Write every `MQTT TOPIC` ingestor's `SESSION CLEAN` or
   `SESSION PERSISTENT` and its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, and use its `ACK` modes
-  and `SUSPEND` only with `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. Do not invent a default or
-  use a mode offered by another entity.
+  and `SUSPEND` only with `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. Write every `MQTT TOPIC`
+  emitter's `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, with `NO ACK` only at `QOS 0` and `ACK` only
+  at `QOS 1` or `QOS 2`. Do not invent a default or use a mode offered by another entity.
 - A server endpoint WebSocket keeps its route and signaling protocol for the connection. After
   its source stops or is replaced, reconnect to use the new source; after signaling, the next
   refused payload on the preceding connection closes with 1013. Configured routes without a live

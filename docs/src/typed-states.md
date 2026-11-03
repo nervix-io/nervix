@@ -270,10 +270,11 @@ identifies the current Model layout, including those unions, an owned Pulsar sub
 start position, a Kafka consumer group's required start position, the required branch partition
 count, Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's
 `SEND` request shape, the session and quality of service an MQTT TOPIC ingestor writes beside its
-delivery mode, a `REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription, and that header
-state. Consensus's `raft_stream_emit_` keyspaces and current state metadata encoding identify its
-stored shapes. An unrecognized signature, namespace or encoding fails with the owning storage error
-and requires the stored data to be recreated.
+delivery mode, the quality of service an MQTT TOPIC emitter writes beside its publishing mode, a
+`REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription, and that header state. Consensus's
+`raft_stream_emit_` keyspaces and current state metadata encoding identify its stored shapes. An
+unrecognized signature, namespace or encoding fails with the owning storage error and requires the
+stored data to be recreated.
 
 ## Absence And Distinct States
 
