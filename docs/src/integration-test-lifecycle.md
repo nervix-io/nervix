@@ -3178,6 +3178,12 @@ job ends on its own.
 For focused local coverage, `just coverage-scenarios <lcov-path> <scenario-options>` starts a
 fresh measurement. `just coverage-scenarios-append <lcov-path> <scenario-options>` retains the
 current profiles and reuses unchanged instrumented artifacts for another scenario selection.
+Both coverage recipes forward each scenario argument unchanged, including empty arguments. Quote
+a scenario name or regular expression containing spaces or `|` as one shell argument, and quote
+input globs for the scenario runner to expand. Pass each option and its value separately.
+`just test-scenario-arguments` exercises their production bodies with recording tool boundaries,
+checking argument forwarding, build dependencies, tool environment and fresh versus append flags
+without compiling or starting services.
 When collecting a different source revision, first run `just coverage-clean-workspace` so
 instrumented binaries and line mappings from earlier sources cannot enter the new report.
 After collecting unit and scenario profiles, `just coverage-report-workspace` exports all

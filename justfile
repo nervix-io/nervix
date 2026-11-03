@@ -1896,7 +1896,7 @@ coverage-scenarios output *args: tests-deps
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
     install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-plexus-format") }} \
         {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-plexus-format") }}
-    cargo llvm-cov --package nervix-scenarios --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+    cargo llvm-cov --package nervix-scenarios --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(args) }}
 
 # Add selected scenarios to the current coverage profiles without rebuilding unchanged artifacts.
 coverage-scenarios-append output *args: tests-deps
@@ -1912,7 +1912,7 @@ coverage-scenarios-append output *args: tests-deps
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
     install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-plexus-format") }} \
         {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-plexus-format") }}
-    cargo llvm-cov --no-clean --package nervix-scenarios --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+    cargo llvm-cov --no-clean --package nervix-scenarios --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(args) }}
 
 # Measure both published paced drivers through their public scenarios, including Python threads
 # and Rust unit tests. The Python report is written beside `output` with a `.python.lcov` suffix.

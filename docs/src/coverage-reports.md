@@ -73,6 +73,13 @@ ordinary reports for `coverage-patch`, using the same normalization as the works
 ordinary profiles, with the browser build and configured ORT environment. It exports a local
 focused report, rather than a CI merge input. Start a new source generation with
 `just coverage-clean-workspace`; owner collections and this focused recipe can then append to it.
+The focused `coverage-scenarios` and `coverage-scenarios-append` recipes preserve each scenario
+argument, including spaces, regular-expression pipes, literal shell characters and empty values.
+Quote a name filter or input glob as one argument; pass separate options as separate arguments.
+They retain the instrumented CLI, report tool, paced driver, shared binding, formatter and ORT
+environment. The first starts a fresh measurement; the append variant retains current profiles
+with `--no-clean`. `just test-scenario-arguments` checks these boundaries through the actual recipe
+bodies with recording builders and Cargo, without compiling or starting services.
 Checks [outside collected counters](#verification-outside-collected-counters) retain their own
 verdicts, including Deloxide supervision and compiler-cache qualification.
 
