@@ -22,7 +22,7 @@ Feature: Pulsar subscription start position
       CREATE PULSAR CLIENT pulsar_main CONFIG {'addr' = '{{pulsar_addr}}'};
       CREATE PULSAR TOPIC INGESTOR pulsar_notifications
         FROM pulsar_main TOPIC 'start_latest_{{test_id}}'
-        SUBSCRIPTION 'start_latest_{{test_id}}' OWNED BY INGESTOR START AT LATEST
+        SUBSCRIPTION 'start_latest_{{test_id}}' OWNED BY INGESTOR START AT LATEST TYPE SHARED
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
@@ -62,7 +62,7 @@ Feature: Pulsar subscription start position
       CREATE RELAY output SCHEMA item UNBRANCHED;
       CREATE PULSAR CLIENT broker CONFIG {'addr' = 'pulsar://127.0.0.1:1'};
       CREATE PULSAR TOPIC INGESTOR events FROM broker TOPIC 'events'
-        SUBSCRIPTION 'readers' PROVISIONED MODE NO ACK ON QUIESCE SUSPEND
+        SUBSCRIPTION 'readers' PROVISIONED TYPE SHARED MODE NO ACK ON QUIESCE SUSPEND
         DECODE USING item_codec TO output INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
@@ -80,7 +80,7 @@ Feature: Pulsar subscription start position
       """
     Then the last command output contains
       """
-      SUBSCRIPTION 'readers' PROVISIONED
+      SUBSCRIPTION 'readers' PROVISIONED TYPE SHARED
       """
 
     Examples:
@@ -103,7 +103,7 @@ Feature: Pulsar subscription start position
       """
       {"user_id":11}
       """
-    And Pulsar ingestor "events" reads subscription "start_earliest_{{test_id}}" of topic "start_earliest_{{test_id}}" declared "OWNED BY INGESTOR START AT EARLIEST"
+    And Pulsar ingestor "events" reads subscription "start_earliest_{{test_id}}" of topic "start_earliest_{{test_id}}" declared "OWNED BY INGESTOR START AT EARLIEST TYPE SHARED"
     Then within "30s" the relay subscription receives exactly one payload for each fragment set
       """
       "user_id":11
@@ -145,7 +145,7 @@ Feature: Pulsar subscription start position
       """
       {"user_id":33}
       """
-    And Pulsar ingestor "events" reads subscription "start_earliest_{{test_id}}" of topic "start_earliest_{{test_id}}" declared "OWNED BY INGESTOR START AT LATEST"
+    And Pulsar ingestor "events" reads subscription "start_earliest_{{test_id}}" of topic "start_earliest_{{test_id}}" declared "OWNED BY INGESTOR START AT LATEST TYPE SHARED"
     Then within "30s" Pulsar subscription "start_earliest_{{test_id}}" of topic "start_earliest_{{test_id}}" has 1 consumer
     When Pulsar message is published to topic "start_earliest_{{test_id}}"
       """

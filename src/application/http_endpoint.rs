@@ -246,7 +246,7 @@ impl EndpointWebsocketConnection {
             };
             if let Err(error) = session_result {
                 warn!(
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     host,
                     path = self.path.as_str(),
                     "websocket signaling failed"

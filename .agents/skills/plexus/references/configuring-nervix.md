@@ -336,8 +336,8 @@ current connection, retry and deadline limits.
 - Size an Iceberg emitter's worst-case latency as `FLUSH EACH` plus `COMMIT EACH`: the commit
   duration starts when a flush stages rows while none are staged, not when the rows arrived.
 - Keep `MAX BATCH SIZE` well below 32 MiB on routes that feed an Iceberg emitter. A commit charges
-  its staged files to the node's 32 MiB bulk memory class and reads a larger staged batch only once
-  the whole class is free; `DESCRIBE EMITTER` shows a commit waiting for that memory as its
+  its staged batches to the node's 32 MiB bulk memory class and reads a larger staged batch only
+  once the whole class is free; `DESCRIBE EMITTER` shows a commit waiting for that memory as its
   transient error while the emitter retries.
 - Provision Iceberg table columns with names and types matching the emitter's `VALUES`. A
   required `NAMESPACE` names the catalog namespace independently of the Nervix domain; provision
@@ -475,17 +475,22 @@ current connection, retry and deadline limits.
   subscriber can then receive twice. The Redis sections of `Ingestors` and `Emitters` state each
   window.
 - An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL`, or `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT
-  ...` with `n` at most 10, with `ON QUIESCE SUSPEND`. An emitter writes its request shape,
-  `SEND SINGLE` or `SEND BATCH`, before `MODE ACK RETRY POLICY ...`. Treat `QUEUE` as a literal,
-  case-preserving SQS name, and check `SQS CLIENT` keys against `Ingestors` → `SQS`: `endpoint`,
-  `region`, `access_key_id` and `secret_access_key` are required, and it declares no proxy or
-  client certificate keys. After `ENCODE USING`, an emitter may write
-  `DELAY <whole seconds from 1s to 900s>` for a standard queue or `DEDUPLICATION ID <string_expression>`
-  for a `.fifo` queue. Its `write_header` values may be `STRING`, an integer type or `BYTES`, sent
-  as `String`, `Number` and `Binary` attributes; read `Emitters` → `SQS`.
+  ...` with `n` at most 10, with `ON QUIESCE SUSPEND`; a rejected batch returns on its
+  `RETRY POLICY`, and a queue visibility timeout shorter than `ACK TIMEOUT` can hand a message still
+  awaiting its acknowledgement to another receive. An emitter writes its request shape,
+  `SEND SINGLE` or `SEND BATCH`, before `MODE ACK RETRY POLICY ...`; `SEND BATCH` is independent
+  of the `BATCH` clause. Treat `QUEUE` as a literal, case-preserving SQS name, and check
+  `SQS CLIENT` keys against `Ingestors` → `SQS`: `endpoint`, `region`, `access_key_id` and
+  `secret_access_key` are required, `tls_ca_file` replaces the platform's roots rather than adding
+  to them, and it declares no proxy or client certificate keys. After `ENCODE USING`, an emitter may
+  write `DELAY <whole seconds from 1s to 900s>` for a standard queue or
+  `DEDUPLICATION ID <string_expression>` for a `.fifo` queue. Its `write_header` values may be
+  `STRING`, an integer type or `BYTES`, sent as `String`, `Number` and `Binary` attributes; read
+  `Emitters` → `SQS`.
   For source identity, redelivery routing and event time, read the metadata table in `Ingestors` →
   `SQS`; use its exact field types and `TIMESTAMP AT metadata.sent_at` where appropriate. User
-  message attributes remain transport headers.
+  message attributes remain transport headers, which an ingestor reads as text, so a `Binary`
+  attribute that is not UTF-8 does not survive the read.
 - `NATS SUBJECT` ingestors use `NO ACK` with a required `QUEUE GROUP` and `INSTANCES`, and
   `BUFFER` or `DROP` quiesce. Write NATS wildcards only in an ingestor's `SUBJECT`, as whole
   tokens with `>` last; an emitter's `SUBJECT` is one literal subject. Check both against the NATS
@@ -499,9 +504,12 @@ current connection, retry and deadline limits.
 - Every `PULSAR TOPIC` ingestor states who owns its subscription after the subscription's name:
   `OWNED BY INGESTOR START AT EARLIEST` when Nervix may create it and should remove it when the ingestor or its
   domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and
-  the operator must create before the ingestor reads. Consumers register as
-  `<domain>~<ingestor>-<instance>`. Read `Ingestors` → `Pulsar` for missing subscriptions, removal
-  failures and which subscription `ALTER` retains or removes. Changing only consumer policy or
+  the operator must create before the ingestor reads. The owner is followed by a required
+  `TYPE SHARED|KEY_SHARED|FAILOVER|EXCLUSIVE`; `FAILOVER` and `EXCLUSIVE` read through one consumer,
+  so they refuse more than one instance. Consumers register as
+  `<domain>~<ingestor>-<instance>`. Read `Ingestors` → `Pulsar` for what each type delivers, missing
+  and held subscriptions, removal failures and which subscription `ALTER` retains or removes.
+  Changing only consumer policy, including `SET TYPE`, or
   handing the same subscription to `PROVISIONED` preserves its backlog; a changed broker, qualified
   topic or subscription name retires the preceding owned subscription best-effort.
 - A `PULSAR TOPIC` ingestor exposes `metadata.topic`, `message_id`, `key` and `producer_name` as

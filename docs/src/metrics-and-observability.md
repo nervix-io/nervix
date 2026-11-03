@@ -397,7 +397,9 @@ Restore](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics) def
 ## DESCRIBE Metrics
 
 `DESCRIBE` commands include metric summaries for the described target when metrics exist. For a
-scheduled target, the request is answered from its owner. Node traffic is grouped under
+scheduled target, the request is answered from its owner. An ingestor that runs on every live node,
+such as an `HTTP ENDPOINT` ingestor, has no single owner, so the node that receives
+`DESCRIBE INGESTOR` answers for its own instance. Node traffic is grouped under
 `incoming_edges` and `outgoing_edges`; relay descriptions keep owner-buffer utilization under
 `relay_buffers` rather than mixing relay traffic into the relay node:
 
@@ -413,7 +415,10 @@ DESCRIBE HASH MAP user_profiles;
 DESCRIBE DOMAIN;
 ```
 
-`DESCRIBE DOMAIN` summarizes active-domain traffic from per-node metric state. Its
+`DESCRIBE DOMAIN` is answered by the node that receives it and summarizes active-domain traffic
+from that node's own metric state. Traffic is counted on the node that observed it, under that
+node's `physical_node`, so the traffic another node observed is in that node's answer: run
+`DESCRIBE DOMAIN` on each node to see the whole cluster. Its
 `input_output` section aggregates ingestor and emitter metrics. Its `processed`
 section aggregates metrics for all runtime nodes in the domain, including
 processing nodes.

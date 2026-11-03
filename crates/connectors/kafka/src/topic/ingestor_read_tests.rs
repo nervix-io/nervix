@@ -5,11 +5,13 @@
 
 use std::{num::NonZeroUsize, time::Duration};
 
+use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     BrokerIngestorConnector, IngestorBatch, IngestorBatchRequest, IngestorMessage,
-    IngestorReadCancellation,
+    IngestorReadCancellation, RetainedIngestMetadata, RetainedIngestMetadataValue as Value,
 };
+use nervix_models::{IngestorMetadataType, Timestamp};
 use nervix_primitives::time::{Instant, sleep};
 use rdkafka::{
     config::ClientConfig,
@@ -17,7 +19,7 @@ use rdkafka::{
 };
 
 use super::{
-    KafkaGroupCommit,
+    KafkaGroupCommit, KafkaTopicIngestorError,
     commit_tests::{READ_DEADLINE, cluster, publish, read_positions, subscribed_source},
 };
 
@@ -25,7 +27,7 @@ use super::{
 const FETCH_INTERVAL: Duration = Duration::from_millis(10);
 
 #[nervix_primitives::test]
-async fn an_invalid_timestamp_returns_the_gathered_prefix_before_its_typed_failure() {
+async fn a_record_whose_timestamp_no_datetime_holds_is_read_between_its_neighbours() {
     let cluster = cluster();
     let producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", cluster.bootstrap_servers())
@@ -50,16 +52,73 @@ async fn an_invalid_timestamp_returns_the_gathered_prefix_before_its_typed_failu
         batch_timeout: Some(Duration::from_secs(1)),
     };
     let cancellation = IngestorReadCancellation::new();
-    let prefix =
-        nervix_primitives::time::timeout(READ_DEADLINE, source.next_batch(request, &cancellation))
-            .await
-            .assured("the group forms within the test observation deadline")
-            .assured("a later refused record does not discard the gathered prefix");
-    let IngestorBatch::Messages(prefix) = prefix else {
-        panic!("an uncancelled read returns its gathered messages");
+    let mut messages = Vec::new();
+    while messages.len() < 3 {
+        let batch = nervix_primitives::time::timeout(
+            READ_DEADLINE,
+            source.next_batch(request, &cancellation),
+        )
+        .await
+        .assured("the group forms within the test observation deadline")
+        .assured("a record whose timestamp no DATETIME holds does not fail the read");
+        let IngestorBatch::Messages(batch) = batch else {
+            panic!("an uncancelled read returns its gathered messages");
+        };
+        messages.extend(batch);
+    }
+
+    let mut readings = Vec::with_capacity(messages.len());
+    for message in &messages {
+        let retained = RetainedIngestMetadata::capture(message.metadata().fields);
+        let [_topic, _partition, offset, _key, time, kind, _tombstone] = retained.values() else {
+            panic!("a KAFKA TOPIC record hands over the seven fields its entity declares");
+        };
+        readings.push([offset.clone(), time.clone(), kind.clone()]);
+    }
+    let create_time = Value::String("create_time".to_string());
+    assert_eq!(
+        readings,
+        [
+            [
+                Value::I64(0),
+                Value::Datetime(Timestamp::from_unix_nanos(1_234_000_000)),
+                create_time.clone(),
+            ],
+            [
+                Value::I64(1),
+                Value::Unrepresentable {
+                    ty: IngestorMetadataType::Datetime,
+                    value: "the Kafka timestamp 9223372036854775807 milliseconds after the Unix \
+                            epoch"
+                        .to_string(),
+                },
+                create_time.clone(),
+            ],
+            [
+                Value::I64(2),
+                Value::Datetime(Timestamp::from_unix_nanos(5_678_000_000)),
+                create_time,
+            ],
+        ],
+        "every record is read in order, its timestamp handed over as its kind and value"
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_failure_retained_after_a_gathered_prefix_is_reported_by_the_next_admitted_read() {
+    let cluster = cluster();
+    publish(&cluster).await;
+    let mut source = subscribed_source(&cluster, KafkaGroupCommit::EachAcknowledgedBatch).await;
+    // What a collected read retains when a record after its gathered prefix has no position to
+    // acknowledge, which only a record at the last offset Kafka's signed offsets reach has.
+    source.pending_read_error = Some(Report::new(KafkaTopicIngestorError::OffsetOverflow {
+        topic: "orders".to_string(),
+        partition: 0,
+    }));
+    let request = IngestorBatchRequest {
+        max_messages: NonZeroUsize::new(8).assured("eight is a nonzero batch bound"),
+        batch_timeout: Some(Duration::from_secs(1)),
     };
-    assert_eq!(prefix.len(), 1);
-    assert_eq!(prefix[0].position().offset, 1);
 
     let cancelled = IngestorReadCancellation::new();
     cancelled.cancel();
@@ -70,17 +129,21 @@ async fn an_invalid_timestamp_returns_the_gathered_prefix_before_its_typed_failu
             .assured("cancellation ends intake");
     assert!(matches!(stopped, IngestorBatch::Interrupted { gathered } if gathered.is_empty()));
 
+    let cancellation = IngestorReadCancellation::new();
     let next =
         nervix_primitives::time::timeout(READ_DEADLINE, source.next_batch(request, &cancellation))
             .await
             .assured("the retained failure is reported within the test observation deadline");
     let Err(error) = next else {
-        panic!("the next admitted read reports the retained timestamp refusal");
+        panic!("the next admitted read reports the retained failure");
     };
-    assert!(error.contains::<nervix_models::TimestampError>());
-    let suffix = read_positions(&mut source).await;
-    assert_eq!(suffix.len(), 1);
-    assert_eq!(suffix[0].offset, 3);
+    assert!(matches!(
+        error.downcast_ref::<KafkaTopicIngestorError>(),
+        Some(KafkaTopicIngestorError::OffsetOverflow { partition: 0, .. })
+    ));
+    let positions = read_positions(&mut source).await;
+    assert_eq!(positions.len(), 1);
+    assert_eq!(positions[0].offset, 1);
 }
 
 #[nervix_primitives::test]

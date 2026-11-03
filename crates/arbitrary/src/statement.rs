@@ -1232,16 +1232,16 @@ impl Arbitrary<'_> {
                 })
                 .into(),
             IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic) => self
-                .operations(|arbitrary| {
-                    if arbitrary.entropy.flag() {
-                        nervix_models::PulsarTopicIngestorOperation::SetStartAt {
-                            position: arbitrary.ingest_start_position(),
-                        }
-                    } else {
-                        nervix_models::PulsarTopicIngestorOperation::Transport(
-                            arbitrary.transport_operation(Self::pulsar_topic_source),
-                        )
-                    }
+                .operations(|arbitrary| match arbitrary.entropy.byte() % 3 {
+                    0 => nervix_models::PulsarTopicIngestorOperation::SetStartAt {
+                        position: arbitrary.ingest_start_position(),
+                    },
+                    1 => nervix_models::PulsarTopicIngestorOperation::SetType {
+                        kind: arbitrary.pulsar_subscription_type(),
+                    },
+                    _ => nervix_models::PulsarTopicIngestorOperation::Transport(
+                        arbitrary.transport_operation(Self::pulsar_topic_source),
+                    ),
                 })
                 .into(),
             IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => {
