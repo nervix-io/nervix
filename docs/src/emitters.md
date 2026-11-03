@@ -1212,7 +1212,10 @@ Transport-specific expectations:
   and TLS file keys with an `http://` endpoint are refused; see [OTEL](#otel).
 - `CLICKHOUSE`: use an `https://...` `addr` with mounted `tls_ca_file` and required positive
   `timeout_ms`; HTTP addresses refuse TLS file keys.
-- `POSTGRES`: use `sslmode=verify-full` in the `addr` URL; Nervix honors `tls_ca_file`, `tls_cert_file`, and `tls_key_file`. `sslmode=disable` is the only other accepted policy.
+- `POSTGRES`: use `sslmode=verify-full` in the `addr` URL. It trusts the Mozilla roots its driver
+  bundles, not the host's trust store, together with the certificates in `tls_ca_file`, and
+  presents `tls_cert_file` with `tls_key_file` as its client certificate. `sslmode=disable` is the
+  only other accepted policy; see [Postgres](#postgres).
 - `MYSQL`: enable TLS with `require_ssl=true` in `addr` or with mounted TLS files. Nervix honors `tls_ca_file` and paired `tls_cert_file`/`tls_key_file` client identity files; see [MySQL](#mysql) for the URL verification policy.
 - `MONGODB`: Nervix honors `tls_ca_file`, and `tls_cert_file` with `tls_key_file` as its client
   certificate; any of them enables TLS without `tls=true` in `addr`, and an `addr` with `tls=false`
@@ -1860,7 +1863,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | TOPIC 'devices/Orders' (mqtt_topic) |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 0)<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 1 or 2) |
 | Options in statement order | `QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |
-| Headers | Not offered: Subscription options select the session and inbound QoS, and the emitter's QOS option its outbound QoS. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation. |
+| Headers | Not offered: A publication carries its topic, payload and quality of service; this implementation writes no MQTT 5 user property on it. |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -2930,16 +2933,29 @@ CREATE POSTGRES TABLE EMITTER to_pg
 Postgres emitters use `VALUES` expressions and insert batches with `INSERT ... SELECT ... FROM
 unnest(...)`. The [batching clause](#batching) is required: each insert carries at most
 `MAX MESSAGES` records, and its statement text and bound arrays measure at most `MAX SIZE` bytes, as
-[Database writes](#database-writes) describes. The insert result acknowledges those records. On the
-poison-isolation path, tables without an idempotent `ON CONFLICT` policy may observe duplicates when
-healthy records are re-executed.
+[Database writes](#database-writes) describes. The insert result acknowledges those records. An
+insert names only the mapped columns, so every other column of the row takes its table default.
+
+Each run of rows a flush hands the emitter, and each retry of the rows a run left unresolved, starts
+with one catalog query that reads the declared type of every mapped column. It runs on the
+connection the run's first insert then uses and adds one round trip to every run, and a change to
+the table's columns applies from the next run.
+
+An insert is one statement, so an insert Postgres refuses stores none of its rows. When Postgres
+refuses one for its rows, the emitter writes them again one at a time on the same connection: each
+row Postgres accepts is stored once, and only the rows it refuses follow `ON MESSAGE ERROR`. A
+duplicate needs an insert whose answer never arrived, which the emitter retries as
+[Database writes](#database-writes) describes; use an `ON CONFLICT` policy against a stable key
+where duplicates matter.
 
 `TABLE` names a table, or a schema and its table, as one or two nonempty parts separated by `.`:
-`TABLE 'Orders'` or `TABLE 'sales.Orders'`, each part on the table identifier alphabet and the whole
-name within 128 bytes. Nervix sends each part as its own quoted identifier with its case kept, so
-`'sales.Orders'` is the relation `"sales"."Orders"`, and the insert and the lookup of the table's
-column types name that same relation. A one-part name resolves through the connection's
-`search_path`. An empty part or a third part is refused at `CREATE`.
+`TABLE 'Orders'` or `TABLE 'sales.Orders'`. The complete name uses 1–128 ASCII bytes from letters,
+digits, `_`, `-`, `~` and the separating dot. Nervix sends each part as its own quoted identifier
+with its case kept, so `'sales.Orders'` is the relation `"sales"."Orders"`, and the insert and the
+catalog query name that same relation. A one-part name resolves through the connection's
+`search_path`. An empty part or a third part is refused at `CREATE`. Each `VALUES` key names one
+column and is sent as one quoted identifier with its case kept: the key `createdAt` writes the
+column `"createdAt"`, and a dot in a key belongs to the column's name.
 
 Each mapped value is bound as text, in the one text array its column binds, and the statement casts
 it to the column's declared type:
@@ -2954,9 +2970,18 @@ it to the column's declared type:
 | `DATETIME` | RFC 3339 timestamp text at UTC offset `+00:00` |
 | `ARRAY<T>`, `VEC<T>` | Recursive JSON text; `BYTES` elements are padded base64 and non-finite floats are `null` |
 
-A typed null binds as a `NULL` element. A mapping without a supported concrete column type is
-refused at `CREATE` and `ALTER`; an untyped `NULL` cannot infer one. A value the column's type cannot
-read from its text, such as `U64` above a `bigint`'s range, is a row Postgres rejects with its SQLSTATE.
+A typed null binds as a `NULL` element, and so does a non-finite float, which a `NOT NULL` column
+then refuses. A mapping without a supported concrete column type is refused at `CREATE` and
+`ALTER`; an untyped `NULL` cannot infer one.
+
+The cast names the column's type without its modifiers, and storing the cast value applies them as
+any insert does: a `varchar(n)` column refuses longer text, and a `numeric(p, s)` column rounds to
+its scale. A timestamp column keeps at most microseconds, so a `DATETIME`'s nanoseconds are rounded
+to the nearest microsecond; a `timestamp with time zone` column stores the instant, and a
+`timestamp` column stores its UTC wall-clock time. An `ARRAY` or `VEC` value is JSON text, which a
+`json`, `jsonb` or `text` column reads; a native Postgres array column, such as `integer[]`, refuses
+it as a malformed array literal. A value the column cannot read from its text, such as `U64` above a
+`bigint`'s range or `true` for an `integer` column, is a row Postgres rejects.
 
 Postgres emitters may include an insert conflict policy after `VALUES`:
 
@@ -2991,7 +3016,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
-| Network waits | a pool checkout: the wait for the pool, name resolution, connection, TLS, authentication and the borrow test: `pool_acquire_timeout_ms`; 30s when omitted<br>each catalog query and each insert: `timeout_ms`; unbounded when omitted<br>closing an interrupted query connection: driver default, SQLx close-on-drop timeout, 5 s |
+| Network waits | a pool checkout: the wait for the pool, name resolution, connection, TLS, authentication and the borrow test: `pool_acquire_timeout_ms`; 30s when omitted<br>each catalog query and each insert: `timeout_ms`; unbounded when omitted<br>closing an interrupted query connection: driver default, SQLx close-on-drop timeout, 5 s<br>testing a connection returned to the pool, which keeps its place until the server answers: unbounded |
 | Driver limits | timeout_ms accepts at most 2147483647 milliseconds, PostgreSQL's statement_timeout maximum.<br>Without timeout_ms, catalog queries and inserts have no Nervix response deadline. |
 | Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER pool_acquire_timeout_ms` |
 
@@ -3000,11 +3025,28 @@ See the [POSTGRES TABLE capability and mirror reference](connector-capabilities.
 
 `DO UPDATE` updates every mapped `VALUES` column except the conflict target columns, so it requires
 a conflict target and at least one mapped column outside it. `DO NOTHING` may be used with or
-without a target; without one, it skips a row that conflicts on any unique constraint. Target
-columns are nonempty names of the table's unique index columns, in written order, and need not be
-mapped. A clause that breaks these rules is refused at `CREATE`. Postgres refuses a `DO UPDATE`
-insert that carries one conflict key twice, so such an insert is written again one record at a time,
-and the later record updates the earlier one.
+without a target; without one, it skips a row that conflicts on any unique constraint. A skipped
+row is acknowledged like a stored one. Target columns are nonempty column names, sent with their
+case kept, and need not be mapped. A clause that breaks these rules is refused at `CREATE`.
+Postgres matches the target, in any column order, to a unique index the table already has, such as
+the one behind its primary key or a unique constraint. A partial unique index matches no target,
+because the clause writes no `WHERE`. Postgres refuses a `DO UPDATE` insert that carries one
+conflict key twice, so such an insert is written again one record at a time, and the later record
+updates the earlier one.
+
+Postgres answers a refused statement with a SQLSTATE. The emitter treats an insert as refused for
+its rows when the SQLSTATE's class is `21` (cardinality violation), `22` (data exception, such as a
+value its column cannot read) or `23` (integrity constraint violation, such as a `NOT NULL`,
+`CHECK`, unique or foreign-key violation), and writes its rows again one at a time. A row Postgres
+still refuses on its own follows `ON MESSAGE ERROR`, named by its SQLSTATE only, such as
+`Postgres rejected record with SQLSTATE 23505`, because the server's message can quote a value.
+Every other answer leaves the insert's rows unresolved for `RETRY POLICY` as a transient publish
+failure: a lost connection, an expired `timeout_ms`, any other SQLSTATE, such as
+`Postgres request failed with SQLSTATE 42P10`, and a missing table or mapped column, which the
+catalog query reports as `Postgres table '<table>' has no column '<column>'`, naming the first
+mapped column when the table itself is missing. A failure no retry cures until the table or the
+statement changes is retried the same way, such as a conflict target no unique index matches
+(`42P10`), a missing privilege (`42501`) or a value mapped to a generated column (`428C9`).
 
 Postgres clients declare their connection-pool bounds and connect with a `postgres://` or
 `postgresql://` URL. Nervix owns the URL's scheme and its TLS policy: the URL sets `sslmode`
@@ -3012,10 +3054,8 @@ exactly once, under that name or the driver's `ssl-mode`, to one of two policies
 for an unencrypted connection, or `sslmode=verify-full` for TLS with certificate-chain and hostname
 verification. There is no opportunistic fallback and no encrypted connection without peer
 verification. `CREATE CLIENT` refuses another scheme, a missing, repeated or other `sslmode`, and
-TLS files without `sslmode=verify-full`, each naming the key and the rule rather than the URL. The
-driver reads the URL's other query options, and its parser checks them before the client is
-committed. See [Database Client Connection Pools](database-client-pools.md) for the accepted
-pool counts:
+TLS files without `sslmode=verify-full`, each naming the key and the rule rather than the URL. See
+[Database Client Connection Pools](database-client-pools.md) for the accepted pool counts:
 
 ```plexus
 CREATE POSTGRES CLIENT pg
@@ -3025,13 +3065,30 @@ CREATE POSTGRES CLIENT pg
   };
 ```
 
+The driver reads the rest of the URL: its user, password, host, port and database, and the query
+options `host`, where a path that starts with `/` names a Unix-domain socket, `hostaddr`, `port`,
+`dbname`, `user`, `password`, `application_name`, `options` with startup options such as
+`-c search_path=sales`, `options[<name>]`, `statement-cache-capacity`, and the TLS files
+`sslrootcert`, `sslcert` and `sslkey`, which it also reads as `ssl-root-cert` or `ssl-ca`,
+`ssl-cert` and `ssl-key`. `CREATE CLIENT` refuses a value the driver cannot read for one of these
+options. The driver ignores any other query option, logging a warning that names the option and its
+value wherever it reads the URL, so a misspelled option changes nothing and is not refused.
+
+Where the URL leaves a part out, the driver takes it from the node it runs on: the port from
+`PGPORT`, else `5432`; the user from `PGUSER`, else the operating-system user Nervix runs as; the
+password from `PGPASSWORD`, else the node's password file, `PGPASSFILE` or `~/.pgpass`; and the
+database from `PGDATABASE`, else the server's default, the user's name. The node's `PGAPPNAME`,
+`PGOPTIONS`, `PGSSLROOTCERT`, `PGSSLCERT` and `PGSSLKEY` apply too: the URL's `application_name`
+and TLS file options replace them, and its `options` follow `PGOPTIONS`. Write every part in `addr`,
+so that every node the client is used on connects in the same way.
+
 The optional client key `timeout_ms` bounds each catalog query and each INSERT separately. It is a
 positive whole number of milliseconds from `1` through `2147483647`, the maximum PostgreSQL accepts
 for `statement_timeout`; `CREATE CLIENT` refuses a value outside that range. Nervix sets that server
 option on every connection and also bounds the local wait for each query's response, so a peer
 that stops answering still ends the attempt. The key takes precedence over a `statement_timeout`
-in the URL's startup options, preserving its other driver options. Omitting the key sets no Nervix
-statement or response deadline.
+among the startup options of the URL or of `PGOPTIONS`, preserving their other options. Omitting
+the key sets no Nervix statement or response deadline.
 
 The independent `pool_acquire_timeout_ms` bounds checkout before a query starts. Each isolated
 row's INSERT gets its own statement bound; `timeout_ms` is not a deadline for the entire flush or
@@ -3041,7 +3098,14 @@ than returning a pending response to the idle pool; SQLx retains its pool permit
 close of at most five seconds. A lost response does not prove an INSERT was not applied, so use a
 suitable idempotent conflict policy when retries must not duplicate rows.
 
-For TLS connections, use `sslmode=verify-full`, mount a TLS resource, and set `'tls_ca_file'` to the mounted CA path. `'tls_cert_file'` and `'tls_key_file'` supply a client identity and must be given together. TLS files require `sslmode=verify-full`.
+`sslmode=verify-full` trusts the Mozilla root certificates its driver bundles, not the host's trust
+store, together with every certificate in `tls_ca_file`: the file adds trust roots and does not
+replace them. For a server whose certificate a private certificate authority signs, mount a TLS
+resource and set `'tls_ca_file'` to the mounted CA path. `'tls_cert_file'` and `'tls_key_file'`
+supply a client identity and must be given together. TLS files require `sslmode=verify-full`. The
+three keys take precedence over the URL's `sslrootcert`, `sslcert` and `sslkey` and over the node's
+`PGSSLROOTCERT`, `PGSSLCERT` and `PGSSLKEY`, which set the same files where a client leaves its keys
+out.
 
 Four more Nervix-owned keys set how the client's pool treats a connection.
 `pool_acquire_timeout_ms`, 30 seconds by default, bounds each checkout, independent of how long an
@@ -3117,9 +3181,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
-| Network waits | pool checkout (including connection and handshake), initial validation, and each insert: `timeout_ms`; unbounded when omitted |
-| Driver limits | Without timeout_ms, pool checkout, connection validation and inserts have no deadline.<br>TLS identity keys use the driver's RSA PKCS#1 private-key format.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |
-| Stalled-peer checks | `STALLED PEER timeout_ms` |
+| Network waits | pool checkout, including connection and authentication; timeout_ms also applies when shorter: `pool_acquire_timeout_ms`; when omitted, the client's declared pool_acquire_timeout_ms default<br>initial validation and each insert; also bounds each pool checkout when shorter: `timeout_ms`; unbounded when omitted |
+| Driver limits | Without timeout_ms, initial validation after checkout and inserts have no operation deadline.<br>Maximum connection age is checked on reuse, return and the driver's idle scan; active inserts are not interrupted.<br>TLS identity keys use the driver's RSA PKCS#1 private-key format.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER pool_acquire_timeout_ms` |
 
 See the [MYSQL TABLE capability and mirror reference](connector-capabilities.md#mysql-table-emit).
 <!-- connector-matrix:emit-mysql-table:end -->
@@ -3177,27 +3241,27 @@ verification choices. For mutual TLS, set `tls_cert_file` and `tls_key_file` tog
 driver reads a PEM certificate chain and an RSA PKCS#1 private key; for a PEM key this is the
 `RSA PRIVATE KEY` form, which OpenSSL can produce with `openssl rsa -traditional`.
 
-The current client CONFIG keys are required `addr` and optional `timeout_ms`, `tls_ca_file`,
-`tls_cert_file` and `tls_key_file`. The address must
-be a `mysql://` URL accepted by the driver's offline parser. Declare capacity with
-`POOL SIZE MIN ... MAX ...`. Nervix installs those bounds on default driver pool options;
-[Database Client Connection Pools](database-client-pools.md) details the resulting URL lifetime settings.
-Pool-size query parameters such as `pool_min` and `pool_max` are refused before the client is
-committed, including their percent-encoded spellings and ASCII case variants. Unknown standalone
-CONFIG keys are refused rather than ignored. The generated [MYSQL client key reference](connector-capabilities.md#mysql-client)
-lists each key's presence, type and confidentiality; it does not expose additional pool-lifetime
-keys. The [pool minimum](database-client-pools.md#how-each-client-type-keeps-its-minimum) keeper waits
-one second before each pass, counting idle and checked-out connections together.
+The client requires `addr` and declares the pool acquire, idle lifetime, maximum-age and minimum
+maintenance keys documented in [Database Client Connection Pools](database-client-pools.md#connection-lifetimes).
+Its optional operation bound is `timeout_ms`; TLS files are `tls_ca_file`, `tls_cert_file` and
+`tls_key_file`. The address must be a `mysql://` URL accepted by the driver's offline parser.
+Declare capacity with `POOL SIZE MIN ... MAX ...`. Pool-size query parameters such as `pool_min`
+and `pool_max` are refused before commit, including percent-encoded spellings and ASCII case
+variants. Unknown standalone CONFIG keys are refused. The generated
+[MYSQL client key reference](connector-capabilities.md#mysql-client) lists every key's presence,
+type and confidentiality. `DESCRIBE CLIENT` shows effective defaults; `SHOW CREATE CLIENT`
+preserves authored configuration.
 
-`timeout_ms` is a positive, schedulable whole number of milliseconds. It bounds opening and
-validating the pool's first connection, each subsequent pool checkout (including connection
-establishment and authentication), and each insert. The minimum keeper uses the same checkout
-bound. Each of these is a separate operation; an insert's bound starts after checkout, and an
-isolated row's insert receives its own bound. Omitting the key leaves these waits unbounded.
-An elapsed bound is an infrastructure failure, reported with `timeout_ms` and its duration, and
-the emitter retries its pending rows on its declared policy. The driver discards a connection
-whose in-flight command was cancelled. A timeout does not establish whether the server committed
-an insert; use a stable key and an appropriate `ON CONFLICT` action where retries must converge.
+`pool_acquire_timeout_ms` bounds each checkout, including connection establishment and
+authentication, and defaults to 30 seconds. `timeout_ms`, when configured, also bounds checkout,
+initial validation and each insert as separate operations. Checkout uses the shorter applicable
+bound, including in the minimum keeper. An insert's operation bound starts after checkout, and
+an isolated row's insert gets its own bound. Omitting `timeout_ms` leaves validation after checkout
+and inserts without an operation deadline; it never removes the acquire deadline.
+An elapsed bound is an infrastructure failure naming its key and duration, and the emitter
+retries pending rows on its declared policy. The driver discards a connection whose in-flight
+command was cancelled. A timeout does not establish whether the server committed an insert;
+use a stable key and an appropriate `ON CONFLICT` action where retries must converge.
 
 ### MongoDB
 
