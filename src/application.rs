@@ -1036,6 +1036,7 @@ impl Application {
 
         let grpc_service = service.clone();
         let grpc_shutdown = listener_shutdown.clone();
+        let grpc_connections_cut = shutdown_coordinator.connections_cut_token();
         let api_server = async move {
             let mut builder = Server::builder();
             builder = if grpc_mode.is_tls() {
@@ -1047,10 +1048,12 @@ impl Application {
             } else {
                 builder
             };
-            // Closing admission ends every connection this listener accepted, so the server's
-            // graceful shutdown never waits for a client to finish or abandon a request.
+            // Closing admission stops this listener accepting and ends every call it carries, a
+            // session's after its ending. The connections it accepted are cut only once
+            // shutdown's grace period has passed, so a client that reads nothing holds the
+            // server's graceful shutdown no longer than that.
             let grpc_incoming =
-                AdmittingListener::new(grpc_listener, grpc_shutdown.clone()).into_connections();
+                AdmittingListener::new(grpc_listener, grpc_connections_cut).into_connections();
             builder
                 .add_service(SessionGrpcService::new(grpc_service.clone()))
                 .serve_with_incoming_shutdown(grpc_incoming, grpc_shutdown.cancelled_owned())
@@ -2760,7 +2763,8 @@ impl Application {
             }
         };
         shutdown_coordinator.stop_admission();
-        let listeners = join_public_listeners(public_listeners, deadline).await;
+        let listeners =
+            join_public_listeners(public_listeners, &shutdown_coordinator, deadline).await;
         let stop_admission_outcome = advertisement_outcome
             .combine(listeners.outcome)
             .unless_deadline_passed(deadline);

@@ -32,7 +32,7 @@ use tonic::{Request, Response, Status, codegen::http::uri::PathAndQuery, transpo
 use tracing::debug;
 
 use crate::{
-    client::{Client, RecoveryMode, SessionRecovery},
+    client::{Client, RecoveryDeadline, RecoveryMode, SessionRecovery},
     connection::GrpcConnector,
     error::{ClientError, RequestKind},
     exchange::SESSION_LIMITS,
@@ -149,7 +149,13 @@ impl Client {
                                 "a resource upload call ended before its reply arrived, so the \
                                  upload opens another with the same identity and archive"
                             );
-                            match self.recover_session(RecoveryMode::Replace).await? {
+                            match self
+                                .recover_session(
+                                    RecoveryMode::Replace,
+                                    RecoveryDeadline::RetryBudget,
+                                )
+                                .await?
+                            {
                                 SessionRecovery::Ready => continue,
                                 SessionRecovery::Unavailable => {
                                     return Err(Report::new(ClientError::UploadResource(status)));
@@ -197,7 +203,8 @@ impl Client {
                                 "a resource upload call was redirected, so the upload opens \
                                  another at the leader with the same identity and archive"
                             );
-                            self.follow_leader(leader).await?;
+                            self.follow_leader(leader, RecoveryDeadline::RetryBudget)
+                                .await?;
                         }
                         Routing::AwaitElection if Self::await_retry(attempt).await => {
                             debug!(

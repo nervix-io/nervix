@@ -45,7 +45,7 @@ use tracing::debug;
 use uuid::Uuid;
 
 use crate::{
-    client::{Client, RecoveryMode, SessionRecovery},
+    client::{Client, RecoveryDeadline, RecoveryMode, SessionRecovery},
     error::{ClientError, RequestKind},
     exchange::{ExchangeRequests, PendingRequest},
     producer::{Answered, request_on_exchange, send_on_exchange},
@@ -282,7 +282,10 @@ impl Client {
                     if !report.current_context().retryable_session_failure() {
                         return Err(report);
                     }
-                    match self.recover_session(RecoveryMode::IfClosed).await? {
+                    match self
+                        .recover_session(RecoveryMode::IfClosed, RecoveryDeadline::RetryBudget)
+                        .await?
+                    {
                         SessionRecovery::Ready => {}
                         SessionRecovery::Unavailable => return Err(report),
                     }
@@ -660,7 +663,9 @@ impl ConsumerHandle {
                 ReadStart::Unattached => {}
             }
             if !matches!(
-                self.client.recover_session(RecoveryMode::IfClosed).await,
+                self.client
+                    .recover_session(RecoveryMode::IfClosed, RecoveryDeadline::RetryBudget)
+                    .await,
                 Ok(SessionRecovery::Ready)
             ) {
                 return Err(Report::new(ClientError::ConsumerSessionUnavailable));

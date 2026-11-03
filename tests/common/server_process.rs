@@ -1335,7 +1335,7 @@ impl ServerProcess {
         };
         Ok(HeldResourceUpload {
             _body: body,
-            _response: response,
+            response,
             _connection: connection,
         })
     }
@@ -1545,8 +1545,36 @@ async fn run_http_load(
 /// An accepted upload stream kept open until it is dropped.
 pub(crate) struct HeldResourceUpload {
     _body: HeldUploadBody,
-    _response: h2::client::ResponseFuture,
+    response: h2::client::ResponseFuture,
     _connection: AbortOnDropHandle<()>,
+}
+
+impl HeldResourceUpload {
+    /// How the server ended the held upload's call: the gRPC status its response carries. A call
+    /// whose HTTP/2 stream failed instead, as it does when its connection is cut, ends with that
+    /// stream's failure.
+    pub(crate) async fn ending(self) -> Result<tonic::Status, h2::Error> {
+        let response = self.response.await?;
+        if let Some(status) = tonic::Status::from_header_map(response.headers()) {
+            return Ok(status);
+        }
+        let mut body = response.into_body();
+        while let Some(data) = body.data().await {
+            nervix_primitives::task::consume_budget().await;
+            data?;
+        }
+        let trailers = body.trailers().await?;
+        let status = match trailers {
+            Some(trailers) => tonic::Status::from_header_map(&trailers),
+            None => None,
+        };
+        match status {
+            Some(status) => Ok(status),
+            None => Ok(tonic::Status::unknown(
+                "the upload's response carried no gRPC status",
+            )),
+        }
+    }
 }
 
 /// The client half of a held upload's request stream.
