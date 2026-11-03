@@ -38,15 +38,16 @@ use nervix_interconnect::{
 use nervix_models::{
     ClusterNodeName, CodecName, CreateCorrelator, CreateDeduplicator, CreateEmitter,
     CreateEndpoint, CreateIngestor, CreateJunction, CreateLookup, CreatePlacement,
-    CreateReingestor, CreateReorderer, CreateUdf, CreateWasmProcessor, CreateWindowProcessor,
-    DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
-    DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor,
-    DescribeRelay, DescribeReorderer, DescribeResource, DescribeUdf, DescribeWasmProcessor,
-    DescribeWindowProcessor, DomainName, DomainStatus, EmitterName, FieldName, IngestorName,
-    InspectionFormat, LookupName, LookupQuery, Model, ModelKind, ModelName, NodeRef, ParseAsType,
-    RelayName, ResourceDescription, ResourceId, ResourceName, ResourceUsage, ResourceVersion,
-    ResourceVersionDescription, ResourceVersionEntries, ScheduledNode, SchemaName,
-    ShowRelayMaterializedState, UniquelyKindedModel, WasmStateInspection,
+    CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateUdf, CreateWasmProcessor,
+    CreateWindowProcessor, DescribeCorrelator, DescribeDeduplicator, DescribeDomain,
+    DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction, DescribeLookup,
+    DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource,
+    DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainName, DomainStatus,
+    EmitterName, FieldName, IngestorName, InspectionFormat, LookupName, LookupQuery, Model,
+    ModelKind, ModelName, NodeRef, ParseAsType, RelayName, ResolvedBranching, ResourceDescription,
+    ResourceId, ResourceName, ResourceUsage, ResourceVersion, ResourceVersionDescription,
+    ResourceVersionEntries, ScheduledModel, ScheduledNode, SchemaName, ShowRelayMaterializedState,
+    UniquelyKindedModel, WasmStateInspection,
 };
 use nervix_vm::window::{WindowAggregateProgram, lower_window_assignments};
 use tracing::{debug, warn};
@@ -99,6 +100,20 @@ struct LookupTarget {
 
 #[derive(Debug, thiserror::Error)]
 pub(in crate::application) enum ObservationError {
+    #[error(
+        "materialized relay '{relay}' references missing scheduled schema '{schema}' in domain \
+         '{domain}'"
+    )]
+    MissingRelaySchema {
+        domain: DomainName,
+        relay: RelayName,
+        schema: SchemaName,
+    },
+    #[error("materialized relay '{relay}' has no scheduled branch metadata in domain '{domain}'")]
+    MissingRelayBranching {
+        domain: DomainName,
+        relay: RelayName,
+    },
     #[error("failed to describe {kind} '{name}' in domain '{domain}' locally", kind = .entity.kind.as_str(), name = .entity.identifier.as_str())]
     LocalDescribe { domain: DomainName, entity: NodeRef },
     #[error("failed to describe {kind} '{name}' in domain '{domain}' on node '{node}'", kind = .entity.kind.as_str(), name = .entity.identifier.as_str())]
@@ -1981,15 +1996,12 @@ impl SessionServiceImpl {
                 domain.as_str()
             ));
         };
-        let Some(relay_node) = domain_schedule
-            .nodes
-            .get(&NodeRef::new(
-                ModelKind::Relay,
-                ModelName::from(&show.relay),
-            ))
-            .filter(|node| {
-                matches!(node.config.as_ref(), Model::Relay(relay) if relay.materialized_state.is_some())
-            })
+        let Some(ScheduledModel {
+            config: relay,
+            node: relay_node,
+        }) = domain_schedule
+            .scheduled::<CreateRelay>(&show.relay)
+            .filter(|scheduled| scheduled.config.materialized_state.is_some())
         else {
             return command_error(format!(
                 "stream '{}' in domain '{}' is not materialized",
@@ -1998,10 +2010,33 @@ impl SessionServiceImpl {
             ));
         };
 
+        let Some(schema) = domain_schedule.configured::<CreateSchema>(&relay.schema) else {
+            let error = Report::new(ObservationError::MissingRelaySchema {
+                domain: domain.clone(),
+                relay: show.relay.clone(),
+                schema: relay.schema.clone(),
+            });
+            return command_error(format!("{error:#}"));
+        };
+        let Some(branching) = relay_node.resolved_branching.as_ref() else {
+            let error = Report::new(ObservationError::MissingRelayBranching {
+                domain: domain.clone(),
+                relay: show.relay.clone(),
+            });
+            return command_error(format!("{error:#}"));
+        };
+        let payload_sensitivity = runtime_schema::compile_schema(schema).vm_sensitivity();
+        let branch_sensitivity = match branching {
+            ResolvedBranching::Unbranched => nervix_vm::SchemaSensitivity::default(),
+            ResolvedBranching::Branched { schema, .. } => {
+                runtime_schema::compile_schema(schema).vm_sensitivity()
+            }
+        };
+
         let entries = match self
             .inner
             .runtime
-            .local_materialized_stream_state(domain, &show.relay)
+            .local_materialized_stream_state(domain, &show.relay, &payload_sensitivity)
             .await
         {
             Ok(entries) if !entries.is_empty() => entries,
@@ -2010,40 +2045,37 @@ impl SessionServiceImpl {
                     match self
                         .inner
                         .runtime
-                        .remote_materialized_stream_state(primary_node, domain, &show.relay)
+                        .remote_materialized_stream_state(
+                            primary_node,
+                            domain,
+                            &show.relay,
+                            &payload_sensitivity,
+                        )
                         .await
                     {
                         Ok(entries) => entries,
-                        Err(error) => return command_error(error.to_string()),
+                        Err(error) => return command_error(format!("{error:#}")),
                     }
                 } else {
                     Vec::new()
                 }
             }
             Ok(entries) => entries,
-            Err(error) => return command_error(error.to_string()),
+            Err(error) => return command_error(format!("{error:#}")),
         };
 
-        let message = if entries.is_empty() {
-            format_materialized_stream_state_output(&show.relay, relay_node, Vec::new())
-        } else {
-            let entry_lines = entries
-                .into_iter()
-                .map(|record| {
-                    format!(
-                        "key={} payload={} low={} high={}",
-                        match record.branch.as_ref() {
-                            Some(branch) => branch.as_str(),
-                            None => "(root)",
-                        },
-                        record.payload,
-                        record.ingested_at_low_watermark,
-                        record.ingested_at_high_watermark
-                    )
-                })
-                .collect::<Vec<_>>();
-            format_materialized_stream_state_output(&show.relay, relay_node, entry_lines)
-        };
+        let mut entry_lines = Vec::with_capacity(entries.len());
+        for record in entries {
+            let key = match record.branch.as_ref() {
+                Some(branch) => branch.to_json_string_masking(&branch_sensitivity),
+                None => "(root)".to_owned(),
+            };
+            entry_lines.push(format!(
+                "key={key} payload={} low={} high={}",
+                record.payload, record.ingested_at_low_watermark, record.ingested_at_high_watermark
+            ));
+        }
+        let message = format_materialized_stream_state_output(&show.relay, relay_node, entry_lines);
         command_ok(message)
     }
 
