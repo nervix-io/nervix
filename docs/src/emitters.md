@@ -127,8 +127,8 @@ See [Domains And Time](domains-and-time.md) for the full clock split. The
 [Plexus Overview](plexus-overview.md) defines the `FLUSH IMMEDIATE` 100 µs minimum batching window.
 For most emitters the collected batch is encoded and published on the flush boundary. Iceberg
 additionally requires `COMMIT EACH <duration> MAX SIZE <bytes>` as part of its emitter clause: flush
-writes local Arrow IPC staging files, and commit writes their rows into Parquet data files and
-appends those files to the table in one catalog commit. `ON MESSAGE ERROR SEND TO`
+appends the batch's rows to a local Arrow IPC staging file, and commit writes their rows into
+Parquet data files and appends those files to the table in one catalog commit. `ON MESSAGE ERROR SEND TO`
 buffers failed-message error records separately and delivers them using the emitter's same `FLUSH`
 interval or maximum batch-size boundary. Which emitters gain from larger flush batches, and which
 publish per record regardless of batch size, is covered by the
@@ -3600,13 +3600,17 @@ altered.
 
 #### Iceberg staging and commits
 
-Iceberg uses two explicit boundaries. `FLUSH` collects typed in-memory batches and writes them to
-local Arrow IPC files under the runtime temporary-file root. `COMMIT EACH <duration> MAX SIZE
-<bytes>` reads the staged Arrow IPC files back, writes their rows into Parquet data files, and
-appends every one of those data files to the Iceberg table in one catalog commit. The commit
+Iceberg uses two explicit boundaries. `FLUSH` collects typed in-memory batches and appends each
+batch's mapped rows to a local Arrow IPC staging file under the runtime temporary-file root.
+Every flush appends to the same staging file until a commit begins, so the root holds one staging
+file for each commit, however many batches, source relays and branches its flushes carried; rows
+staged while a commit is in progress, such as during its retry backoff, start a staging file of
+their own, which the commit after it publishes. `COMMIT EACH <duration> MAX SIZE <bytes>` reads the
+staged rows back, writes them into Parquet data files, and appends every one of those data files
+to the Iceberg table in one catalog commit. The commit
 duration starts when a flush stages rows while none are staged, and rows later flushes stage join
 that commit without moving it, so a row waits at most `FLUSH EACH` in memory and then at most
-`COMMIT EACH` after it is staged. Staged files that reach `MAX SIZE` are committed at once. Both
+`COMMIT EACH` after it is staged. Staged rows that reach `MAX SIZE` are committed at once. Both
 durations are domain-logical, so a paced domain's `TIME RATE` moves the flush and commit boundaries
 together; the maximum batch and commit sizes, the commit retry backoff, and a drain remain
 independent of domain pace. The temporary-file root defaults to `/tmp` and can be changed with
@@ -3621,8 +3625,8 @@ continue to staging. The file's actual size and row count are checked before the
 If the table schema changes between staging and commit so that a staged segment no longer fits,
 the commit fails and retains its staged rows for retry rather than appending an over-limit file.
 Without `BATCH`, the Parquet writer uses its 512 MiB rollover target; `DESCRIBE EMITTER` prints
-`data file target: 512MiB` alongside `batch: none`. The commit's `MAX SIZE` continues to count
-the sum of local staged Arrow IPC file bytes, independently of each Parquet file's bound.
+`data file target: 512MiB` alongside `batch: none`. The commit's `MAX SIZE` counts the Arrow IPC
+bytes of the staged batches, independently of each Parquet file's bound.
 
 The emitter completion point for `MODE ACK` is the successful catalog commit. Local staging is not an
 ACK boundary. Record-level expression and construction errors, and a row too large for its own
@@ -3630,29 +3634,29 @@ Parquet file, are attributed through `ON MESSAGE ERROR` before staging. See [ACK
 Delivery](#ack-semantics-and-effective-delivery) for attachment and fan-out behavior.
 
 A commit holds the rows it reads back in memory until it has written them into data files, so it
-charges them to the node's bulk memory class, which holds 32 MiB. It reads the staged files in
-groups, each the run of consecutive files the class can hold together. Before it reads a group it
-charges every byte of the group's files, and once their rows are in data files it returns the
-charge before it reads the next group; the data files of every group are appended in the one
-catalog commit. It takes a charge only when the class has room for it now rather than waiting in
+charges them to the node's bulk memory class, which holds 32 MiB. It reads the staged batches back
+in groups, each the run of consecutive staged batches the class can hold together, whichever
+staging files hold them. Before it reads a group it charges every Arrow IPC byte of the group's
+staged batches, and once their rows are in data files it returns the charge before it reads the
+next group; the data files of every group are appended in the one catalog commit. It takes a charge only when the class has room for it now rather than waiting in
 the class's queue, where a commit's charge would take every byte the class frees and hold the
-node's other bulk work behind it. When the class has no room, the commit keeps its staged files and
+node's other bulk work behind it. When the class has no room, the commit keeps its staged rows and
 their acknowledgements, `DESCRIBE EMITTER` shows `Iceberg commit waits for room in the bulk memory
 class for <bytes> staged bytes` as the emitter's transient error, and the emitter retries the
-commit on its declared retry policy. A single staged file holds one input carrier's mapped rows,
-or one bounded segment of them when `BATCH` is declared. Without `BATCH` it can be larger than the
-class when a route on the same node flushes batches above 32 MiB.
-Such a file is read alone once the whole class is free, charged with the whole class: that is every
+commit on its declared retry policy. A staged batch holds one input carrier's mapped rows, or one
+bounded segment of them when `BATCH` is declared. Without `BATCH` it can be larger than the class
+when a route on the same node flushes batches above 32 MiB.
+Such a batch is read alone once the whole class is free, charged with the whole class: that is every
 byte of it the class can account for, and it leaves no room for other bulk work beside the read.
 Until then `DESCRIBE EMITTER` shows `Iceberg commit waits for the whole bulk memory class of
-<capacity> bytes for a staged file of <bytes> bytes`, and the emitter retries the commit as before.
+<capacity> bytes for a staged batch of <bytes> bytes`, and the emitter retries the commit as before.
 
 #### Iceberg data files
 
 Every commit writes Parquet data files, whatever the table's `write.format.default` property says,
 with the Parquet library's default writer properties: uncompressed pages, dictionary encoding,
 page-level statistics and row groups of at most 1,048,576 rows. The table's `write.parquet.*`
-properties do not apply. Without `BATCH`, a commit writes each group of staged files it reads back
+properties do not apply. Without `BATCH`, a commit writes each group of staged batches it reads back
 together into data files of their own, rolling to a new file once the current one reaches 512 MiB
 whatever the table's `write.target-file-size-bytes` property says. With `BATCH`, each staged
 segment becomes one data file, as [Iceberg staging and commits](#iceberg-staging-and-commits)
@@ -3686,7 +3690,7 @@ The emitter writes nothing else:
   client, and through no other catalog implementation.
 
 A commit writes its data files to object storage before it appends them, and a retry reuses the
-files an earlier attempt finished writing for a whole group of staged files. Files no snapshot comes
+files an earlier attempt finished writing for a whole group of staged batches. Files no snapshot comes
 to reference stay in object storage until an orphan-file cleanup of the table removes them: those
 of a group whose writing failed partway, which the retry writes again, and those of a commit that
 never succeeds because the emitter ends before a retry does.
@@ -3750,15 +3754,16 @@ declared policy and backpressure. While a failed
 commit waits for its retry, the emitter takes no new input from its relays: a row that reaches a
 relay during the backoff waits upstream, unless a stop drains the relays. The rows a flush stages
 before the retry are therefore input the emitter's `COLLECT FOR` policy held, which comes due
-during the backoff, and the relay input a stop drains. A commit publishes the staged files it found
-when it began, so those rows are not in its data files: the retry first appends what the commit
-began with and then commits the newer rows in a commit of their own. A retry still publishes
+during the backoff, and the relay input a stop drains. A commit publishes the rows staged when it
+began, so those rows are not in its data files: they start a staging file of their own, and the
+retry first appends what the commit began with and then commits the newer rows in a commit of
+their own. A retry still publishes
 everything staged, and acknowledges only rows a catalog commit holds.
 
 Each commit names its append with an identity it records in the snapshot it adds. A commit whose
 catalog answer fails or is lost reloads the table, and the commit and every retry of it look for
 that identity in the current snapshot's history before appending, so a retry never appends the
-same staged files twice. Rows are still appended again when their source redelivers them: after a
+same staged rows twice. Rows are still appended again when their source redelivers them: after a
 lost upstream ACK, after an attached sibling emitter fails, or after the emitter ends before a
 retry learns whether the catalog applied its commit, because it ended without acknowledging the
 rows it still held staged. Iceberg appends are not idempotent.

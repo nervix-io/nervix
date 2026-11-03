@@ -1600,16 +1600,20 @@ the declared `MAX SIZE` is instead a definitive per-row `validation` message err
 operation; `ON MESSAGE ERROR` routes it before the other rows are staged. A data file whose
 physical count or byte length violates a bound after a table schema change is a commit failure:
 the emitter does not append it and keeps the staged rows and acknowledgements for retry.
-Cleanup failures for incomplete staged files or a rejected data file are logged with their paths
-without replacing the original publish or commit failure.
+A failed staging append keeps the typed `StagingError` of the staging file beneath
+`EmitterWriteError::Publish`, and a failed read beneath `EmitterWriteError::Commit`, with the
+filesystem's, Arrow's or the cancellation's failure beneath it; the description the emitter shows
+names the staging file and that failure. Cleanup failures for a new staging file whose first append
+failed, for an append that could not be cut back off, or for a rejected data file are logged with
+their paths or noted on the report without replacing the original publish or commit failure.
 
-An Iceberg commit charges the bulk memory class for the staged files it reads back with
+An Iceberg commit charges the bulk memory class for the staged batches it reads back with
 `Executor::try_reserve`, so a charge the class has no room for is refused rather than queued. The
 refusal keeps the typed `AdmissionError` beneath `EmitterWriteError::Commit` and attaches the
 description the emitter shows as its transient error: `Iceberg commit waits for room in the bulk
 memory class for <bytes> staged bytes` when the class has no room now, and `Iceberg commit waits
-for the whole bulk memory class of <capacity> bytes for a staged file of <bytes> bytes` when one
-staged file is larger than the class, which charges the whole class and so waits until all of it
+for the whole bulk memory class of <capacity> bytes for a staged batch of <bytes> bytes` when one
+staged batch is larger than the class, which charges the whole class and so waits until all of it
 is free. The emitter retries either with its policy, and neither releases a staged record's
 acknowledgement.
 

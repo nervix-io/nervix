@@ -473,8 +473,8 @@ Larger batches genuinely pay only at boundaries that do work per batch rather th
 
 - OTEL emitters send one export request per batch, so batch size sets request count and the
   compression ratio.
-- Iceberg emitters write one staging file per flush and one commit per `COMMIT EACH ... MAX SIZE`
-  boundary, so batch and commit sizes set file counts and Parquet file sizes.
+- Iceberg emitters append every flush to one staging file per commit and make one commit per
+  `COMMIT EACH ... MAX SIZE` boundary, so commit sizes set file counts and Parquet file sizes.
 - Inferencers whose tensor shapes declare a batch dimension run one model invocation per batch.
 - WASM processors serialize one Arrow IPC payload per batch, and cluster interconnect sends one
   frame per batch, with a fixed 8 MiB frame limit.
