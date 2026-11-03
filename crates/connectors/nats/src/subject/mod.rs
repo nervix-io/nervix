@@ -461,13 +461,15 @@ impl NatsSubjectEmitter {
             });
         match options.connect(prepared.address).await {
             Ok(client) => Ok(client),
-            Err(source) => {
-                let kind = source.kind();
-                Err(Report::new(source)
-                    .change_context(EmitterOpenError::Initialize { connector: NATS })
-                    .attach_printable(kind))
-            }
+            Err(source) => Err(Self::connection_failure(source)),
         }
+    }
+
+    fn connection_failure(source: async_nats::ConnectError) -> Report<EmitterOpenError> {
+        let description = source.to_string();
+        Report::new(source)
+            .change_context(EmitterOpenError::Initialize { connector: NATS })
+            .attach_printable(description)
     }
 
     fn connection_delay(
@@ -808,6 +810,26 @@ mod tests {
     }
 
     const CONFIRMED: &str = r#"{"stream":"events","seq":1}"#;
+
+    #[test]
+    fn a_connection_failure_status_keeps_the_cause_and_typed_driver_error() {
+        let source = async_nats::ConnectError::with_source(
+            async_nats::ConnectErrorKind::Io,
+            std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "broker transport refused",
+            ),
+        );
+        let report = NatsSubjectEmitter::connection_failure(source);
+        let description = report
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<String>());
+        assert_eq!(
+            description.map(String::as_str),
+            Some("IO error: broker transport refused")
+        );
+        assert!(report.downcast_ref::<async_nats::ConnectError>().is_some());
+    }
 
     #[nervix_primitives::test]
     async fn jetstream_confirms_each_record_and_refuses_one_above_max_payload() {

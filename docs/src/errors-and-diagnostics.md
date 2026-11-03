@@ -1194,8 +1194,10 @@ attachment so no confidential path is rendered. The async-nats callback requires
 and is the library projection boundary for an AWS-LC nonce-signing failure. Schema
 exclusion errors name the two authentication keys without their values. Ingestor and emitter
 configuration failures preserve those reports, and a broker authentication refusal retains the
-driver's typed connection failure. Emitter status projects its typed connection kind without
-driver values. Public client-validation outcomes continue to expose only reviewed, value-free
+driver's typed connection failure. Emitter status preserves the driver's connection description,
+including its cause, while the report retains the typed driver error for inspection. Authentication
+preparation already projects credentials-file and seed failures through value-free contexts before
+the driver connects. Public client-validation outcomes continue to expose only reviewed, value-free
 contexts.
 
 A NATS source whose client loses its connection to the server reports
