@@ -110,10 +110,13 @@ impl Runtime {
             return Err(refuse(IngestorUnitLayoutError::Scope));
         }
         let scheduled = self.ownership_handoff_scheduled_node(domain, entity)?;
-        let source = scheduled
+        let source_unit = scheduled
             .units
             .get(&unit)
-            .and_then(|placement| placement.primary_node.as_ref())
+            .ok_or_else(|| refuse(IngestorUnitLayoutError::SourceInventory))?;
+        let source = source_unit
+            .primary_node
+            .as_ref()
             .ok_or_else(|| refuse(IngestorUnitLayoutError::SourceInventory))?;
         let (snapshots, _charges) = self
             .read_handoff_unit(domain, entity, unit, source, checkpoints, None)
@@ -194,10 +197,10 @@ impl Runtime {
             if !placements.insert(placement.clone()) {
                 return Err(refuse(IngestorUnitLayoutError::CheckpointInventory));
             }
-            let read = selection.map_or(
-                StateCheckpointRead::HandoffCapture,
-                StateCheckpointRead::IngestorUnits,
-            );
+            let read = match selection {
+                Some(selection) => StateCheckpointRead::IngestorUnits(selection),
+                None => StateCheckpointRead::HandoffCapture,
+            };
             let (snapshot, charge) = self
                 .fetch_state_checkpoint_charged(source, &placement, &checkpoint.snapshot, read)
                 .await

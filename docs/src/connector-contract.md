@@ -2830,7 +2830,8 @@ sequenceDiagram
   each other instance persists its own slice before acknowledging adoption. Its pending slice is
   then released. A delayed initializer can adopt these positions after a plain start advances the
   domain generation. The canonical start remains distinct from subsequent per-unit progress.
-  Cold startup admission shares a mutex with ownership capture and the final offset write; a
+  A one-unit source keeps the direct native reset and durability path; it encodes no distributed
+  candidate and sends no coordination request. Cold startup admission shares a mutex with ownership capture and the final offset write; a
   captured or stopped unit cannot admit a later initialization. The complete start-coordination
   request, including its mutex wait, has a sixty-second deadline.
   After submitting an explicit start, the connector rereads the host's canonical positions and

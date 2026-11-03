@@ -145,7 +145,10 @@ impl Runtime {
             .replicated_branch_aggregated_states
             .get(&placement)
             .map(|state| state.value().clone());
-        let units = state.map_or_else(|| BTreeSet::from([unit]), |state| state.metric_units());
+        let units = match state {
+            Some(state) => state.metric_units(),
+            None => BTreeSet::from([unit]),
+        };
         let dispatcher = self.inner.remote_dispatcher.load_full();
         for unit in units {
             self.inner.metrics.remove_ingestor_unit(

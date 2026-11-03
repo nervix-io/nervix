@@ -324,18 +324,22 @@ impl Runtime {
                     self.kafka_start_seed_checkpoint(placement, generation, selection)
                         .await?
                 }
-                _ => self
-                    .stored_runtime_state_snapshot(placement)
-                    .change_context_lazy(failure)?
-                    .filter(|snapshot| snapshot.lsm == descriptor.lsm)
-                    .ok_or_else(|| {
-                        Report::new(CheckpointTransferError::Truncated {
-                            lsm: descriptor.lsm,
-                            described: descriptor.length,
-                            received: 0,
-                        })
-                        .change_context(failure())
-                    })?,
+                _ => {
+                    let stored = self
+                        .stored_runtime_state_snapshot(placement)
+                        .change_context_lazy(failure)?;
+                    match stored {
+                        Some(snapshot) if snapshot.lsm == descriptor.lsm => snapshot,
+                        _ => {
+                            return Err(Report::new(CheckpointTransferError::Truncated {
+                                lsm: descriptor.lsm,
+                                described: descriptor.length,
+                                received: 0,
+                            })
+                            .change_context(failure()));
+                        }
+                    }
+                }
             };
             let snapshot = match read {
                 StateCheckpointRead::IngestorUnits(selection) => self

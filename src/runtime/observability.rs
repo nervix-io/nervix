@@ -622,21 +622,17 @@ impl Runtime {
             .replicated_branch_aggregated_states
             .get(placement)
             .map(|state| state.value().clone());
-        let mut units = state.as_ref().map_or_else(
-            || BTreeSet::from([placement.unit]),
-            |state| state.metric_units(),
-        );
+        let mut units = match &state {
+            Some(state) => state.metric_units(),
+            None => BTreeSet::from([placement.unit]),
+        };
         let Some(store) = &self.inner.state_store else {
             return Ok(units);
         };
         let Some(snapshot) = store.latest_snapshot(placement)? else {
             return Ok(units);
         };
-        if let Some(state) = self
-            .inner
-            .replicated_branch_aggregated_states
-            .get(placement)
-        {
+        if let Some(state) = state {
             state.restore_persisted_snapshot(&self.inner.metrics, snapshot)?;
             units.extend(state.metric_units());
         } else {

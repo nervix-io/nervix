@@ -662,10 +662,9 @@ pub(in crate::application) fn planned_ownership_moves(
                 .iter()
                 .map(|(unit, placement)| placement.primary_node.clone().map(|owner| (*unit, owner)))
                 .collect::<Option<Vec<_>>>();
-            sources
-                .filter(|sources| !sources.is_empty())
-                .map(|sources| {
-                    StdArc::new(PlannedIngestorUnitLayout {
+            match sources {
+                Some(sources) if !sources.is_empty() => {
+                    Some(StdArc::new(PlannedIngestorUnitLayout {
                         sources,
                         count: std::num::NonZeroU64::new(
                             u64::try_from(planned_node.units.len()).assured("unit counts fit u64"),
@@ -675,8 +674,10 @@ pub(in crate::application) fn planned_ownership_moves(
                         kafka_offsets: planned_node
                             .ownership_state_components()
                             .contains(&nervix_models::OwnershipStateComponent::KafkaOffsets),
-                    })
-                })
+                    }))
+                }
+                _ => None,
+            }
         } else {
             None
         };
@@ -685,11 +686,14 @@ pub(in crate::application) fn planned_ownership_moves(
                 let Some(destination) = &planned_unit.primary_node else {
                     continue;
                 };
-                let former_owner = current_node
+                let current_owner = current_node
                     .units
                     .get(unit_id)
-                    .and_then(|unit| unit.primary_node.clone())
-                    .unwrap_or_else(|| layout.sources[0].1.clone());
+                    .and_then(|unit| unit.primary_node.as_ref());
+                let former_owner = match current_owner {
+                    Some(owner) => owner.clone(),
+                    None => layout.sources[0].1.clone(),
+                };
                 moves.push(PlannedOwnershipMove {
                     entity: identity.clone(),
                     unit: *unit_id,

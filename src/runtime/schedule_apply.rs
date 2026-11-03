@@ -470,10 +470,12 @@ impl Runtime {
             };
             // A relay is rebound unit by unit: the units this node owned, the owner each unit had,
             // and the units it owns now decide which owner and state tasks stop and start.
+            let mut layout_replaced = false;
             let (previous_local_units, previous_unit_owners) = if let Some(execution) =
                 self.inner.executions.get(domain)
                 && let Some(existing) = Self::scheduled_node(&execution.revision, entity)
             {
+                layout_replaced = existing.units.keys().ne(desired_node.units.keys());
                 (
                     existing.units_executing_on(local_node_id),
                     existing.unit_execution_nodes(),
@@ -483,18 +485,6 @@ impl Runtime {
             };
             let desired_local_units = desired_node.units_executing_on(local_node_id);
             if entity.kind == ModelKind::Ingestor {
-                let layout_replaced = self
-                    .inner
-                    .executions
-                    .get(domain)
-                    .and_then(|execution| {
-                        execution
-                            .revision
-                            .nodes
-                            .get(entity)
-                            .map(|before| before.units.keys().ne(desired_node.units.keys()))
-                    })
-                    .unwrap_or(false);
                 for unit in previous_local_units.difference(&desired_local_units) {
                     let key = DomainNodeUnitRef::new(entity.in_domain(domain), *unit);
                     if !layout_replaced || self.inner.ingestors.contains_key(&key) {

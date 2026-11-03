@@ -22,7 +22,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    async fn new() -> Self {
+    async fn new(instances: u64) -> Self {
         let directory = tempfile::tempdir().assured("the test owns an empty database directory");
         let database = Database::builder(directory.path())
             .open()
@@ -43,15 +43,19 @@ impl Fixture {
         };
         runtime.sync_domains(&BTreeMap::from([(domain.clone(), lifecycle.clone())]));
         let mut nodes = Vec::new();
+        let source_statement = format!(
+            "CREATE KAFKA TOPIC INGESTOR source FROM broker TOPIC 'events' OFFSET BY DOMAIN \
+             INSTANCES {instances} MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec TO \
+             events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR \
+             LOG"
+        );
         for source in [
             "CREATE SCHEMA event (value I64)",
             "CREATE WIRE JSON SCHEMA event_wire MODE STRICT (value integer)",
             "CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event",
             "CREATE RELAY events SCHEMA event UNBRANCHED",
             "CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' }",
-            "CREATE KAFKA TOPIC INGESTOR source FROM broker TOPIC 'events' OFFSET BY DOMAIN \
-             INSTANCES 3 MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec TO events \
-             INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG",
+            &source_statement,
         ] {
             let Statement::Create(statement) = nervix_plexus::statement::parse_statement(source)
                 .assured("the fixture uses complete current statements")
@@ -73,7 +77,7 @@ impl Fixture {
         lifecycle.status = DomainStatus::Running;
         runtime.sync_domains(&BTreeMap::from([(domain.clone(), lifecycle)]));
         let mut states = Vec::new();
-        for index in 0..3 {
+        for index in 0..instances {
             let placement = RuntimeStatePlacement {
                 domain: domain.clone(),
                 state: RuntimeState::KafkaOffset,
@@ -120,8 +124,32 @@ impl Fixture {
 }
 
 #[nervix_primitives::test]
+async fn a_single_unit_selects_and_persists_its_canonical_start_directly() {
+    let fixture = Fixture::new(1).await;
+    for offset in [4, 99] {
+        fixture
+            .runtime
+            .start_single_kafka_unit(
+                &fixture.states[0],
+                7,
+                vec![KafkaOffsetPosition {
+                    topic: "events".to_owned(),
+                    partition: 0,
+                    offset,
+                }],
+            )
+            .await
+            .assured("the single native owner initializes durably");
+        let persisted = fixture.persisted(0);
+        assert_eq!(persisted.applied_start_generation(), Some(7));
+        assert_eq!(persisted.next_offset("events", 0), Some(4));
+    }
+    fixture.runtime.shutdown(Duration::from_secs(5)).await;
+}
+
+#[nervix_primitives::test]
 async fn a_late_unit_adopts_the_canonical_cut_after_a_plain_resume() {
-    let fixture = Fixture::new().await;
+    let fixture = Fixture::new(3).await;
     let starts = [4, 7, 9]
         .into_iter()
         .enumerate()

@@ -36,6 +36,9 @@ struct RuntimeKafkaDomainOffsets {
     domain: DomainName,
     ingestor: IngestorName,
     topic: String,
+    /// Fixed for this source lifetime; a count change joins this source before installing its
+    /// replacement. One unit initializes directly through its native owner.
+    instances: NonZeroU64,
     /// The originator this ingestor instance acts under, which schedule application replaces when
     /// a reassignment keeps the instance running.
     state: StdArc<KafkaOffsetOriginatorSlot>,
@@ -76,10 +79,12 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
             None
         };
         let state = self.state.current();
-        self.runtime
-            .synchronize_kafka_start(&state, generation)
-            .await
-            .change_context(KafkaDomainOffsetError::Read)?;
+        if self.instances.get() > 1 {
+            self.runtime
+                .synchronize_kafka_start(&state, generation)
+                .await
+                .change_context(KafkaDomainOffsetError::Read)?;
+        }
         let missing_partition_timestamp = match last_start {
             nervix_models::DomainStartPoint::Resume => self
                 .runtime
@@ -137,6 +142,13 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
             ));
         }
         let state = self.state.current();
+        if self.instances.get() == 1 {
+            return self
+                .runtime
+                .start_single_kafka_unit(&state, generation, positions)
+                .await
+                .change_context(KafkaDomainOffsetError::Reset);
+        }
         self.runtime
             .propose_kafka_start(&state, generation, positions)
             .await
@@ -364,6 +376,7 @@ impl KafkaTopicIngestorStartPlan {
                     domain: domain.clone(),
                     ingestor: ingestor.name.clone(),
                     topic: topic.as_str().to_string(),
+                    instances,
                     state,
                 });
                 KafkaTopicIngestorOffsetMode::Domain {

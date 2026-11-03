@@ -3354,7 +3354,8 @@ checked against the entity's declaration and exact types at `CREATE` and `ALTER`
 The registry owns typed `IngestorInstancingError` causes for unsupported instancing, missing or
 different construction partition structures and Kafka's required domain-offset mode. The
 surrounding report identifies the domain and ingestor. Correct the declaration before activation.
-A count change uses the ownership-handoff preparation boundary to preserve the offset lifetime. Start planning separately validates the complete resolved unit declaration.
+A count change uses the ownership-handoff preparation boundary to preserve the offset lifetime.
+Start planning separately validates the complete resolved unit declaration.
 `AlreadyRunning` and `IngestorNotRunning` name the exact source unit, allowing a sibling instance
 to start or stop independently.
 Per-unit DESCRIBE requests and status records preserve the unit selected by their caller.

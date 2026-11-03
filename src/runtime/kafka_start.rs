@@ -323,6 +323,13 @@ impl Runtime {
 
     /// An explicit start is selected once on unit zero. Pending seeds stay in that unit's native
     /// checkpoint until each recipient has persisted its own positions and acknowledged them.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "one bounded start request admits a driver before its recurring polls"
+        )
+    )]
     pub(crate) async fn answer_kafka_start(
         &self,
         request: KafkaStartRequest,
@@ -462,9 +469,11 @@ impl Runtime {
             .capture_after(None)
             .verified("an unfiltered capture always retains the table");
         let (encoded, scratch) = captured.bounds().change_context_lazy(failure)?;
-        let capacity = encoded
+        let encoded_capacity = encoded
             .checked_mul(3)
-            .and_then(|bytes| bytes.checked_add(scratch))
+            .ok_or_else(|| Report::new(KafkaStartError::Bounds).change_context(failure()))?;
+        let capacity = encoded_capacity
+            .checked_add(scratch)
             .ok_or_else(|| Report::new(KafkaStartError::Bounds).change_context(failure()))?;
         let reservation = self
             .inner
@@ -551,11 +560,8 @@ impl Runtime {
             .nodes
             .get(&NodeRef::new(placement.kind, placement.identifier.clone()))
             .ok_or_else(stale)?;
-        let coordinator = node
-            .units
-            .get(&Unit::Instance(0))
-            .and_then(|unit| unit.primary_node.clone())
-            .ok_or_else(stale)?;
+        let coordinator_unit = node.units.get(&Unit::Instance(0)).ok_or_else(stale)?;
+        let coordinator = coordinator_unit.primary_node.clone().ok_or_else(stale)?;
         let request = KafkaStartRequest {
             placement: placement.to_remote(),
             source: ClusterNodeIdentity::new(
@@ -717,15 +723,14 @@ impl Runtime {
         let mut capacity = 64 * 1024_u64;
         for position in &positions {
             let topic = u64::try_from(position.topic.len()).assured("a topic length fits u64");
+            let entry_length = topic
+                .checked_add(128)
+                .ok_or_else(|| Report::new(KafkaStartError::Bounds).change_context(failure()))?;
+            let entry_capacity = entry_length
+                .checked_mul(3)
+                .ok_or_else(|| Report::new(KafkaStartError::Bounds).change_context(failure()))?;
             capacity = capacity
-                .checked_add(
-                    topic
-                        .checked_add(128)
-                        .and_then(|length| length.checked_mul(3))
-                        .ok_or_else(|| {
-                            Report::new(KafkaStartError::Bounds).change_context(failure())
-                        })?,
-                )
+                .checked_add(entry_capacity)
                 .ok_or_else(|| Report::new(KafkaStartError::Bounds).change_context(failure()))?;
         }
         let reservation = self
@@ -773,6 +778,46 @@ impl Runtime {
         self.adopt_kafka_start(state, generation, exchange).await
     }
 
+    /// A one-unit source already owns the complete cut. Retain its native reset and durability
+    /// path without encoding an offer, hashing it or transferring it back to the same owner.
+    pub(super) async fn start_single_kafka_unit(
+        &self,
+        state: &KafkaOffsetStateOriginator,
+        generation: u64,
+        positions: Vec<KafkaOffsetPosition>,
+    ) -> error_stack::Result<(), StateReplicationError> {
+        let freeze = self.kafka_start_freeze(state.placement());
+        let _initializing = state
+            .read()
+            .start_coordination()
+            .admit(&freeze)
+            .await
+            .change_context(StateReplicationError::KafkaStartFrozen {
+                placement: state.placement().clone(),
+            })?;
+        self.verify_kafka_start_recipient(state, generation)?;
+        if state.placement().unit != Unit::Instance(0) {
+            return Err(Report::new(StateReplicationError::Superseded {
+                placement: state.placement().clone(),
+            }));
+        }
+        self.reset_domain_kafka_offsets(
+            state,
+            generation,
+            positions,
+            KafkaStartApplication::Canonical,
+        )
+        .await
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "start-offer admission resolves its retained body once; stream chunks retain \
+                      only the admitted charged bytes"
+        )
+    )]
     pub(super) fn offered_kafka_start_bytes(
         &self,
         placement: &RuntimeStatePlacement,
@@ -787,12 +832,13 @@ impl Runtime {
             .get(placement)
             .ok_or_else(|| Report::new(KafkaStartError::OfferEnded).change_context(failure()))?;
         let read = ReplicatedKafkaOffsetState::read(state.value());
-        let offer = read
-            .start_coordination()
-            .offer
-            .load_full()
-            .filter(|offer| offer.descriptor.lsm == lsm)
-            .ok_or_else(|| Report::new(KafkaStartError::OfferEnded).change_context(failure()))?;
+        let offer =
+            read.start_coordination().offer.load_full().ok_or_else(|| {
+                Report::new(KafkaStartError::OfferEnded).change_context(failure())
+            })?;
+        if offer.descriptor.lsm != lsm {
+            return Err(Report::new(KafkaStartError::OfferEnded).change_context(failure()));
+        }
         read.authorize_start_offer(offer.assignment)
             .change_context_lazy(failure)?;
         Ok(offer.bytes.clone())
@@ -817,6 +863,14 @@ impl Runtime {
         Ok(checkpoint)
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "one pending-seed admission validates the current layout and native owner \
+                      before and after capture; recurring stream chunks retain admitted bytes"
+        )
+    )]
     fn kafka_start_seed_originator(
         &self,
         placement: &RuntimeStatePlacement,

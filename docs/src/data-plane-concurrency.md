@@ -2788,7 +2788,16 @@ update. Every log guard ends before a callback awaits input, cancellation or a s
 These contracts retain the fixture's synchronization under compiler review; production
 connector and host synchronization keeps its own protocol contracts.
 
-### Protocols and their checks
+#Canonical Kafka start selection is source initialization. The connector host's `reset` contract
+marks that admission before recurring polls; normal acknowledgements use the retained originator
+and `commit`. Each offered-body or pending-seed bulk admission resolves its native state and
+layout before retaining charged bytes; streaming those chunks performs no concurrent-map lookup.
+A one-unit source keeps direct native persistence. Distributed initializers share the startup
+mutex with ownership capture and the final offset writer, scoped to one source unit, while
+recorded-partition commits continue through the existing assignment fence. The start request has
+its sixty-second deadline, and bulk bytes retain their existing size, memory and progress bounds.
+
+## Protocols and their checks
 
 The consensus log chunk owner releases its iterator allocation and Commands reservation in the
 same transition that hands out its final entry. Its Shuttle check races that transition with

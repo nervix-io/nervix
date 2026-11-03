@@ -146,6 +146,14 @@ pub trait KafkaDomainOffsetServices: Send + Sync + 'static {
     /// Accepts the explicit generation start through persistence and its replica boundary.
     /// An already accepted start retains its canonical positions. Subsequent initialization of
     /// that same generation returns `Resume` with those recorded positions.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "an explicit start is selected and made durable before the driver polls \
+                      records; normal acknowledgements call commit instead"
+        )
+    )]
     async fn reset(
         &self,
         generation: u64,

@@ -1181,6 +1181,12 @@ impl CapturedKafkaOffsets {
     }
 
     /// A pending unit's start positions are immutable while unit zero commits its own slice.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the admitted encoder checks caller cancellation between retained entries"
+        )
+    )]
     pub(super) fn start_seed(
         &self,
         generation: u64,
