@@ -1005,8 +1005,10 @@ refusal before either a PULL or PUSH socket opens; an omitted value selects conn
 The MySQL offline check also applies the vocabulary's pooled-client reserved-key declaration to
 URL query parameters. A pool override is a value-free refusal naming `POOL SIZE`, before storage
 or connection attempts; the host uses that same declaration for resolved configuration. MySQL's
-current client schema declares `addr`, `timeout_ms`, `tls_ca_file`, `tls_cert_file` and
-`tls_key_file`, with paired certificate and key files. Its
+current client schema declares `addr`, the pool acquire/lifetime/maintenance keys, `timeout_ms`,
+`tls_ca_file`, `tls_cert_file` and `tls_key_file`, with paired certificate and key files. The
+vocabulary validates nonnegative idle milliseconds and positive whole-second maximum ages before
+commit; the driver never truncates a declared maximum age. Its
 table declaration admits one or two nonempty, case-preserving identifier parts, and the connector
 quotes each part separately. Its declared placeholder bound is shared with the statement divider;
 the bound narrows rows by mapped column count. The [MySQL manual](emitters.md#mysql) gives its
@@ -3237,15 +3239,23 @@ and Arrow type retained beneath the publish context. It is not a per-record reje
 that keeps a MySQL pool at `POOL SIZE MIN` reports a pass that ends below it as
 `PoolMinimumError::NotRestored`, naming the minimum, above the failed checkout's `CheckOut` and the
 driver's error, before its next pass retries; a later writer's failure remains a separate
-diagnostic. MySQL's configured `timeout_ms` is read once through `ConfiguredDeadline` and retained
-with the node's shared driver pool. It bounds every checkout, including the minimum keeper's,
-initial connection validation, and each insert as separate operations. An elapsed operation keeps
-the typed `DeadlineElapsed` beneath its MySQL and host contexts and attaches its safe operation,
-key and duration for public emitter diagnostics. MySQL composition preserves the shared-client
-report through initialization. An elapsed operation is infrastructure failure, never a row
-rejection. Cancelling a driver command marks its connection disconnected, and the
-recycler discards it before handing out capacity again. Omitting the key retains the declared
-unbounded waits. TLS files extend the URL's existing `SslOpts`, retaining verification and trust
+diagnostic. MySQL retains its effective `pool_acquire_timeout_ms` checkout budget, defaulted by
+its client schema to 30 seconds, and optional `timeout_ms` operation budget through
+`ConfiguredDeadline`. Every checkout, including the minimum keeper's, takes the shorter applicable
+bound and names that bound's key on expiry. Initial validation and each insert separately retain
+the operation bound; without `timeout_ms` those operations remain unbounded after checkout.
+An elapsed operation keeps the typed `DeadlineElapsed` beneath its MySQL and host contexts and
+attaches its safe operation, key and duration for public emitter diagnostics. MySQL composition
+preserves the shared-client report through initialization. An elapsed operation is infrastructure
+failure, never a row rejection. Cancelling a driver command marks its connection disconnected,
+and the recycler discards it before handing out capacity again. The pool's immutable policy
+reads effective defaults once, applies idle and optional absolute lifetimes to the driver, and
+passes `pool_maintenance_interval_ms` to the unchanged minimum keeper. Driver expiry scans retain
+their own cadence; [Database Client Connection Pools](database-client-pools.md#connection-lifetimes)
+defines retirement and in-flight operation boundaries. A lifetime or maintenance value that violates
+its declared schema rule retains `ClientConfigSchemaError` beneath `MySqlPoolPolicyError::InvalidKey`
+at open.
+TLS files extend the URL's existing `SslOpts`, retaining verification and trust
 choices, and paired identity files install the driver's RSA PKCS#1 identity. The silent-handshake,
 locked-insert/retry and shared-pool-contention scenarios own the public deadline observations;
 the mounted-certificate scenario uses an account that requires a client certificate.

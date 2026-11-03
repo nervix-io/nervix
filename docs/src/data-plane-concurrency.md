@@ -490,8 +490,9 @@ scenario exercises the real driver and database; these external asynchronous wai
 Deloxide's tracked locks and the model checkers' coverage.
 
 A MySQL pool keeps its `POOL SIZE MIN` with one keeper task, which the pool's handle stops. The
-keeper holds no lock and waits on no notification: once a second it reads the driver's count of
-established connections and, below the minimum, awaits the driver's checkouts one at a time,
+keeper holds no lock and waits on no notification: after each `pool_maintenance_interval_ms`
+delay (one second by default), it reads the driver's count of established connections and, below
+the minimum, awaits the driver's checkouts one at a time,
 holding each until its pass ends, so every connection it opens is one the driver accounts against
 the maximum. These external asynchronous waits are outside Deloxide's tracked locks and the model
 checkers' coverage; unit tests drive the production keeper over a stand-in pool on a paused clock.
