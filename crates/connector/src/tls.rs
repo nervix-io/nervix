@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn default_root_store_includes_public_webpki_roots() {
         let roots = RustlsClientConfigProvider::root_store_with_default_roots();
-        assert!(roots.roots.len() >= webpki_roots::TLS_SERVER_ROOTS.len());
+        assert!(roots.roots.starts_with(webpki_roots::TLS_SERVER_ROOTS));
     }
 
     #[test]

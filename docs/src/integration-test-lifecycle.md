@@ -2764,6 +2764,12 @@ The second line appears only when a connection or the accept loop had to be abor
 A receiver's port is drawn with the scenario's fixture ports and goes back with them at the end of
 cleanup, once the nodes that dialed it have ended.
 
+The HTTP transport scenarios can also start one or three real node processes with
+`SSL_CERT_FILE` pointing to an empty file and `SSL_CERT_DIR` to an empty directory. The cluster
+owns those paths until its processes end; only those children's environments change. This
+exercises client construction without native trust anchors alongside the ordinary suite,
+without changing the runner's trust store or serializing scenarios.
+
 ## HTTP Proxies
 
 A scenario about the proxy an HTTP client declares, or about proxy environment variables a node
