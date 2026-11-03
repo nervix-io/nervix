@@ -2230,6 +2230,14 @@ bench-subscription-rows *args:
 client-wire-cost output="target/client-wire-cost.json":
     cargo bench --package nervix-server --bench client_wire_cost --features benchmarks -- {{ quote(output) }}
 
+# Measure each stage a native client runs before it sends a command: building the statement
+# grammar, parsing with a grammar built for the call or held across calls, the execution identity
+# and the wire request. It runs in the release profile and in the debug profile the scenario harness
+# builds its clients with.
+client-wire-command-cost output_dir="target/client-wire-command-cost":
+    cargo bench --package nervix-client-core --bench command_preparation -- "$(realpath -m {{ quote(output_dir + "/release.json") }})"
+    cargo test --package nervix-client-core --bench command_preparation -- "$(realpath -m {{ quote(output_dir + "/debug.json") }})"
+
 # Run the component benchmark with coverage instrumentation for changed benchmark lines.
 coverage-client-wire-cost output="target/client-wire-cost.lcov" report="target/client-wire-cost-coverage.json":
     cargo llvm-cov --bench client_wire_cost --features benchmarks --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(report) }}
@@ -2246,9 +2254,20 @@ client-wire-binding-cost output="target/client-wire-binding-cost.json":
 client-wire-binding-host-cost output_dir="target/client-wire-binding-host":
     NERVIX_CLIENT_WIRE_BINDING_PROFILE_DIR="$(realpath -m {{ quote(output_dir) }})" just test-client-conformance '@client_probe_python' --concurrency 1 --retry 0
 
-# Compare the same native command workload over plaintext and TLS with one-node test clusters.
-client-wire-tls-cost output_dir="target/client-wire-tls-cost":
-    NERVIX_CLIENT_WIRE_TLS_OUTPUT_DIR={{ quote(output_dir) }} just test-scenarios --input tests/features/runtime/client_wire_tls_cost.feature --tags @client_wire_tls_cost --concurrency 1 --retry 0
+# Compare the same native command and fresh connections over plaintext and TLS gRPC, in alternating
+# pairs against two release servers that differ only in their transport.
+client-wire-tls-cost output_dir="target/client-wire-tls-cost": build-web-console download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo build --release --package nervix-server --bin nervix-server
+    export NERVIX_CLIENT_WIRE_TLS_SERVER={{ quote(cargo_target_dir + "/release/nervix-server") }}
+    export NERVIX_CLIENT_WIRE_TLS_OUTPUT_DIR={{ quote(output_dir) }}
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/runtime/client_wire_tls_cost.feature \
+        --tags @client_wire_tls_cost \
+        --concurrency 1 \
+        --retry 0
 
 # Measure runtime-state replication on the owner and on a replica: a Kafka offset commit its one
 # replica acknowledges, and the branch lifecycle check a replica makes before it installs each

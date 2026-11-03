@@ -53,7 +53,7 @@ use nervix_interconnect::{
     TlsConfigBundle, Transport, TransportClock, TransportIdentity, TransportOptions,
 };
 use nervix_models::{ClusterNodeName, NodeEndpoint, TrustRootFingerprint};
-use nervix_plexus::client_statement::{ClientStatement, parse_client_statement_sources};
+use nervix_plexus::client_statement::ClientStatement;
 use nervix_primitives::{
     runtime::Handle,
     sync::{
@@ -141,7 +141,7 @@ use super::{
     },
     phase_deadline::{BeforeDeadline, PhaseDeadline},
     port_pool::{next_ports, release_test_ports},
-    raw_session::{TestUpload, send_upload},
+    raw_session::{TestUpload, send_upload, with_statement_grammar},
     redis_client::{TestRedisClient, publish_burst},
     scenario_phase::ScenarioIdentity,
     status_request::{
@@ -476,7 +476,7 @@ pub(crate) fn dev_tls_ca_pem() -> io::Result<Vec<u8>> {
     std::fs::read(dev_tls_ca_path()?).map_err(io::Error::other)
 }
 
-fn dev_tls_ca_path() -> io::Result<PathBuf> {
+pub(crate) fn dev_tls_ca_path() -> io::Result<PathBuf> {
     ensure_dev_tls_assets()?;
     Ok(dev_tls_ca_file())
 }
@@ -559,7 +559,8 @@ pub(crate) fn command_connect_options(server: &str, commands: &str) -> io::Resul
 /// Whether `commands` holds an `UPLOAD RESOURCE`. Commands that do not parse upload nothing, and
 /// the client reports them as it would any other.
 fn uploads_resource(commands: &str) -> bool {
-    let Ok(statements) = parse_client_statement_sources(commands) else {
+    let parsed = with_statement_grammar(|grammar| grammar.parse_sources(commands));
+    let Ok(statements) = parsed else {
         return false;
     };
     statements
