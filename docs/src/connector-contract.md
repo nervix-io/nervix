@@ -1760,7 +1760,9 @@ from codec rejections, oversized payloads, quiesce drops and transport redeliver
 Every MQTT subscription checks the successful `SUBACK` grant against its declared QoS before
 publishing readiness, including under `NO ACK`. A lower grant is
 `MqttTopicIngestorError::SubscriptionDowngraded`, carrying the requested and granted levels, beneath
-the host's resume context. The connector retains a `RetiringSubscription` phase. Before another
+the host's resume context. An explicit refused `SUBACK` reports `SubscriptionRefused`; an empty
+persistent session retained after that refusal is not an accepted subscription. Both refusals
+retain the connector's `RetiringSubscription` phase. Before another
 subscription attempt, it runs the existing retirement exchange: clean CONNECT, UNSUBSCRIBE and
 DISCONNECT with session expiry zero, bounded by the client's connection budget. A failed or
 cancelled retirement keeps that phase, including across suspension; only successful cleanup
@@ -1866,6 +1868,27 @@ the replacement remains a runtime installation failure. Matching sessions keep t
 retired subscriptions lose theirs. Each phase runs at most its declared instance count of
 connections concurrently, and keeps no discovery-map guard while awaiting a connection.
 The [ingestor manual](./ingestors.md#mqtt) owns the public behavior.
+
+### Pulsar received metadata
+
+The Pulsar connector converts each driver delivery once into a message owning its payload,
+ordered properties, complete acknowledgement position and validated metadata. The visitor lends
+the nine fields declared by `PulsarTopicIngestor` in declaration order; it renders the message id
+only when read and lends binary ordering keys without a retained metadata row. Publish and optional
+event milliseconds become checked `Timestamp` values; sequence ids are checked into `I64`.
+The driver expands a stored batch before this conversion: a present member sequence id or event
+time overrides its envelope field, including zero; an omitted member field uses that envelope
+value. Event time remains absent when neither carries it, without substituting publish time.
+Missing event time and keys remain absent, including the distinction from present epoch or empty
+values. The external `CommandMessage` contract defaults an omitted redelivery count to zero; the
+connector exposes that count losslessly as `I64`.
+
+A failed conversion preserves its typed timestamp or integer cause under the connector's field
+error and `IngestorError::Read`, including topic and message identity. During batch gathering the
+source returns the valid prefix and retains one pending failure for the next active read. A cancelled
+read preserves that pending failure. This state is instance-local, bounded to one report and never
+persisted. No receive queue, network wait or host cadence changes. The public field contracts live
+in the [Pulsar ingestor manual](./ingestors.md#pulsar).
 
 ### Pulsar subscription ownership
 
@@ -2803,8 +2826,12 @@ sequenceDiagram
   acknowledgement boundary remains the state's highest durable replica progress.
 
 - **Pulsar client.** The Pulsar ingestor and emitter build on Nervix's fork of `pulsar-rs`,
-  `nervix-io/pulsar-rs`, because the released crate discards `CommandConnected` and returns from an
-  acknowledgement before the broker answers it. The fork keeps each connection's announced
+  `nervix-io/pulsar-rs`, because the released crate discards delivered redelivery counts and
+  `CommandConnected`, and returns from an
+  acknowledgement before the broker answers it. Its received-message envelope carries the optional
+  `CommandMessage.redelivery_count` through the bounded consumer channel, including every member
+  of a broker batch. The public `Message` constructor and getter preserve wire presence; message-id
+  equality and hashing remain identity operations. The fork keeps each connection's announced
   `maxMessageSize`, refuses a message whose serialized metadata and payload exceed it before
   writing it, as the Java client does, and resolves a send the broker answers with `SendError` with
   that error's server code and reason. The broker itself only closes the connection on a frame
