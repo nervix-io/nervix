@@ -490,6 +490,9 @@ An `HTTP CLIENT` means the same transport for HTTP polling and for the HTTP emit
 HTTP through maintained implementations, Reqwest for polling and hyper for the emitter, over
 HTTP/2 when the endpoint's TLS negotiates it and HTTP/1.1 otherwise, and:
 
+- Both directions trust the Mozilla roots Nervix ships plus the host's native roots. Every PEM
+  certificate in `tls_ca_file` adds to that set, and `tls_cert_file` with `tls_key_file` supplies
+  the client identity. An empty or unreadable native store leaves the bundled roots available.
 - `timeout_ms` is the one deadline of a request and every redirect it follows. A poll's request
   runs within it until the whole response body has been read, and an emitted request until its
   final response headers are complete, as [HTTP requests](#http-requests) describes.
@@ -1195,7 +1198,8 @@ Transport-specific expectations:
   connection presents no client certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and
   `tls_key_file`.
 - `SENTRY`: the referenced `SENTRY CLIENT` carries an `https://...` `dsn`; its `tls_ca_file` adds
-  a trust root beside the platform's native roots, and `tls_cert_file` with `tls_key_file` presents
+  trust roots beside Nervix's bundled Mozilla roots and the host's native roots, and
+  `tls_cert_file` with `tls_key_file` presents
   a client certificate.
 - `OTEL`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file`, `tls_cert_file`, and
   `tls_key_file` for both OTLP/gRPC and OTLP/HTTP-protobuf. `tls_ca_file` adds a server trust root,
@@ -2265,7 +2269,7 @@ Nervix owns every key of a `SENTRY CLIENT` and refuses a key it does not declare
 | --- | --- | --- |
 | `dsn` | Yes | The project DSN, `<scheme>://<public-key>[:<secret-key>]@<host>[:<port>]/[<path>/]<project-id>`, with an `http` or `https` scheme. It is confidential, and client inspection redacts it. |
 | `timeout_ms` | Yes | A positive whole number of milliseconds that bounds each envelope request, as [Client Deadlines](#client-deadlines) defines. |
-| `tls_ca_file` | No | A PEM certificate authority that HTTPS trusts in addition to the platform's native roots. |
+| `tls_ca_file` | No | PEM certificate authorities that HTTPS trusts in addition to the Mozilla roots Nervix ships and the host's native roots. |
 | `tls_cert_file`, `tls_key_file` | No | The PEM certificate and private key HTTPS presents as the client's identity, supplied together. |
 
 `CREATE CLIENT` checks the complete DSN with Sentry's own parser, including rendered template
@@ -2541,8 +2545,8 @@ The TLS file keys need an `https` endpoint on either protocol, and `tls_cert_fil
 `tls_key_file` go together; `CREATE CLIENT` and `ALTER CLIENT` check both before reading a file or
 opening a transport. Mount the files as resources. The certificate and key are the emitter's client
 identity. `tls_ca_file` adds a trust root rather than replacing the built-in ones: `grpc` trusts the
-bundled WebPKI roots and the file, and `http/protobuf` trusts the platform's trust store and the
-file.
+bundled WebPKI roots and the file, and `http/protobuf` trusts Nervix's bundled Mozilla roots, the
+host's native roots and the file.
 
 Opening an emitter reads its TLS files and builds its transport, but contacts no endpoint: the
 `grpc` channel connects when an export first needs a connection, and the `http/protobuf` client
