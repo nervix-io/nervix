@@ -800,7 +800,8 @@ clocks. Low steal alone does not show a host is fast: CPU execution, cache/memor
 storage can slow work without stolen time. The samples support comparison, not a specific cause.
 
 Every kache-backed job uses kache 2.0.0, records `doctor` output without making it a test failure,
-and publishes a cache report whatever its outcome, a timeout included. The report reads the last six
+and publishes a cache report whatever its outcome, a timeout included. The report names the index
+mode the job's configuration selects. The report reads the last six
 hours of kache's events for every build on the machine: no kache-backed job may run longer, and each
 runs on a machine of its own, so the report covers the whole job, its tool builds included, and
 nothing before it. Filtering by the checkout's build tree would also drop the remote transfers,
@@ -845,10 +846,7 @@ holds every kache-backed job and Docker image build to the bucket of its `runs-o
 kache-backed job passes its bucket's settings, as kache's `KACHE_S3_*` environment variables, to
 `python3 scripts/kache_remote.py start` right after the setup action. Docker image builds pass the
 same settings to their builder, whose build command runs `scripts/kache_remote.py configure` before
-it starts the daemon. The build step also mounts a tmpfs at `/kache-index`: `prepare-index` moves
-the store's index into it before the daemon starts, and the step's exit trap runs `restore-index`
-once the daemon has stopped, moving the index back into the BuildKit cache mount, which outlives the
-step. Before the build, the job's `Lighten the build volume` step remounts the ext4 volume holding
+it starts the daemon. Before the build, the job's `Lighten the build volume` step remounts the ext4 volume holding
 Docker's root directory, where BuildKit keeps that cache mount, with `noatime` and `barrier=0`, as
 the start step does for the store of every other kache-backed job. Either way the service URL is
 written into the daemon's TOML configuration before startup.
@@ -878,23 +876,26 @@ builds. Within the budget the daemon applies its normal eviction while the compi
 shared remote stay enabled. The `Start kache remote` step that follows the action:
 
 1. writes the daemon's configuration, `$RUNNER_TEMP/kache-remote.toml`, with the local store's
-   budget and the bucket, region, service URL, base prefix and pull-request prefix. The credentials
-   stay in the environment.
+   budget, its index mode and the bucket, region, service URL, base prefix and pull-request prefix.
+   The credentials stay in the environment. Nothing on a single-use runner needs to survive a
+   crash, and on Boat kache's downloads spent most of their time waiting for the lock of its SQLite
+   index, whose holders wait on the disk, so the configuration sets `index_mode = "off"`: SQLite
+   never synchronizes the index with the disk. Kache selects that mode only when a configuration
+   names it, in CI as well. A killed process loses nothing in either mode; after a kernel crash or
+   power loss kache quarantines an index it finds corrupt and rebuilds it from the stored entries,
+   best effort. The Docker builder writes the same configuration, so its index, in a BuildKit cache
+   mount that can outlive the job on a builder that persists, follows the same mode, and the
+   report's `kache doctor` output shows the mode each process applies.
 2. exports `KACHE_CONFIG`, the credentials, and the job's `KACHE_MANIFEST_KEY` and
    `KACHE_NAMESPACE` to the job's later steps. A matrix job's key includes its matrix value, so
    every build variant keeps its own manifest and shards. `scenarios-build` keeps the key
    `scenarios-<os>-<arch>` it had before the suite split into shards, also for the unit tests it
    builds now: a key with no manifest starts a job with nothing to prefetch.
-3. prepares the store before any kache process opens it. Nothing on a single-use runner needs to
-   survive a crash, and on Boat kache's downloads spent most of their time waiting for the lock of
-   its SQLite index, whose holders wait on the disk. When `/dev/shm` is a tmpfs with at least a GiB
-   free, the step moves the index, with the write-ahead log and shared-memory files SQLite keeps
-   beside it, into `/dev/shm/kache-index` and leaves a symlink in the cache directory; SQLite
-   resolves the symlink and keeps those files next to its target, so the index never touches the
-   disk. When the store's volume is ext4, the step remounts it with `noatime` and `barrier=0`
-   through passwordless `sudo`, so an fsync returns once the device has the data instead of after
-   its cache is flushed too. A runner where either step does not apply, or where it fails, keeps
-   kache's default, and the step prints what it did.
+3. prepares the store before any kache process opens it. When the store's volume is ext4, the
+   step remounts it with `noatime` and `barrier=0` through passwordless `sudo`, so an fsync of the
+   store's other writes returns once the device has the data instead of after its cache is flushed
+   too. A runner where that does not apply, or where it fails, keeps the volume's options, and the
+   step prints what it did.
 4. starts the daemon, and fails the job unless `kache --json daemon status` reports it running with
    that file and `kache --json stats` reports that the file names `s3://<bucket>/artifacts`. A
    daemon gets a minute to answer, polled every two seconds, because a loaded runner can start it

@@ -72,16 +72,24 @@ class Redaction:
         return text
 
 
-def index_location(environment: Mapping[str, str]) -> str | None:
-    """Where the job's kache index lives: in memory, where the job's start moved it behind a
-    symlink, or on disk. None outside a job's kache setup, which names no cache directory."""
-    configured = environment.get("KACHE_CACHE_DIR")
+def index_mode(environment: Mapping[str, str]) -> str | None:
+    """The index mode the job's kache configuration selects, or kache's default when it selects
+    none. None outside a job's kache setup, which names no configuration, or when kache could not
+    read the configuration either. `kache doctor`, beside it in the report, shows the mode in
+    effect."""
+    configured = environment.get("KACHE_CONFIG")
     if not configured:
         return None
-    index = Path(configured) / "index.db"
-    if index.is_symlink():
-        return f"Index: in memory, at {os.readlink(index)}."
-    return "Index: on disk, in the cache directory."
+    try:
+        cache = tomllib.loads(Path(configured).read_text(encoding="utf-8"))["cache"]
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, KeyError, TypeError):
+        return None
+    if not isinstance(cache, dict):
+        return None
+    mode = cache.get("index_mode")
+    if mode is None:
+        return "Index mode: kache's default, which synchronizes the index with the disk."
+    return f"Index mode: `{mode}`, from the job's kache configuration."
 
 
 def heading(job: str, phase: str) -> str:
@@ -348,9 +356,9 @@ def main(arguments: Sequence[str] | None = None) -> None:
     (destination / "report.json").write_text(redaction.apply(report.stdout))
     markdown = [heading(os.environ.get("GITHUB_JOB", "local build"), options.phase), ""]
     markdown.append(f"Doctor exit status: `{doctor.returncode}`. Problems are diagnostic only.")
-    location = index_location(os.environ)
-    if location is not None:
-        markdown.extend(["", location])
+    mode = index_mode(os.environ)
+    if mode is not None:
+        markdown.extend(["", mode])
     if doctor_output:
         markdown.extend(["", "<details><summary>Doctor output</summary>", "", "```text", doctor_output.strip(), "```", "", "</details>"])
 
