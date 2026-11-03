@@ -301,6 +301,13 @@ fn remove_created(path: &Path) {
 /// the file back to `end` before it returns, so the file still ends after its last staged batch;
 /// should that cut fail as well, the next append cuts the rest. `before_batch` runs before each
 /// batch is written, and a batch it refuses fails the append.
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "`before_batch` is the caller's check between staged batches: the emitter's \
+                  storage job passes the executor's cancellation check, which reads one flag"
+    )
+)]
 pub(super) fn append(
     path: &Path,
     end: u64,
