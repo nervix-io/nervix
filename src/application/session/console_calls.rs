@@ -22,8 +22,8 @@
 //! refuses without reading further.
 //!
 //! When the node begins to stop, a download or a restore still running ends at once with a close
-//! that says so, as a native gRPC call is cut when admission closes, so no client holds the drain
-//! or the process open. A restore admitted with its whole archive goes on without its call.
+//! that says so, as a native gRPC call ends at once with `UNAVAILABLE`, so no client holds the
+//! drain or the process open. A restore admitted with its whole archive goes on without its call.
 
 #![cfg_attr(
     nervix_lint,

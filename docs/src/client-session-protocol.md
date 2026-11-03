@@ -336,7 +336,8 @@ names.
 | Message that is not a valid frame, or a frame of another call | `INTERNAL` | Close `1007` |
 | Text message | — | Close `1003` |
 | A second request on a download | — | Close `1008` |
-| The node began to stop, during a download or a restore | The call is cut | Close `1001` |
+| The node began to stop, during an upload | `UNAVAILABLE` | — |
+| The node began to stop, during a download or a restore | `UNAVAILABLE` | Close `1001` |
 | Frame without a valid request identity | `SessionEnding` with `ProtocolViolated`, then the end of the stream | The same `SessionEnding`, then a normal close |
 | Session ended by the server | The end of the stream, with status `OK` | A normal close |
 
@@ -1877,15 +1878,20 @@ client sees at each ending and what it recovers.
 listeners and ends the sessions they carry. Every request a session had not yet admitted is decided
 cancelled before admission and never begins an effect. Work that was admitted keeps running and no
 reply follows for it: a transaction commit continues, and the node waits for it until its shutdown
-deadline. Subscriptions and domain clock attachments stop with their session, and an upload stream
-still waiting for its client ends at once. A console session receives `SessionEnding` with reason
-`ServerShuttingDown` after the control frames it had already queued, then a normal close. A backup
-download or a restore stream on a console WebSocket of its own ends at once with close code `1001`,
-and a restore admitted with its whole archive goes on without its call. A gRPC
-connection is cut when admission closes, so a native client sees its stream fail, as after any
-transport loss, rather than the ending frame. Either way the client reconnects to another node and
+deadline. Subscriptions and domain clock attachments stop with their session. Every session, native
+or console, receives `SessionEnding` with reason `ServerShuttingDown` after the control frames it
+had already queued; a native session's call then ends with status `OK`, and a console session's
+WebSocket with a normal close. An upload, a restore or a download call on the native listener ends
+at once with `UNAVAILABLE` and is not admitted, unless an upload's installation already began or a
+restore already had its whole archive; either goes on without its call. A backup download or a
+restore stream on a console WebSocket of its own ends at once with close code `1001`, and a restore
+admitted with its whole archive goes on without its call. The node keeps a gRPC connection open
+after admission closes only so that these endings reach the client: it takes no new call on it, and
+it cuts a connection still open two seconds after admission closed, which a native client that
+reads nothing sees as a transport loss. Either way the client reconnects to another node and
 repeats each outstanding command under its execution reference, which joins the admitted work or
-returns its retained outcome.
+returns its retained outcome, and sends again each upload, restore or download whose call did not
+answer.
 
 **Forced ending.** A repeated signal, an expired shutdown deadline, `SIGKILL`, or a crash ends the
 connection without warning. A command whose reply was not received may or may not have been
