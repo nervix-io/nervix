@@ -6,6 +6,7 @@ Feature: Cluster node rejoin
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
+    When leadership is transferred from node "node-2" to node "node-1"
     Then node "node-1" eventually reports leader "node-1"
     And node "node-2" eventually reports leader "node-1"
     And node "node-3" eventually reports leader "node-1"

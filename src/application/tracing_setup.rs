@@ -392,8 +392,14 @@ impl io::Write for SharedFileWriter {
 /// that no leader was known. Without those lines an upload that recovered the version its own
 /// earlier call installed reads like one that found another upload's, and an upload that repeats
 /// nothing costs nothing.
+///
+/// Consensus receiver contexts identify the concrete node even when parallel clusters use the
+/// same names. Its vote and pre-vote clients record send and completion timing at `trace`, so the
+/// failing attempt shows whether an election waited before the Raft API, in its core, or for its
+/// response. These events are per election request, not per heartbeat. OpenRaft keeps its existing
+/// filter; collecting these boundaries does not enable its per-tick and per-append debug stream.
 const TEST_TRACE_FILTER: &str =
-    "nervix_interconnect=debug,nervix_consensus::replication=debug,\
+    "nervix_interconnect=debug,nervix_consensus=trace,nervix_consensus::replication=debug,\
      nervix_client_core::restoration=debug,nervix_client_core::upload=debug,\
      nervix_server::application=debug,nervix_client_core::consumer=debug,\
      nervix_client_core::producer=debug,nervix_server::application::session::consumers=debug,\

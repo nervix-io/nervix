@@ -2345,6 +2345,16 @@ impl Consensus {
             .map_err(io::Error::other)?
     }
 
+    #[tracing::instrument(
+        name = "consensus_node",
+        level = "info",
+        skip_all,
+        fields(
+            cluster = %settings.cluster_name,
+            node = %settings.node_id,
+            local_addr = %settings.interconnect.local_addr(),
+        ),
+    )]
     async fn from_store<Recorder>(
         store: FjallStore,
         settings: ConsensusSettings,
@@ -4489,6 +4499,12 @@ impl ProtocolReceiver {
             .await
     }
 
+    #[tracing::instrument(
+        name = "receive_raft_append",
+        level = "trace",
+        skip_all,
+        fields(node = %self.inner.local_node_id, local_addr = %self.inner.interconnect.local_addr()),
+    )]
     pub async fn append_entries(
         &self,
         req: AppendEntriesRequest<TypeConfig>,
@@ -4496,6 +4512,12 @@ impl ProtocolReceiver {
         self.inner.raft.append_entries(req).await
     }
 
+    #[tracing::instrument(
+        name = "receive_raft_vote",
+        level = "trace",
+        skip_all,
+        fields(node = %self.inner.local_node_id, local_addr = %self.inner.interconnect.local_addr()),
+    )]
     pub async fn vote(
         &self,
         req: VoteRequest<TypeConfig>,
@@ -4503,6 +4525,12 @@ impl ProtocolReceiver {
         self.inner.raft.vote(req).await
     }
 
+    #[tracing::instrument(
+        name = "receive_raft_pre_vote",
+        level = "trace",
+        skip_all,
+        fields(node = %self.inner.local_node_id, local_addr = %self.inner.interconnect.local_addr()),
+    )]
     pub async fn pre_vote(
         &self,
         req: VoteRequest<TypeConfig>,
@@ -4849,6 +4877,15 @@ where
     ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
         self.connectivity.check().map_err(unreachable_err)?;
         let rpc_timeout = option.hard_ttl();
+        let started = Instant::now();
+        tracing::trace!(
+            node = %self.local_node_id,
+            local_addr = %self.interconnect.local_addr(),
+            peer = %self.target,
+            vote = %rpc.vote,
+            deadline = ?rpc_timeout,
+            "sending Raft vote request",
+        );
         let response = {
             let mapping_input = self
                 .interconnect
@@ -4857,8 +4894,16 @@ where
                     wire::RequestVote(wire::VoteRequestRecord::from_request(rpc)),
                     rpc_timeout,
                 )
-                .await
-                .map_err(io_error);
+                .await;
+            tracing::trace!(
+                node = %self.local_node_id,
+                local_addr = %self.interconnect.local_addr(),
+                peer = %self.target,
+                elapsed = ?started.elapsed(),
+                result = ?mapping_input,
+                "Raft vote request completed",
+            );
+            let mapping_input = mapping_input.map_err(io_error);
             match mapping_input {
                 Ok(mapped_value) => Ok(mapped_value),
                 Err(mapping_error) => Err((unreachable_err)(mapping_error)),
@@ -4881,6 +4926,15 @@ where
     ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
         self.connectivity.check().map_err(unreachable_err)?;
         let rpc_timeout = option.hard_ttl();
+        let started = Instant::now();
+        tracing::trace!(
+            node = %self.local_node_id,
+            local_addr = %self.interconnect.local_addr(),
+            peer = %self.target,
+            vote = %rpc.vote,
+            deadline = ?rpc_timeout,
+            "sending Raft pre-vote request",
+        );
         let response = {
             let mapping_input = self
                 .interconnect
@@ -4889,8 +4943,16 @@ where
                     wire::RequestPreVote(wire::VoteRequestRecord::from_request(rpc)),
                     rpc_timeout,
                 )
-                .await
-                .map_err(io_error);
+                .await;
+            tracing::trace!(
+                node = %self.local_node_id,
+                local_addr = %self.interconnect.local_addr(),
+                peer = %self.target,
+                elapsed = ?started.elapsed(),
+                result = ?mapping_input,
+                "Raft pre-vote request completed",
+            );
+            let mapping_input = mapping_input.map_err(io_error);
             match mapping_input {
                 Ok(mapped_value) => Ok(mapped_value),
                 Err(mapping_error) => Err((unreachable_err)(mapping_error)),
