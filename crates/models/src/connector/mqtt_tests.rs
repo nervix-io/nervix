@@ -493,13 +493,32 @@ fn an_emitter_mode_beside_a_statement_that_answers_no_option_names_it_unwritten(
 }
 
 #[test]
-fn topic_emission_writes_ordered_repeated_mqtt_user_properties() {
+fn topic_ingestion_reads_and_emission_writes_ordered_repeated_user_properties() {
     let ingest = IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic).capabilities();
     let emit = EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic).capabilities();
 
-    assert_eq!(ingest.headers, None);
-    assert!(!ingest.reads_headers());
-    assert!(ingest.metadata.fields().is_empty());
+    assert_eq!(
+        ingest.headers,
+        Some(HeaderModel::exact(HeaderLayout::OrderedRepeats))
+    );
+    assert!(ingest.reads_headers());
+    let mut declared = Vec::with_capacity(ingest.metadata.fields().len());
+    for field in ingest.metadata.fields() {
+        declared.push((field.name(), field.ty()));
+    }
+    assert_eq!(
+        declared,
+        [
+            ("topic", IngestorMetadataType::String),
+            ("retain", IngestorMetadataType::Bool),
+            ("qos", IngestorMetadataType::U8),
+            ("duplicate", IngestorMetadataType::Bool),
+            ("content_type", IngestorMetadataType::String),
+            ("response_topic", IngestorMetadataType::String),
+            ("correlation_data", IngestorMetadataType::Bytes),
+            ("message_expiry", IngestorMetadataType::U32),
+        ]
+    );
     assert_eq!(
         emit.headers,
         Some(HeaderModel::exact(HeaderLayout::OrderedRepeats))

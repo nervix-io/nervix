@@ -3295,6 +3295,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/mqtt/src/topic/ingestor/__fuzz__/topic__ingestor__delivered_publish__tests__bolero_delivered_publishes_hand_over_their_declared_row_and_user_properties/corpus"
+domain_version = 1
+features = []
+id = "mqtt-publish-metadata"
+invariant = "Every publish the client decodes and the driver admits hands over exactly one value of its declared type for each declared metadata field, in declared order, absent exactly where its packet carries none, and its MQTT 5 user properties in written order with their repeats; the row and the headers survive the copy a quiesce buffer retains."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-connector-mqtt"
+random_iterations = 256
+source = "crates/connectors/mqtt/src/topic/ingestor/delivered_publish_tests.rs"
+test = "topic::ingestor::delivered_publish::tests::bolero_delivered_publishes_hand_over_their_declared_row_and_user_properties"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/connectors/prometheus/src/query/__fuzz__/query__answer__tests__bolero_every_sample_is_exactly_the_declared_object/corpus"
 domain_version = 1
 features = []

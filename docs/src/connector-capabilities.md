@@ -114,14 +114,14 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | MQTT TOPIC | Compare `MQTT TOPIC`: locator, options, modes, headers. Consumption declares its session, inbound QoS and topic filter. Publication declares its outbound QoS and completion mode, RETAIN, exact MQTT 5 publish properties and ordered, repeated user properties. Both directions keep the written case of topic names. |
+| Entity | MQTT TOPIC | Compare `MQTT TOPIC`: locator, options, modes, ingest metadata. Consumption declares its session, inbound QoS and topic filter, and reads the delivered packet's metadata and ordered, repeated user properties. Publication declares its outbound QoS and completion mode, RETAIN, exact MQTT 5 publish properties and ordered, repeated user properties. Both directions keep the written case of topic names. |
 | Reference | MQTT client |  |
 | Locator and validation rule | TOPIC 'devices/+/orders' (mqtt_topic_filter) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2)<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2) |  |
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1<br>`SESSION CLEAN` (keyword choice); `SESSION PERSISTENT` (keyword choice); required<br>`QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |  |
-| Headers | Not offered: Subscription options select the session and inbound QoS, and the emitter's QOS option its outbound QoS. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation. |  |
+| Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND (requires SESSION PERSISTENT and QOS 1 or 2)<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
-| Metadata | Not offered: The current topic declaration exposes the payload and configured subscription, with no typed publish-property metadata namespace. |  |
+| Metadata | metadata.topic: STRING OPTIONAL<br>metadata.retain: BOOL OPTIONAL<br>metadata.qos: U8 OPTIONAL<br>metadata.duplicate: BOOL OPTIONAL<br>metadata.content_type: STRING OPTIONAL<br>metadata.response_topic: STRING OPTIONAL<br>metadata.correlation_data: BYTES OPTIONAL<br>metadata.message_expiry: U32 OPTIONAL |  |
 | Every live node | no; scheduled owner |  |
 | Position class | broker_redelivered |  |
 | Acknowledgement confirmation | written |  |
@@ -463,7 +463,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | MQTT TOPIC | Compare `MQTT TOPIC`: locator, options, modes, headers, emit envelope/properties. Consumption declares its session, inbound QoS and topic filter. Publication declares its outbound QoS and completion mode, RETAIN, exact MQTT 5 publish properties and ordered, repeated user properties. Both directions keep the written case of topic names. |
+| Entity | MQTT TOPIC | Compare `MQTT TOPIC`: locator, options, modes, emit envelope/properties. Consumption declares its session, inbound QoS and topic filter, and reads the delivered packet's metadata and ordered, repeated user properties. Publication declares its outbound QoS and completion mode, RETAIN, exact MQTT 5 publish properties and ordered, repeated user properties. Both directions keep the written case of topic names. |
 | Reference | MQTT client |  |
 | Locator and validation rule | TOPIC 'devices/Orders' (mqtt_topic) |  |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 0)<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 1 or 2) |  |

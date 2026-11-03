@@ -222,6 +222,7 @@ mod ingestion_time;
 mod kafka_metadata;
 mod materialized_state_inspection;
 mod mqtt_fixtures;
+mod mqtt_properties;
 mod mqtt_publish_properties;
 mod mqtt_sessions;
 mod mqtt_subscription_refusal;
@@ -417,6 +418,14 @@ struct SubscriptionReceipt {
     event: TestSubscriptionEvent,
 }
 
+/// Consensus connectivity a scenario blocked for one node until another node leads.
+struct BlockedConsensusConnectivity {
+    blocked_node_id: String,
+    leader_node_id: String,
+    /// Ends once the connectivity is restored: after the leader led, or after its wait expired.
+    restored: AbortOnDropHandle<std::io::Result<()>>,
+}
+
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
     mqtt_envelope_observer: Option<mqtt_publish_properties::Observer>,
@@ -482,6 +491,8 @@ struct ScenarioWorld {
     restore_inspection_capacity: Option<backup::client_inspection::FilesystemHold>,
     /// A leadership move a scenario armed underneath the next durably admitted command.
     leadership_move: Option<AbortOnDropHandle<std::io::Result<()>>>,
+    /// Consensus connectivity a scenario blocked for one node until another node leads.
+    blocked_consensus_connectivity: Option<BlockedConsensusConnectivity>,
     /// The restore step pause a scenario armed and has not released.
     restore_step_pause: Option<backup::restore::ArmedRestorePause>,
     /// What the last measured CLI backup's memory sampler observed, until a step checks it.
@@ -8007,15 +8018,10 @@ async fn await_covered_log_purge(
 async fn when_leadership_is_transferred_to_node(world: &mut ScenarioWorld, to_node_id: String) {
     let to_node_id = expand_placeholders(world, &to_node_id);
     let leader = running_leader_node(world).await;
-    // A leader asked to hand leadership to itself stops its heartbeats as any transferring leader
-    // does, and then the first follower whose election timeout passes takes over. A node that
-    // already leads therefore keeps leading without a transfer.
-    if leader != to_node_id {
-        world.cluster().transfer_leadership(&leader, &to_node_id);
-    }
+    // A target that already leads keeps leading: the move never asks it to transfer to itself.
     world
         .cluster()
-        .wait_for_leader(&to_node_id, Some(&to_node_id))
+        .move_leadership(&leader, &to_node_id)
         .await
         .unwrap_or_else(|error| panic!("leadership did not move to '{to_node_id}': {error}"));
 }
@@ -12408,6 +12414,57 @@ async fn when_consensus_connectivity_is_blocked(world: &mut ScenarioWorld, node_
         .block_consensus_connectivity(crate::common::cluster::node_name(&node_id));
 }
 
+#[given(expr = "consensus connectivity for node {string} is blocked until node {string} leads")]
+async fn given_consensus_connectivity_blocked_until_node_leads(
+    world: &mut ScenarioWorld,
+    blocked_node_id: String,
+    leader_node_id: String,
+) {
+    let blocked_node_id = expand_placeholders(world, &blocked_node_id);
+    let leader_node_id = expand_placeholders(world, &leader_node_id);
+    let restored = world
+        .cluster()
+        .block_consensus_connectivity_until_leading(&blocked_node_id, &leader_node_id);
+    world.blocked_consensus_connectivity = Some(BlockedConsensusConnectivity {
+        blocked_node_id,
+        leader_node_id,
+        restored,
+    });
+}
+
+#[then(expr = "consensus connectivity for node {string} was restored once node {string} led")]
+async fn then_consensus_connectivity_restored_once_node_led(
+    world: &mut ScenarioWorld,
+    blocked_node_id: String,
+    leader_node_id: String,
+) {
+    let blocked_node_id = expand_placeholders(world, &blocked_node_id);
+    let leader_node_id = expand_placeholders(world, &leader_node_id);
+    let blocked = world
+        .blocked_consensus_connectivity
+        .take()
+        .expect("a preceding step blocked consensus connectivity until a node leads");
+    assert_eq!(
+        (
+            blocked.blocked_node_id.as_str(),
+            blocked.leader_node_id.as_str()
+        ),
+        (blocked_node_id.as_str(), leader_node_id.as_str()),
+        "the step names the connectivity block a preceding step armed"
+    );
+    let ended = nervix_primitives::time::timeout(Duration::from_secs(60), blocked.restored)
+        .await
+        .expect("the connectivity block ends once its leader led or its wait expired");
+    ended
+        .expect("the connectivity block task runs to its end")
+        .unwrap_or_else(|error| {
+            panic!(
+                "node '{leader_node_id}' did not lead while node '{blocked_node_id}' was blocked: \
+                 {error}"
+            )
+        });
+}
+
 #[when(expr = "gossip exchanges involving node {string} are restored")]
 async fn when_gossip_exchanges_are_restored(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -12892,7 +12949,11 @@ async fn when_leadership_is_transferred_from_node_to_node(
     let to_node_id = expand_placeholders(world, &to_node_id);
     world
         .cluster()
-        .transfer_leadership(&from_node_id, &to_node_id);
+        .move_leadership(&from_node_id, &to_node_id)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("leadership did not move from '{from_node_id}' to '{to_node_id}': {error}")
+        });
 }
 
 #[given(

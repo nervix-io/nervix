@@ -274,6 +274,18 @@ impl ScriptedConnection {
         self.write(&Self::publish_packet(packet_id, payload)).await;
     }
 
+    /// Writes a QoS 1 PUBLISH to `events` with its duplicate and retain flags set, under the packet
+    /// identifier `packet_id`, carrying `payload`.
+    pub(crate) async fn write_duplicate_retained_publish(
+        &mut self,
+        packet_id: u16,
+        payload: &[u8],
+    ) {
+        // PUBLISH with the flags: duplicate, QoS 1, retain.
+        self.write(&Self::publish_packet_with_flags(0x3b, packet_id, payload))
+            .await;
+    }
+
     /// Writes a QoS 2 PUBLISH to `events` under the packet identifier `packet_id`, carrying
     /// `payload`.
     pub(crate) async fn write_publish_exactly_once(&mut self, packet_id: u16, payload: &[u8]) {

@@ -1139,21 +1139,24 @@ nothing. A publication topic admits neither wildcard. Every ingestor statement w
 `SESSION CLEAN` or `SESSION PERSISTENT` and its `QOS 0`, `QOS 1` or `QOS 2`, neither of which has a
 default. The ingestor declares `NO ACK`, and `ACK SEQUENTIAL`, `ACK PARALLEL` and `SUSPEND` only
 with `SESSION PERSISTENT` and `QOS 1` or `QOS 2`, the session a broker keeps messages for and
-redelivers after a lost connection; `BUFFER` and `DROP` stay connected under any session. The ingestor
-declares no transport headers or typed metadata field. The emitter writes ordered, repeated MQTT 5
-user properties through its text header model. Every emitter statement writes `QOS 0`, `QOS 1` or `QOS 2`, which
-has no default, and its modes declare what each can complete: `NO ACK` only with `QOS 0`, which
-nothing answers, and `ACK` with either window only with `QOS 1` or `QOS 2`, which a broker answers
-with `PUBACK` or `PUBCOMP`. The start plan holds the two as one value, so the connector receives no
-pairing the declaration refuses. The emitter connects a clean session at `QOS 0` and a persistent
-one otherwise, and declares that as a driver limit rather than an option, together with the session
-a new client cannot resume. Its envelope declares `RETAIN` and the exact `PROPERTIES` types
-`content_type STRING`, `message_expiry U32` (seconds), `response_topic STRING` and
-`correlation_data BYTES`. The connector validates MQTT string/binary field bounds and the response topic before
-handing a record to its driver. Packet measurement includes the complete property section and its
-variable-length prefix; the retained payload keeps the same envelope for every retry. It takes
-codec payloads and optional batching up to
-the Maximum Packet Size each broker declares when the client connects. The unpooled client's keys are
+redelivers after a lost connection; `BUFFER` and `DROP` stay connected under any session. The
+ingestor's headers are a publish's MQTT 5 user properties, `ordered_repeats` exact names, and its
+metadata is the delivered packet's topic, retain flag, quality of service and duplicate flag, then
+its content type, response topic, correlation data and message expiry. The emitter writes ordered,
+repeated MQTT 5 user properties through its text header model. Every emitter statement writes
+`QOS 0`, `QOS 1` or `QOS 2`, which has no default,
+and its modes declare what each can complete: `NO ACK` only with `QOS 0`, which nothing answers, and
+`ACK` with either window only with `QOS 1` or `QOS 2`, which a broker answers with `PUBACK` or
+`PUBCOMP`. The start plan holds the two as one value, so the connector receives no pairing the
+declaration refuses. The emitter connects a clean session at `QOS 0` and a persistent one otherwise,
+and declares that as a driver limit rather than an option, together with the session a new client
+cannot resume. Its envelope declares `RETAIN` and the exact `PROPERTIES` types `content_type STRING`,
+`message_expiry U32` (seconds), `response_topic STRING` and `correlation_data BYTES`. The connector
+validates MQTT string/binary field bounds and the response topic before handing a record to its
+driver. Packet measurement includes the complete property section and its variable-length prefix;
+the retained payload keeps the same envelope for every retry. It takes codec payloads and optional
+batching up to the Maximum Packet Size each broker declares when the client connects. The unpooled
+client's keys are
 all Nervix-owned: `addr` names the broker by `mqtt` or `mqtts`, a host and a nonzero port, and
 nothing else, since a connection reads no credentials, path, query or fragment from it;
 `client_id`; and the TLS files, of which `tls_ca_file` is required exactly with `mqtts` and the
@@ -1344,7 +1347,7 @@ the `write_header` calls of one record become on the published message.
 | --- | --- | --- | --- |
 | `last_wins`, exact names | `SQS QUEUE` | `PULSAR TOPIC` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | `last_wins`, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary | None | `SQS QUEUE` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included; a value's exact type decides the type it travels as |
-| `ordered_repeats`, exact names | `KAFKA TOPIC`, `PULSAR TOPIC` | `KAFKA TOPIC`, `MQTT TOPIC` | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| `ordered_repeats`, exact names | `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC` | `KAFKA TOPIC`, `MQTT TOPIC` | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `repeats_by_name`, exact names | `NATS SUBJECT` | `NATS SUBJECT` | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | `repeats_by_name`, lowercase names | `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT` | None | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | `sorted_by_name`, exact names | `RABBITMQ QUEUE` | `RABBITMQ QUEUE`, `RABBITMQ EXCHANGE` | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
@@ -1419,15 +1422,16 @@ vocabulary, in order and each with its exact type: `HTTP REQUEST` declares the r
 the poll's scheduled instant, `HTTP ENDPOINT` the request's method, path, query, peer address and
 routed host, `WEBSOCKETS CONNECTION` the frame kind, `WEBSOCKETS ENDPOINT` the frame kind, the
 connection's peer address and its path, `KAFKA TOPIC` the topic, partition, offset, binary key,
-timestamp, timestamp kind and tombstone flag, `RABBITMQ QUEUE` the delivery's exchange, routing key,
-delivery tag and redelivery flag followed by its AMQP basic properties, `SQS QUEUE` the message
-identity, send and first-receive times, receive count, group and deduplication identifiers,
-sequence number and sender identifier, `SYSLOG LISTENER` the peer address,
-transport and verified TLS client subject, `REDIS PUBSUB` the
-delivering channel and the pattern it matched, `PROMETHEUS QUERY` the query and the instant it was
-evaluated at, and every other entity none. The endpoint entities are served by the host itself
-rather than a connector crate, so the server's endpoint intake hands their values over the same way
-a connector's message does. Registry
+timestamp, timestamp kind and tombstone flag, `MQTT TOPIC` the delivered packet's topic, retain
+flag, quality of service and duplicate flag, then its content type, response topic, correlation
+data and message expiry, `RABBITMQ QUEUE` the delivery's exchange, routing key, delivery tag and
+redelivery flag followed by its AMQP basic properties, `SQS QUEUE` the message identity, send and
+first-receive times, receive count, group and deduplication identifiers, sequence number and
+sender identifier, `SYSLOG LISTENER` the peer address, transport and verified TLS client subject,
+`REDIS PUBSUB` the delivering channel and the pattern it matched, `PROMETHEUS QUERY` the query and
+the instant it was evaluated at, and every other entity none. The endpoint entities are served by
+the host itself rather than a connector crate, so the server's endpoint intake hands their values
+over the same way a connector's message does. Registry
 validation reads that declaration for the fields an ingestor's route programs and its
 `TIMESTAMP AT metadata.<field>` may name, the host builds its metadata columns from it, and a
 connector's message hands the host the value of every declared field in declared order, one typed
@@ -1481,6 +1485,16 @@ value. If conversion fails after a valid prefix was gathered, the source returns
 keeps one report for the next admitted read. A cancelled read leaves the report pending; no later
 record is taken while it is pending. The source declares this single-report bound beside its
 driver buffers.
+
+MQTT metadata and headers borrow the delivered packet the message owns, the one admission copied
+out of its frame, so the host copies them only when a quiesce buffer retains the message. The
+client's decoder refuses a topic that is not UTF-8 before any message exists, so a message lends its
+topic as text. A property the packet does not carry is absent, and one it carries empty is an empty
+value. The broker keeps user properties in their publisher's order. Every subscription asks for
+Retain As Published so that the retain flag reads what the publisher wrote, and a shared subscription
+receives nothing its broker retained earlier. The duplicate flag is the packet's: a publish the
+source replays after a host rejection is the same packet, so only a broker's redelivery reads
+`true`. An MQTT source names no transport position.
 
 Beside its fields and headers, a message names the position its transport gives it, where the
 transport has one: a Kafka record's topic, partition and offset, or a syslog frame's peer. It is the
@@ -1746,6 +1760,10 @@ cancelled it or its batch timeout passed, drops only its wait on the read-ahead,
 publish, and the driver's poll never stops for it.
 
 ### MQTT source connections
+
+A source subscribes when its broker starts a new session, with Retain As Published set so that a
+delivered publish keeps the retain flag its publisher wrote. A resumed session keeps the
+subscription its broker already holds, with the options that created it.
 
 Once an MQTT source instance has established its subscription, a task the connector owns drives
 its connection until the connection ends or the source drops it. The task is the only owner of the
