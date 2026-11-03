@@ -2025,8 +2025,9 @@ available. This uses the same constrained 36-second startup controller, occupied
 owned-task observation and failed-attempt cleanup, but its completion witness is a completed public
 cluster-status response. It does not require `node.initialization=ready`. An isolated returning
 node can therefore answer observation while it waits for a live peer's policy; the endpoint-route
-restart scenario asserts HTTP 503 during that interval, then starts a peer and observes successful
-route installation. Ordinary readiness and catch-up startups still require completed initialization.
+restart scenario asserts HTTP 503 during that interval, then starts a peer and explicitly observes
+`node.initialization=ready` before probing route installation with its unchanged HTTP readiness
+deadline. Ordinary readiness and catch-up startups still require completed initialization.
 
 ## Scenario Phases
 

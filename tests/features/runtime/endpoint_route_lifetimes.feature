@@ -163,7 +163,8 @@ Feature: Published endpoint route lifetimes
       """
     Then endpoint request "uninstalled" answers HTTP 503
     When node "node-1" is started
-    Then node "node-3" eventually accepts http traffic for host "restart-{{test_id}}.example.com" path "/events"
+    Then node "node-3" eventually reports status containing "node.initialization=ready"
+    And node "node-3" eventually accepts http traffic for host "restart-{{test_id}}.example.com" path "/events"
       """
       {"user_id":43}
       """
