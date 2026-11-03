@@ -18,7 +18,7 @@ use nervix_connector::{
 };
 use nervix_models::{
     ClientConfigEntry, PulsarSubscription, PulsarSubscriptionName, PulsarSubscriptionOwnership,
-    PulsarTopicName,
+    PulsarSubscriptionType, PulsarTopicName,
 };
 use nervix_primitives::{
     net::{TcpListener, TcpStream},
@@ -26,8 +26,11 @@ use nervix_primitives::{
     time::{Instant, sleep, timeout},
 };
 use pulsar::{
-    Error as PulsarError, OperationRetryOptions, Pulsar, TokioExecutor,
-    error::{ConnectionError as PulsarConnectionError, ConsumerError as PulsarConsumerError},
+    Error as PulsarError, OperationRetryOptions, Pulsar, SubType as PulsarSubType, TokioExecutor,
+    error::{
+        ConnectionError as PulsarConnectionError, ConsumerError as PulsarConsumerError,
+        ServiceDiscoveryError as PulsarServiceDiscoveryError,
+    },
     message::{
         Codec as PulsarCodec, Message as PulsarFrame, Payload as PulsarPayload,
         proto::{
@@ -96,9 +99,12 @@ enum CommandAnswer {
 #[derive(Clone, Copy, Debug)]
 struct SubscriptionAnswers {
     /// How it answers a non-durable subscribe, whose refusal can say that a durable subscription
-    /// of the same name exists. A durable subscribe is always accepted.
+    /// of the same name exists.
     non_durable: CommandAnswer,
     unsubscribe: CommandAnswer,
+    /// The refusal it answers the first durable subscribes with, and how many of them it refuses.
+    /// A later durable subscribe is accepted.
+    durable_refusal: Option<(PulsarServerError, &'static str, u32)>,
 }
 
 impl SubscriptionAnswers {
@@ -106,6 +112,7 @@ impl SubscriptionAnswers {
     const ABSENT: Self = Self {
         non_durable: CommandAnswer::Accept,
         unsubscribe: CommandAnswer::Accept,
+        durable_refusal: None,
     };
     /// Answers for a subscription an operator provisioned, as the broker refuses a non-durable
     /// subscribe of its name.
@@ -115,7 +122,16 @@ impl SubscriptionAnswers {
             "Durable subscription with the same name already exists.",
         ),
         unsubscribe: CommandAnswer::Accept,
+        durable_refusal: None,
     };
+
+    /// Answers for a subscription a broker refuses the first `refusals` durable subscribes of.
+    const fn refusing(error: PulsarServerError, reason: &'static str, refusals: u32) -> Self {
+        Self {
+            durable_refusal: Some((error, reason, refusals)),
+            ..Self::ABSENT
+        }
+    }
 }
 
 /// A subscription command the broker received, in the order consumers sent them.
@@ -124,6 +140,7 @@ enum SubscriptionCommand {
     Subscribe {
         durable: bool,
         consumer_name: Option<String>,
+        subscription_type: PulsarSubType,
     },
     Unsubscribe,
     CloseConsumer,
@@ -260,6 +277,7 @@ impl LoopbackBroker {
         let mut delivered = false;
         // Only a durable consumer reads the messages: a non-durable probe is closed unread.
         let mut durable_consumers = std::collections::BTreeSet::new();
+        let mut durable_refusal = subscriptions.durable_refusal;
         while let Some(Ok(frame)) = connection.next().await {
             nervix_primitives::task::consume_budget().await;
             let command = frame.command;
@@ -272,18 +290,26 @@ impl LoopbackBroker {
                 replies.push(Self::served_here(&service_url, request.request_id));
             } else if let Some(request) = command.subscribe {
                 let durable = request.durable.unwrap_or(true);
+                let subscription_type = PulsarSubType::try_from(request.sub_type)
+                    .expect("the client sends a subscription type the protocol names");
                 let subscribed = SubscriptionCommand::Subscribe {
                     durable,
                     consumer_name: request.consumer_name,
+                    subscription_type,
                 };
                 if observed.subscriptions.send(subscribed).is_err() {
                     return;
                 }
-                let answer = if durable {
-                    durable_consumers.insert(request.consumer_id);
-                    CommandAnswer::Accept
-                } else {
-                    subscriptions.non_durable
+                let answer = match (durable, durable_refusal) {
+                    (false, _) => subscriptions.non_durable,
+                    (true, Some((error, reason, refusals))) if refusals > 0 => {
+                        durable_refusal = Some((error, reason, refusals - 1));
+                        CommandAnswer::Refuse(error, reason)
+                    }
+                    (true, _) => {
+                        durable_consumers.insert(request.consumer_id);
+                        CommandAnswer::Accept
+                    }
                 };
                 replies.push(Self::answer(request.request_id, answer));
             } else if let Some(request) = command.unsubscribe {
@@ -545,7 +571,7 @@ async fn plan(
     let client = Pulsar::builder(broker.service_url.clone(), TokioExecutor)
         .with_operation_retry_options(OperationRetryOptions {
             operation_timeout: OPERATION_TIMEOUT,
-            ..Default::default()
+            ..PulsarTopicIngestorPlan::operation_retries()
         })
         .build()
         .await
@@ -565,6 +591,7 @@ fn subscription(ownership: PulsarSubscriptionOwnership) -> PulsarSubscription {
         name: PulsarSubscriptionName::parse("orders-ingestor")
             .expect("the test subscription is a valid Pulsar subscription name"),
         ownership,
+        kind: PulsarSubscriptionType::Shared,
     }
 }
 
@@ -1107,7 +1134,217 @@ async fn an_instance_joins_its_owned_subscription_at_open_under_its_indexed_cons
         SubscriptionCommand::Subscribe {
             durable: true,
             consumer_name: Some("orders-1".to_string()),
+            subscription_type: PulsarSubType::Shared,
         }
+    );
+}
+
+#[nervix_primitives::test]
+async fn an_instance_joins_as_the_declared_type() {
+    for (kind, expected) in [
+        (PulsarSubscriptionType::Shared, PulsarSubType::Shared),
+        (PulsarSubscriptionType::KeyShared, PulsarSubType::KeyShared),
+        (PulsarSubscriptionType::Failover, PulsarSubType::Failover),
+        (PulsarSubscriptionType::Exclusive, PulsarSubType::Exclusive),
+    ] {
+        let mut broker = LoopbackBroker::start(0, AckAnswer::Confirm).await;
+        let mut plan = plan(
+            &broker,
+            PulsarAckReceipts::Awaited,
+            PulsarSubscriptionOwnership::Ingestor {
+                start_at: nervix_models::IngestStartPosition::Earliest,
+            },
+        )
+        .await;
+        plan.subscription.kind = kind;
+
+        let _source = PulsarTopicIngestor::open(&plan, 0)
+            .await
+            .expect("the loopback broker serves the subscription");
+
+        assert_eq!(
+            broker.next_subscription_command().await,
+            SubscriptionCommand::Subscribe {
+                durable: true,
+                consumer_name: Some("orders-0".to_string()),
+                subscription_type: expected,
+            }
+        );
+    }
+}
+
+#[nervix_primitives::test]
+async fn a_subscription_another_consumer_holds_is_left_to_resume_and_reported_until_it_is_free() {
+    const HELD: &str = "Exclusive consumer is already connected";
+    let broker = LoopbackBroker::start_with(
+        1,
+        AckAnswer::Confirm,
+        SubscriptionAnswers::refusing(PulsarServerError::ConsumerBusy, HELD, 2),
+    )
+    .await;
+    let mut plan = plan(
+        &broker,
+        PulsarAckReceipts::Awaited,
+        PulsarSubscriptionOwnership::Ingestor {
+            start_at: nervix_models::IngestStartPosition::Earliest,
+        },
+    )
+    .await;
+    plan.subscription.kind = PulsarSubscriptionType::Exclusive;
+
+    let mut source = PulsarTopicIngestor::open(&plan, 0)
+        .await
+        .expect("a held subscription does not keep the ingestor from starting");
+    assert!(source.needs_resume(), "the refused join is left to resume");
+
+    let refused = source
+        .resume()
+        .await
+        .expect_err("the broker still refuses the join");
+    let PulsarTopicIngestorError::SubscriptionRefused {
+        subscription,
+        topic,
+        refusal,
+    } = pulsar_failure(&refused)
+    else {
+        panic!("the resume reports the broker's refusal: {refused:?}");
+    };
+    assert_eq!(subscription.as_str(), "orders-ingestor");
+    assert_eq!(topic, TOPIC);
+    assert_eq!(
+        refusal,
+        &PulsarRefusal {
+            error: Some(PulsarServerError::ConsumerBusy),
+            reason: Some(HELD.to_string()),
+        }
+    );
+    assert!(source.needs_resume(), "the refused join is tried again");
+
+    let resumed = source
+        .resume()
+        .await
+        .expect("the consumer that held the subscription left");
+    assert!(matches!(resumed, IngestorResume::Ready));
+    assert_eq!(read(&mut source, 1).await.len(), 1);
+}
+
+#[nervix_primitives::test]
+async fn a_join_the_broker_refuses_for_what_is_declared_keeps_the_ingestor_from_starting() {
+    const DENIED: &str = "Client is not authorized to subscribe";
+    let broker = LoopbackBroker::start_with(
+        0,
+        AckAnswer::Confirm,
+        SubscriptionAnswers::refusing(PulsarServerError::AuthorizationError, DENIED, 1),
+    )
+    .await;
+    let plan = plan(
+        &broker,
+        PulsarAckReceipts::Awaited,
+        PulsarSubscriptionOwnership::Ingestor {
+            start_at: nervix_models::IngestStartPosition::Earliest,
+        },
+    )
+    .await;
+
+    let Err(failure) = PulsarTopicIngestor::open(&plan, 0).await else {
+        panic!("an unauthorized join fails the open");
+    };
+
+    let PulsarTopicIngestorError::SubscriptionRefused { refusal, .. } = pulsar_failure(&failure)
+    else {
+        panic!("the open reports the broker's refusal: {failure:?}");
+    };
+    assert_eq!(refusal.error, Some(PulsarServerError::AuthorizationError));
+    assert_eq!(refusal.reason.as_deref(), Some(DENIED));
+}
+
+#[test]
+fn a_join_failure_is_a_refusal_only_when_the_broker_answered_one() {
+    let refusal = |error, reason: &str| (Some(error), Some(reason.to_string()));
+    let (busy_code, busy_reason) = refusal(PulsarServerError::ConsumerBusy, "held");
+    let refused_subscribe = PulsarError::Connection(PulsarConnectionError::PulsarError(
+        busy_code,
+        busy_reason.clone(),
+    ));
+    let refused_consumer = PulsarError::Consumer(PulsarConsumerError::Connection(
+        PulsarConnectionError::PulsarError(busy_code, busy_reason.clone()),
+    ));
+    let (not_ready_code, not_ready_reason) = refusal(PulsarServerError::ServiceNotReady, "loading");
+    let refused_lookup = PulsarError::ServiceDiscovery(PulsarServiceDiscoveryError::Query(
+        not_ready_code,
+        not_ready_reason.clone(),
+    ));
+
+    for (error, expected) in [
+        (
+            &refused_subscribe,
+            PulsarRefusal {
+                error: busy_code,
+                reason: busy_reason.clone(),
+            },
+        ),
+        (
+            &refused_consumer,
+            PulsarRefusal {
+                error: busy_code,
+                reason: busy_reason.clone(),
+            },
+        ),
+        (
+            &refused_lookup,
+            PulsarRefusal {
+                error: not_ready_code,
+                reason: not_ready_reason.clone(),
+            },
+        ),
+    ] {
+        let refusal = PulsarRefusal::of_join(error).expect("the broker answered a refusal");
+        assert!(refusal.holds_only_for_now(), "{refusal}");
+        assert_eq!(refusal, expected);
+    }
+
+    let lost = PulsarError::Connection(PulsarConnectionError::Disconnected);
+    assert_eq!(PulsarRefusal::of_join(&lost), None);
+    let denied = PulsarRefusal {
+        error: Some(PulsarServerError::AuthorizationError),
+        reason: None,
+    };
+    assert!(!denied.holds_only_for_now());
+    let unknown = PulsarRefusal {
+        error: None,
+        reason: None,
+    };
+    assert!(!unknown.holds_only_for_now());
+}
+
+#[nervix_primitives::test]
+async fn a_join_failure_the_broker_did_not_answer_keeps_the_driver_error_beneath_the_subscribe() {
+    let broker = LoopbackBroker::start(0, AckAnswer::Confirm).await;
+    let plan = plan(
+        &broker,
+        PulsarAckReceipts::Awaited,
+        PulsarSubscriptionOwnership::Ingestor {
+            start_at: nervix_models::IngestStartPosition::Earliest,
+        },
+    )
+    .await;
+
+    let failure = plan.join_failure(PulsarError::Connection(PulsarConnectionError::Disconnected));
+
+    let PulsarTopicIngestorError::Subscribe { topic } = failure.current_context() else {
+        panic!("a join the broker did not refuse fails as a subscribe: {failure:?}");
+    };
+    assert_eq!(topic, TOPIC);
+    assert!(
+        !failure.current_context().holds_only_for_now(),
+        "only a refusal the broker answered can pass on a later join"
+    );
+    assert!(
+        matches!(
+            failure.downcast_ref::<PulsarError>(),
+            Some(PulsarError::Connection(PulsarConnectionError::Disconnected))
+        ),
+        "the driver's error stays beneath the subscribe: {failure:?}"
     );
 }
 
@@ -1140,6 +1377,7 @@ async fn a_provisioned_subscription_is_verified_then_joined_on_resume() {
         SubscriptionCommand::Subscribe {
             durable: false,
             consumer_name: Some("orders-0".to_string()),
+            subscription_type: PulsarSubType::Shared,
         }
     );
     assert_eq!(
@@ -1147,6 +1385,7 @@ async fn a_provisioned_subscription_is_verified_then_joined_on_resume() {
         SubscriptionCommand::Subscribe {
             durable: true,
             consumer_name: Some("orders-0".to_string()),
+            subscription_type: PulsarSubType::Shared,
         }
     );
     assert_eq!(read(&mut source, 1).await.len(), 1);
@@ -1196,6 +1435,7 @@ async fn a_missing_provisioned_subscription_is_reported_and_never_created() {
         SubscriptionCommand::Subscribe {
             durable: false,
             consumer_name: Some("orders-0".to_string()),
+            subscription_type: PulsarSubType::Shared,
         }
     );
     assert_eq!(
@@ -1217,6 +1457,7 @@ async fn a_probe_refused_for_another_reason_does_not_say_the_subscription_exists
              persistent://public/default/orders",
         ),
         unsubscribe: CommandAnswer::Accept,
+        durable_refusal: None,
     };
     let mut broker = LoopbackBroker::start_with(0, AckAnswer::Confirm, answers).await;
     let plan = plan(
@@ -1250,6 +1491,7 @@ async fn a_probe_refused_for_another_reason_does_not_say_the_subscription_exists
         SubscriptionCommand::Subscribe {
             durable: false,
             consumer_name: Some("orders-0".to_string()),
+            subscription_type: PulsarSubType::Shared,
         }
     );
     assert!(source.needs_resume());
@@ -1273,6 +1515,7 @@ async fn removing_an_owned_subscription_joins_it_and_unsubscribes() {
         SubscriptionCommand::Subscribe {
             durable: true,
             consumer_name: Some("orders-removal".to_string()),
+            subscription_type: PulsarSubType::Shared,
         }
     );
     assert_eq!(
@@ -1289,6 +1532,7 @@ async fn an_unsubscribe_the_broker_refuses_is_reported_and_closes_the_joined_con
             PulsarServerError::MetadataError,
             "Unconnected or shared consumer attempting to unsubscribe",
         ),
+        durable_refusal: None,
     };
     let mut broker = LoopbackBroker::start_with(0, AckAnswer::Confirm, answers).await;
     let config = broker.config();
@@ -1326,6 +1570,7 @@ async fn an_unsubscribe_the_broker_refuses_is_reported_and_closes_the_joined_con
         SubscriptionCommand::Subscribe {
             durable: true,
             consumer_name: Some("orders-removal".to_string()),
+            subscription_type: PulsarSubType::Shared,
         }
     );
     assert_eq!(

@@ -1204,7 +1204,7 @@ together.
 connector places in its client's namespace, or a fully qualified
 `persistent://tenant/namespace/topic` or `non-persistent://tenant/namespace/topic`, sent as
 written; at most 1,024 bytes without whitespace, control characters or an empty level. The
-ingestor names a subscription of 1 to 255 bytes with its declared owner, declares `NO ACK`,
+ingestor names a subscription of 1 to 255 bytes with its declared owner and type, declares `NO ACK`,
 `ACK SEQUENTIAL` and `ACK PARALLEL` in Pulsar's own delivery-mode type, and quiesces only by
 `SUSPEND`, since the durable subscription keeps its backlog. The emitter declares `NO ACK` and
 `ACK` publishing, optional batching under the `maxMessageSize` the broker announces, the `TIMESTAMP`
@@ -1956,9 +1956,30 @@ and subscription ownership. A replacement reading the same subscription keeps it
 including an ownership handoff to `PROVISIONED`. Routes and codecs alone create no retirement.
 A preceding provisioned subscription is never retired.
 
+Each statement declares the subscription's `TYPE` as a required entity option, and the Model holds
+it in the subscription. The plan carries it, and the connector passes it to every consumer it
+builds: the data consumers, the non-durable existence probe and the removal consumer. Subscription
+identity ignores it, like ownership and the start position, so `SET TYPE` and a `SET FROM` that
+changes only the type retain the subscription. The registry refuses `FAILOVER` and `EXCLUSIVE` with
+more than one instance at `CREATE` and on every alteration, because those types read through one
+consumer. The rule holds until the partitioning epic defines how instances and these types combine.
+
+A Pulsar ingestor's client gives the driver one attempt at an operation. The driver would otherwise
+repeat a subscribe the broker answers with `ConsumerBusy` or `ServiceNotReady` without limit, which
+would leave a refused consumer waiting with nothing to report. The join's refusal reaches the
+connector instead, as `PulsarTopicIngestorError::SubscriptionRefused` with the broker's server error
+and reason. An owned subscription joins at open so that a statement following `START` finds it
+created, but a refusal for what holds right now, `ConsumerBusy` or `ServiceNotReady`, leaves the
+instance to its first resume, where it is the transient status and the host's retry cadence
+applies. Any other refusal fails the open, as a failure to subscribe does. The broker treats a
+redelivery request as a rewind on a `FAILOVER` or `EXCLUSIVE` subscription, and the driver does not
+clear its receive queue, so a rejection there can deliver the messages behind it twice; the
+position class stays replayable and delivery at least once.
+
 The Pulsar composition root resolves the preceding input's client entries through its pinned mounts
 and keeps their lease through the removal. The connector connects a client, joins the subscription
-with a durable shared consumer registered under `<domain>~<ingestor>-removal` and unsubscribes it,
+with a durable consumer of its declared type registered under `<domain>~<ingestor>-removal` and
+unsubscribes it,
 and the broker removes the subscription with its backlog. An absent subscription is created by the
 join and removed again. The broker refuses while another consumer is connected, and the removal
 then closes its own consumer so that it does not keep the subscription busy. The driver's

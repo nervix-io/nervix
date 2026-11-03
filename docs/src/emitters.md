@@ -1474,9 +1474,10 @@ writes the times the first attempt wrote.
 The broker holds a delayed message back, and what it holds depends on the broker and on who reads
 the topic:
 
-- Only a shared subscription is held back, which is how every `PULSAR TOPIC` ingestor reads. A
-  message reaches an exclusive or failover subscription as soon as it is stored, and every
-  subscription of a broker with `delayedDeliveryEnabled=false`.
+- Only a `SHARED` or `KEY_SHARED` subscription is held back, so the `TYPE` a `PULSAR TOPIC`
+  ingestor declares decides whether it waits for a delayed message. A message reaches a `FAILOVER`
+  or `EXCLUSIVE` subscription as soon as it is stored, and every subscription of a broker with
+  `delayedDeliveryEnabled=false`.
 - A broker may hand a message over up to `delayedDeliveryTickTimeMillis` before its delivery time,
   one second by default, unless `isDelayedDeliveryDeliverAtTimeStrict` is set, so a delay no longer
   than that tick may not hold a message back at all.
