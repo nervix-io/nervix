@@ -4,8 +4,8 @@
 //!
 //! - **Owns.** The `nervix.session.Session` gRPC service: routing its four methods,
 //!   authenticating each call from its metadata before any frame is read, holding every message to
-//!   the session frame limit, and ending a call with the status of the transport failure that ended
-//!   it.
+//!   the session frame limit, ending a call with the status of the transport failure that ended
+//!   it, and ending an upload, a restore or a download at once when the node closes admission.
 //! - **Depends on.** The session engine, upload handling, backup downloads and restores, the
 //!   client wire gRPC codecs, and tonic's server primitives.
 //! - **Must not know.** What any request does.
@@ -16,6 +16,12 @@
 //! Everything a well-formed frame can get wrong is answered within the session instead, as a typed
 //! reply to the request it names, except a frame without a request identity, which breaks the
 //! protocol itself and ends the session with a `SessionEnding` that says so.
+//!
+//! When the node closes admission, a session ends itself with a `SessionEnding` that says the node
+//! is shutting down, and its call ends right after that ending. An upload, a restore or a download
+//! still running ends at once with `UNAVAILABLE`: it reads and admits nothing more and does not wait
+//! for its client, so no client holds the stopping node open, and its client sends it again to
+//! another node as it does after a transport failure.
 
 #![cfg_attr(
     nervix_lint,
@@ -49,10 +55,34 @@ use tonic::{
     },
 };
 
-use super::{InboundFrame, SessionTransport, outbound};
+use super::{InboundFrame, SessionTransport, download::DownloadFrameStream, outbound};
 use crate::application::{
     authentication::GrpcAuthenticationError, session_service::SessionServiceImpl,
 };
+
+/// The status of a call the node ended because it closed admission.
+fn shutting_down() -> Status {
+    Status::unavailable("the node is shutting down")
+}
+
+/// The future of a call that runs until it answers or the node closes admission. A call that
+/// admission ends stops at once with [`shutting_down`]: it reads and admits nothing more, and work
+/// it already handed to a task of its own goes on without it.
+fn until_admission_closes<T>(
+    admission: CancellationToken,
+    call: impl Future<Output = Result<T, Status>> + Send + 'static,
+) -> BoxFuture<T, Status>
+where
+    T: Send + 'static,
+{
+    Box::pin(async move {
+        nervix_primitives::select! {
+            biased;
+            answered = call => answered,
+            _ = admission.cancelled() => Err(shutting_down()),
+        }
+    })
+}
 
 /// The session service a gRPC server hosts.
 #[derive(Clone)]
@@ -217,7 +247,8 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for Upload {
     fn call(&mut self, request: Request<Streaming<VerifiedFrame<UploadFrame>>>) -> Self::Future {
         let service = self.service.clone();
         let limits = self.limits;
-        Box::pin(async move {
+        let admission = service.inner.admission_shutdown.clone();
+        until_admission_closes(admission, async move {
             let user = service
                 .authenticate_grpc_metadata(request.metadata())
                 .await
@@ -252,7 +283,8 @@ impl ClientStreamingService<VerifiedFrame<RestoreFrame>> for Restore {
     fn call(&mut self, request: Request<Streaming<VerifiedFrame<RestoreFrame>>>) -> Self::Future {
         let service = self.service.clone();
         let limits = self.limits;
-        Box::pin(async move {
+        let admission = service.inner.admission_shutdown.clone();
+        until_admission_closes(admission, async move {
             let user = service
                 .authenticate_grpc_metadata(request.metadata())
                 .await
@@ -288,7 +320,8 @@ impl ServerStreamingService<VerifiedFrame<BackupDownloadRequestFrame>> for Downl
     ) -> Self::Future {
         let service = self.service.clone();
         let limits = self.limits;
-        Box::pin(async move {
+        let admission = service.inner.admission_shutdown.clone();
+        until_admission_closes(admission.clone(), async move {
             let user = service
                 .authenticate_grpc_metadata(request.metadata())
                 .await
@@ -299,8 +332,170 @@ impl ServerStreamingService<VerifiedFrame<BackupDownloadRequestFrame>> for Downl
                 .map_err(|error| {
                     Status::internal(format!("the download answer does not fit a frame: {error}"))
                 })?;
-            let responses: DownloadStream = Box::pin(frames.into_stream().map(Ok));
+            let frames = frames.into_stream();
+            let responses = DownloadResponse::Frames { frames, admission }.into_stream();
             Ok(Response::new(responses))
         })
+    }
+}
+
+/// What one download call still has to send its client: the frames of its answer, until the node
+/// closes admission, which ends the call at once with [`shutting_down`].
+enum DownloadResponse {
+    Frames {
+        frames: DownloadFrameStream,
+        admission: CancellationToken,
+    },
+    /// The call sent the status it ends with.
+    Ended,
+}
+
+/// What a download call takes next.
+enum DownloadStep {
+    /// The answer's next frame, or its end.
+    Frame(Option<EncodedFrame<BackupDownloadFrame>>),
+    /// The node closed admission.
+    AdmissionClosed,
+}
+
+impl DownloadResponse {
+    fn into_stream(self) -> DownloadStream {
+        Box::pin(stream::unfold(self, Self::next))
+    }
+
+    async fn next(self) -> Option<(Result<EncodedFrame<BackupDownloadFrame>, Status>, Self)> {
+        let Self::Frames {
+            mut frames,
+            admission,
+        } = self
+        else {
+            return None;
+        };
+        let step = nervix_primitives::select! {
+            biased;
+            _ = admission.cancelled() => DownloadStep::AdmissionClosed,
+            frame = frames.next() => DownloadStep::Frame(frame),
+        };
+        match step {
+            DownloadStep::Frame(Some(frame)) => {
+                Some((Ok(frame), Self::Frames { frames, admission }))
+            }
+            DownloadStep::Frame(None) => None,
+            DownloadStep::AdmissionClosed => Some((Err(shutting_down()), Self::Ended)),
+        }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod tests {
+    use std::{
+        pin::pin,
+        task::{Context, Waker},
+    };
+
+    use meticulous::{OptionExt as _, ResultExt as _};
+    use nervix_client_wire::{BackupDownloadFailed, BackupDownloadFailure, BackupDownloadMessage};
+    use nervix_primitives::sync::mpsc;
+
+    use super::*;
+    use crate::application::session::download::DownloadFrames;
+
+    fn download_frame() -> EncodedFrame<BackupDownloadFrame> {
+        let failed = BackupDownloadFailed {
+            failure: BackupDownloadFailure::InvalidRequest,
+            message: "a test frame".to_string(),
+        };
+        BackupDownloadMessage::encode_failed(&failed, &SessionLimits::DEFAULT)
+            .assured("a short failure fits a frame")
+    }
+
+    #[nervix_primitives::test]
+    async fn a_call_still_running_when_admission_closes_ends_at_once_as_unavailable() {
+        let admission = CancellationToken::new();
+        let call = until_admission_closes(
+            admission.clone(),
+            std::future::pending::<Result<(), Status>>(),
+        );
+        let mut call = pin!(call);
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(
+            call.as_mut().poll(&mut context).is_pending(),
+            "a call runs while admission is open"
+        );
+
+        admission.cancel();
+
+        let ended = call.await.expect_err("closing admission ends the call");
+        assert_eq!(ended.code(), tonic::Code::Unavailable);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_call_that_has_answered_keeps_its_answer_when_admission_closes() {
+        let admission = CancellationToken::new();
+        admission.cancel();
+
+        let answered =
+            until_admission_closes(admission, std::future::ready(Ok::<_, Status>(7))).await;
+
+        assert_eq!(answered.assured("an answered call keeps its answer"), 7);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_download_stops_sending_and_ends_as_unavailable_once_admission_closes() {
+        let admission = CancellationToken::new();
+        let (frames, archive) = mpsc::channel(4);
+        frames
+            .send(download_frame())
+            .await
+            .assured("the test channel has room");
+        let mut responses = DownloadResponse::Frames {
+            frames: DownloadFrames::Archive(archive).into_stream(),
+            admission: admission.clone(),
+        }
+        .into_stream();
+
+        let first = responses
+            .next()
+            .await
+            .assured("the frame queued before admission closed is sent");
+        assert!(
+            first.is_ok(),
+            "a frame queued while admission is open is sent"
+        );
+        frames
+            .send(download_frame())
+            .await
+            .assured("the test channel has room");
+        admission.cancel();
+
+        let Some(Err(ended)) = responses.next().await else {
+            panic!("closing admission must end the download with a status, not another frame");
+        };
+        assert_eq!(ended.code(), tonic::Code::Unavailable);
+        assert!(
+            responses.next().await.is_none(),
+            "nothing follows the status that ends the call"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_download_answered_whole_ends_without_a_status() {
+        let admission = CancellationToken::new();
+        let mut responses = DownloadResponse::Frames {
+            frames: DownloadFrames::Answer(download_frame()).into_stream(),
+            admission,
+        }
+        .into_stream();
+
+        let answer = responses.next().await.assured("the answer is sent");
+        assert!(answer.is_ok(), "the answer is a frame");
+        assert!(
+            responses.next().await.is_none(),
+            "an answered download ends without a status"
+        );
     }
 }

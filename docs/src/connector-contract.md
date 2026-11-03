@@ -1437,9 +1437,10 @@ rather than a wider or narrower one, and it is absent where the message carries 
 that keeps a message whose transport value its field's type cannot hold hands that value over as
 unrepresentable, with its declared type and a description of the transport value, never a
 substitute value and never an absence: `RABBITMQ QUEUE` does so for an AMQP timestamp after
-2262-04-11, the last instant a `DATETIME` holds. `KAFKA TOPIC` and `SQS QUEUE` instead fail the read
-of a message whose timestamp is out of range, as their paragraphs below state, before any value is
-handed over.
+2262-04-11, the last instant a `DATETIME` holds, and `KAFKA TOPIC` for a record timestamp before
+1677-09-21 or after 2262-04-11. `SQS QUEUE` instead fails the read of a message whose system
+attribute timestamp is out of range, as its paragraph below states, before any value is handed
+over.
 A `STRING` such as a socket address may be written into the column in place instead of being
 allocated per message.
 A message that hands over another number of values than its entity declares, or a value of another
@@ -1472,15 +1473,19 @@ with the domain's routing, outside the source host.
 Kafka metadata borrows the record's key without allocating another byte sequence. Missing keys
 remain distinct from empty keys. Its timestamp is the exact instant of the driver's Unix
 milliseconds, with `create_time` or `log_append_time` as its kind; an unavailable timestamp has no
-instant or kind. A null value and an empty non-null value both lend an empty payload, but their
-tombstone flags differ. The codec decides whether an empty payload yields any rows. Every row
-that it yields shares the originating record's metadata and transport position. Kafka's
-`SUSPEND`-only quiesce declaration makes retained quiesce metadata unreachable for this entity.
-A present timestamp out of range is a typed source read failure, not an unrepresentable metadata
-value. If conversion fails after a valid prefix was gathered, the source returns that prefix and
-keeps one report for the next admitted read. A cancelled read leaves the report pending; no later
-record is taken while it is pending. The source declares this single-report bound beside its
-driver buffers.
+instant or kind. A present timestamp whose milliseconds name an instant before 1677-09-21 or after
+2262-04-11, which no `DATETIME` holds, is handed over as unrepresentable, described by those
+milliseconds, and its kind still reads as `create_time` or `log_append_time`. Reading the record
+never converts its timestamp: the message converts it only when the host visits its metadata, so
+such a record is read, acknowledged and positioned like any other. A null value and an empty
+non-null value both lend an empty payload, but their tombstone flags differ. The codec decides
+whether an empty payload yields any rows. Every row that it yields shares the originating record's
+metadata and transport position. Kafka's `SUSPEND`-only quiesce declaration makes retained quiesce
+metadata unreachable for this entity. A record at the last offset Kafka's signed offsets reach has
+no next position to acknowledge, which is a typed source read failure. If that failure follows a
+valid prefix gathered in the same read, the source returns that prefix and keeps one report for the
+next admitted read. A cancelled read leaves the report pending; no later record is taken while it
+is pending. The source declares this single-report bound beside its driver buffers.
 
 MQTT metadata and headers borrow the delivered packet the message owns, the one admission copied
 out of its frame, so the host copies them only when a quiesce buffer retains the message. The

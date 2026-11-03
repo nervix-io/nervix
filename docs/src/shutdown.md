@@ -267,22 +267,36 @@ the write:
 Stop admission closes the node's public surface. It stops accepting on the session gRPC, connector,
 observability, and console listeners and closes the client connections those listeners had accepted.
 
-Closing a connection cancels the requests it carries. A console session is told that the server
-is shutting down, after the replies already queued for its client, and that ending is its last
-frame. A native gRPC session's connection is cut when admission closes, so its client sees the
-stream fail as it would after any transport loss. Neither waits for the client to read anything: a
-session whose client reads nothing ends just as promptly, and its subscriptions stop and release
-the relays they held. Every request the session had not yet admitted is cancelled before admission
-and never begins an effect, so the client can send it again, with the same execution reference, to
-another node. A session stream or a resource upload waiting on its client ends at once, so no
-client can hold the drain or the process open. A backup download or a restore stream that the web
-console carries over a WebSocket of its own ends at once as well, with close code `1001`, as a
-native gRPC download or restore call is cut; a restore admitted with its whole archive goes on
-without its call. An authenticated upload held open
-at any point of its progress — before its first message, between chunks, or trickling chunks
-indefinitely — is cancelled this way and does not delay the exit. [Node Stop And Restart As A
-Client Observes Them](./client-session-protocol.md#node-stop-and-restart-as-a-client-observes-them)
-describes what a client sees at each ending and what it recovers.
+Closing admission ends every session the listeners carry, native gRPC and console alike. Each
+session is told that the server is shutting down: it writes `SessionEnding` with reason
+`ServerShuttingDown` after the replies already queued for its client, and that ending is its last
+frame. The session reads nothing more from its client, so a native session's call ends with status
+`OK` right after the ending, and a console session's WebSocket closes normally right after it.
+Ending a session never waits for its client to read anything: the session stops at once, its
+subscriptions stop and release the relays they held, and every request it had not yet admitted is
+cancelled before admission and never begins an effect, so the client can send it again, with the
+same execution reference, to another node.
+
+An upload, a restore or a backup download call on the native gRPC listener ends at once with status
+`UNAVAILABLE`: it reads nothing more from its client and admits nothing more, so a resource upload or
+a restore whose archive is still arriving is never installed, and a download stops sending its
+archive. Its client sends the call again to another node, as it does after a transport failure. A
+restore admitted with its whole archive, and an upload whose installation already began, go on
+without their call. An authenticated upload held open at any point of its progress — before its
+first message, between chunks, or trickling chunks indefinitely — is cancelled this way and does not
+delay the exit. A backup download or a restore stream that the web console carries over a WebSocket
+of its own ends at once as well, with close code `1001`.
+
+The gRPC listener's connections are not cut when admission closes, because their sessions still have
+endings to deliver. The listener's server stops accepting connections and tells each connection it
+accepted to take no new call, and each connection closes once the calls it carries have ended; a
+call that reaches the server even so ends at once as above. A connection can outlive its calls only
+when its client reads nothing, so that an ending or a status cannot be sent. Shutdown therefore
+gives the listeners two seconds, the grace period it gives every task it asks to stop, and then cuts
+every connection still open, which its client sees as a transport loss. No client can hold the drain
+or the process open for longer than that grace period. [Node Stop And Restart As A Client Observes
+Them](./client-session-protocol.md#node-stop-and-restart-as-a-client-observes-them) describes what a
+client sees at each ending and what it recovers.
 
 Work that a session command had already admitted is not cancelled here. Its session stops waiting
 for it, and no reply follows for it, but its effect keeps running. A transaction commit in progress
@@ -1359,6 +1373,7 @@ The phase records are the primary signal:
 | `info` | `termination signal received; requesting graceful shutdown` |
 | `info` | `termination signal received while graceful shutdown is already in progress` |
 | `info` | `advertised terminating process incarnation` |
+| `info` | `public listeners still hold client connections after their grace period; cutting them` |
 | `info` | `shutdown admission phase finished` |
 | `info` | `shutdown drain-support phase finished` |
 | `info` | `shutdown terminal-teardown phase finished` |
@@ -1378,7 +1393,10 @@ drain-timeout records above. The drain and cordon records name the `leader` that
 node itself when it leads, and carry the leader's account of each moved unit as `message`;
 `timed out clearing shutdown drain cordon` carries the `timeout` the release waited. Each phase
 record carries its outcome, so `outcome=Completed` distinguishes a finished phase from an abandoned
-or forced one.
+or forced one. The record that the public listeners' connections are cut carries the
+`grace_period` they had; it appears only when a client still held a connection open, and the stop
+admission phase still finishes `Completed` when the cut lets the listeners close before the
+deadline.
 
 A source instance that stops before its transport confirmed positions it read records
 `source instance stopped before its transport confirmed positions it read; the transport presents
