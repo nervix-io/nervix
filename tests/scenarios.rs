@@ -219,6 +219,7 @@ mod http_transport;
 mod iceberg_delivery;
 mod ingestion_time;
 mod kafka_metadata;
+mod materialized_state_inspection;
 mod mqtt_fixtures;
 mod mqtt_sessions;
 mod mqtt_subscription_refusal;
