@@ -3280,6 +3280,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/connectors/mqtt/src/topic/ingestor/__fuzz__/topic__ingestor__delivered_publish__tests__bolero_delivered_publishes_hand_over_their_declared_row_and_user_properties/corpus"
+domain_version = 1
+features = []
+id = "mqtt-publish-metadata"
+invariant = "Every publish the client decodes and the driver admits hands over exactly one value of its declared type for each declared metadata field, in declared order, absent exactly where its packet carries none, and its MQTT 5 user properties in written order with their repeats; the row and the headers survive the copy a quiesce buffer retains."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-connector-mqtt"
+random_iterations = 256
+source = "crates/connectors/mqtt/src/topic/ingestor/delivered_publish_tests.rs"
+test = "topic::ingestor::delivered_publish::tests::bolero_delivered_publishes_hand_over_their_declared_row_and_user_properties"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/connectors/prometheus/src/query/__fuzz__/query__answer__tests__bolero_every_sample_is_exactly_the_declared_object/corpus"
 domain_version = 1
 features = []
@@ -3446,10 +3461,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/connectors/kafka/src/topic/__fuzz__/topic__ingestor__metadata_tests__bolero_kafka_record_metadata_preserves_every_field/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "kafka-record-metadata"
-invariant = "Every bounded current Kafka record preserves its complete topic, partition, offset, nullable binary key, millisecond timestamp and kind, and null-value tombstone distinction through the production message metadata and retained replay, while its payload and transport position stay exact."
+invariant = "Every bounded current Kafka record preserves its complete topic, partition, offset, nullable binary key, millisecond timestamp as the exact instant or, past either end of the instants a DATETIME holds, as an unrepresentable value describing its milliseconds, its kind, and null-value tombstone distinction through the production message metadata and retained replay, while its payload and transport position stay exact."
 manifest = "Cargo.toml"
 max_input_bytes = 128
 package = "nervix-connector-kafka"
@@ -3701,7 +3716,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/src/connector/__fuzz__/connector__config_schema__tests__bolero_schema_checked_client_entries_round_trip/corpus"
-domain_version = 27
+domain_version = 28
 features = []
 id = "client-config-schema"
 invariant = "Bounded entries drawn from every current client key schema preserve complete values and acceptance through JSON and archive round trips; effective defaults preserve authored entries and are idempotent, as is public inspection."

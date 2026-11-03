@@ -1005,8 +1005,10 @@ refusal before either a PULL or PUSH socket opens; an omitted value selects conn
 The MySQL offline check also applies the vocabulary's pooled-client reserved-key declaration to
 URL query parameters. A pool override is a value-free refusal naming `POOL SIZE`, before storage
 or connection attempts; the host uses that same declaration for resolved configuration. MySQL's
-current client schema declares `addr`, `timeout_ms`, `tls_ca_file`, `tls_cert_file` and
-`tls_key_file`, with paired certificate and key files. Its
+current client schema declares `addr`, the pool acquire/lifetime/maintenance keys, `timeout_ms`,
+`tls_ca_file`, `tls_cert_file` and `tls_key_file`, with paired certificate and key files. The
+vocabulary validates nonnegative idle milliseconds and positive whole-second maximum ages before
+commit; the driver never truncates a declared maximum age. Its
 table declaration admits one or two nonempty, case-preserving identifier parts, and the connector
 quotes each part separately. Its declared placeholder bound is shared with the statement divider;
 the bound narrows rows by mapped column count. The [MySQL manual](emitters.md#mysql) gives its
@@ -1139,15 +1141,18 @@ nothing. A publication topic admits neither wildcard. Every ingestor statement w
 `SESSION CLEAN` or `SESSION PERSISTENT` and its `QOS 0`, `QOS 1` or `QOS 2`, neither of which has a
 default. The ingestor declares `NO ACK`, and `ACK SEQUENTIAL`, `ACK PARALLEL` and `SUSPEND` only
 with `SESSION PERSISTENT` and `QOS 1` or `QOS 2`, the session a broker keeps messages for and
-redelivers after a lost connection; `BUFFER` and `DROP` stay connected under any session. Neither direction carries transport headers, and the ingestor
-projects no typed metadata field. Every emitter statement writes `QOS 0`, `QOS 1` or `QOS 2`, which
-has no default, and its modes declare what each can complete: `NO ACK` only with `QOS 0`, which
-nothing answers, and `ACK` with either window only with `QOS 1` or `QOS 2`, which a broker answers
-with `PUBACK` or `PUBCOMP`. The start plan holds the two as one value, so the connector receives no
-pairing the declaration refuses. The emitter connects a clean session at `QOS 0` and a persistent
-one otherwise, and declares that as a driver limit rather than an option, together with the session
-a new client cannot resume. It takes codec payloads, no envelope clause and optional batching up to
-the Maximum Packet Size each broker declares when the client connects. The unpooled client's keys are
+redelivers after a lost connection; `BUFFER` and `DROP` stay connected under any session. The
+ingestor's headers are a publish's MQTT 5 user properties, `ordered_repeats` exact names, and its
+metadata is the delivered packet's topic, retain flag, quality of service and duplicate flag, then
+its content type, response topic, correlation data and message expiry; the emitter carries no
+transport headers. Every emitter statement writes `QOS 0`, `QOS 1` or `QOS 2`, which has no default,
+and its modes declare what each can complete: `NO ACK` only with `QOS 0`, which nothing answers, and
+`ACK` with either window only with `QOS 1` or `QOS 2`, which a broker answers with `PUBACK` or
+`PUBCOMP`. The start plan holds the two as one value, so the connector receives no pairing the
+declaration refuses. The emitter connects a clean session at `QOS 0` and a persistent one otherwise,
+and declares that as a driver limit rather than an option, together with the session a new client
+cannot resume. It takes codec payloads, no envelope clause and optional batching up to the Maximum
+Packet Size each broker declares when the client connects. The unpooled client's keys are
 all Nervix-owned: `addr` names the broker by `mqtt` or `mqtts`, a host and a nonzero port, and
 nothing else, since a connection reads no credentials, path, query or fragment from it;
 `client_id`; and the TLS files, of which `tls_ca_file` is required exactly with `mqtts` and the
@@ -1338,7 +1343,7 @@ the `write_header` calls of one record become on the published message.
 | --- | --- | --- | --- |
 | `last_wins`, exact names | `SQS QUEUE` | `PULSAR TOPIC` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | `last_wins`, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary | None | `SQS QUEUE` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included; a value's exact type decides the type it travels as |
-| `ordered_repeats`, exact names | `KAFKA TOPIC`, `PULSAR TOPIC` | `KAFKA TOPIC` | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| `ordered_repeats`, exact names | `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC` | `KAFKA TOPIC` | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `repeats_by_name`, exact names | `NATS SUBJECT` | `NATS SUBJECT` | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | `repeats_by_name`, lowercase names | `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT` | None | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | `sorted_by_name`, exact names | `RABBITMQ QUEUE` | `RABBITMQ QUEUE`, `RABBITMQ EXCHANGE` | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
@@ -1413,15 +1418,16 @@ vocabulary, in order and each with its exact type: `HTTP REQUEST` declares the r
 the poll's scheduled instant, `HTTP ENDPOINT` the request's method, path, query, peer address and
 routed host, `WEBSOCKETS CONNECTION` the frame kind, `WEBSOCKETS ENDPOINT` the frame kind, the
 connection's peer address and its path, `KAFKA TOPIC` the topic, partition, offset, binary key,
-timestamp, timestamp kind and tombstone flag, `RABBITMQ QUEUE` the delivery's exchange, routing key,
-delivery tag and redelivery flag followed by its AMQP basic properties, `SQS QUEUE` the message
-identity, send and first-receive times, receive count, group and deduplication identifiers,
-sequence number and sender identifier, `SYSLOG LISTENER` the peer address,
-transport and verified TLS client subject, `REDIS PUBSUB` the
-delivering channel and the pattern it matched, `PROMETHEUS QUERY` the query and the instant it was
-evaluated at, and every other entity none. The endpoint entities are served by the host itself
-rather than a connector crate, so the server's endpoint intake hands their values over the same way
-a connector's message does. Registry
+timestamp, timestamp kind and tombstone flag, `MQTT TOPIC` the delivered packet's topic, retain
+flag, quality of service and duplicate flag, then its content type, response topic, correlation
+data and message expiry, `RABBITMQ QUEUE` the delivery's exchange, routing key, delivery tag and
+redelivery flag followed by its AMQP basic properties, `SQS QUEUE` the message identity, send and
+first-receive times, receive count, group and deduplication identifiers, sequence number and
+sender identifier, `SYSLOG LISTENER` the peer address, transport and verified TLS client subject,
+`REDIS PUBSUB` the delivering channel and the pattern it matched, `PROMETHEUS QUERY` the query and
+the instant it was evaluated at, and every other entity none. The endpoint entities are served by
+the host itself rather than a connector crate, so the server's endpoint intake hands their values
+over the same way a connector's message does. Registry
 validation reads that declaration for the fields an ingestor's route programs and its
 `TIMESTAMP AT metadata.<field>` may name, the host builds its metadata columns from it, and a
 connector's message hands the host the value of every declared field in declared order, one typed
@@ -1431,9 +1437,10 @@ rather than a wider or narrower one, and it is absent where the message carries 
 that keeps a message whose transport value its field's type cannot hold hands that value over as
 unrepresentable, with its declared type and a description of the transport value, never a
 substitute value and never an absence: `RABBITMQ QUEUE` does so for an AMQP timestamp after
-2262-04-11, the last instant a `DATETIME` holds. `KAFKA TOPIC` and `SQS QUEUE` instead fail the read
-of a message whose timestamp is out of range, as their paragraphs below state, before any value is
-handed over.
+2262-04-11, the last instant a `DATETIME` holds, and `KAFKA TOPIC` for a record timestamp before
+1677-09-21 or after 2262-04-11. `SQS QUEUE` instead fails the read of a message whose system
+attribute timestamp is out of range, as its paragraph below states, before any value is handed
+over.
 A `STRING` such as a socket address may be written into the column in place instead of being
 allocated per message.
 A message that hands over another number of values than its entity declares, or a value of another
@@ -1466,15 +1473,29 @@ with the domain's routing, outside the source host.
 Kafka metadata borrows the record's key without allocating another byte sequence. Missing keys
 remain distinct from empty keys. Its timestamp is the exact instant of the driver's Unix
 milliseconds, with `create_time` or `log_append_time` as its kind; an unavailable timestamp has no
-instant or kind. A null value and an empty non-null value both lend an empty payload, but their
-tombstone flags differ. The codec decides whether an empty payload yields any rows. Every row
-that it yields shares the originating record's metadata and transport position. Kafka's
-`SUSPEND`-only quiesce declaration makes retained quiesce metadata unreachable for this entity.
-A present timestamp out of range is a typed source read failure, not an unrepresentable metadata
-value. If conversion fails after a valid prefix was gathered, the source returns that prefix and
-keeps one report for the next admitted read. A cancelled read leaves the report pending; no later
-record is taken while it is pending. The source declares this single-report bound beside its
-driver buffers.
+instant or kind. A present timestamp whose milliseconds name an instant before 1677-09-21 or after
+2262-04-11, which no `DATETIME` holds, is handed over as unrepresentable, described by those
+milliseconds, and its kind still reads as `create_time` or `log_append_time`. Reading the record
+never converts its timestamp: the message converts it only when the host visits its metadata, so
+such a record is read, acknowledged and positioned like any other. A null value and an empty
+non-null value both lend an empty payload, but their tombstone flags differ. The codec decides
+whether an empty payload yields any rows. Every row that it yields shares the originating record's
+metadata and transport position. Kafka's `SUSPEND`-only quiesce declaration makes retained quiesce
+metadata unreachable for this entity. A record at the last offset Kafka's signed offsets reach has
+no next position to acknowledge, which is a typed source read failure. If that failure follows a
+valid prefix gathered in the same read, the source returns that prefix and keeps one report for the
+next admitted read. A cancelled read leaves the report pending; no later record is taken while it
+is pending. The source declares this single-report bound beside its driver buffers.
+
+MQTT metadata and headers borrow the delivered packet the message owns, the one admission copied
+out of its frame, so the host copies them only when a quiesce buffer retains the message. The
+client's decoder refuses a topic that is not UTF-8 before any message exists, so a message lends its
+topic as text. A property the packet does not carry is absent, and one it carries empty is an empty
+value. The broker keeps user properties in their publisher's order. Every subscription asks for
+Retain As Published so that the retain flag reads what the publisher wrote, and a shared subscription
+receives nothing its broker retained earlier. The duplicate flag is the packet's: a publish the
+source replays after a host rejection is the same packet, so only a broker's redelivery reads
+`true`. An MQTT source names no transport position.
 
 Beside its fields and headers, a message names the position its transport gives it, where the
 transport has one: a Kafka record's topic, partition and offset, or a syslog frame's peer. It is the
@@ -1740,6 +1761,10 @@ cancelled it or its batch timeout passed, drops only its wait on the read-ahead,
 publish, and the driver's poll never stops for it.
 
 ### MQTT source connections
+
+A source subscribes when its broker starts a new session, with Retain As Published set so that a
+delivered publish keeps the retain flag its publisher wrote. A resumed session keeps the
+subscription its broker already holds, with the options that created it.
 
 Once an MQTT source instance has established its subscription, a task the connector owns drives
 its connection until the connection ends or the source drops it. The task is the only owner of the
@@ -3219,15 +3244,23 @@ and Arrow type retained beneath the publish context. It is not a per-record reje
 that keeps a MySQL pool at `POOL SIZE MIN` reports a pass that ends below it as
 `PoolMinimumError::NotRestored`, naming the minimum, above the failed checkout's `CheckOut` and the
 driver's error, before its next pass retries; a later writer's failure remains a separate
-diagnostic. MySQL's configured `timeout_ms` is read once through `ConfiguredDeadline` and retained
-with the node's shared driver pool. It bounds every checkout, including the minimum keeper's,
-initial connection validation, and each insert as separate operations. An elapsed operation keeps
-the typed `DeadlineElapsed` beneath its MySQL and host contexts and attaches its safe operation,
-key and duration for public emitter diagnostics. MySQL composition preserves the shared-client
-report through initialization. An elapsed operation is infrastructure failure, never a row
-rejection. Cancelling a driver command marks its connection disconnected, and the
-recycler discards it before handing out capacity again. Omitting the key retains the declared
-unbounded waits. TLS files extend the URL's existing `SslOpts`, retaining verification and trust
+diagnostic. MySQL retains its effective `pool_acquire_timeout_ms` checkout budget, defaulted by
+its client schema to 30 seconds, and optional `timeout_ms` operation budget through
+`ConfiguredDeadline`. Every checkout, including the minimum keeper's, takes the shorter applicable
+bound and names that bound's key on expiry. Initial validation and each insert separately retain
+the operation bound; without `timeout_ms` those operations remain unbounded after checkout.
+An elapsed operation keeps the typed `DeadlineElapsed` beneath its MySQL and host contexts and
+attaches its safe operation, key and duration for public emitter diagnostics. MySQL composition
+preserves the shared-client report through initialization. An elapsed operation is infrastructure
+failure, never a row rejection. Cancelling a driver command marks its connection disconnected,
+and the recycler discards it before handing out capacity again. The pool's immutable policy
+reads effective defaults once, applies idle and optional absolute lifetimes to the driver, and
+passes `pool_maintenance_interval_ms` to the unchanged minimum keeper. Driver expiry scans retain
+their own cadence; [Database Client Connection Pools](database-client-pools.md#connection-lifetimes)
+defines retirement and in-flight operation boundaries. A lifetime or maintenance value that violates
+its declared schema rule retains `ClientConfigSchemaError` beneath `MySqlPoolPolicyError::InvalidKey`
+at open.
+TLS files extend the URL's existing `SslOpts`, retaining verification and trust
 choices, and paired identity files install the driver's RSA PKCS#1 identity. The silent-handshake,
 locked-insert/retry and shared-pool-contention scenarios own the public deadline observations;
 the mounted-certificate scenario uses an account that requires a client certificate.

@@ -15,7 +15,7 @@ use crate::{
     append_cucumber_log_line,
     common::{
         phase_deadline::{BeforeDeadline, PhaseDeadline},
-        raw_session::{WireOutcome as _, fresh_execution_reference, outcome_awaits_leader},
+        raw_session::{WireOutcome as _, fresh_execution_reference},
     },
     current_leader_node, docstring, expand_placeholders, learn_command_outcome,
 };
@@ -37,13 +37,11 @@ async fn begin_cleanup_backup_request(world: &mut ScenarioWorld, #[step] step: &
         .assured("the cleanup fixture opens its backup session");
     let routes = world.cluster().leader_routes();
     let reference = fresh_execution_reference();
-    let scope = session.scope();
+    let prepared = session.prepare_command(&query, &reference);
     world.background_command_result = Some(AbortOnDropHandle::new(task::spawn(async move {
-        let mut outcome = session
-            .run_command_result_with_reference(&query, &reference)
-            .await?;
-        if outcome_awaits_leader(&outcome) {
-            let learned = learn_command_outcome(&routes, &scope, &query, &reference, outcome).await;
+        let mut outcome = prepared.run(&mut session).await?;
+        if prepared.awaits_recovery(&outcome) {
+            let learned = learn_command_outcome(&routes, &prepared, outcome, None).await;
             outcome = learned.outcome;
         }
         Ok(outcome)
