@@ -714,7 +714,7 @@ mod tests {
         load_vhost_tls_materials,
     };
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn grpc_tls_loads_operator_material() {
         let files = test_tls_files("session", &node_named("node-1"));
         let result = load_grpc_tls_server_config(&files.certificate, &files.private_key).await;
@@ -735,7 +735,7 @@ mod tests {
             Some(cause) if cause.kind() == io::ErrorKind::NotFound));
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn grpc_tls_missing_certificate_retains_io_cause() {
         let files = test_tls_files("session", &node_named("node-1"));
         let missing = files.certificate.with_file_name("unavailable.pem");
@@ -745,7 +745,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn grpc_tls_missing_private_key_retains_io_cause() {
         let files = test_tls_files("session", &node_named("node-1"));
         let missing = files.private_key.with_file_name("unavailable.pem");
@@ -755,7 +755,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn grpc_tls_requires_a_nonempty_certificate_chain() -> io::Result<()> {
         let files = test_tls_files("session", &node_named("node-1"));
         std::fs::write(&files.certificate, b"")?;
@@ -772,7 +772,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn grpc_tls_checks_every_certificate_pem_item() -> io::Result<()> {
         let files = test_tls_files("session", &node_named("node-1"));
         let mut chain = std::fs::read(&files.certificate)?;
@@ -792,7 +792,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn grpc_tls_rejects_malformed_private_key_pem() -> io::Result<()> {
         let files = test_tls_files("session", &node_named("node-1"));
         std::fs::write(
@@ -813,7 +813,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn grpc_tls_requires_a_private_key_pem_item() -> io::Result<()> {
         let files = test_tls_files("session", &node_named("node-1"));
         std::fs::write(&files.private_key, b"")?;
@@ -830,7 +830,7 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[nervix_primitives::test]
     async fn grpc_tls_checks_the_leaf_matches_the_private_key() {
         let files = test_tls_files("session", &node_named("node-1"));
         let other = test_tls_files("session", &node_named("node-2"));
