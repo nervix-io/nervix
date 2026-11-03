@@ -1958,6 +1958,25 @@ impl Application {
                 move |context, request| {
                     let service = subscription_interest_service.clone();
                     async move {
+                        #[cfg(feature = "testing")]
+                        if service
+                            .inner
+                            .runtime
+                            .fault_injection()
+                            .take_interest_visibility_refusal(
+                                service.inner.consensus.local_node_id(),
+                            )
+                        {
+                            return RemoteSubscriptionInterestVisibilityResponse {
+                                result: Err(RemoteOperationFailure::rejected(
+                                    RemoteOperationSubject::subscription_interest(
+                                        &request.domain,
+                                        &request.relay,
+                                        &request.subscriber,
+                                    ),
+                                )),
+                            };
+                        }
                         let result = if request.subscriber.node_id() != context.peer_node_id() {
                             Err(RemoteOperationFailure::rejected(
                                 RemoteOperationSubject::subscription_interest(

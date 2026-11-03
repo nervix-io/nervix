@@ -3394,6 +3394,17 @@ impl Cluster {
             .restore_gossip_for_node(&node_name(node_id));
     }
 
+    /// Makes `node_id` refuse the next subscription interest visibility check it answers.
+    pub(crate) fn refuse_interest_visibility_on(&self, node_id: &str) {
+        self.fault_injection
+            .refuse_interest_visibility_on(node_name(node_id));
+    }
+
+    pub(crate) fn interest_visibility_refusal_delivered(&self, node_id: &str) -> bool {
+        self.fault_injection
+            .interest_visibility_refusal_delivered(&node_name(node_id))
+    }
+
     pub(crate) async fn wait_for_health_response_pause(
         &self,
         probing_node_id: &str,
