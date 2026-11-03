@@ -7,6 +7,7 @@
 //! - **Depends on.** Tokio's TCP sockets and I/O traits.
 //! - **Must not know.** The connector's ingestor or emitter, the runtime host, or how a real broker decides.
 
+use meticulous::ResultExt as _;
 use nervix_primitives::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -79,10 +80,11 @@ pub(crate) struct ScriptedConnection {
     stream: TcpStream,
 }
 
-/// A PUBLISH the client sent: the packet identifier the broker answers it under, and its payload.
+/// A PUBLISH the client sent: its packet identifier, payload and complete MQTT 5 properties.
 pub(crate) struct ReceivedPublish {
     pub(crate) packet_id: u16,
     pub(crate) payload: Vec<u8>,
+    pub(crate) properties: Option<rumqttc::PublishProperties>,
 }
 
 impl ScriptedBroker {
@@ -179,6 +181,10 @@ impl ScriptedConnection {
         ReceivedPublish {
             packet_id,
             payload: body[payload_at..].to_vec(),
+            properties: rumqttc::PublishProperties::read(&mut bytes::Bytes::copy_from_slice(
+                &body[properties_at..],
+            ))
+            .assured("the client writes a valid MQTT property section"),
         }
     }
 

@@ -237,7 +237,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_plexus/corpus"
-domain_version = 36
+domain_version = 37
 features = []
 id = "plexus-model"
 invariant = "Canonical Plexus of a generated Model of every family reparses through the client and server grammars to the complete CREATE statement."
@@ -252,7 +252,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
-domain_version = 37
+domain_version = 38
 features = []
 id = "plexus-archive-model"
 invariant = "Complete cluster/domain archives preserve every ordered canonical Model document through export, production restore reads, semantic reparse and byte-exact re-export."
@@ -447,7 +447,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_plexus/corpus"
-domain_version = 35
+domain_version = 36
 features = []
 id = "plexus-statement"
 invariant = "Canonical Plexus of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
@@ -477,7 +477,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
-domain_version = 35
+domain_version = 36
 features = []
 id = "plexus-statement-text"
 invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical Plexus reparses to them."
@@ -492,7 +492,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatted_documents_keep_their_statements/corpus"
-domain_version = 35
+domain_version = 36
 features = []
 id = "plexus-format-document"
 invariant = "Formatting a generated document with gaps, comments and either line ending keeps its statements and comments and is idempotent."
@@ -507,7 +507,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus-format/src/__fuzz__/format_round_trip_tests__bolero_formatter_text_is_formatted_or_rejected/corpus"
-domain_version = 34
+domain_version = 35
 features = []
 id = "plexus-format-text"
 invariant = "Edited documents are either refused as unparseable or formatted without changing their statements, idempotently."
@@ -582,7 +582,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/connectors/__fuzz__/surface__bolero_generated_entities_state_only_what_their_entity_declares/corpus"
-domain_version = 26
+domain_version = 27
 features = []
 id = "models-connector-declarations"
 invariant = "A generated ingestor and emitter of every entity state only what their entity declares: a declared delivery or publishing mode whose required option choices they make, a quiesce mode their entity honors, a body of the declared form, batching the declared legality admits, a type contract exactly for direct-value bodies and a client of a declared connector."
@@ -3087,10 +3087,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__emitter_record_writes__tests__bolero_retained_payloads_are_written_unchanged_until_answered/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "emitter-retained-payloads"
-invariant = "Across generated packing and write steps with delivered, rejected and unanswered records and failed writes, every write hands the emitter the retained payloads in packing order with exactly the bytes, key, text or typed headers and group they were prepared with; a delivery resolves every member, a rejection rejects every member with one error and leaves them awaiting it, and an unanswered payload stays retained unchanged."
+invariant = "Across generated packing and write steps with delivered, rejected and unanswered records and failed writes, every write hands the emitter the retained payloads in packing order with exactly the bytes, key, text or typed headers, group and complete MQTT retained-publication envelope they were prepared with; a delivery resolves every member, a rejection rejects every member with one error and leaves them awaiting it, and an unanswered payload stays retained unchanged."
 manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-server"
@@ -3177,16 +3177,31 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/connectors/mqtt/src/topic/__fuzz__/topic__tests__bolero_measured_packets_are_the_bytes_the_client_writes/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "mqtt-publish-packets"
-invariant = "For generated topics, every quality of service and payloads beside every Remaining Length width and the protocol's largest, the measured PUBLISH size is exactly the packet the client writes, a payload past the largest Remaining Length has no packet, and the broker's latest declared maximum admits exactly the packets at most that size."
+invariant = "For generated topics, MQTT publish and repeated user properties, every quality of service and payloads beside every Remaining Length width and the protocol's largest, the measured PUBLISH size is exactly the packet the client writes, a payload past the largest Remaining Length has no packet, and the broker's latest declared maximum admits exactly the packets at most that size."
 manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-connector-mqtt"
 random_iterations = 256
 source = "crates/connectors/mqtt/src/topic/mod.rs"
 test = "topic::tests::bolero_measured_packets_are_the_bytes_the_client_writes"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/connectors/mqtt/src/topic/publication/__fuzz__/topic__publication__tests__bolero_publish_properties_preserve_the_complete_packet/corpus"
+domain_version = 1
+features = []
+id = "mqtt-publish-properties"
+invariant = "Every bounded current MQTT publication property and ordered repeated user property maps through the production owner to the complete driver properties and survives a complete PUBLISH encode/decode with identical payload, topic, quality of service, retain flag and packet identifier; the production packet measure equals the encoded byte count, including both variable-length prefixes."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-connector-mqtt"
+random_iterations = 128
+source = "crates/connectors/mqtt/src/topic/publication/tests.rs"
+test = "topic::publication::tests::bolero_publish_properties_preserve_the_complete_packet"
 test_target = "lib"
 
 [[target]]
@@ -3612,7 +3627,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_entity_presentations_keep_declared_rows_and_complete_configuration/corpus"
-domain_version = 21
+domain_version = 22
 features = []
 id = "connector-entity-presentation"
 invariant = "Every generated source and sink entity uses its declared phrase and ordered inspection rows, while the canonical Plexus built from that shared presentation reparses to its complete Model including all options, modes, payload mappings, flush and error policies."

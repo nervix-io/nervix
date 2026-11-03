@@ -20,8 +20,8 @@ use crate::{
     ClientConfigEntry, ClientConfigFile, ClientConfigOwner, ClientConfigPresence,
     ClientConfigReaders, ClientConfigSchema, ClientConfigSchemaError, ClientConfigValue,
     ClientPooling, DeclaredPublishing, EmitterEntityKind, EmitterEntityModel as _,
-    EmitterPublishingModeKind, IngestDeliveryKind, IngestQuiesceKind, IngestorEntityKind,
-    IngestorEntityModel as _, WrittenChoice,
+    EmitterPublishingModeKind, EnvelopeClauseKind, HeaderLayout, HeaderModel, IngestDeliveryKind,
+    IngestQuiesceKind, IngestorEntityKind, IngestorEntityModel as _, PropertyType, WrittenChoice,
 };
 
 /// The bound of a wait for a write: one interval of the keep-alive the client asks for.
@@ -344,8 +344,19 @@ fn topic_emission_writes_its_quality_of_service_beside_a_mode_that_pairs_with_it
     let qos = emit.option("QOS").assured("the keywords above declare QOS");
     assert!(qos.is_required());
     assert_eq!(qos.examples(), vec!["QOS 0", "QOS 1", "QOS 2"]);
-    assert!(emit.envelope.is_empty());
-    assert!(emit.properties.is_empty());
+    assert_eq!(emit.envelope, &[EnvelopeClauseKind::Retain]);
+    assert_eq!(
+        emit.properties
+            .iter()
+            .map(|property| (property.name, property.ty))
+            .collect::<Vec<_>>(),
+        vec![
+            ("content_type", PropertyType::String),
+            ("message_expiry", PropertyType::U32),
+            ("response_topic", PropertyType::String),
+            ("correlation_data", PropertyType::Bytes),
+        ]
+    );
 }
 
 #[test]
@@ -482,14 +493,17 @@ fn an_emitter_mode_beside_a_statement_that_answers_no_option_names_it_unwritten(
 }
 
 #[test]
-fn both_topic_directions_carry_no_transport_headers_or_typed_metadata() {
+fn topic_emission_writes_ordered_repeated_mqtt_user_properties() {
     let ingest = IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic).capabilities();
     let emit = EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic).capabilities();
 
     assert_eq!(ingest.headers, None);
     assert!(!ingest.reads_headers());
     assert!(ingest.metadata.fields().is_empty());
-    assert_eq!(emit.headers, None);
+    assert_eq!(
+        emit.headers,
+        Some(HeaderModel::exact(HeaderLayout::OrderedRepeats))
+    );
 }
 
 #[test]

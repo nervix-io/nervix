@@ -220,6 +220,7 @@ mod iceberg_delivery;
 mod ingestion_time;
 mod kafka_metadata;
 mod mqtt_fixtures;
+mod mqtt_publish_properties;
 mod mqtt_sessions;
 mod mysql_isolation;
 mod nats_delivery;
@@ -413,6 +414,8 @@ struct SubscriptionReceipt {
 
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
+    mqtt_envelope_observer: Option<mqtt_publish_properties::Observer>,
+    mqtt_publication_endpoint: Option<mqtt_publish_properties::Endpoint>,
     mqtt_fixture_publication: Option<mqtt_fixtures::Publication>,
     postgres_fixture_locks: Option<postgres_fixtures::HeldLocks>,
     postgres_fixture_observations: Option<postgres_fixtures::Observations>,
@@ -34920,6 +34923,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 // harness state, and they are given back once the nodes they fronted have ended.
                 world.stallable_tcp_proxies.clear();
                 world.mqtt_publish_filter = None;
+                world.mqtt_envelope_observer = None;
+                world.mqtt_publication_endpoint = None;
                 world.rabbitmq_confirm_order = None;
                 world.sqs_answer_hold = None;
                 world.iceberg_catalog_gate = None;

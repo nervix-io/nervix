@@ -2842,12 +2842,22 @@ subscriber's maximum level stays the filter's, and an event the filter refuses c
 without the rule. The scenario run's subscriber, which writes
 `tests/logs/scenarios.log`, applies the same rule to its own default.
 
-The node drops one such event: Lapin's report of a message its broker returned. Lapin logs every
+The node drops Lapin's report of a message its broker returned. Lapin logs every
 returned message at `warn` under the target `lapin::returned_messages`, with the whole message, its
 body and properties included. The node drops that target's `info`, `warn` and `error` events; its
 `debug` and `trace` events carry no message and stay with the filter. What the log carries about a
 return is the RabbitMQ emitter's own report of it, which names the broker's reply code and text and
-never the record. A change that makes another payload-bearing dependency event reachable, through a
+never the record.
+
+The MQTT driver also logs its complete outbound request at `warn` when the broker does not support
+retained publications. The node suppresses that specific warning under `rumqttc::eventloop` while
+retaining the target's connection warnings. The filter recognizes the warning's fixed message
+prefix without formatting the request that follows it; operator directives cannot re-enable it.
+The emitter reports the typed refusal through its record outcome. MQTT field-length and NUL
+refusals name the field and its bound without carrying the field's content; a response-topic
+refusal retains the vocabulary's typed cause.
+
+A change that makes another payload-bearing dependency event reachable, through a
 dependency upgrade or a driver option a connector starts to use, adds it to the dropped events in
 the same change. Several drivers log messages, requests or frames at `debug` and `trace`; an
 operator who selects those levels for a driver's target chooses to see them.

@@ -21,12 +21,12 @@ use nervix_models::{
     KafkaTopicName, LocatorDeclaration, LocatorName, MongoDbEmitterEntity, MqttEmitterEntity,
     MqttIngestorEntity, MqttTopicFilter, MySqlEmitterEntity, NatsEmitterEntity, NatsIngestorEntity,
     NatsQueueGroupName, NatsSubjectName, OptionDeclaration, OptionForm, OptionPresence,
-    OtelEmitterEntity, PostgresEmitterEntity, PrometheusIngestorEntity, PulsarEmitterEntity,
-    PulsarIngestorEntity, PulsarSubscriptionName, PulsarTopicName, RabbitMqEmitterEntity,
-    RabbitMqExchangeName, RabbitMqIngestorEntity, RabbitMqQueueName, RedisChannelName,
-    RedisEmitterEntity, RedisIngestorEntity, RuntimeCapability, SentryEmitterEntity,
-    SqsEmitterEntity, SqsIngestorEntity, SqsQueueName, SyslogEmitterEntity, SyslogIngestorEntity,
-    WebsocketsIngestorEntity, ZeroMqEmitterEntity, ZeroMqIngestorEntity,
+    OtelEmitterEntity, PostgresEmitterEntity, PrometheusIngestorEntity, PropertyType,
+    PulsarEmitterEntity, PulsarIngestorEntity, PulsarSubscriptionName, PulsarTopicName,
+    RabbitMqEmitterEntity, RabbitMqExchangeName, RabbitMqIngestorEntity, RabbitMqQueueName,
+    RedisChannelName, RedisEmitterEntity, RedisIngestorEntity, RuntimeCapability,
+    SentryEmitterEntity, SqsEmitterEntity, SqsIngestorEntity, SqsQueueName, SyslogEmitterEntity,
+    SyslogIngestorEntity, WebsocketsIngestorEntity, ZeroMqEmitterEntity, ZeroMqIngestorEntity,
 };
 use strum::IntoEnumIterator as _;
 
@@ -260,9 +260,10 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
             ],
             ..located(ConnectorKind::Pulsar, "TOPIC", "pulsar_topic", &[])
         },
-        EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => {
-            located(ConnectorKind::Mqtt, "TOPIC", "mqtt_topic", &[("QOS", true)])
-        }
+        EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => EmitterSurface {
+            envelope: &[EnvelopeClauseKind::Retain],
+            ..located(ConnectorKind::Mqtt, "TOPIC", "mqtt_topic", &[("QOS", true)])
+        },
         EmitterEntityKind::RabbitMq(RabbitMqEmitterEntity::Queue) => EmitterSurface {
             envelope: mandatory,
             ..located(ConnectorKind::RabbitMq, "QUEUE", "rabbitmq_queue", &[])
@@ -357,8 +358,24 @@ fn every_emitter_pair_declares_its_reference_locator_options_and_envelope_clause
         assert_eq!(locator_shape(declared.locator), expected.locator, "{kind}");
         assert_eq!(option_shapes(declared.options), expected.options, "{kind}");
         assert_eq!(declared.envelope, expected.envelope, "{kind}");
-        // No entity declares an envelope property yet.
-        assert!(declared.properties.is_empty(), "{kind}");
+        let properties: &[(&str, PropertyType)] = match kind {
+            EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => &[
+                ("content_type", PropertyType::String),
+                ("message_expiry", PropertyType::U32),
+                ("response_topic", PropertyType::String),
+                ("correlation_data", PropertyType::Bytes),
+            ],
+            _ => &[],
+        };
+        assert_eq!(
+            declared
+                .properties
+                .iter()
+                .map(|property| (property.name, property.ty))
+                .collect::<Vec<_>>(),
+            properties,
+            "{kind}"
+        );
     }
 }
 

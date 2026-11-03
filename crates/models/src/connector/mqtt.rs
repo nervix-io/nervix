@@ -37,10 +37,11 @@ use crate::{
     ClientConfigValue, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
     EmitterBatchLegality, EmitterBodyForm, EmitterClientReference, EmitterDeclaration,
     EmitterEntityBody, EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind,
-    IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration, IngestorEntityBody,
-    IngestorEntityCapabilities, IngestorMetadataDeclaration, IngestorReference,
-    IngestorReferenceKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
-    OptionForm, OptionPresence, PositionClass, RetryPolicy,
+    EnvelopeClauseKind, HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode,
+    IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
+    IngestorMetadataDeclaration, IngestorReference, IngestorReferenceKind, LocatorDeclaration,
+    LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence, PositionClass,
+    PropertyDeclaration, PropertyType, RetryPolicy,
 };
 
 mod config;
@@ -654,7 +655,7 @@ pub struct MqttTopicEmitter {
 
 impl EmitterDeclaration for MqttTopicEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
-        headers: None,
+        headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         reference: EmitterReferenceKind::Client(ConnectorKind::Mqtt),
         body: EmitterBodyForm::Codec,
         // Each broker declares its Maximum Packet Size when the client connects, and the emitter
@@ -667,10 +668,25 @@ impl EmitterDeclaration for MqttTopicEmitter {
             name: LocatorName::External(MqttTopicName::DECLARATION),
         }),
         options: &[MQTT_QOS],
-        // A publish carries its topic and payload; the emitter sets no retain flag and no MQTT 5
-        // property of its own.
-        envelope: &[],
-        properties: &[],
+        envelope: &[EnvelopeClauseKind::Retain],
+        properties: &[
+            PropertyDeclaration {
+                name: "content_type",
+                ty: PropertyType::String,
+            },
+            PropertyDeclaration {
+                name: "message_expiry",
+                ty: PropertyType::U32,
+            },
+            PropertyDeclaration {
+                name: "response_topic",
+                ty: PropertyType::String,
+            },
+            PropertyDeclaration {
+                name: "correlation_data",
+                ty: PropertyType::Bytes,
+            },
+        ],
         bounds: MQTT_EMITTER_BOUNDS,
     };
 }
@@ -736,6 +752,13 @@ fn mqtt_publication_topic(text: &str) -> Result<(), ExternalNameError> {
         return Err(ExternalNameError::InvalidChar { ch });
     }
     Ok(())
+}
+
+/// Move a validated publication topic into an external wire field without copying its text.
+impl From<MqttTopicName> for String {
+    fn from(topic: MqttTopicName) -> Self {
+        topic.0
+    }
 }
 
 #[cfg(test)]
