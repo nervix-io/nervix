@@ -306,6 +306,7 @@ members = [
   "crates/checkpoint-replication",
   "crates/client-core",
   "crates/client-ffi",
+  "crates/client-host",
   "crates/client-wire",
   "crates/columnar-json",
   "crates/connector",
@@ -539,6 +540,7 @@ nervix-branch-instances = { package = "nervix-branch-instances", path = "crates/
 nervix-checkpoint-replication = { package = "nervix-checkpoint-replication", path = "crates/checkpoint-replication" }
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
 nervix-client-ffi = { package = "nervix-client-ffi", path = "crates/client-ffi" }
+nervix-client-host = { package = "nervix-client-host", path = "crates/client-host" }
 nervix-client-wire = { package = "nervix-client-wire", path = "crates/client-wire" }
 nervix-columnar-json = { package = "nervix-columnar-json", path = "crates/columnar-json" }
 nervix-connector = { package = "nervix-connector", path = "crates/connector" }

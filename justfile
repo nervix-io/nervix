@@ -1587,7 +1587,8 @@ test-coverage-feature +features: tests-deps
 test-coverage-client-packages:
     cargo llvm-cov --no-report --all-targets \
         --package nervix-client-core --package nervix-client-wire --package nervix-client-ffi \
-        --package nervix-models --package nervix-cli --package nervix-web-console
+        --package nervix-client-host --package nervix-models --package nervix-cli \
+        --package nervix-web-console
 
 # Add focused backup, wire, state, and primitive tests to a backup feature's coverage profile.
 test-coverage-backup-packages:
@@ -1974,6 +1975,7 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
         --package nervix-dns \
         --package nervix-client-core \
         --package nervix-client-ffi \
+        --package nervix-client-host \
         --package nervix-cli \
         --package nervix-connector \
         --package nervix-connector-http \
@@ -2025,6 +2027,7 @@ coverage-dns-clients-report output="target/dns-clients.lcov":
         --package nervix-dns \
         --package nervix-client-core \
         --package nervix-client-ffi \
+        --package nervix-client-host \
         --package nervix-cli \
         --package nervix-connector \
         --package nervix-connector-http \
@@ -2424,6 +2427,7 @@ clippy_all_features_packages := [
     "nervix-checkpoint-replication",
     "nervix-cli",
     "nervix-client-ffi",
+    "nervix-client-host",
     "nervix-client-wire",
     "nervix-columnar-json",
     "nervix-dataflow-graph",

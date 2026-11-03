@@ -6754,23 +6754,37 @@ name = "nervix-client-ffi"
 version = "0.1.0-dev"
 dependencies = [
  "arch-into",
- "arrow-array",
- "arrow-buffer",
- "arrow-data",
  "arrow-ipc",
- "arrow-schema",
  "bolero",
  "bytes",
  "error-stack",
  "meticulous",
  "nervix-arbitrary",
  "nervix-client-core",
+ "nervix-client-host",
+ "nervix-models",
+ "nervix-primitives",
+ "serde_json",
+ "tonic 0.13.1",
+ "uuid",
+]
+
+[[package]]
+name = "nervix-client-host"
+version = "0.1.0-dev"
+dependencies = [
+ "arch-into",
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-data",
+ "bytes",
+ "error-stack",
+ "meticulous",
+ "nervix-client-core",
  "nervix-models",
  "nervix-primitives",
  "nervix-recovery",
- "serde_json",
  "strum 0.26.3",
- "tonic 0.13.1",
  "uuid",
 ]
 

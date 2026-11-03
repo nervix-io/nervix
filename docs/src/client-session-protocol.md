@@ -74,7 +74,8 @@ over the interconnect, and that node encodes Row frames for its own sessions.
 | Control plane | Subscription delivery | The delivery of one subscription generation to its session, and the interest lease it holds on its relay. |
 | Data plane | Relay subscription fan-out | The subscribers of one relay, the definition they were attached under, and ending every subscriber before a batch of another definition can reach it. |
 | Edges | The Rust client, `nervix-client-core` | Connecting, TLS selection, the dispatcher that pairs replies with requests, execution identity across retries, redirect and reconnect, transaction binding and previews, desired subscriptions and their restoration, followed domain clocks, uploads, and backup downloads verified against their summary. |
-| Edges | The shared binding, `nervix-client-ffi` | The C ABI through which C, C++, Python, JVM and Ruby hosts drive the Rust client's state machine, with borrowed frame access, bulk column copies, retained domain clock events, retained reads of the clock of each followed domain with its projections, and the Rust client's producers and consumers with their typed outcomes, settlements and Arrow batches built and read one column level at a time. |
+| Edges | The host session runtime, `nervix-client-host` | What every binding shares: the session runtime a host's thread blocks on, cancellation and deadlines, the classification of every client failure by its report's context, subscription events with bulk column access to their verified frames, domain clock events and the clock of each followed domain with its projections, field descriptions, and the Rust client's producers and consumers with their typed outcomes, settlements and Arrow batches built and read one column level at a time. |
+| Edges | The C ABI, `nervix-client-ffi` | The C ABI through which C, C++, Python, JVM and Ruby hosts drive the host session runtime: the handles a host holds, retains and releases, borrowed frame access, and bulk column copies into memory the host passes. |
 | Edges | The web console and the CLI | Consumers of the same protocol with bounded buffers of their own. The console speaks it over its WebSockets: the session, and one per backup download or restore stream, whose archive it verifies or measures itself; the CLI uses the Rust client. |
 
 The server is the composition root: it is the only crate that names the wire crate, the command
@@ -1921,10 +1922,12 @@ it restores them.
 A host language reaches the protocol in one of two ways. It loads the shared Rust binding,
 `nervix-client-ffi`, whose C ABI is `crates/client-ffi/include/nervix_client.h`, or it implements
 the protocol itself from the schema. The binding is the supported path for C, C++, Python, JVM, and
-Ruby hosts. It drives the Rust client's own state machine, so request correlation, leader redirects,
-reconnection, execution identity across retries, and desired-subscription restoration are decided
-once, in the library, and a host never retries, reroutes, or reinterprets an outcome on its own. A
-separate SDK per language would have to reimplement each of those decisions and be qualified again.
+Ruby hosts. Its C ABI drives the host session runtime every binding of the Rust client shares,
+`nervix-client-host`, and through it the Rust client's own state machine, so request correlation,
+leader redirects, reconnection, execution identity across retries, and desired-subscription
+restoration are decided once, in the library, and a host never retries, reroutes, or reinterprets
+an outcome on its own. A separate SDK per language would have to reimplement each of those
+decisions and be qualified again.
 
 The binding's lifecycle follows from that choice:
 
