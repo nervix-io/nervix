@@ -21,10 +21,32 @@ use nervix_models::{
 };
 
 use super::*;
-use crate::common::raw_session::{open_raw_session, open_session_as};
+use crate::common::{
+    command_probe::CommandRefusalPhase,
+    raw_session::{PreparedCommand, open_raw_session, open_session_as},
+};
 
 /// How long a scenario waits for the server to end a session it broke.
 const SESSION_END_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// One named correlation and, for commands, the immutable request behind that correlation.
+pub(crate) struct NamedRequest {
+    id: RequestId,
+    command: Option<PreparedCommand>,
+}
+
+impl NamedRequest {
+    fn other(id: RequestId) -> Self {
+        Self { id, command: None }
+    }
+
+    fn command(id: RequestId, command: PreparedCommand) -> Self {
+        Self {
+            id,
+            command: Some(command),
+        }
+    }
+}
 
 fn active_session(world: &mut ScenarioWorld) -> &mut TestSession {
     world
@@ -34,10 +56,11 @@ fn active_session(world: &mut ScenarioWorld) -> &mut TestSession {
 }
 
 fn named_request(world: &ScenarioWorld, name: &str) -> RequestId {
-    *world
+    world
         .session_requests
         .get(name)
         .unwrap_or_else(|| panic!("request '{name}' was never sent"))
+        .id
 }
 
 async fn reply_to_named(world: &mut ScenarioWorld, name: &str) -> ReplyBody {
@@ -60,11 +83,20 @@ async fn when_active_session_sends_named_command(
 ) {
     let query = expand_placeholders(world, docstring(step));
     let reference = crate::common::raw_session::fresh_execution_reference();
-    let request_id = active_session(world)
-        .send_command_request_with_reference(&query, &reference)
+    let command = active_session(world).prepare_command(&query, &reference);
+    let request_id = command
+        .send(active_session(world))
         .await
         .unwrap_or_else(|error| panic!("failed to send request '{name}': {error}"));
-    world.session_requests.insert(name, request_id);
+    append_cucumber_log_line(&format!(
+        "named command {name}, node {:?}, request {request_id}, execution reference {reference}, \
+         original position {:?}",
+        world.active_session_node,
+        command.expected_position()
+    ));
+    world
+        .session_requests
+        .insert(name, NamedRequest::command(request_id, command));
 }
 
 #[when(
@@ -79,11 +111,65 @@ async fn when_active_session_sends_named_referenced_command(
 ) {
     let query = expand_placeholders(world, docstring(step));
     let reference = command_execution_reference(world, &execution_reference);
-    let request_id = active_session(world)
-        .send_command_request_with_reference(&query, &reference)
+    let command = active_session(world).prepare_command(&query, &reference);
+    let request_id = command
+        .send(active_session(world))
         .await
         .unwrap_or_else(|error| panic!("failed to send request '{name}': {error}"));
-    world.session_requests.insert(name, request_id);
+    append_cucumber_log_line(&format!(
+        "named command {name}, node {:?}, request {request_id}, execution reference {reference}, \
+         original position {:?}",
+        world.active_session_node,
+        command.expected_position()
+    ));
+    world
+        .session_requests
+        .insert(name, NamedRequest::command(request_id, command));
+}
+
+#[then(expr = "request {string} reaches the durable command admission pause on node {string}")]
+async fn then_named_request_reaches_durable_admission(
+    world: &mut ScenarioWorld,
+    name: String,
+    node: String,
+) {
+    let node = expand_placeholders(world, &node);
+    let node_name = crate::common::cluster::node_name(&node);
+    let command = world
+        .session_requests
+        .get(&name)
+        .verified("the scenario sent its named request")
+        .command
+        .as_ref()
+        .verified("a durable command boundary belongs to a command request")
+        .clone();
+    let faults = world.fault_injection.clone();
+    // This is the existing pause budget. A retry consumes the time left in it.
+    nervix_primitives::time::timeout(Duration::from_secs(30), async {
+        let mut pause = Box::pin(faults.wait_for_command_durable_admission_pause(&node_name));
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let id = named_request(world, &name);
+            let body = nervix_primitives::select! {
+                () = &mut pause => {
+                    append_cucumber_log_line(&format!("named command {name}, request {id}, execution reference {}, reached durable admission on {node}", command.reference()));
+                    return;
+                },
+                body = active_session(world).reply_to(id) => body
+                    .unwrap_or_else(|error| panic!("named command '{name}' transport failed before durable admission: {error}")),
+            };
+            let ReplyBody::Command(outcome) = body else {
+                panic!("named command '{name}' ended before durable admission: {body:?}");
+            };
+            assert_eq!(&outcome.execution_reference, command.reference(), "the reply must retain its original execution reference");
+            append_cucumber_log_line(&format!("named command {name}, request {id}, execution reference {}, before durable admission on {node}: {:?}: {}", command.reference(), outcome.disposition, outcome.message));
+            assert!(command.awaits_recovery(&outcome), "named command '{name}' ended before its durable admission pause: {outcome:?}");
+            nervix_primitives::time::sleep(crate::common::command_recovery::LEADER_POLL_INTERVAL).await;
+            let repeated = command.send(active_session(world)).await
+                .unwrap_or_else(|error| panic!("named command '{name}' retry transport failed: {error}"));
+            world.session_requests.get_mut(&name).verified("the named request remains registered").id = repeated;
+        }
+    }).await.unwrap_or_else(|error| panic!("named command '{name}' did not reach durable admission on '{node}': {error}"));
 }
 
 #[when(expr = "the active session sends request {string} listing domains")]
@@ -92,7 +178,9 @@ async fn when_active_session_lists_domains(world: &mut ScenarioWorld, name: Stri
         .send_request(ClientRequest::ListDomains)
         .await
         .unwrap_or_else(|error| panic!("failed to send request '{name}': {error}"));
-    world.session_requests.insert(name, request_id);
+    world
+        .session_requests
+        .insert(name, NamedRequest::other(request_id));
 }
 
 #[then(expr = "request {string} lists domain {string}")]
@@ -123,7 +211,9 @@ async fn when_active_session_requests_completions(
         .send_request(ClientRequest::Suggest(request))
         .await
         .unwrap_or_else(|error| panic!("failed to send request '{name}': {error}"));
-    world.session_requests.insert(name, request_id);
+    world
+        .session_requests
+        .insert(name, NamedRequest::other(request_id));
 }
 
 #[then(expr = "request {string} suggests {string}")]
@@ -317,7 +407,9 @@ async fn when_active_session_sends_malformed_reference(
         .send_altered(&original, &variant, reference.as_bytes())
         .await
         .unwrap_or_else(|error| panic!("failed to send request '{name}': {error}"));
-    world.session_requests.insert(name, request_id);
+    world
+        .session_requests
+        .insert(name, NamedRequest::other(request_id));
 }
 
 #[when(
@@ -358,7 +450,9 @@ async fn when_active_session_sends_split_cursor(
         .send_altered(&original, &variant, &[cursor_byte])
         .await
         .unwrap_or_else(|error| panic!("failed to send request '{name}': {error}"));
-    world.session_requests.insert(name, request_id);
+    world
+        .session_requests
+        .insert(name, NamedRequest::other(request_id));
 }
 
 #[when(expr = "the active session sends request {string} completing with invalid page size {int}")]
@@ -384,7 +478,9 @@ async fn when_active_session_sends_invalid_page_size(
         .send_altered(&suggestion(1), &suggestion(2), &[page_size])
         .await
         .assured("the connected scenario session sends the altered page size");
-    world.session_requests.insert(name, request_id);
+    world
+        .session_requests
+        .insert(name, NamedRequest::other(request_id));
 }
 
 #[then(expr = "request {string} is rejected as an invalid request naming {string}")]
@@ -426,6 +522,41 @@ async fn then_active_session_is_ended_for_violating_protocol(world: &mut Scenari
     assert!(
         matches!(ending, Some(SessionEndReason::ProtocolViolated { .. })),
         "the session must end for violating the protocol, ended with {ending:?} and {status:?}"
+    );
+}
+
+#[when("the node serving the active session is stopped")]
+async fn when_node_serving_active_session_is_stopped(world: &mut ScenarioWorld) {
+    let node = world
+        .active_session_node
+        .clone()
+        .verified("the step that opened the active session recorded the node serving it");
+    world
+        .cluster_mut()
+        .stop_node(&node)
+        .await
+        .unwrap_or_else(|error| panic!("node '{node}' did not stop: {error}"));
+}
+
+#[then("the active session ends because its node is shutting down")]
+async fn then_active_session_ends_because_its_node_is_shutting_down(world: &mut ScenarioWorld) {
+    let session = active_session(world);
+    let status = session
+        .wait_until_ended(SESSION_END_TIMEOUT)
+        .await
+        .unwrap_or_else(|error| panic!("the session did not end: {error}"));
+    let ending = session.ending().cloned();
+    assert_eq!(
+        ending,
+        Some(SessionEndReason::ServerShuttingDown),
+        "the session must be told that its node is shutting down; it ended with {ending:?} and \
+         {status:?}"
+    );
+    assert_eq!(
+        status.code(),
+        tonic::Code::Ok,
+        "the call must end after the session's ending rather than fail with its connection: \
+         {status:?}"
     );
 }
 
@@ -518,10 +649,10 @@ pub(crate) fn assert_reports_moved_leadership(message: &str) {
 }
 
 /// The proposal of a command execution a scenario names.
-fn command_write(write: &str) -> nervix_consensus::CommandWrite {
+fn command_write(write: &str) -> CommandRefusalPhase {
     match write {
-        "admission" => nervix_consensus::CommandWrite::Admission,
-        "finalization" => nervix_consensus::CommandWrite::Finalization,
+        "admission" => CommandRefusalPhase::Admission,
+        "finalization" => CommandRefusalPhase::Finalization,
         other => panic!("a scenario names a command's admission or finalization, not '{other}'"),
     }
 }
@@ -546,10 +677,15 @@ async fn given_leader_refuses_command_write_as_lapsed_lease(
     execution_reference: String,
 ) {
     let reference = scenario_execution_reference(world, &execution_reference);
+    let write = command_write(&write);
     world
         .fault_injection
-        .refuse_command_write_as_lapsed_lease(reference, command_write(&write))
+        .refuse_command_write_as_lapsed_lease(reference.clone(), write.into())
         .await;
+    append_cucumber_log_line(&format!(
+        "armed {write:?} lease refusal for execution reference {reference}"
+    ));
+    world.command_probes.arm_refusal(reference, write);
 }
 
 #[then(
@@ -565,7 +701,7 @@ async fn then_leader_refused_command_write_as_lapsed_lease(
     assert!(
         world
             .fault_injection
-            .command_write_refused_as_lapsed_lease(&reference, command_write(&write))
+            .command_write_refused_as_lapsed_lease(&reference, command_write(&write).into())
             .await,
         "no node refused the {write} of execution reference '{reference}' as armed"
     );
@@ -730,7 +866,9 @@ async fn when_active_session_inspects_attached_transaction(
         .send_request(ClientRequest::InspectTransaction(request))
         .await
         .unwrap_or_else(|error| panic!("failed to send request '{name}': {error}"));
-    world.session_requests.insert(name, request_id);
+    world
+        .session_requests
+        .insert(name, NamedRequest::other(request_id));
 }
 
 #[then(expr = "request {string} is refused because no transaction is attached")]
@@ -777,7 +915,9 @@ async fn when_active_session_sends_unsubscribe(
         .send_unsubscribe(subscription)
         .await
         .unwrap_or_else(|error| panic!("failed to send request '{name}': {error}"));
-    world.session_requests.insert(name, request_id);
+    world
+        .session_requests
+        .insert(name, NamedRequest::other(request_id));
 }
 
 #[then(expr = "request {string} deleted subscription {string}")]
