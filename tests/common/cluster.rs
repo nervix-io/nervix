@@ -2051,11 +2051,12 @@ impl Cluster {
             // scenario releases it after observing scheduling with the bootstrap node leading.
             self.start_restarted_nodes_together(construction, None)
                 .await?;
-            let leader = self.wait_for_leader_among_running().await?;
-            if leader != bootstrap {
-                self.transfer_leadership(&leader, &bootstrap);
-            }
-            self.wait_for_leader(&bootstrap, Some(&bootstrap)).await?;
+            self.wait_for_leader_among_running().await?;
+            self.establish_restarted_bootstrap_leader(
+                &bootstrap,
+                construction.nested(STATUS_WAIT_BUDGET),
+            )
+            .await?;
             self.fault_injection
                 .begin_startup_voter_observation(&node_name(&bootstrap));
             return Ok(());
@@ -2081,6 +2082,47 @@ impl Cluster {
         }
 
         Ok(())
+    }
+
+    /// Establishes this fixture's observer as leader even if the startup election changes
+    /// between observation and delivery of a transfer request. OpenRaft ignores a transfer
+    /// delivered to a follower, so a request belongs to an observed leader and term.
+    async fn establish_restarted_bootstrap_leader(
+        &self,
+        bootstrap: &str,
+        deadline: PhaseDeadline,
+    ) -> io::Result<()> {
+        let mut requested = BTreeSet::new();
+        let mut last_status = None;
+        let mut last_failure = None;
+        while !deadline.has_passed() {
+            nervix_primitives::task::consume_budget().await;
+            match self.cluster_status(bootstrap, deadline).await {
+                Ok(status) => {
+                    if status.current_leader.as_deref() == Some(bootstrap)
+                        && status.raft_state.as_deref() == Some("Leader")
+                    {
+                        return Ok(());
+                    }
+                    if let (Some(leader), Some(term)) =
+                        (&status.current_leader, status.current_term)
+                        && leader != bootstrap
+                        && requested.insert((leader.clone(), term))
+                    {
+                        self.transfer_leadership(leader, bootstrap);
+                    }
+                    last_status = Some(status.raw);
+                }
+                Err(failure) => last_failure = Some(failure),
+            }
+            deadline.pause(POLL_INTERVAL).await;
+        }
+        Err(io::Error::other(format!(
+            "timed out after {:?} establishing restarted bootstrap '{bootstrap}' as leader; \
+             requested transfers: {requested:?}; last status: {last_status:?}; \
+             last failure: {last_failure:?}",
+            deadline.elapsed()
+        )))
     }
 
     pub(crate) async fn wait_for_leader(
@@ -5255,6 +5297,7 @@ async fn publish_secure_websocket(
 struct ClusterStatus {
     raw: String,
     current_leader: Option<String>,
+    current_term: Option<u64>,
     raft_state: Option<String>,
     last_applied: Option<u64>,
     membership: BTreeMap<String, String>,
@@ -5264,6 +5307,7 @@ struct ClusterStatus {
 impl ClusterStatus {
     fn parse(raw: String) -> Self {
         let mut current_leader = None;
+        let mut current_term = None;
         let mut raft_state = None;
         let mut last_applied = None;
         let mut membership = BTreeMap::new();
@@ -5277,6 +5321,10 @@ impl ClusterStatus {
                 if trimmed != "(none)" {
                     current_leader = Some(trimmed.to_string());
                 }
+            }
+
+            if let Some(value) = line.strip_prefix("raft.current_term: ") {
+                current_term = value.trim().parse::<u64>().ok();
             }
 
             if let Some(value) = line.strip_prefix("raft.state: ") {
@@ -5322,6 +5370,7 @@ impl ClusterStatus {
         Self {
             raw,
             current_leader,
+            current_term,
             raft_state,
             last_applied,
             membership,

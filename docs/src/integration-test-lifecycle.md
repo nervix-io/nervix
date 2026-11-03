@@ -2006,8 +2006,12 @@ ready, it waits for each to catch up with the leader and then for the same conve
 Starting the nodes one after another would hold the last voter back by every earlier node's startup.
 On a loaded host that can outlast the ten-second grace a newly started leader gives voters it has
 not yet observed before it fails their work over, as [Control Plane](./control-plane.md) describes.
-The restarted-voter observation fixture also starts all nodes together, then transfers leadership
-to the bootstrap node if needed. It waits for the held voter's catch-up after releasing its
+The restarted-voter observation fixture also starts all nodes together, then establishes the
+bootstrap node as leader. It requests a transfer once for each observed non-bootstrap leader and
+term: OpenRaft ignores a request delivered to a follower, so a startup leadership change must not
+leave the fixture waiting on a request addressed to a former leader. The original cluster-state
+deadline bounds these observations and requests; the fixture releases its reconciliation gate
+only after the bootstrap node reports itself leading. It waits for the held voter's catch-up after releasing its
 scheduling barrier. Adding a node, or starting one a
 scenario stopped, spends one 84-second node startup and the catch-up that follows it; adding a node
 also repeats the convergence checks. A node started while its consensus connectivity is blocked
