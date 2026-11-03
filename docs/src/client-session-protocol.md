@@ -950,14 +950,16 @@ recover the outcome later, within the retry validity.
 
 The Rust client bounds each connection attempt by `connect_timeout` (10 seconds by default), each
 request by `request_timeout` (120 seconds), and each public call, including all of its retries and
-redirects, by `retry_timeout` (120 seconds). Without keepalives, a request that outlives
-`request_timeout` is the client's only sign that its session may be dead, so it ends every request
-still waiting on that session, and the next request opens a new one. While an election converges it
-retries with a delay that starts at 100 milliseconds and doubles up to one second. When a call's
-deadline passes before a command's outcome is known, and the command may have been admitted, the
-call fails as uncertain and names the execution reference. The Rust client, the CLI, and the console
-never send `CancelRequest`: a caller that stops waiting only drops its waiter, and the reply, when
-it comes, is discarded.
+redirects, by `retry_timeout` (120 seconds). A `BACKUP` takes `backup_wait_timeout` in place of
+both: its replies and every redirect and reconnect it makes share that one deadline, so a backup
+keeps reconnecting through an outage longer than `retry_timeout`. Without keepalives, a request
+that outlives `request_timeout` is the client's only sign that its session may be dead, so it ends
+every request still waiting on that session, and the next request opens a new one. While an
+election converges it retries with a delay that starts at 100 milliseconds and doubles up to one
+second. When a call's deadline passes before a command's outcome is known, and the command may have
+been admitted, the call fails as uncertain and names the execution reference. The Rust client, the
+CLI, and the console never send `CancelRequest`: a caller that stops waiting only drops its waiter,
+and the reply, when it comes, is discarded.
 
 `nervix-cli backup --timeout` sets only each running domain's quiesce timeout; its request and
 retry budgets stay at their defaults, and `--backup-wait-timeout` bounds the overall command wait.

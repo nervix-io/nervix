@@ -298,6 +298,7 @@ tags = [
   "@client_io_03_generation",
   "@remote_ack_owners",
   "@backup_wait",
+  "@client_wire_backup_outage",
   "@stopped_checkpoint_writes",
   "@backup_cut_diagnostics",
   "@backup_parked_wait",
@@ -1797,6 +1798,16 @@ scenario = "A bounded native wait recovers the original multi-domain backup afte
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Native-client session recovery of a backup whose session a stopped TCP forwarder ended: reconnect attempts until the forwarder restarts after the client's retry budget has passed, the repeated command under its reference, and the archive download. Existing client, storage and cluster lifecycle locks are tracked; the reconnect backoff, command-retry asynchronous waits and the forwarder's sockets are untracked."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "scenario.client-wire-backup-outage"
+invariant = "A backup whose session is lost keeps reconnecting until its own wait deadline, past the client's retry budget, and completes under its original execution reference with a verified archive on one and three nodes."
+invocation = "scenarios"
+scenario = "A native backup waits through an outage longer than its retry budget on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Client command and pending-reply lifetimes while two delayed domain cuts each stay within their own budget and together exceed the ordinary request budget."
 examples = 2
 feature = "tests/features/cluster/backup_wait.feature"
@@ -2537,6 +2548,16 @@ scenario = "A cluster backup recovers a first-domain lease release refused by a 
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
+coverage = "Under scheduling stress: native-client session recovery of a backup across a TCP forwarder outage longer than its retry budget, the repeated command under its reference, and the archive download. The reconnect backoff, command-retry asynchronous waits and the forwarder's sockets are untracked."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "stress.client-wire-backup-outage"
+invariant = "A backup whose session is lost keeps reconnecting until its own wait deadline, past the client's retry budget, and completes under its original execution reference with a verified archive on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "A native backup waits through an outage longer than its retry budget on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
 coverage = "Under scheduling stress: client command and pending-reply lifetimes while two delayed domain cuts each stay within their own budget and together exceed the ordinary request budget."
 examples = 2
 feature = "tests/features/cluster/backup_wait.feature"
@@ -3220,11 +3241,13 @@ workloads = [
   "scenario.backup-lease-release-recovery",
   "scenario.backup-native-recovery",
   "scenario.backup-multi-domain-wait",
+  "scenario.client-wire-backup-outage",
   "stress.paced.reopen-generation",
   "stress.paced.delayed-refusal",
   "stress.backup-lease-release-recovery",
   "stress.backup-native-recovery",
   "stress.backup-multi-domain-wait",
+  "stress.client-wire-backup-outage",
 ]
 
 [[owner]]

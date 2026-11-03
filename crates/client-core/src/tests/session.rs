@@ -28,7 +28,7 @@ use nervix_primitives::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
-        mpsc,
+        mpsc, oneshot,
     },
     task::JoinHandle,
 };
@@ -50,6 +50,8 @@ use crate::{
     Client, ClientError, CommandDisposition, ConnectDns, ConnectOptions, DomainName, Leadership,
     OutcomeOrigin, ResourceUploadIdentity, ResourceUploadOutcome, SubscriptionEvent,
     SubscriptionLifecycle, SubscriptionRequest,
+    connection::{GrpcConnector, ServerDirectory},
+    exchange::{Exchange, SessionEvents},
     wire::{
         Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection,
         ChoiceStatus, ChoiceTarget, ChoiceValue, ClientFrame, ClientMessage, ClientRequest,
@@ -188,6 +190,8 @@ struct ReceivedUpload {
 #[derive(Clone)]
 struct SessionService {
     exchanges: mpsc::Sender<ServerExchange>,
+    /// The hold the next exchange the client opens waits on before the server answers it.
+    exchange_hold: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
     uploads: mpsc::Sender<ReceivedUpload>,
     fail_upload_replies: Arc<AtomicU64>,
     upload_reply_mode: Arc<Mutex<Option<UploadReplyMode>>>,
@@ -220,6 +224,7 @@ impl Service<http::Request<Body>> for SessionService {
                 let mut grpc = Grpc::new(ServerExchangeCodec::new(limits()));
                 let exchange = OpenExchange {
                     exchanges: service.exchanges,
+                    hold: service.exchange_hold,
                 };
                 Ok(grpc.streaming(exchange, request).await)
             }),
@@ -239,9 +244,11 @@ impl Service<http::Request<Body>> for SessionService {
     }
 }
 
-/// Hands every exchange the client opens to the test.
+/// Hands every exchange the client opens to the test, and answers it once the hold the test
+/// placed on it, if any, is released.
 struct OpenExchange {
     exchanges: mpsc::Sender<ServerExchange>,
+    hold: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
 }
 
 impl StreamingService<VerifiedFrame<ClientFrame>> for OpenExchange {
@@ -251,7 +258,9 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for OpenExchange {
 
     fn call(&mut self, request: Request<Streaming<VerifiedFrame<ClientFrame>>>) -> Self::Future {
         let exchanges = self.exchanges.clone();
+        let hold = self.hold.clone();
         Box::pin(async move {
+            let held = hold.lock().await.take();
             let (frames, outbound) = mpsc::channel(64);
             let exchange = ServerExchange {
                 requests: request.into_inner(),
@@ -260,8 +269,27 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for OpenExchange {
             if exchanges.send(exchange).await.is_err() {
                 return Err(Status::unavailable("the test takes no more exchanges"));
             }
+            if let Some(held) = held {
+                held.await.discarded(
+                    "a hold the test dropped without releasing it lets the server answer too",
+                );
+            }
             Ok(Response::new(ReceiverStream::new(outbound)))
         })
+    }
+}
+
+/// A hold on the server's answer to the next exchange the client opens.
+struct ExchangeHold {
+    release: oneshot::Sender<()>,
+}
+
+impl ExchangeHold {
+    /// Lets the server answer the held exchange.
+    fn release(self) {
+        self.release.send(()).discarded(
+            "an exchange the client abandoned while it was held has no answer left to release",
+        );
     }
 }
 
@@ -380,6 +408,7 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for InstallUpload {
 struct TestServer {
     address: SocketAddr,
     exchanges: mpsc::Receiver<ServerExchange>,
+    exchange_hold: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
     uploads: mpsc::Receiver<ReceivedUpload>,
     fail_upload_replies: Arc<AtomicU64>,
     upload_reply_mode: Arc<Mutex<Option<UploadReplyMode>>>,
@@ -406,11 +435,13 @@ impl TestServer {
             .local_addr()
             .assured("a bound listener has an address");
         let (exchange_sender, exchanges) = mpsc::channel(4);
+        let exchange_hold = Arc::new(Mutex::new(None));
         let (upload_sender, uploads) = mpsc::channel(4);
         let fail_upload_replies = Arc::new(AtomicU64::new(0));
         let upload_reply_mode = Arc::new(Mutex::new(None));
         let service = SessionService {
             exchanges: exchange_sender,
+            exchange_hold: exchange_hold.clone(),
             uploads: upload_sender,
             fail_upload_replies: fail_upload_replies.clone(),
             upload_reply_mode: upload_reply_mode.clone(),
@@ -425,6 +456,7 @@ impl TestServer {
         Self {
             address,
             exchanges,
+            exchange_hold,
             uploads,
             fail_upload_replies,
             upload_reply_mode,
@@ -442,10 +474,52 @@ impl TestServer {
         .assured("the client connects to the test server")
     }
 
+    /// Connects a client whose session starts in the `tenant` domain and whose calls run under
+    /// `options`, bounding the session's setup by this fixture's deadline alone.
+    ///
+    /// `Client::connect_with_options` is itself a call under the client's retry budget, so a test
+    /// that shortens the budgets for the call it examines would otherwise race them while the
+    /// session is still being set up. This server shares the test's runtime thread, and on a loaded
+    /// host opening a session against it can take longer than such a budget. The session opens
+    /// through the client's own connector and exchange, as `Client::connect_with_options` opens
+    /// it on its first server.
+    async fn connect_with(&self, options: ConnectOptions) -> Client {
+        let server = Url::parse(&format!("http://{}", self.address))
+            .assured("the test server is an HTTP origin");
+        let mut connector = GrpcConnector::new(options)
+            .assured("options without credentials build no authorization metadata");
+        within_deadline(connector.load_dns())
+            .await
+            .assured("the system DNS configuration loads");
+        let channel = within_deadline(connector.connect(&server))
+            .await
+            .assured("the client reaches the test server");
+        let events = SessionEvents::new();
+        let exchange =
+            within_deadline(Exchange::open(channel, &connector, events.emitters.clone()))
+                .await
+                .assured("the test server accepts the session");
+        let mut servers = ServerDirectory::with_seeds(server.clone(), connector.seed_servers());
+        servers.connected(&server);
+        Client::assemble(exchange, events, connector, Some(domain("tenant")), servers)
+    }
+
     async fn next_exchange(&mut self) -> ServerExchange {
         within_deadline(self.exchanges.recv())
             .await
             .assured("the server keeps handing exchanges to the test")
+    }
+
+    /// Makes the server answer the next exchange the client opens only once the returned hold is
+    /// released. The test receives that exchange as soon as the client opens it.
+    async fn hold_next_exchange(&self) -> ExchangeHold {
+        let (release, held) = oneshot::channel();
+        let previous = self.exchange_hold.lock().await.replace(held);
+        assert!(
+            previous.is_none(),
+            "the server holds one exchange at a time"
+        );
+        ExchangeHold { release }
     }
 
     /// Stops serving and waits until the listener is closed, so a client connecting afterwards is
@@ -714,7 +788,10 @@ async fn a_closed_session_recovers_through_a_configured_seed() {
     let recovered_requests = client.inner.exchange.lock().await.requests();
     assert!(matches!(
         client
-            .recover_session(crate::client::RecoveryMode::IfClosed)
+            .recover_session(
+                crate::client::RecoveryMode::IfClosed,
+                crate::client::RecoveryDeadline::RetryBudget,
+            )
             .await,
         Ok(crate::client::SessionRecovery::Ready)
     ));
@@ -960,18 +1037,13 @@ async fn lost_begin_append_and_commit_replies_retry_the_exact_request() {
 #[nervix_primitives::test]
 async fn an_unanswered_command_ends_with_a_reusable_uncertain_identity() {
     let mut server = TestServer::start().await;
-    let options = ConnectOptions {
-        request_timeout: Duration::from_millis(50),
-        retry_timeout: Duration::from_millis(250),
-        ..ConnectOptions::default()
-    };
-    let client = within_deadline(Client::connect_with_options(
-        format!("http://{}", server.address),
-        Some(domain("tenant")),
-        options,
-    ))
-    .await
-    .assured("the test server accepts the session");
+    let client = server
+        .connect_with(ConnectOptions {
+            request_timeout: Duration::from_millis(50),
+            retry_timeout: Duration::from_millis(250),
+            ..ConnectOptions::default()
+        })
+        .await;
     let mut exchange = server.next_exchange().await;
     let execution = client.prepare_execution("SHOW CLUSTER STATUS;").await;
     let expected = execution.reference().clone();
@@ -1000,19 +1072,14 @@ async fn backup_waits_beyond_ordinary_request_and_retry_deadlines() {
     for prepared in [false, true] {
         nervix_primitives::task::consume_budget().await;
         let mut server = TestServer::start().await;
-        let options = ConnectOptions {
-            request_timeout: Duration::from_millis(50),
-            retry_timeout: Duration::from_millis(50),
-            backup_wait_timeout: Duration::from_secs(2),
-            ..ConnectOptions::default()
-        };
-        let client = Client::connect_with_options(
-            format!("http://{}", server.address),
-            Some(domain("tenant")),
-            options,
-        )
-        .await
-        .assured("the backup client connects");
+        let client = server
+            .connect_with(ConnectOptions {
+                request_timeout: Duration::from_millis(50),
+                retry_timeout: Duration::from_millis(50),
+                backup_wait_timeout: Duration::from_secs(2),
+                ..ConnectOptions::default()
+            })
+            .await;
         let mut exchange = server.next_exchange().await;
         let task = nervix_primitives::task::spawn(async move {
             let query = "BACKUP CLUSTER TO 'cluster.nvxb' TIMEOUT 1s;";
@@ -1052,32 +1119,38 @@ async fn backup_waits_beyond_ordinary_request_and_retry_deadlines() {
     }
 }
 
+/// A backup whose session is lost reconnects and repeats its command under the same reference
+/// within its own wait, even though the new session opens only after the ordinary request and
+/// retry budgets have passed.
 #[nervix_primitives::test]
 async fn backup_reconnects_with_the_same_reference_within_its_wait_budget() {
     let mut server = TestServer::start().await;
-    let client = Client::connect_with_options(
-        format!("http://{}", server.address),
-        Some(domain("tenant")),
-        ConnectOptions {
+    let client = server
+        .connect_with(ConnectOptions {
             request_timeout: Duration::from_millis(50),
             retry_timeout: Duration::from_millis(50),
             backup_wait_timeout: Duration::from_secs(2),
             ..ConnectOptions::default()
-        },
-    )
-    .await
-    .assured("the backup client connects");
+        })
+        .await;
     let mut exchange = server.next_exchange().await;
-    let task = nervix_primitives::task::spawn(async move {
+    let mut task = nervix_primitives::task::spawn(async move {
         client.execute("BACKUP CLUSTER TO 'cluster.nvxb';").await
     });
     let first = exchange.next_request().await;
     let ClientRequest::Command(first_command) = first.request else {
         panic!("a backup is a command");
     };
+    let hold = server.hold_next_exchange().await;
     drop(exchange);
     let mut recovered_exchange = server.next_exchange().await;
-    let recovered = recovered_exchange.next_request().await;
+    nervix_primitives::time::sleep(Duration::from_millis(150)).await;
+    hold.release();
+    let recovered = nervix_primitives::select! {
+        biased;
+        ended = &mut task => panic!("the backup ended while its new session opened: {ended:?}"),
+        recovered = recovered_exchange.next_request() => recovered,
+    };
     let ClientRequest::Command(command) = recovered.request else {
         panic!("the backup is retried");
     };
@@ -1103,6 +1176,90 @@ async fn backup_reconnects_with_the_same_reference_within_its_wait_budget() {
         .await
         .assured("the waiter finishes")
         .assured("the backup survives the session loss");
+    assert_eq!(outcome.disposition, CommandDisposition::Failed);
+}
+
+/// A backup redirected to a leader it cannot reach recovers its session on the server it knows
+/// and repeats its command there under the same reference, within its own wait, even though that
+/// session opens only after the ordinary request and retry budgets have passed.
+#[nervix_primitives::test]
+async fn backup_redirected_to_an_unreachable_leader_recovers_within_its_wait_budget() {
+    let mut server = TestServer::start().await;
+    let unused = TcpListener::bind("127.0.0.1:0")
+        .await
+        .assured("loopback accepts a test listener");
+    let unreachable = unused
+        .local_addr()
+        .assured("a bound listener has an address");
+    drop(unused);
+    let client = server
+        .connect_with(ConnectOptions {
+            request_timeout: Duration::from_millis(50),
+            retry_timeout: Duration::from_millis(50),
+            backup_wait_timeout: Duration::from_secs(2),
+            ..ConnectOptions::default()
+        })
+        .await;
+    let mut exchange = server.next_exchange().await;
+    let mut task = nervix_primitives::task::spawn(async move {
+        client.execute("BACKUP CLUSTER TO 'cluster.nvxb';").await
+    });
+    let first = exchange.next_request().await;
+    let ClientRequest::Command(first_command) = first.request else {
+        panic!("a backup is a command");
+    };
+    let leader =
+        Url::parse(&format!("http://{unreachable}")).assured("the leader is an HTTP origin");
+    let hold = server.hold_next_exchange().await;
+    exchange
+        .reply(
+            first.request_id,
+            command_outcome(
+                &first_command.execution_reference,
+                CommandDisposition::NotLeader(LeaderRedirect {
+                    leader: Some(NodeEndpoints {
+                        node: node("leader"),
+                        grpc_uri: Some(leader),
+                        web_console_uri: None,
+                    }),
+                }),
+                "follow the leader",
+            ),
+            &limits(),
+        )
+        .await;
+    let mut recovered_exchange = server.next_exchange().await;
+    nervix_primitives::time::sleep(Duration::from_millis(150)).await;
+    hold.release();
+    let recovered = nervix_primitives::select! {
+        biased;
+        ended = &mut task => panic!("the backup ended while its new session opened: {ended:?}"),
+        recovered = recovered_exchange.next_request() => recovered,
+    };
+    let ClientRequest::Command(command) = recovered.request else {
+        panic!("the backup is retried");
+    };
+    assert_eq!(command.query, first_command.query);
+    assert_eq!(command.domain, first_command.domain);
+    assert_eq!(
+        command.execution_reference,
+        first_command.execution_reference
+    );
+    recovered_exchange
+        .reply(
+            recovered.request_id,
+            command_outcome(
+                &command.execution_reference,
+                CommandDisposition::Failed,
+                "a recovered terminal failure",
+            ),
+            &limits(),
+        )
+        .await;
+    let outcome = within_deadline(task)
+        .await
+        .assured("the waiter finishes")
+        .assured("the backup survives the unreachable leader");
     assert_eq!(outcome.disposition, CommandDisposition::Failed);
 }
 
@@ -2728,7 +2885,10 @@ async fn a_reconnected_session_restores_subscriptions_before_it_attaches_its_tra
     let recovering = client.clone();
     let recovery = nervix_primitives::task::spawn(async move {
         recovering
-            .recover_session(crate::client::RecoveryMode::IfClosed)
+            .recover_session(
+                crate::client::RecoveryMode::IfClosed,
+                crate::client::RecoveryDeadline::RetryBudget,
+            )
             .await
             .map(|_| ())
     });

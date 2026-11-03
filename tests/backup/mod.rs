@@ -51,6 +51,19 @@ pub(crate) struct TestBackup {
     summary: BackupArchiveSummary,
 }
 
+/// A backup a native client runs in the background while the scenario interrupts its session.
+pub(crate) struct BackgroundNativeBackup {
+    /// The execution reference the client prepared before it sent the backup.
+    reference: CommandExecutionReference,
+    /// The file the client writes the archive to.
+    archive: PathBuf,
+    /// How long the client waits for the backup's outcome, every reconnect included.
+    wait: Duration,
+    task: AbortOnDropHandle<
+        error_stack::Result<nervix_client_core::CommandOutcome, nervix_client_core::ClientError>,
+    >,
+}
+
 /// The slowest three-node restore the CLI completed in the scenarios jobs of Check runs
 /// 39683355582 and 39683521277, both on slow runners, rounded up: 291 seconds for a 42 MB archive,
 /// and up to 260 seconds for the 84 MB keyspace and window archives. Restores that took longer

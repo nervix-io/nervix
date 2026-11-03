@@ -31,7 +31,7 @@ use tokio_tar::{Builder as AsyncTarBuilder, EntryType, Header, HeaderMode};
 use tonic::{Request, Response, Status, codegen::http::uri::PathAndQuery, transport::Channel};
 
 use crate::{
-    client::{Client, RecoveryMode, SessionRecovery},
+    client::{Client, RecoveryDeadline, RecoveryMode, SessionRecovery},
     connection::GrpcConnector,
     error::{ClientError, RequestKind},
     exchange::SESSION_LIMITS,
@@ -131,7 +131,13 @@ impl Client {
                             if upload_status_is_retryable(&status)
                                 && Self::await_retry(attempt).await =>
                         {
-                            match self.recover_session(RecoveryMode::Replace).await? {
+                            match self
+                                .recover_session(
+                                    RecoveryMode::Replace,
+                                    RecoveryDeadline::RetryBudget,
+                                )
+                                .await?
+                            {
                                 SessionRecovery::Ready => continue,
                                 SessionRecovery::Unavailable => {
                                     return Err(Report::new(ClientError::UploadResource(status)));
@@ -170,7 +176,10 @@ impl Client {
                     }
                     let outcome = CommandOutcome::from_upload(reply, upload_identity.clone());
                     match outcome.routing() {
-                        Routing::Redirect(leader) => self.follow_leader(leader).await?,
+                        Routing::Redirect(leader) => {
+                            self.follow_leader(leader, RecoveryDeadline::RetryBudget)
+                                .await?
+                        }
                         Routing::AwaitElection if Self::await_retry(attempt).await => {}
                         _ => return Ok(outcome),
                     }

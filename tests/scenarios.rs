@@ -456,6 +456,8 @@ struct ScenarioWorld {
     last_backup: Option<backup::TestBackup>,
     /// A CLI backup paused at its quiesced cut while the scenario exercises other operations.
     background_backup: Option<AbortOnDropHandle<std::process::Output>>,
+    /// A native client's backup running while the scenario interrupts its session.
+    background_native_backup: Option<backup::BackgroundNativeBackup>,
     /// The exact CLI child started by the background-backup step, for cancellation assertions.
     background_backup_pid: Option<nix::unistd::Pid>,
     /// How the last backup download a scenario shaped itself ended.
@@ -9534,6 +9536,32 @@ async fn when_the_tcp_forwarder_stops(world: &mut ScenarioWorld, address: String
         .stop(address)
         .await
         .unwrap_or_else(|error| panic!("the forwarder at {address} could not stop: {error}"));
+}
+
+/// Stops the TCP forwarder at `address` and starts it again `seconds` later. Every session through
+/// it ends when it stops, and no client can open another through it until it starts again.
+#[when(expr = "the TCP forwarder at {string} stays stopped for {int} seconds and then restarts")]
+async fn when_the_tcp_forwarder_stays_stopped(
+    world: &mut ScenarioWorld,
+    address: String,
+    seconds: u64,
+) {
+    let address = address
+        .parse::<std::net::IpAddr>()
+        .assured("the scenario names a TCP forwarder address");
+    let forwarders = world
+        .tcp_forwarders
+        .as_mut()
+        .verified("the scenario started TCP forwarders");
+    forwarders
+        .stop(address)
+        .await
+        .unwrap_or_else(|error| panic!("the forwarder at {address} could not stop: {error}"));
+    nervix_primitives::time::sleep(Duration::from_secs(seconds)).await;
+    forwarders
+        .restart(address)
+        .await
+        .unwrap_or_else(|error| panic!("the forwarder at {address} could not restart: {error}"));
 }
 
 #[when(expr = "the TCP forwarder at {string} restarts")]
