@@ -1218,6 +1218,7 @@ async fn an_exchange_that_used_every_identity_takes_no_further_requests() {
     let mut pending = PendingReplies::Open {
         next_request_id: Some(RequestId::new(NonZeroU64::MAX)),
         waiters: ahash::HashMap::default(),
+        reader_ending: nervix_primitives::sync::watch::channel(()).0,
     };
     let last = pending
         .register()

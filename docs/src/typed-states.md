@@ -54,6 +54,11 @@ required, validates it there, and passes the resulting typed value to the next l
 the registry, execution plans, runtime, clients, and diagnostics from assigning different meanings
 to the same raw value.
 
+The native client's open request-registry variant owns the sender that keeps its exchange reader
+waiting for frames. Closing the registry drops that sender and its pending reply senders together.
+The closed variant owns neither: reader termination follows the typed state's lifetime, without a
+second boolean that can disagree with whether requests are admitted.
+
 A backup cut's active phase is a typed state. Its completed phase measurements are an ordered
 sequence of typed phases and durations; an empty sequence means the first phase is still active.
 These task-owned measurements are volatile diagnostics and do not enter stored configuration,

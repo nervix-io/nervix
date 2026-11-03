@@ -2416,6 +2416,12 @@ cases emits an early tick or silently clamps the interval.
 
 ### Rust Client, CLI And C Binding
 
+A native request deadline ends the exchange's request registry and wakes its frame reader. An
+unanswered subscription reopening therefore ends that session, with its normal interruption and
+recovery behavior; it does not report `RestorationFailed` on that ended session. A waiting event
+reader that knows no server for recovery returns `ClientError::SessionClosed`. Clock readers follow
+the same exchange ending even when another restoration's retry delay is still pending.
+
 Every call of the Rust client returns an `error_stack::Report<ClientError>`. Its current context is
 the failure a caller acts on, and the frames beneath keep the cause: a call's transport status, the
 wire codec's report beneath `EncodeRequest`, `InvalidUploadReply` or `InvalidRestoreReply`, the

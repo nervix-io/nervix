@@ -261,7 +261,7 @@ Feature: Web console Plexus REPL
     Given a 3 node nervix cluster is started
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    When the web console is opened on node "{{old_leader}}"
+    When the web console is opened on node "{{old_leader}}" through resettable endpoint "console"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".prompt-row input" is filled with "CREATE DOMAIN {{domain}};"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -273,12 +273,14 @@ Feature: Web console Plexus REPL
     When selector ".prompt-row input" is filled with "CREATE SCHEMA before_switchover ( value I64 );"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "quiesce level: DYNAMIC"
+    When the stallable endpoint "console" resets its connections
+    Then the web console reports each acknowledged clock attachment for domain "{{domain}}" exactly once per session after at least 2 sessions
     When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
     Then node "{{old_leader}}" eventually reports leader "{{new_leader}}"
     And selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".terminal" contains "connected to leader '{{new_leader}}'"
     And selector ".prompt-row" contains "{{domain}} tx"
-    And selector ".terminal" contains "domain clock [{{domain}}] attached" exactly 2 times
+    And the web console reports each acknowledged clock attachment for domain "{{domain}}" exactly once per session after at least 3 sessions
     Given command response delivery on node "{{new_leader}}" pauses after execution
     When selector ".prompt-row input" is filled with "CREATE SCHEMA after_switchover ( value I64 );"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -1433,12 +1435,12 @@ Feature: Web console Plexus REPL
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 30s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    When the web console is opened on node "{{old_leader}}"
+    When the web console is opened on node "{{old_leader}}" through resettable endpoint "console"
     Then selector ".graph-hit-layer" contains "raw_metrics"
     When selector ".prompt-row input" is filled with "CREATE SUBSCRIPTION restored_metrics TO raw_metrics;"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -1447,6 +1449,13 @@ Feature: Web console Plexus REPL
     And selector ".prompt-row input" is filled with "BEGIN;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".prompt-row" contains "{{domain}} tx"
+    When the next web console session frames are held
+    And the stallable endpoint "console" resets its connections
+    Then the replacement web console session frames are held
+    When the held replacement web console session frames are released
+    Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
+    When selector ".repl-toolbar button:has-text('Plexus REPL')" is clicked
+    Then the web console prompt is ready for input
     Given command response delivery on node "{{old_leader}}" pauses after execution
     When selector ".prompt-row input" is filled with "REVERT;"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -1455,12 +1464,16 @@ Feature: Web console Plexus REPL
     And leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
     Then selector ".terminal" contains "delivery interrupted"
     When the command response delivery pause on node "{{old_leader}}" is released
+    And selector ".repl-toolbar button:has-text('Plexus REPL')" is clicked
+    Then selector ".terminal" contains "connected to leader '{{new_leader}}'"
+    And selector ".prompt-row" does not contain "{{domain}} tx"
+    When selector ".subscription-tab .tab-main[data-subscription-title='raw_metrics']" is clicked by script
     Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
-    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+    When one http payload is posted with a completed graph acknowledgement to node "node-1" host "http-{{test_id}}.example.com" path "/metrics"
       """
       {"value":7}
       """
-    Then selector ".terminal" contains ":7}"
+    Then selector ".terminal" contains ":7}" exactly 1 times
 
   @client_wire24
   Scenario: Web console restores a relay tab before it attaches its open transaction again
@@ -1474,7 +1487,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 30s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then the current leader node is saved as placeholder "old_leader"
@@ -1492,14 +1505,81 @@ Feature: Web console Plexus REPL
     And leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
     Then selector ".terminal" contains "delivery interrupted"
     And selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
-    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+    When one http payload is posted with a completed graph acknowledgement to node "node-1" host "http-{{test_id}}.example.com" path "/metrics"
       """
       {"value":8}
       """
-    Then selector ".terminal" contains ":8}"
+    Then selector ".terminal" contains ":8}" exactly 1 times
     When selector ".repl-toolbar button:has-text('Plexus REPL')" is clicked
     Then selector ".terminal" contains "connected to leader '{{new_leader}}'"
     And selector ".prompt-row" contains "{{domain}} tx"
+
+  @client_wire24
+  Scenario Outline: Web console restores a relay tab and transaction after a gated reconnect
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA metric ( value I32 );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
+      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 30s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the web console is opened on node "{{leader}}" through resettable endpoint "console"
+    Then selector ".graph-hit-layer" contains "raw_metrics"
+    When selector ".prompt-row input" is filled with "CREATE SUBSCRIPTION restored_metrics TO raw_metrics;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
+    When selector ".repl-toolbar button:has-text('Plexus REPL')" is clicked
+    And selector ".prompt-row input" is filled with "BEGIN;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".prompt-row" contains "{{domain}} tx"
+    When the next web console session frames are held
+    And the stallable endpoint "console" resets its connections
+    Then the replacement web console session frames are held
+    When the held replacement web console session frames are released
+    Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
+    When selector ".repl-toolbar button:has-text('Plexus REPL')" is clicked
+    Then the web console prompt is ready for input
+    When selector ".prompt-row input" is filled with "CREATE SCHEMA after_reconnect ( value I64 );"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "quiesce level: DYNAMIC"
+    And the web console reports each acknowledged clock attachment for domain "{{domain}}" exactly once per session after at least 2 sessions
+    When selector ".subscription-tab .tab-main[data-subscription-title='raw_metrics']" is clicked by script
+    Then selector ".subscription-tab[data-subscription-state='active']" contains "RAW_METRICS"
+    When one http payload is posted with a completed graph acknowledgement to node "{{leader}}" host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":8}
+      """
+    Then selector ".terminal" contains ":8}" exactly 1 times
+    When selector ".repl-toolbar button:has-text('Plexus REPL')" is clicked
+    Then selector ".prompt-row" contains "{{domain}} tx"
+    When selector ".transaction-indicator" is pressed with "Enter"
+    Then selector ".transaction-inspector .inspector-summary" contains "1 accepted"
+    And selector ".transaction-inspector .inspector-item[data-name='after_reconnect']" contains "SCHEMA"
+    When selector ".transaction-inspector button[aria-label='Close transaction inspector']" is pressed with "Enter"
+    And selector ".prompt-row input" is filled with "COMMIT;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "quiesce level: DYNAMIC" exactly 2 times
+    And selector ".prompt-row" does not contain "{{domain}} tx"
+    When selector ".prompt-row input" is filled with "SHOW CREATE SCHEMA after_reconnect;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains
+      """
+      CREATE SCHEMA after_reconnect (
+        value I64
+      );
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   Scenario: Web console keeps relay subscription histories isolated while switching tabs
     Given a 1 node nervix cluster is started

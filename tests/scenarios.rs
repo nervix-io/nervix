@@ -237,6 +237,7 @@ mod rabbitmq_properties;
 mod restarted_voter;
 mod session_protocol;
 mod standalone_transaction;
+mod subscription_restoration;
 mod web_console_connections;
 mod websocket_lifecycle;
 
@@ -34811,6 +34812,11 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                         });
                 }
                 world.enter_phase(ScenarioPhase::BodyComplete, &format!("result={body}"));
+                if let ScenarioBodyResult::StepFailed(_) | ScenarioBodyResult::BeforeHookFailed =
+                    &body
+                {
+                    web_console_connections::record_browser_state(world).await;
+                }
 
                 world.enter_phase(ScenarioPhase::TeardownStarted, "");
                 world.stop_consensus_load();

@@ -412,8 +412,11 @@ reset. A genuine reset failure arrives as `RequestFailed` and follows the failur
   on the next session, unless the server ended it (S-4), and report the time between as a gap. If
   its user deletes a subscription while an opening or reopening is in flight, a late successful
   reply MUST be followed by an unsubscribe before the name is used again. When the new session
-  refuses the reopening, or leaves it unanswered, the client MUST report the refusal and SHOULD send
+  refuses the reopening, the client MUST report the refusal and SHOULD send
   it again on that session after a wait that grows with each refusal, rather than at a fixed rate. A
+  reopening left unanswered past the request timeout ends that session. Its reader MUST be woken
+  even when the transport remains connected, and MUST open the next session to restore the desired
+  subscription; the unanswered request is not a server refusal to retry on the ended session. A
   client MUST complete the deletion of a subscription no open session holds, because the session
   that held it ended or the current session refused to open it again, without sending
   `UnsubscribeRequest`, and MUST release its name; a deletion whose session ends before it is
