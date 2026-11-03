@@ -65,7 +65,11 @@ uuid = { workspace = true, features = ["v7"] }
 bolero = { workspace = true }
 nervix-model-harness = { workspace = true }
 nervix-test-environment = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tar = { workspace = true }
+tikv-jemalloc-ctl = { workspace = true }
+tikv-jemallocator = { workspace = true }
 tokio = { workspace = true, features = [
   "macros",
   "net",
@@ -74,3 +78,9 @@ tokio = { workspace = true, features = [
   "test-util",
   "time",
 ] }
+
+# Measures each stage a native client runs before it sends a command. `just client-wire-command-cost`
+# runs it in the release and debug profiles.
+[[bench]]
+harness = false
+name = "command_preparation"

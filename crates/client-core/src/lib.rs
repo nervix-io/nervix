@@ -98,7 +98,7 @@ pub struct QuerySplitError;
 
 /// Splits a batch into the exact Plexus source slices that should be submitted separately.
 pub fn split_query_statements(query: &str) -> error_stack::Result<Vec<&str>, QuerySplitError> {
-    let statements = nervix_plexus::client_statement::parse_client_statement_sources(query)
+    let statements = client::with_statement_grammar(|grammar| grammar.parse_sources(query))
         .change_context(QuerySplitError)?;
     Ok(statements
         .iter()

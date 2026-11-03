@@ -2,7 +2,10 @@ mod expression_completion;
 
 use std::ops::Range;
 
-use chumsky::prelude::*;
+use chumsky::{
+    cache::{Cache, Cached},
+    prelude::*,
+};
 use meticulous::OptionExt as _;
 use nervix_models::{
     Backup, BuiltinFunctionScope, CanonicalPlexusError, CreateSubscription, DeleteSubscription,
@@ -425,40 +428,147 @@ pub fn parse_upload_resource_query(
     crate::upload_resource::parse_upload_resource(input)
 }
 
+/// The client statement grammar, built once and reused for every statement parsed with it.
+///
+/// Building the grammar constructs the parser of every statement Plexus defines, which costs far
+/// more than parsing a short statement with it. A caller that parses repeatedly holds one grammar
+/// and parses with it; [`parse_client_statement`] and [`parse_client_statement_sources`] build a
+/// grammar for each call instead.
+///
+/// A grammar is not `Send`: its parsers share their parts through non-atomic reference counts, so
+/// a caller that parses on several threads holds one grammar on each of them.
+pub struct ClientStatementGrammar {
+    parser: Cache<ClientStatementParser>,
+}
+
+impl ClientStatementGrammar {
+    pub fn new() -> Self {
+        Self {
+            parser: Cache::new(ClientStatementParser),
+        }
+    }
+
+    /// Parses `input` as exactly one statement.
+    pub fn parse_statement(
+        &self,
+        input: &str,
+    ) -> error_stack::Result<ClientStatement, ParseFromSourceError> {
+        let lexed = lex_input(input)?;
+        let tokens = 0..lexed.tokens.len();
+        self.parse_lexed_statement(&lexed, tokens, input.len())
+    }
+
+    /// Parses a batch of semicolon-separated statements, keeping where each one sits in `input`.
+    ///
+    /// The batch is lexed once and every statement is parsed from its own run of those tokens. A
+    /// rejected statement is therefore reported against the whole batch: its diagnostics index
+    /// `input`, wherever in the batch that statement starts.
+    pub fn parse_sources(
+        &self,
+        input: &str,
+    ) -> error_stack::Result<Vec<ParsedClientStatement>, ParseFromSourceError> {
+        /// The statement being read: where its first token sits among the batch's tokens and in
+        /// the batch's source.
+        struct OpenStatement {
+            first_token: usize,
+            start: usize,
+        }
+
+        let lexed = lex_input(input)?;
+        let mut statements = Vec::new();
+        let mut open: Option<OpenStatement> = None;
+
+        for (index, token) in lexed.spanned_tokens.iter().enumerate() {
+            if token.token == Token::Semicolon {
+                // A segment is a statement only when it actually contains tokens, so a stray
+                // semicolon or a trailing comment does not become an empty statement.
+                if let Some(statement) = open.take() {
+                    let tokens = statement.first_token..index;
+                    let parsed = self.parse_lexed_statement(&lexed, tokens, token.span.start)?;
+                    statements.push(ParsedClientStatement {
+                        span: statement.start..token.span.end,
+                        statement: parsed,
+                    });
+                }
+            } else if open.is_none() {
+                open = Some(OpenStatement {
+                    first_token: index,
+                    start: token.span.start,
+                });
+            }
+        }
+
+        if let Some(statement) = open {
+            let end = match lexed.spanned_tokens.last() {
+                Some(token) => token.span.end,
+                None => input.len(),
+            };
+            let tokens = statement.first_token..lexed.spanned_tokens.len();
+            let parsed = self.parse_lexed_statement(&lexed, tokens, input.len())?;
+            statements.push(ParsedClientStatement {
+                span: statement.start..end,
+                statement: parsed,
+            });
+        }
+
+        Ok(statements)
+    }
+
+    /// Parses the one statement that `tokens` of `lexed` hold.
+    ///
+    /// The tokens keep the spans they have in the lexed source, so a rejection is located in that
+    /// whole source rather than in the statement alone, and its diagnostics index the text it
+    /// names. `source_end` is where the statement's source ends, at its terminating semicolon or at
+    /// the end of the source; a rejection that expected another token points there.
+    fn parse_lexed_statement(
+        &self,
+        lexed: &LexedInput,
+        tokens: Range<usize>,
+        source_end: usize,
+    ) -> error_stack::Result<ClientStatement, ParseFromSourceError> {
+        let spanned_tokens = &lexed.spanned_tokens[tokens.clone()];
+        let out = self.parser.get().parse(&lexed.tokens[tokens]);
+        if out.has_errors() {
+            return Err(into_parse_error(
+                lexed.source.clone(),
+                spanned_tokens,
+                source_end,
+                out.into_errors(),
+            ));
+        }
+        Ok(out
+            .into_output()
+            .verified("has_errors returned false above, so this parse produced output"))
+    }
+}
+
+impl Default for ClientStatementGrammar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Builds the parser a [`ClientStatementGrammar`] holds: one whole client statement, ending where
+/// the statement's tokens end.
+///
+/// The cache lets the one parser it builds read inputs of any lifetime. That holds because the
+/// parser captures nothing borrowed: `make_parser` builds it for a lifetime it cannot name.
+struct ClientStatementParser;
+
+impl Cached for ClientStatementParser {
+    type Parser<'src> =
+        Boxed<'src, 'src, &'src [Token], ClientStatement, extra::Err<ParseError<'src>>>;
+
+    fn make_parser<'src>(self) -> Self::Parser<'src> {
+        client_statement_parser().then_ignore(end()).boxed()
+    }
+}
+
+/// Parses `input` as exactly one statement, with a grammar built for this call.
 pub fn parse_client_statement(
     input: &str,
 ) -> error_stack::Result<ClientStatement, ParseFromSourceError> {
-    let lexed = lex_input(input)?;
-    let tokens = 0..lexed.tokens.len();
-    parse_lexed_client_statement(&lexed, tokens, input.len())
-}
-
-/// Parses the one statement that `tokens` of `lexed` hold.
-///
-/// The tokens keep the spans they have in the lexed source, so a rejection is located in that whole
-/// source rather than in the statement alone, and its diagnostics index the text it names.
-/// `source_end` is where the statement's source ends, at its terminating semicolon or at the end of
-/// the source; a rejection that expected another token points there.
-fn parse_lexed_client_statement(
-    lexed: &LexedInput,
-    tokens: Range<usize>,
-    source_end: usize,
-) -> error_stack::Result<ClientStatement, ParseFromSourceError> {
-    let spanned_tokens = &lexed.spanned_tokens[tokens.clone()];
-    let out = client_statement_parser()
-        .then_ignore(end())
-        .parse(&lexed.tokens[tokens]);
-    if out.has_errors() {
-        return Err(into_parse_error(
-            lexed.source.clone(),
-            spanned_tokens,
-            source_end,
-            out.into_errors(),
-        ));
-    }
-    Ok(out
-        .into_output()
-        .verified("has_errors returned false above, so this parse produced output"))
+    ClientStatementGrammar::new().parse_statement(input)
 }
 
 pub fn parse_client_statements(
@@ -472,57 +582,12 @@ pub fn parse_client_statements(
     })
 }
 
-/// Parses a batch of semicolon-separated statements, keeping where each one sits in `input`.
-///
-/// The batch is lexed once and every statement is parsed from its own run of those tokens. A
-/// rejected statement is therefore reported against the whole batch: its diagnostics index `input`,
-/// wherever in the batch that statement starts.
+/// Parses a batch of semicolon-separated statements, keeping where each one sits in `input`, with
+/// one grammar built for this call; see [`ClientStatementGrammar::parse_sources`].
 pub fn parse_client_statement_sources(
     input: &str,
 ) -> error_stack::Result<Vec<ParsedClientStatement>, ParseFromSourceError> {
-    /// The statement being read: where its first token sits among the batch's tokens and in the
-    /// batch's source.
-    struct OpenStatement {
-        first_token: usize,
-        start: usize,
-    }
-
-    let lexed = lex_input(input)?;
-    let mut statements = Vec::new();
-    let mut open: Option<OpenStatement> = None;
-
-    for (index, token) in lexed.spanned_tokens.iter().enumerate() {
-        if token.token == Token::Semicolon {
-            // A segment is a statement only when it actually contains tokens, so a stray
-            // semicolon or a trailing comment does not become an empty statement.
-            if let Some(statement) = open.take() {
-                let tokens = statement.first_token..index;
-                statements.push(ParsedClientStatement {
-                    span: statement.start..token.span.end,
-                    statement: parse_lexed_client_statement(&lexed, tokens, token.span.start)?,
-                });
-            }
-        } else if open.is_none() {
-            open = Some(OpenStatement {
-                first_token: index,
-                start: token.span.start,
-            });
-        }
-    }
-
-    if let Some(statement) = open {
-        let end = match lexed.spanned_tokens.last() {
-            Some(token) => token.span.end,
-            None => input.len(),
-        };
-        let tokens = statement.first_token..lexed.spanned_tokens.len();
-        statements.push(ParsedClientStatement {
-            span: statement.start..end,
-            statement: parse_lexed_client_statement(&lexed, tokens, input.len())?,
-        });
-    }
-
-    Ok(statements)
+    ClientStatementGrammar::new().parse_sources(input)
 }
 
 pub fn suggest_client_statement(input: &str, cursor: usize) -> Vec<String> {
@@ -1064,6 +1129,38 @@ mod tests {
                 .iter()
                 .all(|statement| matches!(statement, ClientStatement::Server(_)))
         );
+    }
+
+    /// A held grammar parses every input as a grammar built for that input does, after statements
+    /// of other kinds and after rejected ones, so a parse leaves nothing behind for the next.
+    #[test]
+    fn held_grammar_parses_as_a_grammar_built_for_each_input() {
+        let inputs = [
+            "DESCRIBE DOMAIN;",
+            "CREATE SCHEMA event ( seq I64 ); CREATE RELAY events SCHEMA event UNBRANCHED;",
+            "CREATE RELAY;",
+            "SHOW CLUSTER STATUS;",
+            "CREATE SCHEMA broken ( value BOGUS );",
+            "USE analytics; LIST DOMAINS;",
+            "-- a comment and no statement",
+            "CREATE DOMAIN 'never closed",
+            "BEGIN; COMMIT;",
+            "DESCRIBE DOMAIN;",
+        ];
+        let held = ClientStatementGrammar::new();
+        for input in inputs {
+            let reused = held.parse_sources(input);
+            let built = ClientStatementGrammar::new().parse_sources(input);
+            match (reused, built) {
+                (Ok(reused), Ok(built)) => assert_eq!(reused, built, "{input}"),
+                (Err(reused), Err(built)) => {
+                    assert_eq!(reused.current_context(), built.current_context(), "{input}");
+                }
+                (reused, built) => {
+                    panic!("{input}: a held grammar gave {reused:?} and a built one {built:?}")
+                }
+            }
+        }
     }
 
     #[test]

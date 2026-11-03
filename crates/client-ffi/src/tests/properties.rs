@@ -21,7 +21,7 @@ use nervix_models::Timestamp;
 use nervix_primitives::sync::Arc;
 
 use super::{Shared, handle, name, schema, succeeded};
-use crate::{Event, nx_event_frame, nx_event_release, nx_event_retain, schema::Part};
+use crate::{Event, Part, nx_event_frame, nx_event_release, nx_event_retain};
 
 fn check(bytes: &[u8]) {
     let mut arbitrary =

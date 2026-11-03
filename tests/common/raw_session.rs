@@ -51,7 +51,7 @@ use nervix_models::{
     ArchiveDigest, CommandExecutionReference, DomainName, ResourceName, ResourceUploadIdentity,
     RestoreArchive, SubscriptionName, TransactionPosition, TransactionStatus,
 };
-use nervix_plexus::client_statement::{ClientStatement, parse_client_statement_sources};
+use nervix_plexus::client_statement::{ClientStatement, ClientStatementGrammar};
 use nervix_primitives::{stream::wrappers::ReceiverStream, sync::mpsc, time::Instant};
 use tonic::{
     Request, Status, Streaming,
@@ -67,6 +67,18 @@ use super::cluster::{dev_tls_ca_pem, test_basic_authorization};
 /// reply arrives, so the bound is generous: a START that compiles a WASM processor on every node of a
 /// coverage-instrumented diagnostic build, on a loaded machine, has taken more than two minutes.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(300);
+
+nervix_primitives::thread_local! {
+    /// The statement grammar the harness reads statements with on this thread. A raw session
+    /// parses every command it routes, and building the grammar costs far more than parsing a
+    /// command with it.
+    static STATEMENT_GRAMMAR: ClientStatementGrammar = ClientStatementGrammar::new();
+}
+
+/// Lends `read` the statement grammar the harness reads statements with on this thread.
+pub(crate) fn with_statement_grammar<T>(read: impl FnOnce(&ClientStatementGrammar) -> T) -> T {
+    STATEMENT_GRAMMAR.with(read)
+}
 
 /// A row a subscription delivered, as a client displays it.
 #[derive(Debug, Clone)]
@@ -750,7 +762,8 @@ impl TestSession {
         if self.holds_transaction() {
             return false;
         }
-        let Ok(statements) = parse_client_statement_sources(query) else {
+        let parsed = with_statement_grammar(|grammar| grammar.parse_sources(query));
+        let Ok(statements) = parsed else {
             return false;
         };
         statements
@@ -1066,7 +1079,8 @@ impl TestSession {
     }
 
     fn route(query: &str) -> io::Result<CommandRoute> {
-        let Ok(statements) = parse_client_statement_sources(query) else {
+        let parsed = with_statement_grammar(|grammar| grammar.parse_sources(query));
+        let Ok(statements) = parsed else {
             return Ok(CommandRoute::Command);
         };
         let subscription_statements = statements

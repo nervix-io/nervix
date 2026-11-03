@@ -2473,9 +2473,13 @@ the whole server, so no build has to produce another file and no launch has to f
 `nervix-server`, and `main` reads `arg0` before it does anything else. A process of that name calls
 `run_server_process`, the entry point the `nervix-server` executable's own `main` calls, and none of
 the suite runs. Clap takes the program's name from the same `arg0`, so the command line a scenario
-reads is the product's. The dependency lifecycle helper is selected the same way. The one launch
-of another file is the client protocol's baseline, whose subject is a release build:
-`just client-wire-baseline` builds that server and names it to the suite.
+reads is the product's. The dependency lifecycle helper is selected the same way. The launches of
+another file are the client protocol's measurements, whose subject is a release build:
+`just client-wire-baseline` and `just client-wire-tls-cost` build that server and name it to the
+suite. The transport cost starts two such processes that differ only in their session listener: one
+serves plaintext gRPC, and the other serves TLS on the port a plaintext listener would use,
+presenting the development certificate in-process TLS nodes present. The process's readiness probe
+and the clients the fixture opens follow the listener's transport.
 
 Each launch has 120 seconds from its start until the process accepts commands. Reading the
 executable, spawning the process and waiting for its readiness share that one deadline, and a
@@ -2962,6 +2966,16 @@ probe drives the shared Rust binding's C ABI from a blocking task of the binary'
 every call of the binding blocks its caller; every other probe is a child process that the fixture
 starts with its target in `NERVIX_PROBE_*` variables and its standard input closed. A probe prints
 one report line per observation on standard output, and the fixture keeps every line it read.
+
+The row-conformance exercise waits for every node to agree on its leader and starts on a different
+node when the cluster has one, logging both identities. Its independent Go, Node.js and Bun probes
+first create an otherwise unused schema, a leader-only command, and must report its redirect and
+preserve the harness-supplied UUIDv7 execution reference across the original request, the repeated
+request and the terminal outcome. The fixture compares all three
+references with its own expected value; merely completing the operation does not qualify the
+redirect. Go exercises the native command-reply redirect and TypeScript the console's
+`SessionEnding{LeaderRedirect}`, with subsequent subscription traffic on the replacement session.
+The one-node examples retain the same row oracle as direct-connection controls.
 
 A probe's waits are bounded twice. The step that starts it waits at most 180 seconds for the line
 that says its subscription is open or its clock attach completed. A later step can wait, for the
