@@ -316,11 +316,12 @@ instead of certifying discarded bytes. A deadline leaves the pending state intac
 volatile connector state, never a stored shape or a separate representation of the host's rows.
 
 **MQTT subscription admission.** An instance's connection is disconnected, running, or waiting
-to retire a downgraded broker subscription. The last state survives a failed or cancelled cleanup
-and suspension of the connector; only the completed retirement exchange permits another resume.
-It is not ordinary disconnection: trusting a retained session there would bypass the refused QoS
-grant. This is exclusively owned, in-memory connection state, separate from a retained accepted
-broker session and from the runtime's input-plan retirement.
+to retire a refused or downgraded broker subscription. The last state survives a failed or
+cancelled cleanup and suspension of the connector; only the completed retirement exchange permits
+another resume.
+It is not ordinary disconnection: trusting a retained session there would bypass the refused
+subscription or QoS grant. This is exclusively owned, in-memory connection state, separate from a
+retained accepted broker session and from the runtime's input-plan retirement.
 
 **MQTT input retirement.** A retiring input keeps the previous typed plan and an optional
 replacement plan. Absence means the declaration is removed; stopping an execution whose input

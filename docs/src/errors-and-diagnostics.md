@@ -999,6 +999,12 @@ An MQTT broker's successful `SUBACK` with a grant below the requested QoS fails 
 policy and `DESCRIBE INGESTOR` report those levels without payload or client credentials, in
 acknowledged and `NO ACK` modes alike.
 
+An explicitly refused `SUBACK` keeps `MqttTopicIngestorError::SubscriptionRefused` beneath the
+same resume context. Both subscription refusals require session retirement before another
+attempt: an empty retained session cannot clear the failure or report readiness. Cleanup failures
+keep their typed retirement report and the pending phase, including across suspension. Once
+cleanup succeeds, the next attempt must obtain an accepted subscription grant.
+
 MQTT input retirement reports `RuntimeError::RetireIngestorEntity`, naming its domain and
 ingestor, above the connector's `MqttTopicIngestorError::RetireInstance` and instance index. The report
 keeps typed client and connection causes, an unsubscribe refusal's reason codes, or the cleanup

@@ -1760,7 +1760,9 @@ from codec rejections, oversized payloads, quiesce drops and transport redeliver
 Every MQTT subscription checks the successful `SUBACK` grant against its declared QoS before
 publishing readiness, including under `NO ACK`. A lower grant is
 `MqttTopicIngestorError::SubscriptionDowngraded`, carrying the requested and granted levels, beneath
-the host's resume context. The connector retains a `RetiringSubscription` phase. Before another
+the host's resume context. An explicit refused `SUBACK` reports `SubscriptionRefused`; an empty
+persistent session retained after that refusal is not an accepted subscription. Both refusals
+retain the connector's `RetiringSubscription` phase. Before another
 subscription attempt, it runs the existing retirement exchange: clean CONNECT, UNSUBSCRIBE and
 DISCONNECT with session expiry zero, bounded by the client's connection budget. A failed or
 cancelled retirement keeps that phase, including across suspension; only successful cleanup

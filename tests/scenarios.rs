@@ -221,6 +221,7 @@ mod ingestion_time;
 mod kafka_metadata;
 mod mqtt_fixtures;
 mod mqtt_sessions;
+mod mqtt_subscription_refusal;
 mod mysql_isolation;
 mod nats_delivery;
 mod paced_replication;

@@ -529,6 +529,7 @@ capability = "SESSION PERSISTENT"
 entity = "MQTT TOPIC INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/mqtt_ingestion.feature", scenario = "MQTT publishes a buffering quiesce retains are acknowledged and replayed on release" },
+  { feature = "tests/features/runtime/mqtt_subscription_refusal.feature", scenario = "An authenticated MQTT subscription keeps retrying after refusal and recovers when permission is granted" },
 ]
 
 [[capability]]
