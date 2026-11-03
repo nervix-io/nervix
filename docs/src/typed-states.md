@@ -317,11 +317,12 @@ instead of certifying discarded bytes. A deadline leaves the pending state intac
 volatile connector state, never a stored shape or a separate representation of the host's rows.
 
 **MQTT subscription admission.** An instance's connection is disconnected, running, or waiting
-to retire a downgraded broker subscription. The last state survives a failed or cancelled cleanup
-and suspension of the connector; only the completed retirement exchange permits another resume.
-It is not ordinary disconnection: trusting a retained session there would bypass the refused QoS
-grant. This is exclusively owned, in-memory connection state, separate from a retained accepted
-broker session and from the runtime's input-plan retirement.
+to retire a refused or downgraded broker subscription. The last state survives a failed or
+cancelled cleanup and suspension of the connector; only the completed retirement exchange permits
+another resume.
+It is not ordinary disconnection: trusting a retained session there would bypass the refused
+subscription or QoS grant. This is exclusively owned, in-memory connection state, separate from a
+retained accepted broker session and from the runtime's input-plan retirement.
 
 **MQTT input retirement.** A retiring input keeps the previous typed plan and an optional
 replacement plan. Absence means the declaration is removed; stopping an execution whose input
@@ -332,6 +333,17 @@ Cleanup failure at a preceding endpoint is reported separately from failure to p
 replacement. A failed preceding configuration supplies no preservation proof: the explicit
 replacement must prepare all of its sessions. An absent `client_id` selects the domain-qualified
 default, with an instance suffix when needed.
+
+**Pulsar received messages.** The driver message crosses one conversion boundary into checked
+publish and optional event `Timestamp` values and an `I64` sequence. The admitted message retains
+those typed values rather than raw time or sequence alternatives. Optional event time, partition
+key and ordering key preserve absence independently of present zero or empty values. The driver's
+batch decoder resolves optional member sequence ids and event times by presence: a present member
+value wins, including zero; an absent member uses the envelope field. Only absence at both levels
+leaves event time absent, and publish time is never its substitute. The broker
+protocol explicitly defaults an omitted redelivery count to zero; that external default is applied
+once into a lossless `I64`. Failed conversion is a typed read failure, held separately from any
+valid gathered prefix. The full broker position remains the settlement identity.
 
 **Pulsar input retirement.** The same optional replacement plan distinguishes dropping an input
 from replacing it. A changed owned source requires a comparison of resolved broker address,
