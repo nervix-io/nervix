@@ -468,6 +468,7 @@ tags = [
   "@node_prerequisite_refusal",
   "@backup_holder_download",
   "@snapshot_receive_admission",
+  "@session_shutdown_ending",
 ]
 target = "test:scenarios"
 
@@ -1052,6 +1053,26 @@ id = "scenario.shutdown-cordon-release"
 invariant = "A stopping leader and a stopping follower whose cordon release outlasts one second complete the drain-support phase and leave no cordon after the stop or after the restart."
 invocation = "scenarios"
 scenario = "A stopping <role> whose cordon release outlasts one second completes its drain and leaves no cordon"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A graceful stop of the node serving a native gRPC session on one and three nodes: admission closes, the session ends its in-flight requests and queues its ending under its tracked in-flight and ending locks, its call ends after the ending, and the public listeners close their connections within their grace period. The connection cut, the listener join and the gRPC server's graceful shutdown are untracked."
+examples = 2
+feature = "tests/features/runtime/session_protocol.feature"
+id = "scenario.session-shutdown-ending"
+invariant = "A native session on a stopping node receives SessionEnding with reason ServerShuttingDown as its last frame, and its call ends with status OK rather than with its connection."
+invocation = "scenarios"
+scenario = "A native session is told its node is shutting down before its call ends"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A graceful stop, under a five-second shutdown deadline, of the node serving a native gRPC session whose durably admitted command is held in its ordered lane, on one and three nodes: the session ends its in-flight requests and queues its ending under its tracked in-flight and ending locks and lets go of its client while the lane still waits, and terminal teardown ends the held command at the deadline. The connection cut, the listener join, the gRPC server's graceful shutdown and the fault-injection hold are untracked."
+examples = 2
+feature = "tests/features/runtime/session_protocol.feature"
+id = "scenario.session-shutdown-ending-admitted-command"
+invariant = "A native session whose admitted command still runs when its node stops receives SessionEnding with reason ServerShuttingDown, and its call ends with status OK before the command or the shutdown deadline ends."
+invocation = "scenarios"
+scenario = "A native session whose admitted command still runs is told its node is shutting down before its call ends"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -2048,6 +2069,26 @@ id = "stress.shutdown-cordon-release"
 invariant = "A stopping leader and a stopping follower whose cordon release outlasts one second complete the drain-support phase and leave no cordon after the stop or after the restart."
 invocation = "stress-scenarios"
 scenario = "A stopping <role> whose cordon release outlasts one second completes its drain and leaves no cordon"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a graceful stop of the node serving a native gRPC session on one and three nodes, while the session ends its in-flight requests and queues its ending under its tracked in-flight and ending locks. The connection cut, the listener join and the gRPC server's graceful shutdown are untracked."
+examples = 2
+feature = "tests/features/runtime/session_protocol.feature"
+id = "stress.session-shutdown-ending"
+invariant = "A native session on a stopping node receives SessionEnding with reason ServerShuttingDown as its last frame, and its call ends with status OK rather than with its connection."
+invocation = "stress-scenarios"
+scenario = "A native session is told its node is shutting down before its call ends"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a graceful stop, under a five-second shutdown deadline, of the node serving a native gRPC session whose durably admitted command is held in its ordered lane, on one and three nodes, while the session ends its in-flight requests and queues its ending under its tracked in-flight and ending locks. The connection cut, the listener join, the gRPC server's graceful shutdown and the fault-injection hold are untracked."
+examples = 2
+feature = "tests/features/runtime/session_protocol.feature"
+id = "stress.session-shutdown-ending-admitted-command"
+invariant = "A native session whose admitted command still runs when its node stops receives SessionEnding with reason ServerShuttingDown, and its call ends with status OK before the command or the shutdown deadline ends."
+invocation = "stress-scenarios"
+scenario = "A native session whose admitted command still runs is told its node is shutting down before its call ends"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -3610,6 +3651,10 @@ workloads = [
 [[owner]]
 path = "src/application/session/mod.rs"
 workloads = [
+  "scenario.session-shutdown-ending",
+  "stress.session-shutdown-ending",
+  "scenario.session-shutdown-ending-admitted-command",
+  "stress.session-shutdown-ending-admitted-command",
   "scenario.clock-takeover-local",
   "scenario.clock-takeover-observer",
   "stress.clock-takeover-local",
@@ -3629,6 +3674,10 @@ workloads = [
 [[owner]]
 path = "src/application/session/outbound.rs"
 workloads = [
+  "scenario.session-shutdown-ending",
+  "stress.session-shutdown-ending",
+  "scenario.session-shutdown-ending-admitted-command",
+  "stress.session-shutdown-ending-admitted-command",
   "scenario.clock-takeover-local",
   "scenario.clock-takeover-observer",
   "stress.clock-takeover-local",

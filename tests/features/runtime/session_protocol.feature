@@ -162,6 +162,52 @@ Feature: Session protocol
     When the active session sends a message larger than the frame limit
     Then the active session ends with status "OutOfRange"
 
+  @session_shutdown_ending @deloxide_stress
+  Scenario Outline: A native session is told its node is shutting down before its call ends
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When the node serving the active session is stopped
+    Then the active session ends because its node is shutting down
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  # The command holds the session's ordered lane until the shutdown deadline ends it, so the call
+  # ends before that only if the session lets go of its client as soon as it has said why it ends.
+  @session_shutdown_ending @deloxide_stress
+  Scenario Outline: A native session whose admitted command still runs is told its node is shutting down before its call ends
+    Given shutdown timeout is configured as "5s"
+    And drain timeout is configured as "5s"
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given command execution on node "{{leader}}" pauses after durable admission
+    When the active session sends request "admitted" with execution reference "shutdown-admitted-{{test_id}}" and this Plexus command
+      """
+      CREATE SCHEMA admitted_record (
+        value STRING
+      );
+      """
+    Then the durable command admission pause on node "{{leader}}" is reached
+    When the node serving the active session is stopped
+    Then the active session ends because its node is shutting down
+    When the durable command admission pause on node "{{leader}}" is released
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario: Leadership lost after durable admission leaves an unknown outcome that a retry recovers
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"

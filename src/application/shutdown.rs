@@ -2,9 +2,9 @@
 //!
 //! Layer: control plane.
 //!
-//! - **Owns.** The ordered transition from a stop request through admission shutdown, drain
-//!   support, terminal teardown, and the outcome reported to the process boundary, together with
-//!   the one deadline that bounds all of them.
+//! - **Owns.** The ordered transition from a stop request through admission shutdown and the cut
+//!   of the client connections it leaves open, drain support, terminal teardown, and the outcome
+//!   reported to the process boundary, together with the one deadline that bounds all of them.
 //! - **Depends on.** Tokio signaling primitives and monotonic time.
 //! - **Must not know.** Which listeners, control-plane services, or runtime tasks observe each
 //!   lifecycle signal.
@@ -220,6 +220,9 @@ struct ShutdownCoordinatorInner {
     state: watch::Sender<CoordinatorState>,
     stop_requested: CancellationToken,
     admission_shutdown: CancellationToken,
+    /// Cancelled once the client connections the public listeners still hold after admission
+    /// closed are cut.
+    connections_cut: CancellationToken,
     drain_support_shutdown: CancellationToken,
 }
 
@@ -256,6 +259,7 @@ impl ShutdownCoordinator {
                 state,
                 stop_requested: CancellationToken::new(),
                 admission_shutdown: CancellationToken::new(),
+                connections_cut: CancellationToken::new(),
                 drain_support_shutdown: CancellationToken::new(),
             }),
         }
@@ -333,6 +337,11 @@ impl ShutdownCoordinator {
         self.inner.admission_shutdown.clone()
     }
 
+    /// The signal that cuts the client connections a public listener accepted.
+    pub(in crate::application) fn connections_cut_token(&self) -> CancellationToken {
+        self.inner.connections_cut.clone()
+    }
+
     pub(in crate::application) fn drain_support_token(&self) -> CancellationToken {
         self.inner.drain_support_shutdown.clone()
     }
@@ -341,6 +350,18 @@ impl ShutdownCoordinator {
         self.request()
             .assured("the composition root stops admission only after a stop request");
         self.inner.admission_shutdown.cancel();
+    }
+
+    /// Cuts every client connection the public listeners still hold. Admission closed before, so
+    /// the sessions those connections carry have already been told why they end.
+    pub(in crate::application) fn cut_connections(&self) {
+        if !self.inner.admission_shutdown.is_cancelled() {
+            None::<()>.assured(
+                "the composition root cuts the public listeners' connections only after it closed \
+                 admission",
+            );
+        }
+        self.inner.connections_cut.cancel();
     }
 
     pub(in crate::application) fn begin_drain_support(&self, stop_admission: ShutdownPhaseOutcome) {
