@@ -204,7 +204,13 @@ impl KafkaDomainOffsetHost {
         generation: u64,
         positions: Vec<KafkaOffsetPosition>,
     ) -> KafkaDomainOffsetResult<()> {
-        self.inner.services.reset(generation, positions).await
+        nervix_primitives::expect_lint!(
+            nervix::lifecycle_call,
+            "Kafka initialization selects one explicit starting cut before polling; recurring \
+             record acknowledgements call commit instead",
+            self.inner.services.reset(generation, positions)
+        )
+        .await
     }
 
     pub async fn commit(&self, position: KafkaOffsetPosition) -> KafkaDomainOffsetResult<()> {
