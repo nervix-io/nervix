@@ -1490,14 +1490,14 @@ The host projects metadata lazily. When an ingestor binds its programs, the host
 declared fields its route programs and its `TIMESTAMP AT metadata.<field>` read, and every ingest
 group of the ingestor builds Arrow columns for those fields and no others. A group of an ingestor
 that reads none visits no metadata value at all. A message whose value for a read field is
-unrepresentable is refused once its ingestor's `FILTER WHERE` has kept it and before its event time
-is selected: each output route's `ON MESSAGE ERROR` policy receives a message error with code
-`validation` and operation `admit` that names `metadata.<field>` and describes the value, and the
-message's ACK resolves through that policy as any other refused message's does. A value that is
-unrepresentable in a field no program reads refuses nothing, so the lazy projection still decides
-what a message costs and whether it can fail. Transport headers keep their projection whatever the
-programs read, because an ingestor's error-route programs may call `read_header` and are compiled
-with the domain's routing, outside the source host.
+unrepresentable or invalid is refused once its ingestor's `FILTER WHERE` has kept it and before
+its event time is selected: each output route's `ON MESSAGE ERROR` policy receives a message error
+with code `validation` and operation `admit` that names `metadata.<field>` and describes the value
+or typed failure. The message's ACK resolves through that policy as any other refused message's
+does. An unrepresentable or invalid value in a field no program reads refuses nothing, so the lazy
+projection still decides what a message costs and whether it can fail. Transport headers keep their
+projection whatever the programs read, because an ingestor's error-route programs may call
+`read_header` and are compiled with the domain's routing, outside the source host.
 
 Kafka metadata borrows the record's key without allocating another byte sequence. Missing keys
 remain distinct from empty keys. Its timestamp is the exact instant of the driver's Unix
