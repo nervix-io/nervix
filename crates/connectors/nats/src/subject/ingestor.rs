@@ -6,7 +6,7 @@
 //!   through, the end of that subscription when the connection is lost, and
 //!   message headers as ingest headers.
 //! - **Depends on.** The connector contract, typed client configuration entries, `error-stack`,
-//!   the boundary's channels and `async-nats`.
+//!   the node executor, the boundary's channels and `async-nats`.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
@@ -30,11 +30,12 @@ use nervix_connector::{
     IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
     IngestorReadCancellation, IngestorResult, IngestorResume,
 };
+use nervix_execution::Executor;
 use nervix_models::{ClientConfigEntry, NatsQueueGroupName, NatsSubjectName};
 use nervix_primitives::sync::mpsc::{self, error::TrySendError};
 use thiserror::Error;
 
-use crate::client::NatsClientOptions;
+use crate::client::{NatsClientOptions, NatsClientOptionsError};
 
 const NATS: &str = "nats";
 
@@ -43,6 +44,8 @@ const NATS: &str = "nats";
 pub enum NatsSubjectIngestorError {
     #[error("invalid NATS client configuration")]
     ClientConfig,
+    #[error("failed to prepare NATS client credentials on the node executor")]
+    ClientPreparation,
     #[error("failed to connect NATS client")]
     Connect,
     #[error("failed to subscribe to NATS subject '{subject}'")]
@@ -61,6 +64,7 @@ type NatsSubjectIngestorResult<T> = Result<T, Report<NatsSubjectIngestorError>>;
 /// group every instance joins.
 #[derive(Clone)]
 pub struct NatsSubjectIngestorPlan {
+    executor: Executor,
     config: Vec<ClientConfigEntry>,
     subject: NatsSubjectName,
     queue_group: NatsQueueGroupName,
@@ -106,11 +110,13 @@ impl NatsSubscription {
 
 impl NatsSubjectIngestorPlan {
     pub fn new(
+        executor: Executor,
         config: Vec<ClientConfigEntry>,
         subject: NatsSubjectName,
         queue_group: NatsQueueGroupName,
     ) -> Self {
         Self {
+            executor,
             config,
             subject,
             queue_group,
@@ -120,7 +126,7 @@ impl NatsSubjectIngestorPlan {
     async fn subscribe(&self) -> NatsSubjectIngestorResult<NatsSubscription> {
         // One pending signal is enough: the instance ends its subscription on the first.
         let (lost, connection_lost) = mpsc::channel(1);
-        let client = Self::client_from_config(&self.config, lost).await?;
+        let client = Self::client_from_config(&self.executor, &self.config, lost).await?;
         let subscriber = client
             .queue_subscribe(
                 self.subject.as_str().to_string(),
@@ -149,12 +155,21 @@ impl NatsSubjectIngestorPlan {
     /// attempt of its own, so it makes one before its connection task ends; the instance has
     /// ended its subscription by then, and that attempt only lets the task end.
     async fn client_from_config(
+        executor: &Executor,
         config: &[ClientConfigEntry],
         lost: mpsc::Sender<()>,
     ) -> NatsSubjectIngestorResult<NatsClient> {
-        let prepared = NatsClientOptions::from_config(config)
+        let prepared = NatsClientOptions::from_config(executor, config)
             .await
-            .change_context(NatsSubjectIngestorError::ClientConfig)?;
+            .map_err(|report| {
+                let context = match report.current_context() {
+                    NatsClientOptionsError::CredentialsPreparation => {
+                        NatsSubjectIngestorError::ClientPreparation
+                    }
+                    _ => NatsSubjectIngestorError::ClientConfig,
+                };
+                report.change_context(context)
+            })?;
         let options = prepared
             .options
             .max_reconnects(1)
@@ -362,6 +377,7 @@ mod tests {
             connection
         });
         let plan = NatsSubjectIngestorPlan::new(
+            nervix_execution::Executor::default(),
             vec![entry("addr", &addr)],
             NatsSubjectName::try_from("events".to_string()).expect("a valid subject"),
             NatsQueueGroupName::try_from("members".to_string()).expect("a valid queue group"),
@@ -431,6 +447,7 @@ mod tests {
             connection.end().await;
         });
         let plan = NatsSubjectIngestorPlan::new(
+            nervix_execution::Executor::default(),
             vec![entry("addr", &addr)],
             NatsSubjectName::try_from("events".to_string()).expect("a valid subject"),
             NatsQueueGroupName::try_from("members".to_string()).expect("a valid queue group"),
@@ -526,17 +543,65 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn credentials_admission_refusal_is_not_an_ingestor_configuration_error() {
+        use nervix_execution::{AdmissionError, Executor, MemoryClass};
+
+        let executor = Executor::default();
+        let held = executor
+            .try_reserve(
+                MemoryClass::Credentials,
+                executor.memory(MemoryClass::Credentials).capacity_bytes,
+            )
+            .expect("the fixture occupies the credentials class without allocating its capacity");
+        let (lost, _connection_lost) = mpsc::channel(1);
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../docker/nats/auth-user.creds"
+        );
+        let error = NatsSubjectIngestorPlan::client_from_config(
+            &executor,
+            &[
+                entry("addr", "nats://127.0.0.1:1"),
+                entry("credentials_file", path),
+            ],
+            lost,
+        )
+        .await
+        .expect_err("no bytes can be read without admission");
+        assert!(matches!(
+            error.current_context(),
+            NatsSubjectIngestorError::ClientPreparation
+        ));
+        assert!(matches!(
+            error.downcast_ref::<AdmissionError>(),
+            Some(AdmissionError::BudgetExhausted {
+                class: "credentials",
+                ..
+            })
+        ));
+        assert!(!format!("{error:#}").contains(path));
+        assert_eq!(executor.snapshot().filesystem_storage.admitted, 1);
+        drop(held);
+        assert_eq!(executor.memory(MemoryClass::Credentials).reserved_bytes, 0);
+    }
+
+    #[nervix_primitives::test]
     async fn client_configuration_failures_keep_typed_context() {
         let (lost, _connection_lost) = mpsc::channel(1);
-        let error = NatsSubjectIngestorPlan::client_from_config(&[], lost.clone())
-            .await
-            .expect_err("a missing NATS address must fail");
+        let error = NatsSubjectIngestorPlan::client_from_config(
+            &nervix_execution::Executor::default(),
+            &[],
+            lost.clone(),
+        )
+        .await
+        .expect_err("a missing NATS address must fail");
         assert!(matches!(
             error.current_context(),
             NatsSubjectIngestorError::ClientConfig
         ));
 
         let error = NatsSubjectIngestorPlan::client_from_config(
+            &nervix_execution::Executor::default(),
             &[
                 entry("addr", "tls://127.0.0.1:1"),
                 entry("tls_cert_file", "client.pem"),

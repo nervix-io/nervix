@@ -747,8 +747,9 @@ sequenceDiagram
 ### Blocking work and the node's executor
 
 A connector runs on the host's asynchronous tasks and never blocks one. Synchronous work it does
-itself, such as writing or reading a local file, goes through the node's bounded executor, which the
-emitter host hands a connector as `EmitterHost::executor`. The connector chooses the storage or CPU class
+itself, such as writing or reading a local file, goes through the node's bounded executor. The
+emitter host supplies it as `EmitterHost::executor`; ingestor composition passes the same node-owned
+handle in a connector plan where its startup needs synchronous work. The connector chooses the storage or CPU class
 of its work and the memory it charges; the executor admits that work beside the rest of the node's,
 and a refusal is the connector's own typed failure. The Iceberg emitter writes and reads its staged
 Arrow IPC files on the filesystem storage workers. A staging write the node cannot take now fails
@@ -1124,8 +1125,12 @@ Both sides build authentication and TLS options through one connector-owned buil
 their own connection-loss notifications or reconnect policy. Token authentication uses the driver;
 nkey and JWT credentials use its auth callback with AWS-LC Ed25519 signing. The connector validates
 the fixed-size user seed's base32, user prefix and transcription checksum, and reads a mounted
-credentials file on the blocking pool. Decoded seed bytes and the temporary file text are cleared
-on drop. Reading preserves the filesystem's typed I/O cause without rendering the path; parsing
+credentials file through the node's filesystem workers. Its immutable mounted length is charged to
+credentials memory before allocation or reading, and that charge stays until the temporary bytes
+are cleared. Cancellation is checked before and after the bounded file read. Admission or execution
+refusal judges no credential and remains a retryable initialization failure, distinct from invalid
+configuration. Decoded seed bytes and temporary file bytes are cleared on drop. Reading preserves
+the filesystem's typed I/O cause without rendering the path; parsing
 preserves a value-free typed authentication cause. A broker's authentication refusal remains a
 typed connection failure. The cryptography chapter records the signing owner and its FIPS limits.
 The address's userinfo and query options belong to the driver and are masked in inspection. The

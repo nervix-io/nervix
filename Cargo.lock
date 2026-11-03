@@ -7143,6 +7143,7 @@ dependencies = [
  "futures-util",
  "meticulous",
  "nervix-connector",
+ "nervix-execution",
  "nervix-models",
  "nervix-primitives",
  "nkeys",

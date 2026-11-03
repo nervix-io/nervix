@@ -97,6 +97,11 @@ plan into connector configuration without normalization. Iceberg resolves its co
 client into the S3, GCS or Azure Blob backend while constructing this plan; the runtime receives
 that resolved backend and never infers it from the statement or location.
 
+NATS ingestor composition binds the node executor into its connector plan, and its emitter uses
+the executor supplied by the emitter host. Both authenticate through the same options owner;
+mounted credentials reads take filesystem worker admission and charge their temporary bytes
+before allocation. A connector creates no independent executor at startup or reconnect.
+
 The registry establishes batching legality and direct-mapping key and type contracts from each
 entity's vocabulary declaration before planning. A emitter that requires `BATCH` therefore receives
 the already-validated batch configuration; planning does not maintain another required-batching

@@ -2,7 +2,7 @@
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** Declared authentication and TLS options for every NATS client connection.
-//! - **Depends on.** The connector contract, vocabulary declarations and the NATS driver.
+//! - **Depends on.** The connector contract, node executor, vocabulary and the NATS driver.
 //! - **Must not know.** Graph routing, subscriptions, publishing, placement or retry policy.
 
 #![cfg_attr(
@@ -15,14 +15,15 @@
 )]
 
 use async_nats::{ConnectOptions, ServerAddr};
-use error_stack::{Report, ResultExt as _};
+use error_stack::ResultExt as _;
 use meticulous::OptionExt as _;
 use nervix_connector::{client_config_value, client_tls_paths, optional_client_config_value};
+use nervix_execution::Executor;
 use nervix_models::{ClientConfigEntry, ConnectorKind};
 use thiserror::Error;
-use zeroize::Zeroizing;
 
 mod authentication;
+mod credentials;
 
 #[derive(Clone, Copy, Debug, Error)]
 pub(crate) enum NatsClientOptionsError {
@@ -32,6 +33,8 @@ pub(crate) enum NatsClientOptionsError {
     Address,
     #[error("failed to load the {connector} credentials_file", connector = ConnectorKind::Nats)]
     CredentialsFile,
+    #[error("failed to run the {connector} credentials_file preparation", connector = ConnectorKind::Nats)]
+    CredentialsPreparation,
     #[error("failed to prepare the {connector} nkey_seed", connector = ConnectorKind::Nats)]
     NkeySeed,
 }
@@ -43,6 +46,7 @@ pub(crate) struct NatsClientOptions {
 
 impl NatsClientOptions {
     pub(crate) async fn from_config(
+        executor: &Executor,
         config: &[ClientConfigEntry],
     ) -> error_stack::Result<Self, NatsClientOptionsError> {
         let schema = ConnectorKind::Nats
@@ -62,21 +66,7 @@ impl NatsClientOptions {
         } else if let Some(seed) = optional_client_config_value(config, "nkey_seed") {
             authentication::nkey_options(seed).change_context(NatsClientOptionsError::NkeySeed)?
         } else if let Some(path) = optional_client_config_value(config, "credentials_file") {
-            let path = path.to_owned();
-            let contents =
-                nervix_primitives::task::spawn_blocking(move || std::fs::read_to_string(path))
-                    .await
-                    .map_err(|source| {
-                        Report::new(NatsClientOptionsError::CredentialsFile).attach(source)
-                    })?
-                    .map_err(|source| {
-                        // A confidential path may occur in an I/O failure. Preserve its typed cause
-                        // as an opaque attachment rather than rendering it in the public context.
-                        Report::new(NatsClientOptionsError::CredentialsFile).attach(source)
-                    })?;
-            let contents = Zeroizing::new(contents);
-            authentication::credentials_options(&contents)
-                .change_context(NatsClientOptionsError::CredentialsFile)?
+            credentials::options(executor, path.to_owned()).await?
         } else {
             ConnectOptions::new()
         };
@@ -109,8 +99,11 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn preparation_preserves_the_driver_address_refusal() {
-        let Err(report) =
-            NatsClientOptions::from_config(&[entry("addr", "https://localhost:4222")]).await
+        let Err(report) = NatsClientOptions::from_config(
+            &nervix_execution::Executor::default(),
+            &[entry("addr", "https://localhost:4222")],
+        )
+        .await
         else {
             panic!("the NATS driver accepts only its transport schemes");
         };
@@ -126,11 +119,14 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn preparation_preserves_the_typed_schema_refusal() {
-        let Err(report) = NatsClientOptions::from_config(&[
-            entry("addr", "nats://localhost:4222"),
-            entry("token", "test-token"),
-            entry("nkey_seed", "test-seed"),
-        ])
+        let Err(report) = NatsClientOptions::from_config(
+            &nervix_execution::Executor::default(),
+            &[
+                entry("addr", "nats://localhost:4222"),
+                entry("token", "test-token"),
+                entry("nkey_seed", "test-seed"),
+            ],
+        )
         .await
         else {
             panic!("two declared authentication methods cannot prepare a connection");
@@ -154,10 +150,13 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../../docker/nats/no-such-credentials"
         );
-        let Err(report) = NatsClientOptions::from_config(&[
-            entry("addr", "nats://localhost:4222"),
-            entry("credentials_file", missing_path),
-        ])
+        let Err(report) = NatsClientOptions::from_config(
+            &nervix_execution::Executor::default(),
+            &[
+                entry("addr", "nats://localhost:4222"),
+                entry("credentials_file", missing_path),
+            ],
+        )
         .await
         else {
             panic!("unavailable or malformed credentials cannot prepare a connection");
@@ -186,10 +185,13 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../../docker/nats/auth-user.nk"
         );
-        let Err(report) = NatsClientOptions::from_config(&[
-            entry("addr", "nats://localhost:4222"),
-            entry("credentials_file", seed_path),
-        ])
+        let Err(report) = NatsClientOptions::from_config(
+            &nervix_execution::Executor::default(),
+            &[
+                entry("addr", "nats://localhost:4222"),
+                entry("credentials_file", seed_path),
+            ],
+        )
         .await
         else {
             panic!("a credentials file requires a complete JWT and user seed");
@@ -203,5 +205,31 @@ mod tests {
             Some(super::authentication::NatsAuthenticationError::Credentials)
         ));
         assert!(!format!("{report:#}").contains(seed_path));
+    }
+
+    #[nervix_primitives::test]
+    async fn credentials_preparation_uses_the_node_filesystem_class_and_releases_its_bytes() {
+        let executor = nervix_execution::Executor::default();
+        let before = executor.snapshot().filesystem_storage.admitted;
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../docker/nats/auth-user.creds"
+        );
+        let _prepared = NatsClientOptions::from_config(
+            &executor,
+            &[
+                entry("addr", "nats://127.0.0.1:1"),
+                entry("credentials_file", path),
+            ],
+        )
+        .await
+        .expect("valid mounted credentials prepare without connecting");
+        assert_eq!(executor.snapshot().filesystem_storage.admitted, before + 1);
+        assert_eq!(
+            executor
+                .memory(nervix_execution::MemoryClass::Credentials)
+                .reserved_bytes,
+            0
+        );
     }
 }
