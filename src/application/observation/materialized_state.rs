@@ -3,9 +3,10 @@
 //! Layer: control plane.
 //!
 //! - **Owns.** The materialized-state command, its required scheduled metadata, payload and branch
-//!   sensitivity, local or owner reads, and the text presented to the session.
-//! - **Depends on.** The committed schedule for relay/schema/branch declarations, the runtime for
-//!   materialized records, and the command and presentation owners for the result boundary.
+//!   sensitivity, and the text presented to the session.
+//! - **Depends on.** The committed schedule for relay/schema/branch declarations, the reads of each
+//!   unit's records wherever the schedule places it, and the command and presentation owners for
+//!   the result boundary.
 //! - **Must not know.** How materialized records are executed, persisted or replicated.
 
 #![cfg_attr(

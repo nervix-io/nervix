@@ -19,6 +19,7 @@
 
 use nervix_interconnect::DescribeMetricsEnvelope;
 use nervix_models::{DomainName, ModelKind, ModelName, RelayName, ScheduledNode};
+use nervix_vm::SchemaSensitivity;
 
 use super::{super::session_service::SessionServiceImpl, ObservationError};
 use crate::runtime::{BranchKey, MaterializedReadError, MaterializedRecordReport};
@@ -61,7 +62,7 @@ impl SessionServiceImpl {
         domain: &DomainName,
         relay: &RelayName,
         relay_node: &ScheduledNode,
-        sensitivity: &nervix_vm::SchemaSensitivity,
+        sensitivity: &SchemaSensitivity,
     ) -> error_stack::Result<Vec<MaterializedRecordReport>, MaterializedReadError> {
         let local_node_id = self.inner.consensus.local_node_id();
         let mut entries = Vec::new();
