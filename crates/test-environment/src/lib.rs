@@ -730,6 +730,15 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                     .with_copy_to("/nervix/api-keys.txt", api_keys.clone().into_bytes())
                     .with_env_var("EMQX_LISTENERS__TCP__AUTH__BIND", "0.0.0.0:1885")
                     .with_env_var("EMQX_LISTENERS__TCP__AUTH__ENABLE_AUTHN", "true")
+                    // Scenarios can deny one client's subscriptions without changing any other
+                    // client's access. A policy change takes effect on the next attempt.
+                    .with_env_var(
+                        "EMQX_AUTHORIZATION__SOURCES",
+                        "[{type = built_in_database, enable = true}]",
+                    )
+                    .with_env_var("EMQX_AUTHORIZATION__NO_MATCH", "allow")
+                    .with_env_var("EMQX_AUTHORIZATION__DENY_ACTION", "ignore")
+                    .with_env_var("EMQX_AUTHORIZATION__CACHE__ENABLE", "false")
                     .with_env_var("EMQX_LISTENERS__TCP__DEFAULT__ENABLE_AUTHN", "false")
                     .with_env_var(
                         "EMQX_LISTENERS__TCP__SHORT_KEEPALIVE__ENABLE_AUTHN",

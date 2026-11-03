@@ -498,6 +498,20 @@ and no relay delivery on one and three nodes, including under `NO ACK`. Their di
 waits for broker confirmation without requiring ingestor readiness. A broker-pin change must
 preserve those wire grants.
 
+The MQTT subscription-refusal fixture uses the authenticating listener with valid credentials
+and client-scoped rules in the broker's built-in authorizer. Unmatched clients remain allowed;
+authorization caching is disabled and a denial leaves the connection open, so changing only the
+scenario's unique client rule takes effect on its next subscription. An independent probe
+observes a successful CONNACK, a Not Authorized SUBACK, and a retained empty session on reconnect.
+It uses a different client identity from Nervix. The one- and three-node scenarios require the
+source's reconnect backoff to grow across repeated refusals, preserve refusal through an ingestor
+hold, then deliver after the scenario grants permission. A forced drain refusal ends the codec
+alteration before replacement, so the same suspended source resumes with its current codec.
+This observes retry progress
+instead of assuming a fixed quiet interval. Each HTTP update and the complete wire probe have
+a thirty-second observation budget. The rules neither serialize scenarios nor alter another
+client's access.
+
 The reclaimed-command-identity scenario configures a 20-second retry validity for its initial
 admission and exact retry. Its reclamation wait includes the configured validity followed by
 60 seconds for reclamation. The assertions still require the identity to remain expired after a
