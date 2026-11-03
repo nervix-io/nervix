@@ -1609,7 +1609,9 @@ describing the target slice. Receivers fetch the slice through the same bounded 
 
 Kafka start coordination uses a Commands request bounded to sixty seconds. It carries the
 source's node incarnation, lifecycle generation and complete ownership fingerprint, with a
-descriptor for a retained candidate. Candidate revisions belong to the offered body. Candidate
+descriptor for a retained candidate. The current local run is checked against its installed
+incarnation directly, including before membership is first published; remote runs use the
+membership publication. Candidate revisions belong to the offered body. Candidate
 and pending-seed bytes travel through the Snapshot bulk subquota under the existing transfer
 limit and memory admission. Instance zero selects and persists one canonical start before
 answering another unit. A recipient persists and replicates its slice before acknowledging it.

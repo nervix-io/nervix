@@ -379,6 +379,9 @@ impl RemoteDispatcher {
     }
 
     pub(super) fn is_live_node_identity(&self, identity: &ClusterNodeIdentity) -> bool {
+        if identity.node_id() == self.local_node_id() {
+            return identity.incarnation() == self.local_node_incarnation();
+        }
         self.cluster.live_node_incarnation(identity.node_id()) == Some(identity.incarnation())
     }
 

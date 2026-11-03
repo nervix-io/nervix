@@ -30,7 +30,16 @@ impl Fixture {
         let runtime = Runtime::with_persistence(Some(database), Duration::from_secs(30))
             .assured("current runtime storage initializes");
         let node = ClusterNodeName::parse("node-1").assured("the loopback node has a valid name");
-        attach_loopback_cluster(&runtime, &node).await;
+        let incarnation = attach_loopback_cluster(&runtime, &node).await;
+        let dispatcher = runtime
+            .inner
+            .remote_dispatcher
+            .load_full()
+            .assured("the loopback dispatcher is installed");
+        assert!(
+            dispatcher.is_live_node_identity(&ClusterNodeIdentity::new(node.clone(), incarnation,)),
+            "the current local run is known before gossip publishes membership"
+        );
         let domain = DomainName::parse("starts").assured("the fixture domain name is valid");
         let mut lifecycle = unpaced_domain_state(domain.as_str());
         lifecycle.status = DomainStatus::Stopped;
@@ -223,7 +232,9 @@ async fn a_late_unit_adopts_the_canonical_cut_after_a_plain_resume() {
         .sync_domains(&BTreeMap::from([(fixture.domain.clone(), lifecycle)]));
     let clock = fixture
         .runtime
-        .bind_domain_clock(&fixture.domain)
+        .domain_clock_lifecycle(&fixture.domain)
+        .assured("the resumed domain owns its lifecycle")
+        .bind()
         .assured("the resumed lifecycle is installed");
     {
         let mut execution = fixture
