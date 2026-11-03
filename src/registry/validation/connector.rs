@@ -2026,3 +2026,7 @@ pub(in crate::registry) fn validate_iceberg_client_pairing(
 #[cfg(test)]
 #[path = "connector_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "connector_pulsar_tests.rs"]
+mod pulsar_tests;
