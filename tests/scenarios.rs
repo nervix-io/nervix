@@ -13366,6 +13366,28 @@ async fn then_refused_resource_publication_was_taken_up(
     );
 }
 
+#[given(expr = "node {string} loses the reply to its next installed resource upload")]
+async fn given_installed_resource_upload_reply_loss(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .lose_next_installed_resource_upload_reply_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "node {string} lost the reply to the resource upload it installed")]
+async fn then_installed_resource_upload_reply_was_lost(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let lost = world
+        .fault_injection
+        .lost_installed_resource_upload_reply(&crate::common::cluster::node_name(&node_id));
+    assert_eq!(
+        lost,
+        Some(true),
+        "node '{node_id}' must install an uploaded version and lose the reply to the call that \
+         installed it"
+    );
+}
+
 #[given(expr = "the next HTTPS listener installation on node {string} fails")]
 async fn given_https_listener_installation_failure(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -17280,11 +17302,12 @@ async fn when_named_client_uploads_resource_with_identity(
     world.last_client_outcome = Some(outcome);
 }
 
-fn assert_last_client_upload(
+/// The resource upload the last client upload step reported, once the version it reports is
+/// checked against `version`.
+fn last_client_upload_of_version(
     world: &ScenarioWorld,
     version: u64,
-    origin: nervix_client_core::OutcomeOrigin,
-) {
+) -> &nervix_client_core::ResourceUploadOutcome {
     let outcome = world
         .last_client_outcome
         .as_ref()
@@ -17299,21 +17322,54 @@ fn assert_last_client_upload(
         Some(version),
         "unexpected upload version: {upload:?}"
     );
-    assert_eq!(
-        upload.origin,
-        Some(origin),
-        "unexpected upload origin: {upload:?}"
-    );
+    upload
 }
 
+/// The upload's identity was unused before it, so whichever of its calls installed the version,
+/// the upload did. A call reports the origin it saw: the only call an upload opened installed the
+/// version itself, while a call the upload repeated, after an earlier one lost its reply or was
+/// redirected, finds recorded what that earlier call installed.
 #[then(expr = "the last client upload installed version {int}")]
 async fn then_last_client_upload_installed_version(world: &mut ScenarioWorld, version: u64) {
-    assert_last_client_upload(world, version, nervix_client_core::OutcomeOrigin::Executed);
+    let upload = last_client_upload_of_version(world, version);
+    let Some(origin) = upload.origin else {
+        panic!("the upload reported no installed version: {upload:?}");
+    };
+    if upload.calls == std::num::NonZeroU32::MIN {
+        assert_eq!(
+            origin,
+            nervix_client_core::OutcomeOrigin::Executed,
+            "an upload answered by the only call it opened installed its version with that call: \
+             {upload:?}"
+        );
+    }
+}
+
+#[then(expr = "the last client upload repeated its call and recovered version {int}")]
+async fn then_last_client_upload_repeated_and_recovered_version(
+    world: &mut ScenarioWorld,
+    version: u64,
+) {
+    let upload = last_client_upload_of_version(world, version);
+    assert!(
+        upload.calls > std::num::NonZeroU32::MIN,
+        "the upload must open another call after its first: {upload:?}"
+    );
+    assert_eq!(
+        upload.origin,
+        Some(nervix_client_core::OutcomeOrigin::Recovered),
+        "the repeated call must find the version an earlier call installed: {upload:?}"
+    );
 }
 
 #[then(expr = "the last client upload recovered version {int} from an earlier upload")]
 async fn then_last_client_upload_recovered_version(world: &mut ScenarioWorld, version: u64) {
-    assert_last_client_upload(world, version, nervix_client_core::OutcomeOrigin::Recovered);
+    let upload = last_client_upload_of_version(world, version);
+    assert_eq!(
+        upload.origin,
+        Some(nervix_client_core::OutcomeOrigin::Recovered),
+        "unexpected upload origin: {upload:?}"
+    );
 }
 
 #[when(
