@@ -12403,6 +12403,24 @@ async fn when_gossip_exchanges_are_blocked(
     world.cluster().block_gossip_for_node(&node_id, delay);
 }
 
+#[when(expr = "node {string} refuses the next subscription interest visibility check it answers")]
+fn when_node_refuses_next_interest_visibility_check(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world.cluster().refuse_interest_visibility_on(&node_id);
+}
+
+#[then(expr = "node {string} refused a subscription interest visibility check")]
+fn then_node_refused_interest_visibility_check(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    assert!(
+        world
+            .cluster()
+            .interest_visibility_refusal_delivered(&node_id),
+        "node '{node_id}' never answered the subscription interest visibility check armed to be \
+         refused"
+    );
+}
+
 #[when(expr = "consensus connectivity for node {string} is blocked")]
 async fn when_consensus_connectivity_is_blocked(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);

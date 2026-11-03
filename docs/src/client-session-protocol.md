@@ -1103,7 +1103,12 @@ is a per-session counter that starts at 1, so a handle, the name together with i
 unique within its session only; a generation taken by a request that then failed is simply skipped.
 The visibility wait is what makes the reply meaningful: by the time a client reads
 `SubscriptionOpened`, every live node already routes the relay's batches to the subscriber's node,
-and an advertisement left over from before an earlier withdrawal cannot satisfy it.
+and an advertisement left over from before an earlier withdrawal cannot satisfy it. When a live node
+does not confirm the interest, the refusal names every such node and carries, beneath it, the first
+one's own cause: the interconnect failure that ended the request to it, such as its deadline or the
+node leaving the membership, or the node's own refusal. Like every failed command's message, it is
+the whole chain of the report, as [Errors And Diagnostics](./errors-and-diagnostics.md#rendering)
+describes.
 
 The reply carries the schema and precedes every row. Delivery is held back until the reply is queued
 on the control lane, which the transport always serves first. When the reply cannot be queued,
