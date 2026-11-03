@@ -30,8 +30,8 @@ use nervix_models::{
     DeduplicatorName, DomainClockPeriod, DomainName, EmitterName, EndpointName, Expression,
     ExternalName, FieldName, FlushPolicy, GeneralErrorPolicy, GeneratorName, InferencerName,
     IngestorName, InputCollectPolicy, InspectionFormat, JunctionName, LookupName,
-    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, ModelName, NameError,
-    OutputBranch, PayloadSizeLimit, PlacementName, ProcessorInputWhere, ProcessorInputs,
+    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, ModelName, MqttQos,
+    NameError, OutputBranch, PayloadSizeLimit, PlacementName, ProcessorInputWhere, ProcessorInputs,
     ProcessorOutput, ProcessorOutputs, ReingestorName, RelayName, ReordererName,
     RequestedResourceVersion, ResourceName, RetryPolicy, RouteConstruction, SchemaName,
     SignalingProtocolName, SubscriptionName, TransactionOperationNumber, UdfName, UserName,
@@ -345,6 +345,24 @@ pub fn ack_window<'src>()
         parallel_ack_window().map(|max| AckWindow::Parallel { max }),
     ))
     .boxed()
+}
+
+/// `QOS 0 | QOS 1 | QOS 2`, which an MQTT statement of either side writes.
+pub fn mqtt_qos_clause<'src>()
+-> impl Parser<'src, &'src [Token], MqttQos, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Qos).ignore_then(
+        select! { Token::NumberLiteral(raw) => raw }
+            .labelled("mqtt_qos")
+            .try_map(|raw, span| match raw.as_str() {
+                "0" => Ok(MqttQos::Qos0),
+                "1" => Ok(MqttQos::Qos1),
+                "2" => Ok(MqttQos::Qos2),
+                _ => Err(Rich::custom(
+                    span,
+                    format!("MQTT QOS must be 0, 1 or 2, found {raw}"),
+                )),
+            }),
+    )
 }
 
 pub fn ack_timeout<'src>()

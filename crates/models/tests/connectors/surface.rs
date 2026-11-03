@@ -264,7 +264,7 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
             ..located(ConnectorKind::Pulsar, "TOPIC", "pulsar_topic", &[])
         },
         EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => {
-            located(ConnectorKind::Mqtt, "TOPIC", "mqtt_topic", &[])
+            located(ConnectorKind::Mqtt, "TOPIC", "mqtt_topic", &[("QOS", true)])
         }
         EmitterEntityKind::RabbitMq(RabbitMqEmitterEntity::Queue) => EmitterSurface {
             envelope: mandatory,
@@ -544,7 +544,7 @@ fn every_delivery_and_publishing_mode_kind_is_declared_at_most_once() {
         for mode in EmitterPublishingModeKind::iter() {
             let mut count = 0;
             for declared_mode in declared.publishing_modes {
-                if *declared_mode == mode {
+                if declared_mode.kind == mode {
                     count += 1;
                 }
             }
@@ -709,6 +709,21 @@ fn an_envelope_clause_and_a_property_are_named_as_a_statement_writes_them() {
 }
 
 #[test]
+fn an_mqtt_emitter_answers_the_quality_of_service_it_publishes_at() {
+    let kind = EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic);
+    for seed in 0..8 {
+        let bytes = seeded_bytes(seed);
+        let mut arbitrary = Arbitrary::new(&bytes, Domain::Vocabulary);
+        let destination = arbitrary.emitter_entity_of(kind);
+        let qos = destination
+            .chosen("QOS")
+            .assured("MQTT answers its quality of service");
+        assert!(matches!(qos, "0" | "1" | "2"), "{qos}");
+        assert_eq!(destination.chosen("SEND"), None);
+    }
+}
+
+#[test]
 fn an_mqtt_source_answers_the_session_and_quality_of_service_it_subscribes_with() {
     let kind = IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic);
     for seed in 0..8 {
@@ -798,6 +813,11 @@ fn assert_generated_emitter_states_what_its_entity_declares(bytes: &[u8]) {
         declared.accepts_publishing_mode_kind(emitter.connector.publishing().kind()),
         "{emitter_kind} names an undeclared mode: {:?}",
         emitter.connector.publishing()
+    );
+    assert_eq!(
+        emitter.connector.unmet_publishing(),
+        None,
+        "{emitter_kind} names a mode without the choices it requires"
     );
     let formed = match (declared.body, &emitter.body) {
         (EmitterBodyForm::Codec, EmitterBody::Codec { .. })
