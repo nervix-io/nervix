@@ -1,122 +1,19 @@
-//! A consumer a host holds: `nx_consumer`, opened on a session's client emitter.
+//! `nx_consumer`: a consumer a host holds, opened on a session's client emitter.
 //!
-//! - **Owns.** Opening a consumer with the fields and credit a host asks for, waiting for the
-//!   next delivery, reading its description and state, and closing and releasing it.
-//! - **Depends on.** The Rust client's emitter consumer, the session it was opened on, the field
-//!   and delivery handles, and the endpoint vocabulary.
+//! - **Owns.** Opening a consumer through the C ABI with the credit a host passes, and the
+//!   handle a host closes and frees.
+//! - **Depends on.** The shared consumer, the session, field and delivery handles, the endpoint
+//!   vocabulary and the C ABI boundary.
 //! - **Must not know.** How output is assigned, redelivered or restored; the Rust consumer decides
-//!   all of it, so this module keeps no state of its own about a delivery or an attachment.
+//!   all of it.
 
-use nervix_client_core::{
-    ClientConsumerLimits, DomainName, EmitterConsumer, EmitterName, wire::EmitterOpened,
-};
-use nervix_primitives::sync::Arc;
-
-use crate::{
-    abi,
-    cancel::Cancel,
-    delivery::Delivery,
-    endpoint::{EndpointState, OpenRefusal, Reopen, ReopenReason, Window, WindowKind},
-    failure::{Failure, FailureKind},
-    fields::Fields,
-    producer::{credit, nanos},
-    schema::Schema,
-    session::{Session, SessionRuntime},
+use nervix_client_core::ClientConsumerLimits;
+use nervix_client_host::{
+    Cancel, Consumer, Delivery, EndpointState, Failure, Fields, OpenRefusal, ReopenReason, Schema,
+    Session, Window, WindowKind, credit, nanos,
 };
 
-/// A consumer, with the session its blocking calls run on and the schema of its batches.
-pub struct Consumer {
-    consumer: EmitterConsumer,
-    schema: Schema,
-    session: Arc<SessionRuntime>,
-}
-
-impl Consumer {
-    /// Opens a consumer on `emitter` of `domain`, blocking until the server answers.
-    pub fn open(
-        session: &Session,
-        domain: &str,
-        emitter: &str,
-        fields: &Fields,
-        limits: ClientConsumerLimits,
-        cancel: Option<&Cancel>,
-    ) -> Result<Self, Failure> {
-        let domain = match DomainName::try_from(domain) {
-            Ok(domain) => domain,
-            Err(error) => return Err(Failure::invalid_argument("domain", &error.to_string())),
-        };
-        let emitter = match EmitterName::try_from(emitter) {
-            Ok(emitter) => emitter,
-            Err(error) => return Err(Failure::invalid_argument("emitter", &error.to_string())),
-        };
-        let expected = fields.schema_fields()?;
-        let shared = session.shared().clone();
-        let opening = async {
-            let opened = shared
-                .client()
-                .subscribe_emitter(domain, emitter, expected, limits)
-                .await;
-            opened.map_err(Failure::from)
-        };
-        let consumer = shared.block_on(cancel, opening)?;
-        let schema = Schema::of_fields(consumer.description().fields.clone());
-        Ok(Self {
-            consumer,
-            schema,
-            session: shared,
-        })
-    }
-
-    fn description(&self) -> &EmitterOpened {
-        self.consumer.description()
-    }
-
-    pub fn schema(&self) -> &Schema {
-        &self.schema
-    }
-
-    pub fn state(&self) -> EndpointState {
-        EndpointState::from(self.consumer.connection())
-    }
-
-    /// Why the consumer has to be opened again, once it does.
-    pub fn reopen(&self) -> Option<Reopen> {
-        self.consumer.reopen_reason().as_ref().map(Reopen::from)
-    }
-
-    /// Waits for the next delivery. A read the wait abandons stays with the consumer, and a later
-    /// call receives what it reads.
-    pub fn next(&self, cancel: Option<&Cancel>) -> Result<Delivery, Failure> {
-        let reading = async { self.consumer.next_batch().await.map_err(Failure::from) };
-        let read = self.session.block_on(cancel, reading)?;
-        let Some(delivery) = read else {
-            return Err(Failure::new(FailureKind::Closed, "the consumer was closed"));
-        };
-        Ok(Delivery::new(
-            delivery,
-            self.schema.clone(),
-            self.session.clone(),
-        ))
-    }
-
-    /// Closes the consumer and waits until the server released its attachment.
-    pub fn close(&self, cancel: Option<&Cancel>) -> Result<(), Failure> {
-        let closing = async { self.consumer.close().await.map_err(Failure::from) };
-        self.session.block_on(cancel, closing)?;
-        Ok(())
-    }
-
-    /// Releases the consumer, closing it without waiting when it is still open.
-    fn free(self) {
-        let Self {
-            consumer,
-            schema,
-            session,
-        } = self;
-        drop(schema);
-        session.release(consumer);
-    }
-}
+use crate::abi;
 
 /// # Safety
 ///
@@ -349,7 +246,7 @@ unsafe fn write_next(
     let (consumer, cancel) = unsafe { (abi::handle(consumer, "consumer")?, cancel.as_ref()) };
     let delivery = consumer.next(cancel)?;
     // SAFETY: `out` is non-null, and the caller guarantees it is writable.
-    unsafe { abi::write(out, delivery.into_shared()) };
+    unsafe { abi::write(out, abi::into_shared(delivery)) };
     Ok(())
 }
 
@@ -380,10 +277,7 @@ unsafe fn closed(consumer: *const Consumer, cancel: *const Cancel) -> Result<(),
 /// other thread is using it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nx_consumer_free(consumer: *mut Consumer) {
-    if consumer.is_null() {
-        return;
-    }
-    // SAFETY: the header requires an unreleased consumer no other thread uses.
-    let consumer = unsafe { Box::from_raw(consumer) };
-    consumer.free();
+    // SAFETY: the header requires an unreleased consumer no other thread uses, or null. Dropping
+    // it releases it inside its session's runtime.
+    unsafe { abi::release(consumer) };
 }

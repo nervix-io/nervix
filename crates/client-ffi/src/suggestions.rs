@@ -1,8 +1,10 @@
-//! One bounded completion page: `nx_suggestions`.
+//! `nx_suggestions`: one bounded completion page.
 //!
 //! Layer: edges.
+//!
 //! - **Owns.** C access to completion status, candidates, source edits, and continuation.
-//! - **Depends on.** The Rust session client and the C ABI's handle and failure conventions.
+//! - **Depends on.** The shared completion page and session, and the C ABI's handle and failure
+//!   conventions.
 //! - **Must not know.** How grammar candidates or transaction snapshots are computed.
 
 #![cfg_attr(
@@ -10,55 +12,11 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
-use nervix_client_core::{AutocompleteOutcome, SuggestionKind, SuggestionStatus};
-
-use crate::{
-    abi,
-    cancel::Cancel,
-    failure::{Failure, FailureKind},
-    session::Session,
+use nervix_client_host::{
+    Cancel, CompletionKind, CompletionStatus, Failure, FailureKind, Session, Suggestions,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i32)]
-pub enum CompletionStatus {
-    Ready = 1,
-    MissingContext = 2,
-    StaleContext = 3,
-    LookupFailed = 4,
-}
-
-impl From<SuggestionStatus> for CompletionStatus {
-    fn from(status: SuggestionStatus) -> Self {
-        match status {
-            SuggestionStatus::Ready => Self::Ready,
-            SuggestionStatus::MissingContext => Self::MissingContext,
-            SuggestionStatus::StaleContext => Self::StaleContext,
-            SuggestionStatus::LookupFailed => Self::LookupFailed,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i32)]
-pub enum CompletionKind {
-    Text = 1,
-    LocalDirectoryLookup = 2,
-}
-
-impl From<SuggestionKind> for CompletionKind {
-    fn from(kind: SuggestionKind) -> Self {
-        match kind {
-            SuggestionKind::Text => Self::Text,
-            SuggestionKind::LocalDirectoryLookup => Self::LocalDirectoryLookup,
-        }
-    }
-}
-
-/// One page owned by the caller until released.
-pub struct Suggestions {
-    outcome: AutocompleteOutcome,
-}
+use crate::abi;
 
 /// # Safety
 ///
@@ -122,7 +80,7 @@ unsafe fn write_suggest(
     };
     let outcome = session.suggest_page(input, cursor, page_size, continuation, cancel)?;
     // SAFETY: the caller guarantees the out pointer is writable.
-    unsafe { abi::write(out, abi::into_handle(Suggestions { outcome })) };
+    unsafe { abi::write(out, abi::into_handle(Suggestions::new(outcome))) };
     Ok(())
 }
 
@@ -134,7 +92,10 @@ pub unsafe extern "C" fn nx_suggestions_status(
     suggestions: *const Suggestions,
 ) -> CompletionStatus {
     // SAFETY: the header requires a live page.
-    unsafe { abi::accessor(suggestions) }.outcome.status.into()
+    unsafe { abi::accessor(suggestions) }
+        .outcome()
+        .status
+        .into()
 }
 
 /// # Safety
@@ -144,7 +105,7 @@ pub unsafe extern "C" fn nx_suggestions_status(
 pub unsafe extern "C" fn nx_suggestions_count(suggestions: *const Suggestions) -> usize {
     // SAFETY: the header requires a live page.
     unsafe { abi::accessor(suggestions) }
-        .outcome
+        .outcome()
         .suggestions
         .len()
 }
@@ -200,7 +161,7 @@ unsafe fn write_suggestion(
 ) -> Result<(), Failure> {
     // SAFETY: the caller guarantees a live page.
     let suggestions = unsafe { abi::handle(suggestions, "suggestions") }?;
-    let Some(suggestion) = suggestions.outcome.suggestions.get(index) else {
+    let Some(suggestion) = suggestions.outcome().suggestions.get(index) else {
         return Err(Failure::new(
             FailureKind::InvalidArgument,
             format!("suggestion index {index} is out of range"),
@@ -232,7 +193,7 @@ pub unsafe extern "C" fn nx_suggestions_continuation(
 ) -> bool {
     // SAFETY: the header requires a live page.
     let suggestions = unsafe { abi::accessor(suggestions) };
-    let Some(next) = suggestions.outcome.continuation.as_ref() else {
+    let Some(next) = suggestions.outcome().continuation.as_ref() else {
         return false;
     };
     // SAFETY: the header requires writable non-null outputs.
@@ -253,27 +214,27 @@ pub unsafe extern "C" fn nx_suggestions_free(suggestions: *mut Suggestions) {
 mod tests {
     use std::ptr;
 
-    use nervix_client_core::{AutocompleteSuggestion, TextEdit};
+    use nervix_client_core::{
+        AutocompleteOutcome, AutocompleteSuggestion, SuggestionKind, SuggestionStatus, TextEdit,
+    };
 
     use super::*;
 
     #[test]
     fn c_accessors_keep_page_status_edit_and_continuation() {
-        let page = abi::into_handle(Suggestions {
-            outcome: AutocompleteOutcome {
-                status: SuggestionStatus::Ready,
-                suggestions: vec![AutocompleteSuggestion {
-                    value: "CLUSTER".to_string(),
-                    kind: SuggestionKind::Text,
-                    edit: TextEdit {
-                        start: 5,
-                        end: 11,
-                        replacement: "CLUSTER".to_string(),
-                    },
-                }],
-                continuation: Some("next-page".to_string()),
-            },
-        });
+        let page = abi::into_handle(Suggestions::new(AutocompleteOutcome {
+            status: SuggestionStatus::Ready,
+            suggestions: vec![AutocompleteSuggestion {
+                value: "CLUSTER".to_string(),
+                kind: SuggestionKind::Text,
+                edit: TextEdit {
+                    start: 5,
+                    end: 11,
+                    replacement: "CLUSTER".to_string(),
+                },
+            }],
+            continuation: Some("next-page".to_string()),
+        }));
         // SAFETY: this test owns the live page and writes into its local outputs.
         unsafe {
             assert_eq!(nx_suggestions_status(page), CompletionStatus::Ready);
@@ -336,13 +297,11 @@ mod tests {
             ),
         ];
         for (status, expected) in statuses {
-            let page = abi::into_handle(Suggestions {
-                outcome: AutocompleteOutcome {
-                    status,
-                    suggestions: Vec::new(),
-                    continuation: None,
-                },
-            });
+            let page = abi::into_handle(Suggestions::new(AutocompleteOutcome {
+                status,
+                suggestions: Vec::new(),
+                continuation: None,
+            }));
             // SAFETY: this test owns the live page and writes into its local outputs.
             unsafe {
                 assert_eq!(nx_suggestions_status(page), expected);

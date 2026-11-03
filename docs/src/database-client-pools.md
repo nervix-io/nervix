@@ -238,7 +238,10 @@ With `true`, a checkout that finds the connection closed replaces it within
 trip, and a connection the server or a proxy closed reaches the write that borrowed it, which fails
 as a transient error and retries on its emitter's policy. Either way the pool tests a connection
 again when it is returned, and closes one that fails. A newly opened connection is not tested
-first.
+first. The test of a returned connection has no deadline: a server that stops answering keeps that
+connection, and its place within `MAX`, until the server answers or the connection breaks, so once
+every place is held this way a checkout waits out `pool_acquire_timeout_ms` and the write retries
+on its emitter's policy.
 
 ```plexus
 CREATE POSTGRES CLIENT postgres_behind_proxy
@@ -249,6 +252,13 @@ CREATE POSTGRES CLIENT postgres_behind_proxy
     'pool_max_lifetime_ms' = '900000'
   };
 ```
+
+Every catalog query and insert of a Postgres emitter runs as a named prepared statement, which the
+driver prepares once on a connection and keeps for it, up to the URL's `statement-cache-capacity`,
+100 by default. A connection pooler between Nervix and the server must therefore keep a session's
+prepared statements: pool by session, or by transaction only where the pooler supports
+protocol-level prepared statements. Behind a pooler that does not keep them, a write that reuses
+a statement can fail with SQLSTATE `26000`, which the emitter retries on its policy.
 
 ## Accepted values
 

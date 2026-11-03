@@ -13,7 +13,7 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumIter, EnumString, IntoStaticStr};
@@ -235,18 +235,7 @@ impl CreateEmitter {
                     codec: codec.clone(),
                 };
             }
-            AlterEmitterOperation::DropEncode => {
-                if self.connector.capabilities().body == crate::EmitterBodyForm::CodecOrWithoutBody
-                {
-                    return Err(Report::new(AlterEmitterError::BodySelectionRequired {
-                        entity: self.connector.kind(),
-                    }));
-                }
-                if self.body.codec().is_none() {
-                    return Err(Report::new(AlterEmitterError::EncodeNotConfigured));
-                }
-                self.body = EmitterBody::Values;
-            }
+            AlterEmitterOperation::DropEncode => return self.drop_encode(),
             AlterEmitterOperation::SetCollect { policy } => {
                 self.from.collect_policy = Some(policy.clone());
             }
@@ -281,7 +270,25 @@ impl CreateEmitter {
                 table.commit_each = commit_each.clone();
                 table.max_commit_size = *max_commit_size;
             }
+            AlterEmitterOperation::AlterEnvelope { alteration } => {
+                self.envelope
+                    .apply_alteration(self.connector.kind(), alteration)
+                    .change_context(AlterEmitterError::Envelope)?;
+            }
         }
+        Ok(())
+    }
+
+    fn drop_encode(&mut self) -> error_stack::Result<(), AlterEmitterError> {
+        if self.connector.capabilities().body == crate::EmitterBodyForm::CodecOrWithoutBody {
+            return Err(Report::new(AlterEmitterError::BodySelectionRequired {
+                entity: self.connector.kind(),
+            }));
+        }
+        if self.body.codec().is_none() {
+            return Err(Report::new(AlterEmitterError::EncodeNotConfigured));
+        }
+        self.body = EmitterBody::Values;
         Ok(())
     }
 
@@ -371,6 +378,9 @@ pub enum AlterEmitterOperation {
         commit_each: String,
         max_commit_size: crate::PayloadSizeLimit,
     },
+    AlterEnvelope {
+        alteration: Box<crate::EmitterEnvelopeAlteration>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -410,6 +420,8 @@ pub enum AlterEmitterError {
     BatchNotConfigured,
     #[error(transparent)]
     Batch(EmitterBatchContractError),
+    #[error("invalid emitter envelope alteration")]
+    Envelope,
 }
 
 /// Why an emitter's batching clause does not fit the emitter it publishes to.
