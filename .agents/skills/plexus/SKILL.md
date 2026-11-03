@@ -36,6 +36,10 @@ direct-value sections. Nervix validates the entity's declared limits and exact m
 For MQTT sources, read [Ingestors → MQTT](../../../docs/src/ingestors.md#mqtt) before promising
 delivery during downstream stalls; it distinguishes QoS 0 overflow, acknowledged capacity and
 the counters that expose each outcome, and the refusal of a broker grant below the declared QoS.
+For Pulsar source identity, keys, redelivery and event-time windows, read
+[Ingestors → Pulsar](../../../docs/src/ingestors.md#pulsar) and its metadata table. Choose
+`TIMESTAMP AT metadata.event_time` or `TIMESTAMP AT metadata.publish_time` deliberately: an absent
+event time stays null, while an explicit epoch time is preserved.
 
 For NATS publication, choose `NATS SUBJECT EMITTER` with `MODE NO ACK` for Core NATS, or
 `NATS STREAM EMITTER` with a provisioned `STREAM`, a literal `SUBJECT` captured by that stream,

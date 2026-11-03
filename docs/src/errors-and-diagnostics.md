@@ -1010,6 +1010,12 @@ An MQTT broker's successful `SUBACK` with a grant below the requested QoS fails 
 policy and `DESCRIBE INGESTOR` report those levels without payload or client credentials, in
 acknowledged and `NO ACK` modes alike.
 
+An explicitly refused `SUBACK` keeps `MqttTopicIngestorError::SubscriptionRefused` beneath the
+same resume context. Both subscription refusals require session retirement before another
+attempt: an empty retained session cannot clear the failure or report readiness. Cleanup failures
+keep their typed retirement report and the pending phase, including across suspension. Once
+cleanup succeeds, the next attempt must obtain an accepted subscription grant.
+
 MQTT input retirement reports `RuntimeError::RetireIngestorEntity`, naming its domain and
 ingestor, above the connector's `MqttTopicIngestorError::RetireInstance` and instance index. The report
 keeps typed client and connection causes, an unsubscribe refusal's reason codes, or the cleanup
@@ -1184,6 +1190,13 @@ keeps the first failed receipt beneath `EmitterFinishError::Flush`; if its deadl
 receipts still unanswered, `EmitterFinishError::Unsent` counts those receipts, retaining an earlier
 driver failure beneath it when present. An unanswered receipt leaves delivery unknown rather
 than proving that the broker did not store the message.
+
+Pulsar receive conversion uses `PulsarTopicIngestorError::PublishTime`, `EventTime` or `SequenceId`
+under `IngestorError::Read`, retaining `TimestampError` or `TryFromIntError` as the typed cause.
+Each field error carries the received topic and full message position. A valid batch prefix reaches
+the host before a later conversion or driver receive failure is reported on the next active read;
+cancellation leaves that pending failure available. An unsupported present value never becomes a
+missing metadata field.
 
 A Pulsar source classifies an acknowledgement or a redelivery request that did not take effect in
 `PulsarTopicIngestorError`, beneath `IngestorError::Acknowledge` or `IngestorError::Reject`. An

@@ -687,7 +687,7 @@ dependencies = [
 [[package]]
 name = "async-nats"
 version = "0.49.1"
-source = "git+https://github.com/glebpom/nats.rs.git?rev=d8dced4222568fe3935fcbdb81d66b6f89bfbaca#d8dced4222568fe3935fcbdb81d66b6f89bfbaca"
+source = "git+https://github.com/glebpom/nats.rs.git?rev=51b219e6946e431ceb0614b688792ed58117006c#51b219e6946e431ceb0614b688792ed58117006c"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
@@ -7831,6 +7831,7 @@ dependencies = [
  "opentelemetry-proto",
  "ort",
  "playwright-rs",
+ "prost 0.13.5",
  "prost 0.14.4",
  "pulsar",
  "rcgen",
@@ -9705,7 +9706,7 @@ dependencies = [
 [[package]]
 name = "pulsar"
 version = "6.9.0"
-source = "git+https://github.com/nervix-io/pulsar-rs.git?branch=nervix-message-size-ack-receipts#1545163035670abe8996be7bd2610e45421c47ce"
+source = "git+https://github.com/nervix-io/pulsar-rs.git?branch=nervix-message-size-ack-receipts#effd94b4d137e85823f103b123727883c53ccaad"
 dependencies = [
  "async-channel",
  "async-trait",

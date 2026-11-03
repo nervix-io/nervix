@@ -134,6 +134,7 @@ ort = { workspace = true, features = [
 ] }
 otel-prost = { workspace = true }
 playwright-rs = { workspace = true }
+prost = { workspace = true }
 pulsar = { workspace = true }
 rcgen = { workspace = true }
 redis = { workspace = true }
