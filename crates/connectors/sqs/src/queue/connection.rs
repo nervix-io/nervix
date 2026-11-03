@@ -302,6 +302,8 @@ pub(crate) enum SqsRequest {
     QueueLookup,
     Receive,
     Delete,
+    DeleteBatch,
+    ChangeVisibilityBatch,
     Send,
     SendBatch,
 }
@@ -313,6 +315,8 @@ impl SqsRequest {
             Self::QueueLookup => "SQS GetQueueUrl failed",
             Self::Receive => "SQS ReceiveMessage failed",
             Self::Delete => "SQS DeleteMessage failed",
+            Self::DeleteBatch => "SQS DeleteMessageBatch failed",
+            Self::ChangeVisibilityBatch => "SQS ChangeMessageVisibilityBatch failed",
             Self::Send => "SQS SendMessage failed",
             Self::SendBatch => "SQS SendMessageBatch failed",
         }
@@ -324,6 +328,8 @@ impl SqsRequest {
             Self::QueueLookup => "the SQS queue lookup",
             Self::Receive => "an SQS receive after its long poll",
             Self::Delete => "an SQS delete",
+            Self::DeleteBatch => "an SQS batch delete",
+            Self::ChangeVisibilityBatch => "an SQS visibility change",
             Self::Send => "an SQS send",
             Self::SendBatch => "an SQS batch send",
         }
