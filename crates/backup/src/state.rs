@@ -130,7 +130,7 @@ impl ArchiveRecord for KafkaOffsetsRecord {
         StreamedKafkaOffsets {
             domain: self.domain.clone(),
             entity: self.entity.clone(),
-            unit: self.unit.into(),
+            unit: self.unit,
             schema: self.schema,
             revision: self.revision,
             applied_start_generation: self.applied_start_generation,
@@ -181,7 +181,7 @@ impl ArchiveRecord for BranchLifecycleRecord {
             domain: self.domain.clone(),
             owner_kind: self.owner_kind,
             entity: self.entity.clone(),
-            unit: self.unit.into(),
+            unit: self.unit,
             schema: self.schema,
             revision: self.revision,
             branches: self.branches.iter().cloned(),

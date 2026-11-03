@@ -879,6 +879,8 @@ pub(super) enum IngestorEntityDraftError {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use std::num::NonZeroU64;
+
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
         CodecName, CreateStatement, GeneralErrorPolicy, HttpIngestorEntity, HttpRequestHeader,

@@ -3734,12 +3734,12 @@ workloads = [
   "scenario.window-metrics-relocation",
   "stress.window-metrics-drain",
   "stress.window-metrics-relocation",
-    "scenario.ingestor-instance-layout-01",
-    "stress.ingestor-instance-layout-01",
-    "scenario.ingestor-instance-layout-02",
-    "stress.ingestor-instance-layout-02",
-    "scenario.ingestor-instance-layout-03",
-    "stress.ingestor-instance-layout-03",
+  "scenario.ingestor-instance-layout-01",
+  "stress.ingestor-instance-layout-01",
+  "scenario.ingestor-instance-layout-02",
+  "stress.ingestor-instance-layout-02",
+  "scenario.ingestor-instance-layout-03",
+  "stress.ingestor-instance-layout-03",
 ]
 
 [[owner]]
@@ -3784,12 +3784,12 @@ workloads = [
   "stress.branch-state-resume",
   "stress.branch-state-stale-coordinator",
   "stress.restore-generation",
-    "scenario.ingestor-instance-layout-01",
-    "stress.ingestor-instance-layout-01",
-    "scenario.ingestor-instance-layout-02",
-    "stress.ingestor-instance-layout-02",
-    "scenario.ingestor-instance-layout-03",
-    "stress.ingestor-instance-layout-03",
+  "scenario.ingestor-instance-layout-01",
+  "stress.ingestor-instance-layout-01",
+  "scenario.ingestor-instance-layout-02",
+  "stress.ingestor-instance-layout-02",
+  "scenario.ingestor-instance-layout-03",
+  "stress.ingestor-instance-layout-03",
 ]
 
 [[owner]]
@@ -3832,12 +3832,12 @@ workloads = [
   "stress.wasm-kafka-restore",
   "scenario.backup-parked-wait-slow-reads",
   "stress.backup-parked-wait-slow-reads",
-    "scenario.ingestor-instance-layout-01",
-    "stress.ingestor-instance-layout-01",
-    "scenario.ingestor-instance-layout-02",
-    "stress.ingestor-instance-layout-02",
-    "scenario.ingestor-instance-layout-03",
-    "stress.ingestor-instance-layout-03",
+  "scenario.ingestor-instance-layout-01",
+  "stress.ingestor-instance-layout-01",
+  "scenario.ingestor-instance-layout-02",
+  "stress.ingestor-instance-layout-02",
+  "scenario.ingestor-instance-layout-03",
+  "stress.ingestor-instance-layout-03",
 ]
 
 [[owner]]
@@ -3896,12 +3896,12 @@ workloads = [
   "stress.shutdown-terminating-destination",
   "scenario.shutdown-unactivated-handoff",
   "stress.shutdown-unactivated-handoff",
-    "scenario.ingestor-instance-layout-01",
-    "stress.ingestor-instance-layout-01",
-    "scenario.ingestor-instance-layout-02",
-    "stress.ingestor-instance-layout-02",
-    "scenario.ingestor-instance-layout-03",
-    "stress.ingestor-instance-layout-03",
+  "scenario.ingestor-instance-layout-01",
+  "stress.ingestor-instance-layout-01",
+  "scenario.ingestor-instance-layout-02",
+  "stress.ingestor-instance-layout-02",
+  "scenario.ingestor-instance-layout-03",
+  "stress.ingestor-instance-layout-03",
 ]
 
 [[owner]]
@@ -4018,12 +4018,12 @@ workloads = [
   "stress.diagnostic-nodes",
   "stress.memory-pressure-pause",
   "stress.shutdown-kafka-handoff",
-    "scenario.ingestor-instance-layout-01",
-    "stress.ingestor-instance-layout-01",
-    "scenario.ingestor-instance-layout-02",
-    "stress.ingestor-instance-layout-02",
-    "scenario.ingestor-instance-layout-03",
-    "stress.ingestor-instance-layout-03",
+  "scenario.ingestor-instance-layout-01",
+  "stress.ingestor-instance-layout-01",
+  "scenario.ingestor-instance-layout-02",
+  "stress.ingestor-instance-layout-02",
+  "scenario.ingestor-instance-layout-03",
+  "stress.ingestor-instance-layout-03",
 ]
 
 [[owner]]
@@ -4155,12 +4155,12 @@ workloads = [
   "stress.restore-staging-quota",
   "stress.branch-state-large",
   "stress.wasm-large-handoff",
-    "scenario.ingestor-instance-layout-01",
-    "stress.ingestor-instance-layout-01",
-    "scenario.ingestor-instance-layout-02",
-    "stress.ingestor-instance-layout-02",
-    "scenario.ingestor-instance-layout-03",
-    "stress.ingestor-instance-layout-03",
+  "scenario.ingestor-instance-layout-01",
+  "stress.ingestor-instance-layout-01",
+  "scenario.ingestor-instance-layout-02",
+  "stress.ingestor-instance-layout-02",
+  "scenario.ingestor-instance-layout-03",
+  "stress.ingestor-instance-layout-03",
 ]
 
 [[owner]]
