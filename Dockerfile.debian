@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1.7
 
 ARG RUST_VERSION=1.99
-ARG KACHE_VERSION=1.2.2
+ARG KACHE_VERSION=2.0.0
 # The checksums of the pinned version's release archive for each build architecture.
-ARG KACHE_SHA256_AMD64=f2f6555dee50945c2a90a7fb793c2084a00cc6459d08ac2306d38d905064321b
-ARG KACHE_SHA256_ARM64=38856cee613f6ee0ec579099fc9205b840a0b45bb763f4b8fa782d25d93c18ef
+ARG KACHE_SHA256_AMD64=6c59665faf1b14d0944391e6f2a1b510195e6be92c63060a9d1770ed00676824
+ARG KACHE_SHA256_ARM64=8c5ca4d1d4b6fc66e5175c8a1150e1daa85099080646322058d9083c72986bba
 ARG TRUNK_VERSION=0.21.14
 ARG TRUNK_SHA256_AMD64=f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b
 ARG TRUNK_SHA256_ARM64=b1d8e60e454f7fc182d9a4d95d1506ffbae947d8ba90f8f6f02da93b60f980f9
@@ -118,7 +118,8 @@ RUN mkdir -p /etc/apt/keyrings \
 
 # kache and trunk come from the release archive of their pinned version, checked against its pinned
 # checksum. Each builds its release with fat LTO in one codegen unit, which takes minutes to
-# compile, and every image build runs this step.
+# compile, and every image build runs this step. Kache's archive holds its client and the engine
+# the client runs only with, so both are installed and must report the pinned version.
 RUN case "${BUILDARCH}" in \
         amd64) tool_arch=x86_64; kache_sha256="${KACHE_SHA256_AMD64}"; trunk_sha256="${TRUNK_SHA256_AMD64}" ;; \
         arm64) tool_arch=aarch64; kache_sha256="${KACHE_SHA256_ARM64}"; trunk_sha256="${TRUNK_SHA256_ARM64}" ;; \
@@ -133,10 +134,11 @@ RUN case "${BUILDARCH}" in \
         -o /tmp/trunk.tar.gz \
     && echo "${trunk_sha256}  /tmp/trunk.tar.gz" | sha256sum --check - \
     && mkdir -p /tmp/release-tools \
-    && tar -xzf /tmp/kache.tar.gz -C /tmp/release-tools kache \
+    && tar -xzf /tmp/kache.tar.gz -C /tmp/release-tools kache kache-engine \
     && tar -xzf /tmp/trunk.tar.gz -C /tmp/release-tools trunk \
-    && install -m 0755 /tmp/release-tools/kache /tmp/release-tools/trunk /usr/local/bin/ \
+    && install -m 0755 /tmp/release-tools/kache /tmp/release-tools/kache-engine /tmp/release-tools/trunk /usr/local/bin/ \
     && test "$(kache --version)" = "kache ${KACHE_VERSION}" \
+    && test "$(kache-engine --version)" = "kache ${KACHE_VERSION}" \
     && test "$(trunk --version)" = "trunk ${TRUNK_VERSION}" \
     && rm -rf /tmp/kache.tar.gz /tmp/trunk.tar.gz /tmp/release-tools
 

@@ -604,7 +604,7 @@ including their instrumented builds. Coverage flags do not replace Wild linker s
 The suite has one pool of **run slots**. Its size is the number of CPUs times the concurrency
 factor, set by `NERVIX_TEST_CONCURRENCY_FACTOR` or `--concurrency-factor` and `1` by default;
 `--concurrency` sets an absolute slot count. Each CI `scenarios` shard uses factor `3`, so its
-16-CPU runner has 48 slots. Cucumber may take up all parsed scenarios without charging a slot.
+8-CPU runner has 24 slots. Cucumber may take up all parsed scenarios without charging a slot.
 
 The slots are the suite's capacity, and the measurement of 26 October 2026 set their number. Over
 the retained artifacts of 20 Check runs, an ordinary run of one inventory of about 3,620 attempts
@@ -627,11 +627,13 @@ that thread ran on a CPU for 86 percent of the run, every scenario took about 1.
 median across the factor `3` runs, and the run needed 279,439 slot-seconds where 48 slots had
 needed at most 215,000. More slots added no throughput, so the job keeps factor `3`. Memory was no
 limit on those runs' runner, which used at most 28 GiB of its 62. The archive build runs on
-`blacksmith-16vcpu-ubuntu-2404`, and its unit-test and scenario readers on `boat-xlarge`, whose
-32 GB and 4 GB of swap stay above that peak with less to spare. Each scenario shard keeps 16 CPUs,
-48 slots and every product and harness deadline. A Boat runner can lose a fifth of its CPU to its host: in Check 41157008321 two of three
-shards averaged 18% and 20% CPU steal with 54 and 64 retries, and the third averaged 0.9% with one.
-The runner load record shows how close a run comes on memory and how much CPU it lost.
+`blacksmith-16vcpu-ubuntu-2404`, the unit-test reader on `boat-xlarge`, and the scenario shards on
+`blacksmith-8vcpu-ubuntu-2404`, whose 32 GB give each of its 24 slots the memory that runner gave
+each of 48. Each of the three shards keeps every product and harness deadline on 8 CPUs and 24
+slots, half the slots a 16-CPU shard held, so a shard takes about twice as long. The shards left Boat because a Boat
+runner can lose a fifth of its CPU to its host: in Check 41157008321 two of three shards averaged
+18% and 20% CPU steal with 54 and 64 retries, and the third averaged 0.9% with one. The runner load
+record shows how close a run comes on memory and how much CPU it lost.
 
 Admission grants feature capacity and the attempt's share of the run slots in one decision, after
 both are available. A scenario holds both through the end of teardown. The `@slots_N` tag declares
@@ -644,14 +646,16 @@ An attempt holds the larger of its declared weight and its retry share, capped a
 pool, rounded down, and at least one slot. A weight above the pool's capacity therefore still
 admits in a small local run. In a 48-slot pool, weight four holds four slots on the first attempt
 and first retry, and six on the second retry; a weight above twelve holds twelve on every attempt.
+In a CI shard's 24-slot pool, weight four holds four slots on every attempt, and a weight above six
+holds six.
 Pools of one, two or three slots give every attempt one. The cap preserves concurrent admission;
 no weight makes a scenario exclusive.
 
 A retry can hold a larger share, so it runs beside fewer scenarios than the run that failed. The first
 retry holds a sixteenth of the pool, and each later retry holds twice the share of the run before
 it. With Cucumber's two retries, the second retry holds an eighth, so an unweighted scenario's
-shares are 1, 3 and 6 of CI's 48 slots. Every run holds at least one slot, so a pool of fewer than
-sixteen slots gives its first retry one. A run past the configured retries, as a `--retry` override
+shares are 1, 1 and 3 of a CI shard's 24 slots, and 1, 3 and 6 of a 48-slot pool. Every run holds
+at least one slot, so a pool of fewer than sixteen slots gives its first retry one. A run past the configured retries, as a `--retry` override
 allows, keeps the last retry's share. An eligible attempt whose share is not yet free keeps the
 slots that free up until its share fits. This applies to weighted first attempts as well as
 retries: smaller attempts behind it cannot consume those slots one at a time and starve it.
@@ -795,7 +799,7 @@ physical SSD latency. Reported MHz and cpufreq policy values do not measure effe
 clocks. Low steal alone does not show a host is fast: CPU execution, cache/memory contention and
 storage can slow work without stolen time. The samples support comparison, not a specific cause.
 
-Every kache-backed job uses kache 1.2.2, records `doctor` output without making it a test failure,
+Every kache-backed job uses kache 2.0.0, records `doctor` output without making it a test failure,
 and publishes a cache report whatever its outcome, a timeout included. The report reads the last six
 hours of kache's events for every build on the machine: no kache-backed job may run longer, and each
 runs on a machine of its own, so the report covers the whole job, its tool builds included, and
@@ -911,7 +915,7 @@ lock, so Cargo recognizes it for guarded cleanup. Later phases rebuild any requi
 through the configured cache.
 
 Native CI jobs and the BuildKit builder also set `KACHE_AUTO_RECOVER_MIN_FREE_BYTES=68719476736`
-(64 GiB). Kache 1.2.2 otherwise disables free-space recovery in CI. This floor enables reclamation
+(64 GiB). Kache 2.0.0 otherwise disables free-space recovery in CI. This floor enables reclamation
 of eligible cached artifacts when free space falls below it, while the cache budget above scales
 with the actual cache filesystem. Artifacts still shared with active build targets are retained;
 target-directory recovery stays disabled. The floor is a trigger checked at kache's existing
@@ -3133,11 +3137,10 @@ for one build at a time, so the recipe builds each helper beside the suite in a 
 below `target/llvm-cov-tools`, and then installs it into the target directory of `cargo llvm-cov`. `scripts/scenario_shards.py`
 names what the archive holds: every executable `cargo llvm-cov report` reads as an object, the
 Playwright driver whose path the scenario executable holds, the ONNX fixtures and runtime, and the
-WASM guests. Each `scenarios (I of N)` job checks out the same revision and bind-mounts it at the
-path the build publishes, which the executables' absolute paths require, because the build and the
-shards run on different providers. It then restores the archive from there with
-`just test-scenarios-coverage-unpack`. The restore refuses an archive of another revision or
-checkout path, a file restored at another size, and an executable whose shared libraries the runner
+WASM guests. Each `scenarios (I of N)` job checks out the same revision on the build's provider,
+at the path the build checked out, which the executables' absolute paths require. It then restores
+the archive there with `just test-scenarios-coverage-unpack`. The restore refuses an archive of
+another revision or checkout path, a file restored at another size, and an executable whose shared libraries the runner
 lacks, before any scenario starts. Before it, the shard remounts the ext4 volumes holding `/tmp`,
 where its nodes sync their storage, and the checkout with `noatime` and `barrier=0`, as the build
 job's kache start step remounts its store's volume: a single-use runner needs no crash consistency. The shard then runs `just test-scenarios-coverage-shard I/N`. A
@@ -3161,9 +3164,10 @@ also has a different effective cap in different local slot pools, so it is not a
 
 `SCENARIO_SHARDS` in the Check workflow sets the number of shards, and `scenarios-build` turns it
 into the shards' matrix. In that run, a third of the 240,698 slot-seconds of work fills 48 slots
-for 28.5 minutes, while the longest attempt ran for 37.5 minutes, so the longest attempt bounds a
-shard of three. More shards shorten each shard's work but not that attempt; fewer make each shard
-longer, and the suite budget below assumes three. Each shard uploads its own coverage report,
+for 28.5 minutes and a shard's 24 slots for 57 minutes, while the longest attempt ran for 37.5
+minutes, so on 24 slots a shard of three is bounded by its work rather than by that attempt. More
+shards shorten each shard's work down to that attempt; fewer make each shard longer, and the suite
+budget below assumes three shards of 24 slots. Each shard uploads its own coverage report,
 `coverage-scenarios-<I>`, its logs, `scenario-logs-<I>`, and its runner load. The coverage job
 merges the report of every shard the workflow runs and fails when one is missing. A shard's suite
 summary names the shard, and its standard output and scenario log name how many of the runs it read

@@ -79,8 +79,9 @@ minutes to compile. cargo-auditable and cargo-sonic compile with `cargo install 
 the lockfile each crate published, so a later compatible release of one of their dependencies can
 neither change them nor stop them compiling. Moving a tool to another version changes its version
 pin and, for an archive, the checksum of each build architecture; an archive that does not match
-its checksum fails the build. The kache pin is the `KACHE_VERSION` that CI's kache-backed jobs
-install, which the recipes pass to the build.
+its checksum fails the build. Kache's archive holds its client and the engine the client runs only
+with, and the builder installs both and checks that each reports the pinned version. The kache pin
+is the `KACHE_VERSION` that CI's kache-backed jobs install, which the recipes pass to the build.
 
 `Dockerfile.debian` has two complete image targets: `cpu` (the default) and `cuda`. The recipes
 select them with `--target cpu` and `--target cuda`, respectively. Both targets copy the same
@@ -398,7 +399,7 @@ inspection or stop took 8 to 29 seconds against the chaos suite's 30-second boun
 operation, and three of fourteen soak shards failed their network qualification.
 
 [Boat](https://boat.dev) machines, which the boat CI GitHub App starts for every job whose `runs-on`
-names a Boat size, run every other job but the three that run on Blacksmith. Each gets a fresh
+names a Boat size, run every other job but those that run on Blacksmith. Each gets a fresh
 x86_64 Ubuntu 24.04 virtual machine with Docker, deleted when the job ends.
 `.github/actionlint.yaml` declares the Boat labels to `just validate-workflows`. Boat runs a public
 repository's jobs only for the GitHub users its account setting lists, and only when both a run's
@@ -408,7 +409,7 @@ minute, hour and day. A job's size follows the memory and disk its builds use ra
 since a Boat machine has only 2 GB of memory per CPU, with 4 GB of swap beside it:
 
 - `boat-xlarge`, with 16 CPUs, 32 GB and 251 GB of disk, runs validation, the diagnostic evidence,
-  the unit tests, the scenario shards, the extra checks, Shuttle, Loom, the Deloxide
+  the unit tests, the extra checks, Shuttle, Loom, the Deloxide
   lane, the Bolero randomized properties, the image builds and the benchmarks. In October 2026 the
   extra checks used about 95 GiB of disk and the amd64 image build lost its runner on a 16 GB
   machine.
@@ -433,11 +434,17 @@ needs more than Boat's 32 GB, even with eight compilers. The other two are compi
 Check run 40991534806 kache's downloads spent most of their time waiting for the lock of its local
 store, 1.8 to 4.6 seconds each against 0.4 seconds on Blacksmith, the Loom qualification shards
 reached their two-hour limit after about 107 minutes of compiling, and the client conformance build
-took 49 of its job's 60 minutes. `.github/actionlint.yaml` declares the Blacksmith labels as well.
+took 49 of its job's 60 minutes.
+
+The scenario shards are timing sensitive, and they run on Blacksmith's
+`blacksmith-8vcpu-ubuntu-2404`, with 8 CPUs, 32 GB and 160 GB of disk. On `boat-xlarge` a shard
+lost on average a tenth of its CPU to its host and up to 58% at peaks, and its failures followed
+that loss. `.github/actionlint.yaml` declares the Blacksmith labels as well.
 
 An archive restores only at the checkout path it was built in, and it checks that path before it
-restores any file. The scenario build runs on Blacksmith and publishes its path, so the `tests` job
-and the shards on Boat bind-mount their checkout there, and restore and run from that path.
+restores any file. The scenario build and the shards run on Blacksmith, at the same path. The build
+publishes its path, so the `tests` job on Boat bind-mounts its checkout there, and restores and runs
+from that path.
 
 A kache-backed job uses the cache bucket in its runner's region: the EU bucket on Boat's European
 machines, and the US bucket on GitHub's hosted runners and on Blacksmith's US runners.

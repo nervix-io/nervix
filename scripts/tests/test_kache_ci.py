@@ -169,7 +169,7 @@ class KacheWorkflowTests(unittest.TestCase):
         manifest_keys = []
         for path in WORKFLOWS:
             workflow = path.read_text()
-            self.assertIn('KACHE_VERSION: "1.2.2"', workflow_env(workflow))
+            self.assertIn('KACHE_VERSION: "2.0.0"', workflow_env(workflow))
             self.assertIn('KACHE_REMOTE_KEY_LISTING: "false"', workflow_env(workflow))
             self.assertIn(
                 f'KACHE_AUTO_RECOVER_MIN_FREE_BYTES: "{CACHE_RECOVERY_BYTES}"', workflow_env(workflow)
@@ -440,9 +440,9 @@ class KacheWorkflowTests(unittest.TestCase):
             self.assertIn(f'--build-arg "{name}=${{{name}}}"', justfile)
             self.assertIn(f'"${{{name}:?{name} is required}}"', justfile)
             self.assertIn(f"ARG {name}\n", dockerfile)
-        self.assertIn('--build-arg "KACHE_VERSION=${KACHE_VERSION:-1.2.2}"', justfile)
+        self.assertIn('--build-arg "KACHE_VERSION=${KACHE_VERSION:-2.0.0}"', justfile)
 
-        self.assertIn("ARG KACHE_VERSION=1.2.2", dockerfile)
+        self.assertIn("ARG KACHE_VERSION=2.0.0", dockerfile)
         self.assertIn("COPY scripts/kache_remote.py ./scripts/kache_remote.py", dockerfile)
         self.assertIn("COPY scripts/publish_kache_report.py ./scripts/publish_kache_report.py", dockerfile)
         self.assertIn("ENV RUSTC_WRAPPER=kache", dockerfile)
@@ -504,6 +504,10 @@ class KacheWorkflowTests(unittest.TestCase):
             extraction = image_build.builder_stage.index(f"tar -xzf /tmp/{tool}.tar.gz")
             self.assertLess(check, extraction)
             self.assertIn(f'test "$({tool} --version)" = "{tool} ${{{argument}_VERSION}}"', image_build.builder_stage)
+        # Kache's client runs only with the engine of its own release, so both leave the archive.
+        self.assertIn("tar -xzf /tmp/kache.tar.gz -C /tmp/release-tools kache kache-engine", image_build.builder_stage)
+        self.assertIn("/tmp/release-tools/kache-engine /tmp/release-tools/trunk /usr/local/bin/", image_build.builder_stage)
+        self.assertIn('test "$(kache-engine --version)" = "kache ${KACHE_VERSION}"', image_build.builder_stage)
         self.assertIn("amd64) tool_arch=x86_64;", image_build.builder_stage)
         self.assertIn("arm64) tool_arch=aarch64;", image_build.builder_stage)
 

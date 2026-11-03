@@ -18,7 +18,6 @@ env:
   TINYGO_VERSION: "0.41.1"
   # How many shards run the scenario suite: scenarios-build plans a matrix of this many, and each
   # shard runs its share of the scenario runs. More shards shorten each shard down to its longest
-  # scenario; see the shards in docs/src/integration-test-lifecycle.md.
   SCENARIO_SHARDS: "3"
 
 permissions:
@@ -1035,10 +1034,12 @@ jobs:
   # checkout of the same revision at the same path, and runs its share of the scenario runs, which
   # the scenario executable's --shard option deals out. SCENARIO_SHARDS sets how many shards run.
   # A shard compiles nothing, so it needs neither the build's toolchain setup nor the cache.
+  # The scenarios are timing sensitive, so the shards run on Blacksmith, where the build runs and
+  # its checkout path is theirs too: Boat's runners lost up to half their CPU to their hosts.
   scenarios:
     name: scenarios (${{ matrix.shard }} of ${{ strategy.job-total }})
     needs: [scenarios-build]
-    runs-on: boat-xlarge
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     # The harness derives each shard's 85-minute suite budget from this limit, with 15 minutes for
     # setup and the archive's restore before it and 15 for cleanup, export and uploads after it.
     # Keep tests/common/suite_watchdog.rs in step.
@@ -1053,9 +1054,10 @@ jobs:
       NO_COLOR: "1"
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
-      # 48 slots on the 16-CPU runner. Every scenario's steps run on one runner thread, and 64 slots
-      # (Check 40358096404) kept that thread on a CPU for 86% of the run, made every scenario about
-      # 45% slower and raised no throughput; see the run slots in docs/src/integration-test-lifecycle.md.
+      # 24 slots on the 8-CPU runner. Every scenario's steps run on one runner thread, and factor 4,
+      # 64 slots on 16 CPUs (Check 40358096404), kept that thread on a CPU for 86% of the run, made
+      # every scenario about 45% slower and raised no throughput; see the run slots in
+      # docs/src/integration-test-lifecycle.md.
       NERVIX_TEST_CONCURRENCY_FACTOR: "3"
     steps:
       - name: Checkout
