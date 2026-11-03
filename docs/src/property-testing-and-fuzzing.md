@@ -1,5 +1,12 @@
 # Property Testing And Fuzzing
 
+The temporary CI execution policy disables every fuzz target, regardless of labels, schedules,
+manual dispatch or reruns. Re-enabling it requires an explicit user decision. Local targeted
+campaigns remain available when a concrete risk needs them; they are not routine replacements
+for broad CI qualification. The sanitizer job configuration and its budgets below are retained
+while execution is disabled. Ordinary corpus tests, permitted randomized checks, report integrity
+and the complexity gate retain their own verdicts.
+
 Bolero is Nervix's default property-test engine for representation correctness. Each property is
 an ordinary Rust test beside its production owner and a registered custom libFuzzer target. The
 generator, production path and assertion are the same in both modes.
@@ -512,7 +519,7 @@ example tests.
 
 Server properties embed the real web console assets. The Bolero recipes build them before
 discovery, requiring Trunk and the repository Rust toolchain's `wasm32-unknown-unknown` target.
-Both CI modes install those prerequisites.
+The randomized CI job and retained disabled sanitizer configuration install those prerequisites.
 Asset builds stage Trunk's complete output and preserve byte-identical published files, including
 their timestamps, so preparing assets again keeps the native server's compiled artifacts reusable.
 
@@ -749,9 +756,9 @@ uses this shared path for the declared registry library harness. `just prepare-b
 campaigns. The target must subsequently pass `just fuzz <id>` with the ordinary build and case
 limits; CI campaigns continue to use that bounded runner.
 
-PR CI runs each Bolero mode through Check's reusable Bolero call only when the PR carries its
-label. The sanitizer libFuzzer shards run with `fuzz`, with 30 seconds of engine time per target,
-and the ordinary randomized/corpus job runs with `bolero-random`. Every job uses the native
+PR CI calls the permitted randomized/corpus job with `bolero-random`. Sanitizer libFuzzer
+execution is disabled for every trigger under the temporary policy. Its retained job configuration
+allocates 30 seconds of engine time per target. Every job uses the native
 [CI linker](./developing-nervix.md#validation-and-tests), including sanitizer builds that supply
 their own compiler flags. Adding or removing a label reevaluates the jobs, and a push to a labeled
 PR runs them again. Manual workflow runs execute the ordinary properties. Job limits
@@ -759,11 +766,9 @@ reserve additional time for compilation, artifacts and cleanup. A cache may seed
 cannot skip a target or replace checked-in regressions. An empty selection, timeout, engine
 failure, sanitizer finding or property failure fails the job.
 
-`fuzz` is the preferred Bolero evidence in CI, and it stays off by default: run `just fuzz` locally
-first, and label a pull request only for the need [CI labels](./developing-nervix.md#ci-labels)
-describes. Its shards discover the inventory, run a
-coverage-guided sanitizer campaign of every registered target from its checked-in corpus, measure
-the Rust source those campaigns execute and qualify the runner's failure paths. A pull request whose
+The disabled sanitizer job retains its inventory discovery, checked-in corpus, source coverage
+collection and failure qualification. A `fuzz` label cannot enable it; see
+[CI labels](./developing-nervix.md#ci-labels). A pull request whose
 diff requires the ordinary suites runs each product property there as an ordinary Rust test that
 replays its checked-in corpus, whatever its labels; the five `typed-*` properties of the separate
 `tools/nervix-lint` workspace run as ordinary tests in `just test-typed-ratchet`, which CI runs for a
@@ -772,7 +777,7 @@ exact declared features and the check that every property ran the inventory's ca
 replayed its whole corpus. Label a pull request `bolero-random` only when its task requires
 that run, such as a change to the randomized run itself, its runner or its job, or a release
 qualification, whose register requires it. A new or changed target is checked locally with
-`just test-bolero <id>`; in CI, label its pull request `fuzz`.
+`just test-bolero <id>`; record the sanitizer CI qualification gap while the temporary ban applies.
 
 Each fuzz run retains its corpus, crashes, log and metadata with revision, target, domain version,
 toolchain, features, flags, result and exact-input reproduction commands. Retain failure
@@ -801,8 +806,8 @@ A random seed reproduces one generated case, not an entire entropy-driven campai
 - An input that differs from its run record, and one whose record cannot be read, are refused.
 
 The deliberately failing targets live in the standalone `tests/bolero-qualification` package,
-outside the workspace and the inventory. Every CI shard runs the qualification, so each shard's
-runner proves its own failure paths.
+outside the workspace and the inventory. The disabled CI shard configuration retains this qualification before its campaigns. No current
+CI qualification is claimed while execution is prohibited.
 
 ## Live Rust Source Coverage
 

@@ -157,11 +157,8 @@ jobs:
   build-diagnostic:
     name: build-diagnostic-deloxide-order-amd64
     needs: meta
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      (contains(github.event.pull_request.labels.*.name, 'chaos') ||
-        contains(github.event.pull_request.labels.*.name, 'chaos-soak'))
+    # Temporary CI policy: re-enabling execution requires an explicit user decision.
+    if: ${{ false }}
     # The diagnostic server's workspace crates compile with the detector's features, which the
     # release image's cache does not hold. Like the release builds, it takes the 32 GB machine.
     runs-on: boat-xlarge
@@ -525,10 +522,8 @@ jobs:
   chaos-smoke-diagnostic:
     name: chaos-smoke-diagnostic
     needs: [meta, build-diagnostic]
-    if: >-
-      github.event_name == 'pull_request' &&
-      contains(github.event.pull_request.labels.*.name, 'chaos') &&
-      github.event.pull_request.head.repo.full_name == github.repository
+    # Temporary CI policy: re-enabling execution requires an explicit user decision.
+    if: ${{ false }}
     permissions:
       contents: read
       packages: read
@@ -559,10 +554,8 @@ jobs:
   chaos-soak-diagnostic:
     name: chaos-soak-diagnostic
     needs: [meta, build-diagnostic]
-    if: >-
-      github.event_name == 'pull_request' &&
-      contains(github.event.pull_request.labels.*.name, 'chaos-soak') &&
-      github.event.pull_request.head.repo.full_name == github.repository
+    # Temporary CI policy: re-enabling execution requires an explicit user decision.
+    if: ${{ false }}
     permissions:
       contents: read
       packages: read
