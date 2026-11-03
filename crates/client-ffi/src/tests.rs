@@ -23,7 +23,7 @@ use nervix_models::{ParseAsType, SchemaField, Timestamp};
 use nervix_primitives::{sync::Arc, time::Instant};
 
 use crate::{
-    Cancel, CellState, Disposition, Event, EventKind, FailureKind, FieldType, Outcome, Schema,
+    CellState, Disposition, Event, EventKind, FailureKind, FieldType, Outcome, Schema,
     nx_cancel_free, nx_cancel_new, nx_cancel_trigger, nx_cancel_with_deadline,
     nx_error_execution_reference, nx_error_free, nx_error_kind_of, nx_error_message,
     nx_event_cell_varlen, nx_event_column_fixed, nx_event_column_states, nx_event_column_varlen,
@@ -317,16 +317,36 @@ fn profiles_bulk_binding_access_and_retain_release() {
     }
 }
 
+#[test]
+fn a_host_creates_triggers_and_frees_tokens_through_the_c_abi() {
+    let token = nx_cancel_new();
+    let mut expiring = ptr::null_mut();
+    // SAFETY: the tokens are live until they are freed, and `expiring` is writable.
+    unsafe {
+        nx_cancel_trigger(token);
+        nx_cancel_free(token);
+        succeeded(nx_cancel_with_deadline(1_000, &mut expiring));
+        nx_cancel_free(expiring);
+        assert_eq!(
+            failure_kind(nx_cancel_with_deadline(1_000, ptr::null_mut())),
+            FailureKind::InvalidArgument
+        );
+        assert_eq!(
+            failure_kind(nx_cancel_with_deadline(u64::MAX, &mut expiring)),
+            FailureKind::InvalidArgument
+        );
+        nx_cancel_free(ptr::null_mut());
+    }
+}
+
 /// An event handed out as a host's first reference, released when dropped.
 struct Shared(*mut Event);
 
 impl Shared {
     fn new(event: SubscriptionEvent) -> Self {
-        Self(
-            Event::new(event)
-                .assured("the event conforms")
-                .into_shared(),
-        )
+        Self(crate::abi::into_shared(
+            Event::new(event).assured("the event conforms"),
+        ))
     }
 }
 
@@ -1283,62 +1303,6 @@ fn client_errors_are_classified_and_keep_their_causes() {
             &mut text_len
         ));
         nx_error_free(unnamed);
-    }
-}
-
-#[test]
-fn a_token_bounds_a_call_by_cancellation_and_by_deadline() {
-    let runtime = nervix_primitives::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .assured("a test runtime starts");
-    let forever = || std::future::pending::<Result<(), crate::Failure>>();
-
-    let cancelled = Cancel::default();
-    cancelled.trigger();
-    let result = runtime.block_on(cancelled.bound(async { Ok(()) }));
-    assert_eq!(
-        result
-            .expect_err("a triggered token wins over a ready result")
-            .kind(),
-        FailureKind::Cancelled
-    );
-
-    let expiring = Cancel::with_deadline(Duration::from_millis(10)).assured("a short deadline");
-    let result = runtime.block_on(expiring.bound(forever()));
-    assert_eq!(
-        result.expect_err("the deadline ends the wait").kind(),
-        FailureKind::Deadline
-    );
-
-    let open = Cancel::default();
-    assert!(runtime.block_on(open.bound(async { Ok(()) })).is_ok());
-
-    let too_long = Cancel::with_deadline(Duration::from_secs(2 * 24 * 60 * 60));
-    assert_eq!(
-        too_long
-            .expect_err("a deadline beyond a day is refused")
-            .kind(),
-        FailureKind::InvalidArgument
-    );
-
-    let token = nx_cancel_new();
-    let mut expiring = ptr::null_mut();
-    // SAFETY: the tokens are live until they are freed, and `expiring` is writable.
-    unsafe {
-        nx_cancel_trigger(token);
-        nx_cancel_free(token);
-        succeeded(nx_cancel_with_deadline(1_000, &mut expiring));
-        nx_cancel_free(expiring);
-        assert_eq!(
-            failure_kind(nx_cancel_with_deadline(1_000, ptr::null_mut())),
-            FailureKind::InvalidArgument
-        );
-        assert_eq!(
-            failure_kind(nx_cancel_with_deadline(u64::MAX, &mut expiring)),
-            FailureKind::InvalidArgument
-        );
-        nx_cancel_free(ptr::null_mut());
     }
 }
 
