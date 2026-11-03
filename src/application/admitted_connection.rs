@@ -256,4 +256,29 @@ mod tests {
             .expect_err("a connection must not write after it was cut");
         assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
     }
+
+    #[nervix_primitives::test]
+    async fn cutting_the_connection_fails_its_vectored_writes_flush_and_shutdown() {
+        let cut = CancellationToken::new();
+        let (_client, server) = tokio::io::duplex(64);
+        let mut connection = AdmittedConnection::new(server, &cut);
+
+        cut.cancel();
+
+        let vectored = connection
+            .write_vectored(&[io::IoSlice::new(b"late")])
+            .await
+            .expect_err("a cut connection must not take a vectored write");
+        assert_eq!(vectored.kind(), io::ErrorKind::ConnectionAborted);
+        let flushed = connection
+            .flush()
+            .await
+            .expect_err("a cut connection must not flush");
+        assert_eq!(flushed.kind(), io::ErrorKind::ConnectionAborted);
+        let shut = connection
+            .shutdown()
+            .await
+            .expect_err("a cut connection must not shut down its write half");
+        assert_eq!(shut.kind(), io::ErrorKind::ConnectionAborted);
+    }
 }
