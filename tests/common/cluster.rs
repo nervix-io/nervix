@@ -4,6 +4,7 @@ mod snapshot_receive;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt,
     fs::OpenOptions,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -880,6 +881,157 @@ impl LeaderWitness {
                 expired.last_output.map(|status| status.raw)
             ))),
         }
+    }
+}
+
+/// One leadership as a node reports it: the leader it names and the term it reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReportedLeadership {
+    leader: String,
+    term: u64,
+}
+
+impl ReportedLeadership {
+    /// Whether this is a leadership that a move which last asked `asked` has not asked yet. A
+    /// later term is a new leadership, and so is another leader in the same term, because OpenRaft
+    /// orders the candidates of one term by node identifier. A report of an earlier term is stale.
+    fn is_new_since(&self, asked: &ReportedLeadership) -> bool {
+        if self.term != asked.term {
+            return self.term > asked.term;
+        }
+        self.leader != asked.leader
+    }
+}
+
+impl fmt::Display for ReportedLeadership {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "'{}' in term {}", self.leader, self.term)
+    }
+}
+
+/// Moves leadership to one node and waits until that node reports itself the leader.
+///
+/// A transfer is a request, not a reservation of the next election. The leader stops sending
+/// heartbeats and the target campaigns at once, but every other voter's election timeout keeps
+/// running until the target's votes come back. Under load a granted vote's reply can miss the
+/// target's vote request deadline, or another voter's timeout can pass first, and that voter wins,
+/// even in the term the target campaigns in, because OpenRaft orders one term's candidates by node
+/// identifier. Raft is right to elect it, and nothing moves leadership on afterwards. A move
+/// therefore asks each leadership the target reports that is not its own, once, until the target
+/// leads. It never asks a target that already leads: a leader asked to transfer to itself stops its
+/// heartbeats and hands leadership to whichever follower's election timeout passes first.
+struct LeadershipMove {
+    fault_injection: FaultInjection,
+    target: LeaderWitness,
+}
+
+impl LeadershipMove {
+    /// Asks `from_node_id`, and then each new leadership the target reports, to transfer
+    /// leadership to the target, until the target reports itself the leader within `deadline`.
+    async fn complete(&self, from_node_id: &str, deadline: PhaseDeadline) -> io::Result<()> {
+        let target = self.target.node_id.as_str();
+        let mut repeated = Vec::new();
+        let first = self
+            .next_status(deadline, &repeated, |status| status.leadership().is_some())
+            .await?;
+        let first = first
+            .leadership()
+            .verified("the poll accepted the status because it names a leadership");
+        if first.leader == target {
+            return Ok(());
+        }
+        let mut asked = ReportedLeadership {
+            leader: from_node_id.to_string(),
+            term: first.term,
+        };
+        if asked.leader != target {
+            self.ask(&asked.leader);
+        }
+        loop {
+            let status = self
+                .next_status(deadline, &repeated, |status| {
+                    self.reports_target_or_new_since(status, &asked)
+                })
+                .await?;
+            let leadership = status
+                .leadership()
+                .verified("the poll accepted the status because it names a leadership");
+            if leadership.leader == target {
+                return Ok(());
+            }
+            eprintln!(
+                "leadership move to '{target}': {leadership} leads after {asked} was asked; \
+                 asking '{}' to transfer to '{target}'",
+                leadership.leader
+            );
+            self.ask(&leadership.leader);
+            repeated.push(leadership.clone());
+            asked = leadership;
+        }
+    }
+
+    /// Whether `status` names the target as the leader, or a leadership the move has not asked
+    /// since it asked `asked`.
+    fn reports_target_or_new_since(
+        &self,
+        status: &ClusterStatus,
+        asked: &ReportedLeadership,
+    ) -> bool {
+        let Some(leadership) = status.leadership() else {
+            return false;
+        };
+        leadership.leader == self.target.node_id || leadership.is_new_since(asked)
+    }
+
+    /// Asks `leader` to transfer leadership to the target.
+    fn ask(&self, leader: &str) {
+        self.fault_injection
+            .request_leadership_transfer(node_name(leader), node_name(&self.target.node_id));
+    }
+
+    /// Polls the target's status until `accepts` takes one, and otherwise names, once `deadline`
+    /// passes, the leaderships the move asked again in `repeated` and what the target last
+    /// reported.
+    async fn next_status<Accepts>(
+        &self,
+        deadline: PhaseDeadline,
+        repeated: &[ReportedLeadership],
+        accepts: Accepts,
+    ) -> io::Result<ClusterStatus>
+    where
+        Accepts: Fn(&ClusterStatus) -> bool,
+    {
+        let polled = deadline
+            .poll_until(
+                POLL_INTERVAL,
+                |phase| async move {
+                    let status = self.target.endpoint.cluster_status(phase).await?;
+                    Ok::<_, Report<StatusRequestError>>(ClusterStatus::parse(status))
+                },
+                accepts,
+            )
+            .await;
+        let expired = match polled {
+            Ok(status) => return Ok(status),
+            Err(expired) => expired,
+        };
+        let asked_again = repeated
+            .iter()
+            .map(ReportedLeadership::to_string)
+            .collect::<Vec<_>>();
+        let mut message = format!(
+            "node '{}' did not report itself the leader within {:?}; the move asked again after \
+             {asked_again:?}",
+            self.target.node_id,
+            deadline.elapsed()
+        );
+        if let Some(status) = expired.last_output {
+            message.push_str(&format!("\nlast status:\n{}", status.raw));
+        }
+        if let Some(failure) = expired.last_failure {
+            message.push_str(&format!("\nlast error: {failure:#}"));
+        }
+        Err(io::Error::other(message))
     }
 }
 
@@ -2051,12 +2203,10 @@ impl Cluster {
             // scenario releases it after observing scheduling with the bootstrap node leading.
             self.start_restarted_nodes_together(construction, None)
                 .await?;
-            self.wait_for_leader_among_running().await?;
-            self.establish_restarted_bootstrap_leader(
-                &bootstrap,
-                construction.nested(STATUS_WAIT_BUDGET),
-            )
-            .await?;
+            let leader = self.wait_for_leader_among_running().await?;
+            self.leadership_move(&bootstrap)
+                .complete(&leader, construction.nested(STATUS_WAIT_BUDGET))
+                .await?;
             self.fault_injection
                 .begin_startup_voter_observation(&node_name(&bootstrap));
             return Ok(());
@@ -2082,47 +2232,6 @@ impl Cluster {
         }
 
         Ok(())
-    }
-
-    /// Establishes this fixture's observer as leader even if the startup election changes
-    /// between observation and delivery of a transfer request. OpenRaft ignores a transfer
-    /// delivered to a follower, so a request belongs to an observed leader and term.
-    async fn establish_restarted_bootstrap_leader(
-        &self,
-        bootstrap: &str,
-        deadline: PhaseDeadline,
-    ) -> io::Result<()> {
-        let mut requested = BTreeSet::new();
-        let mut last_status = None;
-        let mut last_failure = None;
-        while !deadline.has_passed() {
-            nervix_primitives::task::consume_budget().await;
-            match self.cluster_status(bootstrap, deadline).await {
-                Ok(status) => {
-                    if status.current_leader.as_deref() == Some(bootstrap)
-                        && status.raft_state.as_deref() == Some("Leader")
-                    {
-                        return Ok(());
-                    }
-                    if let (Some(leader), Some(term)) =
-                        (&status.current_leader, status.current_term)
-                        && leader != bootstrap
-                        && requested.insert((leader.clone(), term))
-                    {
-                        self.transfer_leadership(leader, bootstrap);
-                    }
-                    last_status = Some(status.raw);
-                }
-                Err(failure) => last_failure = Some(failure),
-            }
-            deadline.pause(POLL_INTERVAL).await;
-        }
-        Err(io::Error::other(format!(
-            "timed out after {:?} establishing restarted bootstrap '{bootstrap}' as leader; \
-             requested transfers: {requested:?}; last status: {last_status:?}; last failure: \
-             {last_failure:?}",
-            deadline.elapsed()
-        )))
     }
 
     pub(crate) async fn wait_for_leader(
@@ -3970,9 +4079,17 @@ impl Cluster {
             .ok_or_else(|| io::Error::other("cluster has no alternate node"))
     }
 
-    pub(crate) fn transfer_leadership(&self, from_node_id: &str, to_node_id: &str) {
-        self.fault_injection
-            .request_leadership_transfer(node_name(from_node_id), node_name(to_node_id));
+    /// Moves leadership from `from_node_id` to `to_node_id` and returns once `to_node_id` reports
+    /// itself the leader. The move asks again whenever another node wins the election a transfer
+    /// started; see [`LeadershipMove`].
+    pub(crate) async fn move_leadership(
+        &self,
+        from_node_id: &str,
+        to_node_id: &str,
+    ) -> io::Result<()> {
+        self.leadership_move(to_node_id)
+            .complete(from_node_id, PhaseDeadline::after(STATUS_WAIT_BUDGET))
+            .await
     }
 
     /// Moves leadership from `from_node_id` to `to_node_id` underneath the next persistent command
@@ -3987,26 +4104,55 @@ impl Cluster {
         to_node_id: &str,
     ) -> AbortOnDropHandle<io::Result<()>> {
         let from = node_name(from_node_id);
-        let to = node_name(to_node_id);
-        let successor = self.leader_witness(to_node_id);
-        let predecessor = self.leader_witness(from_node_id);
+        let from_node_id = from_node_id.to_string();
+        let successor_node_id = to_node_id.to_string();
+        let leadership_move = self.leadership_move(to_node_id);
+        let predecessor = self.leader_witness(&from_node_id);
         let fault_injection = self.fault_injection.clone();
         hold.arm(&fault_injection, from.clone());
         AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
             hold.reached(&fault_injection, &from).await;
-            fault_injection.request_leadership_transfer(from.clone(), to);
             let deadline = PhaseDeadline::after(STATUS_WAIT_BUDGET);
-            let elected = successor.reports_leader(deadline, &successor.node_id).await;
+            let elected = leadership_move.complete(&from_node_id, deadline).await;
             let known = match elected {
                 Ok(()) => {
                     predecessor
-                        .reports_leader(deadline, &successor.node_id)
+                        .reports_leader(deadline, &successor_node_id)
                         .await
                 }
                 Err(error) => Err(error),
             };
             hold.release(&fault_injection, &from);
             known
+        }))
+    }
+
+    /// A move of leadership to `to_node_id`, read through that node's own status.
+    fn leadership_move(&self, to_node_id: &str) -> LeadershipMove {
+        LeadershipMove {
+            fault_injection: self.fault_injection.clone(),
+            target: self.leader_witness(to_node_id),
+        }
+    }
+
+    /// Blocks consensus connectivity for `blocked_node_id` until `leader_node_id` reports itself
+    /// the leader, and then restores it. The returned task ends once the connectivity is restored:
+    /// with `Ok` when the leader was seen leading first, and otherwise, once the status wait budget
+    /// passed, with the status the leader last reported, after restoring the connectivity anyway.
+    pub(crate) fn block_consensus_connectivity_until_leading(
+        &self,
+        blocked_node_id: &str,
+        leader_node_id: &str,
+    ) -> AbortOnDropHandle<io::Result<()>> {
+        let blocked = node_name(blocked_node_id);
+        let leader = self.leader_witness(leader_node_id);
+        let fault_injection = self.fault_injection.clone();
+        fault_injection.block_consensus_connectivity(blocked.clone());
+        AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
+            let deadline = PhaseDeadline::after(STATUS_WAIT_BUDGET);
+            let led = leader.reports_leader(deadline, &leader.node_id).await;
+            fault_injection.restore_consensus_connectivity(&blocked);
+            led
         }))
     }
 
@@ -5380,6 +5526,14 @@ impl ClusterStatus {
 }
 
 impl ClusterStatus {
+    /// The leadership this status reports: the leader it names in the term it reports, when it
+    /// names both.
+    fn leadership(&self) -> Option<ReportedLeadership> {
+        let leader = self.current_leader.clone()?;
+        let term = self.current_term?;
+        Some(ReportedLeadership { leader, term })
+    }
+
     /// Whether the membership this status reports holds `node_id` as a voter.
     fn is_voter(&self, node_id: &str) -> bool {
         match self.membership.get(node_id) {
