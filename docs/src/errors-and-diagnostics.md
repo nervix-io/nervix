@@ -614,6 +614,19 @@ or the optional applied-start generation. A mismatched signature retains the typ
 Loading, replica conversion and backup capture all use that owning decoder; no missing marker is
 filled from domain metadata.
 
+Kafka's canonical-start coordination retains its typed offer, encoding, allocation and transfer
+causes beneath `StateReplicationError::KafkaStart`. A capture freeze reports `KafkaStartFrozen`;
+the shared checkpoint-transfer deadline reports `KafkaStartDeadline`. Changed lifecycle or
+assignment authority reports `Superseded`. The interconnect handler rejects a source node that
+does not match its authenticated peer before reading or changing state. Runtime admission also
+checks the current membership incarnation. These failures end that initialization attempt; the
+host retries through its existing source lifecycle without polling from substitute positions.
+
+An ingestor layout preparation retains invalid selections, source or checkpoint inventories,
+component kinds and allocation bounds beneath `OwnershipHandoffError::IngestorUnitLayout`.
+Offset and metric decoding keep their owning typed causes. Preparation fails before publishing
+the replacement layout; it never installs only the source cuts that happened to succeed.
+
 The vocabulary's `ArchivedCountError` reports a fixed-width archived count that the receiving
 target's `usize` cannot represent. Archive decoding retains it beneath the owning storage or
 transport failure. Registry Model records validate their current frame signature and report
