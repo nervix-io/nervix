@@ -42,7 +42,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Emitter envelope clauses and `PROPERTIES`: timestamps, flags, delays, reply targets and message identities a transport carries beside each payload | `Emitters` → `Envelope clauses`, then `Connector Capabilities` |
 | MongoDB collection names and the lookup before each write, BSON field-name admission, native widths/date precision, conflict filters and upserts, write-concern outcomes, client URL configuration, the client database, paired TLS identity files, pool waits and driver deadlines | `Emitters` → `MongoDB`, `Database Client Connection Pools`, then `Connector Capabilities` |
 | MySQL table path parts, exact value bindings, duplicate-key actions, placeholder and packet limits, operation deadlines, TLS verification and identity file formats, URL lifetime settings and maintained pool minimums | `Emitters` → `MySQL`, `Database Client Connection Pools`, then `Connector Capabilities` → `MYSQL client` |
-| Postgres table path parts, conflict rules, the `sslmode` policy, TLS identity files, statement versus checkout deadlines, connection lifetimes and the borrow test | `Emitters` → `Postgres`, and `Database Client Connection Pools` |
+| Postgres table path parts, the catalog query before each write, value bindings and the column types that read them, conflict rules, which SQLSTATEs reject a row and which retry, the `sslmode` policy and TLS trust, URL options and the node defaults the driver fills in, statement versus checkout deadlines, connection lifetimes, the borrow and return tests, and prepared statements behind a pooler | `Emitters` → `Postgres`, `Database Client Connection Pools`, then `Connector Capabilities` → `POSTGRES client` |
 | Sentry platform options, event defaults and limit, batch transformations, strict DSN/timeout configuration, the inherited HTTP transport, rejected versus retried statuses and retry hints | `Emitters` → `Sentry`, then `Connector Capabilities` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
@@ -546,7 +546,7 @@ current connection, retry and deadline limits.
   nothing. A `gzip`, `deflate` or `br` response arrives decompressed and without its
   `content-encoding` and `content-length` headers. Read `Ingestors` → `HTTP REQUEST` for the
   request, responses, failures and the shared client keys, and `Emitters` → `HTTP client transport`
-  for redirects and proxies.
+  for redirects, proxies and the common TLS trust policy used by polling and emitting.
 - Every `PROMETHEUS CLIENT` sets `addr` to the API root, an `http` or `https` URL without a
   query string or fragment, and a positive `timeout_ms`. It sets no key beyond `tls_ca_file` and
   the paired `tls_cert_file` and `tls_key_file`; `CREATE PROMETHEUS CLIENT` refuses any other. It
@@ -641,7 +641,8 @@ Choose checks relevant to the configured graph:
 - `SHOW CREATE <kind> <name>;` confirms the stored canonical definition.
 - `DESCRIBE RELAY <relay>;` reports the relay owner and optional materialized-state replicas;
   `DESCRIBE RELAY <relay> WHERE (...);` is owner-authoritative for concrete branch state.
-- `SHOW RELAY <relay> MATERIALIZED STATE;` inspects materialized data and placement.
+- `SHOW RELAY <relay> MATERIALIZED STATE;` inspects materialized data and placement, masking
+  `SENSITIVE` payload fields and branch-key fields on both the owner and other nodes.
 - `DESCRIBE INGESTOR`, `DESCRIBE JUNCTION`, other processor-specific `DESCRIBE` commands, and
   `DESCRIBE EMITTER` inspect runtime state and edge metrics. `SHOW INGESTORS;` lists every ingestor
   with the connector and entity it reads (`from=<CONNECTOR> <ENTITY>`), its owner and state, and a

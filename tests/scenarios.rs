@@ -220,6 +220,7 @@ mod http_transport;
 mod iceberg_delivery;
 mod ingestion_time;
 mod kafka_metadata;
+mod materialized_state_inspection;
 mod mqtt_fixtures;
 mod mqtt_sessions;
 mod mqtt_subscription_refusal;
@@ -234,6 +235,7 @@ mod pulsar_emission;
 mod pulsar_metadata;
 mod pulsar_readiness;
 mod pulsar_subscriptions;
+mod rabbitmq_envelope;
 mod rabbitmq_properties;
 mod restarted_voter;
 mod session_protocol;
@@ -416,6 +418,8 @@ struct SubscriptionReceipt {
 
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
+    rabbitmq_envelope_broker:
+        Option<nervix_test_environment::restartable_rabbitmq::RestartableRabbitMq>,
     mqtt_fixture_publication: Option<mqtt_fixtures::Publication>,
     postgres_fixture_locks: Option<postgres_fixtures::HeldLocks>,
     postgres_fixture_observations: Option<postgres_fixtures::Observations>,
@@ -4657,6 +4661,7 @@ fn client_probe_target(
         username: TEST_AUTH_USERNAME.to_string(),
         password: TEST_AUTH_PASSWORD.to_string(),
         domain: world.domain.clone(),
+        execution_reference: Uuid::now_v7().to_string(),
         exercise,
     }
 }
@@ -4683,27 +4688,50 @@ async fn start_client_probe(
 }
 
 #[when(
-    expr = "the {string} client probe subscribes as {string} to relay {string} on node {string} \
-            expecting {int} rows"
+    expr = "the {string} client probe subscribes as {string} to relay {string} on a follower when \
+            available expecting {int} rows"
 )]
 async fn when_client_probe_subscribes(
     world: &mut ScenarioWorld,
     runtime: String,
     subscription: String,
     relay: String,
-    node_id: String,
     rows: usize,
 ) {
     let runtime: ProbeRuntime = runtime
         .parse()
         .expect("the step names a known probe runtime");
-    let node_id = expand_placeholders(world, &node_id);
+    let leader = current_leader_node(world).await;
+    // This fixture runs with one or three nodes; select a follower from that bounded topology.
+    let follower = world
+        .cluster()
+        .node_ids()
+        .into_iter()
+        .find(|node| node != &leader);
+    let node_id = match follower {
+        Some(follower) => follower,
+        None => leader.clone(),
+    };
+    append_cucumber_log_line(&format!(
+        "client probe {runtime:?}: observed_leader={leader} initial_node={node_id} follower={}",
+        node_id != leader
+    ));
     let exercise = ProbeExercise::Subscription {
         relay: expand_placeholders(world, &relay),
         subscription: expand_placeholders(world, &subscription),
         rows,
     };
     let target = client_probe_target(world, &node_id, exercise);
+    let redirect_report = if runtime.implements_protocol() && node_id != leader {
+        let reference = &target.execution_reference;
+        format!("REDIRECT original={reference} repeated={reference} outcome={reference}")
+    } else {
+        // This is empty report content for the direct and binding controls, not a redirect state.
+        String::new()
+    };
+    world
+        .placeholders
+        .insert("client_probe_redirect_report".to_string(), redirect_report);
     start_client_probe(world, runtime, &node_id, target, SUBSCRIBED_LINE).await;
 }
 
@@ -4821,6 +4849,7 @@ async fn then_client_probe_reports(world: &mut ScenarioWorld, within: String, #[
     report
         .check(&expected)
         .unwrap_or_else(|error| panic!("{error}"));
+    append_cucumber_log_line(&format!("client probe report verified: {report:?}"));
 }
 
 #[then(expr = "the server process exits with status {int}")]
@@ -35109,11 +35138,27 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 let scenario_ports = std::mem::take(&mut world.scenario_ports);
                 crate::common::port_pool::release_test_ports(&scenario_ports);
 
+                let rabbitmq_cleanup =
+                    if let Some(mut broker) = world.rabbitmq_envelope_broker.take() {
+                        Some(broker.shutdown().await)
+                    } else {
+                        None
+                    };
+                if let Some(Err(error)) = &rabbitmq_cleanup {
+                    append_cucumber_log_line(&format!(
+                        "scenario teardown failed: isolated RabbitMQ: {error}"
+                    ));
+                }
                 world.enter_phase(
                     ScenarioPhase::Finished,
                     &format!("body={body} {cluster_cleanup}"),
                 );
                 world.scenario_admission = None;
+                if let Some(cleanup) = rabbitmq_cleanup {
+                    cleanup.assured(
+                        "the scenario-owned RabbitMQ broker is removed after all other cleanup",
+                    );
+                }
             })
         })
         .with_writer(writer)

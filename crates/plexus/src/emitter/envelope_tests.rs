@@ -181,12 +181,16 @@ fn a_property_outside_the_declared_set_or_set_twice_is_refused() {
         .expect_err("an undeclared property is refused");
     assert!(undeclared.contains("expiration"), "{undeclared}");
 
-    let twice = read(EVERY_CLAUSE, "PROPERTIES {'priority' = 1, 'priority' = 2}")
-        .expect_err("a property set twice is refused");
-    assert!(
-        twice.contains("PROPERTIES sets key 'priority' more than once"),
-        "{twice}"
-    );
+    for text in [
+        "PROPERTIES {'priority' = 1, 'priority' = 2}",
+        "PROPERTIES {'priority' = 1, 'content_type' = 'text/plain', 'priority' = 2}",
+    ] {
+        let twice = read(EVERY_CLAUSE, text).expect_err("a property set twice is refused");
+        assert!(
+            twice.contains("PROPERTIES sets key 'priority' more than once"),
+            "{twice}"
+        );
+    }
 
     assert!(read(EVERY_CLAUSE, "PROPERTIES {}").is_err());
 }
@@ -246,6 +250,27 @@ fn completion_inside_properties_offers_exactly_the_declared_keys() {
         offered(EVERY_CLAUSE, "PROPERTIES {"),
         ["\"content_type\"", "\"priority\""]
     );
+}
+
+#[test]
+fn completion_continues_with_each_unwritten_property_key() {
+    assert_eq!(
+        offered(&[], "PROPERTIES {'content_type' = 'application/json', "),
+        ["\"priority\"", "}"]
+    );
+    assert_eq!(
+        offered(
+            &[],
+            "PROPERTIES {'content_type' = 'application/json', 'priority' = 1, "
+        ),
+        ["}"]
+    );
+    let envelope = read(
+        &[],
+        "PROPERTIES {'content_type' = 'application/json', 'priority' = 1, }",
+    )
+    .expect("every declared property and a trailing comma read together");
+    assert_eq!(envelope.properties.len(), PROPERTIES.len());
 }
 
 #[test]

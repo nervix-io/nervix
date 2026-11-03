@@ -158,9 +158,9 @@ reason = "A release count must change in the same scheduling step as the release
 [[permission]]
 items = ["runtime::Builder", "runtime::Runtime"]
 limit = "Nothing the binding does runs in a model; the client protocol it drives has its own checks through the Rust client."
-owner = "The C binding's session."
-path = "crates/client-ffi/src/session.rs"
-reason = "The binding owns the runtime its host's threads enter, and entering it and shutting it down in the background are the binding's contract with the host, which Shuttle's runtime does not provide."
+owner = "The host session runtime every client binding shares."
+path = "crates/client-host/src/session.rs"
+reason = "A binding owns the runtime its host's threads enter, and entering it and shutting it down in the background are every binding's contract with its host, which Shuttle's runtime does not provide."
 
 [[permission]]
 items = [

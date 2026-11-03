@@ -13,8 +13,6 @@
     nervix::layer(language, reason = "owns the language boundary declared above")
 )]
 
-use std::collections::BTreeSet;
-
 use strum::IntoEnumIterator as _;
 
 use super::*;
@@ -92,9 +90,13 @@ pub(super) fn envelope_section<'src>(
     if properties.is_empty() {
         return section;
     }
-    then_optional(section, properties_block(properties), |envelope, set| {
-        envelope.properties = set;
-    })
+    then_optional(
+        section,
+        kw(Identifier::Properties).ignore_then(properties_values(properties)),
+        |envelope, set| {
+            envelope.properties = set;
+        },
+    )
 }
 
 /// `section` followed by an optional `clause`, whose value `write` records in the envelope.
@@ -116,42 +118,119 @@ fn then_optional<'src, T: 'src>(
 
 /// `PROPERTIES { '<key>' = <expression>, … }`, setting each of the `declared` keys at most once.
 ///
-/// The keys are a closed set, so each is offered as the exact literal that names it, and any other
-/// key is refused where it is written.
-fn properties_block<'src>(
+/// The keys are a closed set. Each remaining key is offered as its exact literal, so completing
+/// another assignment cannot repeat a key already written. An unknown or repeated key is refused
+/// where it is written.
+fn properties_values<'src>(
     declared: &'static [PropertyDeclaration],
 ) -> impl Parser<'src, &'src [Token], Vec<EnvelopeProperty>, extra::Err<ParseError<'src>>> + Clone {
-    let mut keys = Vec::with_capacity(declared.len());
-    for property in declared {
-        let name = property.name.to_string();
-        keys.push(just(Token::StringLiteral(name.clone())).to(name).boxed());
-    }
-    let property = choice(keys)
-        .then_ignore(tok(Token::Eq))
-        .then(embedded_expression("value_expression"))
-        .map(|(name, expression)| EnvelopeProperty { name, expression });
-    kw(Identifier::Properties)
-        .ignore_then(
-            property
-                .separated_by(tok(Token::Comma))
-                .at_least(1)
-                .allow_trailing()
-                .collect::<Vec<_>>()
-                .delimited_by(tok(Token::LBrace), tok(Token::RBrace)),
-        )
-        .try_map(|properties: Vec<EnvelopeProperty>, span| {
-            let mut set = BTreeSet::new();
-            for property in &properties {
-                if !set.insert(property.name.as_str()) {
-                    let duplicate = EnvelopeDeclarationError::DuplicateProperty {
-                        name: property.name.clone(),
-                    };
-                    return Err(Rich::custom(span, duplicate.to_string()));
-                }
+    let value = embedded_expression("value_expression");
+    custom(move |input| {
+        let mut properties: Vec<EnvelopeProperty> = Vec::with_capacity(declared.len());
+        input.parse(tok(Token::LBrace))?;
+        // Every assignment consumes one distinct declared key, bounding the number of iterations.
+        loop {
+            if let Some(Token::StringLiteral(name)) = input.peek_ref()
+                && properties.iter().any(|property| property.name == *name)
+            {
+                let name = name.clone();
+                let token = Token::StringLiteral(name.clone());
+                let duplicate = EnvelopeDeclarationError::DuplicateProperty { name };
+                return input.parse(
+                    just(token)
+                        .try_map(move |_, span| Err(Rich::custom(span, duplicate.to_string()))),
+                );
             }
-            Ok(properties)
-        })
-        .boxed()
+            let mut next: Vec<_> = declared
+                .iter()
+                .filter(|declaration| {
+                    !properties
+                        .iter()
+                        .any(|property| property.name == declaration.name)
+                })
+                .map(|declaration| {
+                    let name = declaration.name.to_string();
+                    just(Token::StringLiteral(name.clone()))
+                        .to(Some(name))
+                        .boxed()
+                })
+                .collect();
+            if !properties.is_empty() {
+                next.push(tok(Token::RBrace).to(None).boxed());
+            }
+            let Some(name) = input.parse(choice(next))? else {
+                return Ok(properties);
+            };
+            input.parse(tok(Token::Eq))?;
+            let expression = input.parse(value.clone())?;
+            properties.push(EnvelopeProperty { name, expression });
+            let more = input.parse(choice((
+                tok(Token::Comma).to(true),
+                tok(Token::RBrace).to(false),
+            )))?;
+            if !more {
+                return Ok(properties);
+            }
+        }
+    })
+}
+
+/// Targeted edits offered only where the entity declares their envelope surface.
+pub(super) fn alterations<'src>(
+    declared: &EmitterEntityCapabilities,
+) -> Vec<Boxed<'src, 'src, &'src [Token], AlterEmitterOperation, extra::Err<ParseError<'src>>>> {
+    let mut choices = Vec::new();
+    if declared.declares_envelope_clause(EnvelopeClauseKind::Persistent) {
+        choices.push(
+            kw_phrase2(Identifier::Set, Identifier::Persistent)
+                .to(EmitterEnvelopeAlteration::SetPersistent)
+                .map(operation)
+                .boxed(),
+        );
+        choices.push(
+            kw_phrase2(Identifier::Drop, Identifier::Persistent)
+                .to(EmitterEnvelopeAlteration::DropPersistent)
+                .map(operation)
+                .boxed(),
+        );
+    }
+    if declared.declares_envelope_clause(EnvelopeClauseKind::Timestamp) {
+        choices.push(
+            kw_phrase2(Identifier::Set, Identifier::Timestamp)
+                .ignore_then(embedded_expression("timestamp_expression"))
+                .map(|expression| EmitterEnvelopeAlteration::SetTimestamp { expression })
+                .map(operation)
+                .boxed(),
+        );
+        choices.push(
+            kw_phrase2(Identifier::Drop, Identifier::Timestamp)
+                .to(EmitterEnvelopeAlteration::DropTimestamp)
+                .map(operation)
+                .boxed(),
+        );
+    }
+    if !declared.properties.is_empty() {
+        choices.push(
+            kw_phrase2(Identifier::Set, Identifier::Properties)
+                .ignore_then(properties_values(declared.properties))
+                .map(|properties| EmitterEnvelopeAlteration::SetProperties { properties })
+                .map(operation)
+                .boxed(),
+        );
+        choices.push(
+            kw_phrase2(Identifier::Drop, Identifier::Properties)
+                .to(EmitterEnvelopeAlteration::DropProperties)
+                .map(operation)
+                .boxed(),
+        );
+    }
+    choices
+}
+
+fn operation(alteration: EmitterEnvelopeAlteration) -> AlterEmitterOperation {
+    AlterEmitterOperation::AlterEnvelope {
+        alteration: Box::new(alteration),
+    }
 }
 
 /// The envelope section of an emitter of the entity `S`, as its declaration states it.

@@ -11,7 +11,19 @@
 
 use std::{ptr, slice};
 
-use crate::failure::Failure;
+use nervix_client_host::{Failure, FieldType, Part};
+use nervix_primitives::sync::Arc;
+
+/// Reads a field type a host passed as an `nx_type`.
+pub(crate) fn field_type(field_type: i32) -> Result<FieldType, Failure> {
+    FieldType::from_repr(field_type)
+        .ok_or_else(|| Failure::invalid_argument("type", "is not an nx_type"))
+}
+
+/// Reads a part a host passed as an `nx_part`.
+pub(crate) fn part(part: i32) -> Result<Part, Failure> {
+    Part::from_repr(part).ok_or_else(|| Failure::invalid_argument("part", "is not an nx_part"))
+}
 
 /// Borrows a required UTF-8 argument.
 ///
@@ -119,6 +131,17 @@ pub(crate) unsafe fn accessor<'a, T>(handle: *const T) -> &'a T {
 /// Hands an owned value to the host as a handle it releases exactly once.
 pub(crate) fn into_handle<T>(value: T) -> *mut T {
     Box::into_raw(Box::new(value))
+}
+
+/// Hands an owned value to the host as the first reference to a value it retains and releases.
+pub(crate) fn into_shared<T>(value: T) -> *mut T {
+    Arc::into_raw(Arc::new(value)).cast_mut()
+}
+
+/// Hands the host a new reference to a value the library already shares, such as the batch a
+/// delivery keeps once it is decoded.
+pub(crate) fn share<T>(shared: &Arc<T>) -> *mut T {
+    Arc::into_raw(Arc::clone(shared)).cast_mut()
 }
 
 /// Takes back and drops a handle, doing nothing for a null one.
