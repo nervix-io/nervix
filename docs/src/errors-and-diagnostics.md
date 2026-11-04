@@ -639,6 +639,9 @@ An ingestor layout preparation retains invalid selections, source or checkpoint 
 component kinds and allocation bounds beneath `OwnershipHandoffError::IngestorUnitLayout`.
 Offset and metric decoding keep their owning typed causes. Preparation fails before publishing
 the replacement layout; it never installs only the source cuts that happened to succeed.
+Membership-incarnation refusals name the affected node and its source or destination role.
+Replicas receiving prepared state are destinations of that transfer, so a layout's additional
+participants retain the same diagnostic precision as a single-unit handoff.
 
 The vocabulary's `ArchivedCountError` reports a fixed-width archived count that the receiving
 target's `usize` cannot represent. Archive decoding retains it beneath the owning storage or

@@ -879,22 +879,23 @@ impl SessionServiceImpl {
     ) -> OwnershipHandoffResult<()> {
         let current = self.live_node_incarnations().await;
         for moved in &handoff.moves {
-            for node in moved
+            for (node, role) in moved
                 .source_nodes()
                 .into_iter()
-                .chain(moved.preparation_nodes())
+                .map(|node| (node, "source"))
+                .chain(
+                    moved
+                        .preparation_nodes()
+                        .into_iter()
+                        .map(|node| (node, "destination")),
+                )
             {
                 nervix_primitives::task::consume_budget().await;
                 let expected = *handoff
                     .node_incarnations
                     .get(node)
                     .verified("every handoff participant has a bound incarnation");
-                Self::verify_ownership_handoff_node_incarnation(
-                    &current,
-                    node,
-                    expected,
-                    "participant",
-                )?;
+                Self::verify_ownership_handoff_node_incarnation(&current, node, expected, role)?;
             }
         }
         Ok(())
