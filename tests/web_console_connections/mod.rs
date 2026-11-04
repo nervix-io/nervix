@@ -4,7 +4,8 @@
 //! Layer: test harness.
 //! - **Owns.** Starting a console page with its connection recorder and optional bounded initial
 //!   frame gate, reading the page's record, releasing the gate, closing the session connection the
-//!   page holds, and checking the record against the scenario's consoles and reported leaders.
+//!   page holds, saving its first serving leader, and checking the record against the scenario's
+//!   consoles and reported leaders.
 //! - **Depends on.** The scenario's browser page and cluster, and the console connection record
 //!   and its checks.
 //! - **Must not know.** How the console drives its session, or how a node serves it.
@@ -102,6 +103,25 @@ async fn read_record(page: &playwright_rs::Page) -> ConsoleConnectionRecord {
     page.evaluate::<(), ConsoleConnectionRecord>(READ_RECORD, None::<&()>)
         .await
         .assured("every console page starts with the connection recorder")
+}
+
+#[then(expr = "the first leader connected by the web console is saved as placeholder {string}")]
+async fn then_initial_console_leader_is_saved(world: &mut ScenarioWorld, placeholder: String) {
+    let record = read_record(browser_page(world)).await;
+    let node = match record.first_serving_node() {
+        Ok(Some(node)) => node,
+        Ok(None) => {
+            panic!("the console has not received a serving-leader report; its connections:{record}")
+        }
+        Err(error) => panic!("{error:#}; the web console's connections:{record}"),
+    };
+    let node = node.to_string();
+    assert!(
+        world.cluster().node_ids().binary_search(&node).is_ok(),
+        "the console's first serving leader '{node}' must belong to this scenario's cluster",
+    );
+    append_cucumber_log_line(&format!("the console first connected to leader '{node}'"));
+    world.placeholders.insert(placeholder, node);
 }
 
 /// The leaders the nodes reported on the page's connections.

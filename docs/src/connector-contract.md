@@ -2943,6 +2943,18 @@ sequenceDiagram
   assignment changes without reading node-wide state or execution registries. The Kafka commit and
   acknowledgement boundary remains the state's highest durable replica progress.
 
+- **Kafka client build.** Kafka clients, ingestors and emitters run librdkafka 2.12.1 through
+  Nervix's fork of `rust-rdkafka`, `nervix-io/rust-rdkafka`, which carries the librdkafka backport
+  of the duplicate `FETCH_STOP` fix and builds librdkafka's TLS on AWS-LC instead of OpenSSL. Its
+  `aws-lc` feature compiles librdkafka with CMake against the libcrypto and libssl that
+  `aws-lc-sys` builds with its `ssl` feature: the same `aws-lc-sys` `aws-lc-rs` links, so Kafka
+  TLS, SASL SCRAM and OAUTHBEARER share the product's one AWS-LC. The fork's build reads the
+  `links` metadata of the AWS-LC crate its backend selects under that crate's versioned key, so a
+  new `aws-lc-sys` release changes only the version the fork requires. An upgrade of `aws-lc-rs`
+  that moves to another `aws-lc-sys` moves the fork in the same change, because `just ratchet`
+  refuses a product that links two; [Cryptography](cryptography.md) owns that rule and lists what
+  librdkafka and the libcurl of its OAUTHBEARER token requests implement themselves.
+
 - **Pulsar client.** The Pulsar ingestor and emitter build on Nervix's fork of `pulsar-rs`,
   `nervix-io/pulsar-rs`, because the released crate discards delivered redelivery counts and
   `CommandConnected`, and returns from an

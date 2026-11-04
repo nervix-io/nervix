@@ -565,7 +565,10 @@ name, or `none`.
 
 Files or a whole directory can be uploaded from the browser as a new version of that resource in
 the selected domain. The successful upload result arrives after every current live node has
-verified and installed the version. An upload moves no binding: models keep the version they pin
+verified and installed the version. A refusal by a node that could not act as the leader, such as a
+leader that could not confirm its lease, decided nothing: the dialog keeps uploading and sends the
+same files again, waiting as the console waits before reconnecting, until the upload completes or
+fails, or the dialog is closed. An upload moves no binding: models keep the version they pin
 until [`REBIND RESOURCE`](resources.md#rebinding-existing-models) moves them. Version contents and
 how nodes consume them are covered in [Resources](resources.md).
 
