@@ -73,7 +73,9 @@ command path, so the rendered stored Model and every listener use a concrete ver
 `CREATE RESOURCE` declares a resource in the selected domain and starts its version sequence at 1.
 Uploads are leader operations. A client-protocol upload declares the exact size of the archive it
 streams, and a follower redirects it to the leader. A web-console upload streams the selected files
-to the leader, which builds the archive itself; a follower refuses it.
+to the leader, which builds the archive itself; a follower refuses it with `409 Conflict`, as the
+leader does when it cannot propose for the upload, and the console sends such an upload again under
+the same identity, as [Resource Uploads](./client-session-protocol.md#resource-uploads) describes.
 
 The native client's directory archive is completed and flushed locally before its upload call
 opens. A failed or cancelled construction discards its partial temporary archive and assigns no
@@ -642,6 +644,7 @@ cluster. Local reports remain typed until that projection.
 | An HTTPS listener cannot install a VHOST change in a step that did not pause | The failure record restores the previous models and schedule, and every listener presents the restored certificates before the command reports the failure. |
 | A consumer cannot load the version during activation, such as protobuf sources that do not compile or a hash-map line that does not decode | The step releases any pause it engaged, the committed models remain, and the command or transaction reports the activation failure. Nothing returns the models to their previous versions; a later model change, such as a rebinding to a usable version, repairs the binding. |
 | One node cannot install a version during its upload, including a transfer that is interrupted | The upload fails with that node's reason. The number stays assigned and is never bindable. |
+| Consensus refuses the start of an upload before proposing it, such as a leader that cannot confirm its lease | Nothing is assigned. A native client receives a leader redirect and sends the upload again; the console receives `409 Conflict` and sends the same files under the same identity again for as long as its upload dialog stays open. |
 | Consensus refuses the publication of an upload's version, such as a leader that cannot confirm it still leads | The uploading client receives a leader redirect and sends the upload again. The leader's next reconciliation publishes its own installed copy, so the upload completes, and the repetition joins it or recovers its outcome. |
 | A node lacks a published version | Its reconciliation fetches the version from a live node that holds it, from the beginning of the archive. Until it holds the version, that node cannot build a domain that needs it. |
 

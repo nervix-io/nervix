@@ -253,10 +253,17 @@ above it is refused before it is buffered.
 The listener serves plaintext HTTP/2 on `--addr` (`NERVIX_ADDR`, default `127.0.0.1:47391`) and
 advertises `--grpc-advertise-addr` (`NERVIX_GRPC_ADVERTISE_ADDR`), or the listen address when that
 is unset. `--grpc-mode https` (`NERVIX_GRPC_MODE`) serves the listener over TLS on
-`--grpc-https-listen-addr` instead and advertises `--grpc-https-advertise-addr`. That mode presents
-the development certificate that `scripts/generate_dev_tls.sh` writes under `tls/dev` in the source
-tree the server was built from; no option selects another certificate, and the Kubernetes deployment
-runs the listener in plaintext mode.
+`--grpc-https-listen-addr` instead and advertises `--grpc-https-advertise-addr`. HTTPS requires
+`--grpc-tls-cert` (`NERVIX_GRPC_TLS_CERT`) and `--grpc-tls-key` (`NERVIX_GRPC_TLS_KEY`), naming the
+operator's PEM certificate chain and private key. The first certificate is the server's leaf and
+must cover the advertised hostname or IP address. Every node needs its own reachable advertised
+address and provisioned identity. The Kubernetes deployment runs the listener in plaintext mode.
+
+The node validates the complete identity at startup, before opening its stores or listeners.
+Missing material, unreadable files, unusable PEM and mismatched keys fail startup with a typed
+cause; TLS files supplied in HTTP mode are refused. Certificates are loaded once, so rotation
+requires restarting the node. A running listener retains the loaded identity. Client trust remains
+explicit: the native client uses the supplied CA, while the browser uses its own trust store.
 
 ### Console WebSocket
 
@@ -266,6 +273,12 @@ and optionally a TLS listener, `--web-console-https-listen-addr` with `--web-con
 `--web-console-tls-key`. Each binary message holds exactly one frame in either direction and nothing
 else: no size prefix, never two frames, never part of one. Ping, pong, and close messages belong to
 the WebSocket connection and never carry a frame.
+
+`--web-console-advertise-addr` names the externally reachable host and port. Its advertised scheme
+is HTTPS when the HTTPS console listener is configured and HTTP otherwise. Without an explicit
+address, the HTTPS listener's address is preferred. The certificate and key are loaded once at
+startup; rotation requires a restart. Console HTTPS configuration is independent of native gRPC
+TLS configuration.
 
 The console session is served only by the leader. A console session on any other node is ended at
 once with a `SessionEnding` whose reason is a `LeaderRedirect` naming the leader, and the console
@@ -299,7 +312,8 @@ further. The server closes with `1011` the rare answer it cannot fit into a fram
 
 The console has no upload stream: it uploads a resource through its own HTTP path,
 `/console/resources/upload`, where the leader builds the archive from the files it receives, as
-[Resource Versions And Bindings](./resource-versions.md#assignment) describes.
+[Resource Versions And Bindings](./resource-versions.md#assignment) describes. How the console
+sends an upload again is described with the [Resource Uploads](#resource-uploads) contract.
 
 ### Authentication
 
@@ -844,14 +858,20 @@ configuration until the commit.
 
 **Binding, attach, and takeover.** The session that begins a transaction is bound to it. The binding
 is soft state in the leader's memory: it routes commands, and it is gone after a leader change or
-when the session ends. A session binds an existing transaction with `AttachTransactionRequest`,
+when the session ends. An open transaction that expires takes its binding with it. A transaction
+that finishes otherwise, such as a commit that another request admitted before this session attached,
+keeps the binding of the session that holds it: that session's next request for the transaction is
+answered from the transaction's recorded outcome, and that answer ends the binding. A session binds
+an existing transaction with `AttachTransactionRequest`,
 which the leader grants only to the transaction's owner; the reply is `TransactionAttached` with the
 current status, `TransactionAlreadyFinished` with the final status and aggregate outcome while its
 tombstone is retained, or a failure for an identity that is unknown or retained no longer. A leader
 that holds no binding for the session's transaction answers the session's next transaction request
 with `TransactionDetached`, and the client attaches again and repeats the request under the same
-reference. A finished or failed attach does not resolve commands whose replies were lost: the
-client repeats each under its own execution reference and expected position. The leader returns a
+reference. An attach that reports the transaction already finished binds nothing, and a session that
+still named that transaction no longer holds it. A finished or failed attach does not resolve
+commands whose replies were lost: the client repeats each under its own execution reference and
+expected position. The leader returns a
 recorded outcome before planning a new request; a command it never admitted receives a failure.
 Attaching from a second session takes the binding over, and the displaced session's next
 transaction request receives `TransactionTakenOver` before anything is admitted. While a session
@@ -1648,6 +1668,15 @@ names the domain, the declared resource, the upload identity, and the exact size
 each chunk is non-empty and fits one frame. There is no manifest, digest, or finish frame: the
 leader hashes the archive as it stages it and verifies everything else when it installs it. The
 console WebSocket carries no upload stream.
+
+The console posts the selected files to its own HTTP path, `/console/resources/upload`, under an
+upload identity it chooses once per upload. A node that cannot propose for the upload as the
+leader, because another node leads, none is known, or it could not confirm its lease, answers
+`409 Conflict`. That refusal decided nothing, so the console sends the same files under the same
+upload identity again, to the leader it knows by then, after the wait it takes before reconnecting,
+which doubles from 250 ms up to five seconds, for as long as its upload dialog stays open, as the
+Rust client opens another call after a redirect or a reply without a leader. A success names the
+installed version, and every other answer is final.
 
 The Rust client builds one deterministic archive in a temporary file before opening an upload
 call. Archive construction uses bounded 1 MiB read and write buffers. Only a successfully

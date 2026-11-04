@@ -652,6 +652,8 @@ rcgen = { version = "0.13", default-features = false, features = [
   "pem",
 ] }
 # Keep the AWS-LC support from PR #850 and the librdkafka 2.12.1 backport of duplicate FETCH_STOP fix #5574.
+# The fork builds librdkafka's TLS on the aws-lc-sys that aws-lc-rs links, so an aws-lc-rs upgrade
+# that moves to another aws-lc-sys moves the fork too; `just ratchet` refuses a second AWS-LC.
 rdkafka = { git = "https://github.com/nervix-io/rust-rdkafka.git", branch = "nervix-aws-lc-fetch-stop", default-features = false }
 redis = { version = "1.1.0", default-features = false, features = [
   "aio",

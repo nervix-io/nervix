@@ -2,6 +2,14 @@
 
 *Plexus, the Nervix graph definition language.*
 
+Native session TLS provisioning fails before a node opens its stores or listeners. Missing
+certificate/key paths and TLS files supplied in HTTP mode are distinct application errors. File
+reads retain their `io::Error` beneath `TlsMaterialError::ReadFile`, including the certificate or
+private-key role; malformed PEM and key mismatch retain the material owner's typed cause beneath
+`AppError::LoadGrpcTls`. Reporting renders the full chain without including certificate or key
+contents. The [Client Session Protocol](client-session-protocol.md#native-grpc) owns the TLS
+listener's startup and rotation contract.
+
 Client CONFIG validation keeps vocabulary `ClientConfigSchemaError` beneath the registry's
 client/domain context. The server's changed-model binding validation runs connector-owned offline
 checks before standalone mutation or transaction commit. `OfflineClientConfigError` retains typed
@@ -2334,6 +2342,14 @@ in a later term; otherwise no leader is known. An unconfirmed lease is never rep
 and a move never as an unconfirmed lease: the context's text says which, so an operator reading a
 rendered report or log line tells lease trouble from an election without a separate counter. The
 Raft or I/O error stays beneath the context as the report's cause.
+
+Trace-level vote and pre-vote transport completion events record the existing nested result before
+its foreign-error conversion, beside the local listener, peer and elapsed time. A transport error
+and a peer's typed refusal therefore remain distinguishable in the diagnostic. Cancellation by
+OpenRaft can end the exchange before that event; its own timeout then records the outcome. These
+events do not classify a late reply as leadership loss or change the error returned to OpenRaft.
+The [consensus observability contract](consensus-storage-and-replication.md#observability) describes
+the receive and core contexts used to locate a delay.
 
 The session edge reads the current context of a proposal's report. `LeadershipLost` becomes a
 `NotLeader` disposition with a redirect to the observed leader when nothing of the command was

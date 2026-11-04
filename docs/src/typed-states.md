@@ -69,6 +69,13 @@ required, validates it there, and passes the resulting typed value to the next l
 the registry, execution plans, runtime, clients, and diagnostics from assigning different meanings
 to the same raw value.
 
+The resolved node identity distinguishes a plaintext gRPC transport from an HTTPS transport that
+carries its listen and advertised addresses and both provisioned TLS paths. The CLI edge refuses
+incomplete pairs and TLS material in HTTP mode before constructing that identity. File availability,
+PEM parsing and key consistency are checked at startup before stores or listeners open; invalid
+material is a typed failure, never a substituted identity. The [Client Session Protocol](client-session-protocol.md#native-grpc)
+owns the listener and certificate lifetime.
+
 Materialized relay inspection requires the payload schema and resolved branching from its
 captured schedule. Incomplete scheduled metadata is an inspection failure, never an empty
 sensitivity set. The prepared sensitivity governs local, stored and remote record rendering;

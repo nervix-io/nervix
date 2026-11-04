@@ -99,6 +99,7 @@ Feature: Web console Plexus REPL
       """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
     Given command response delivery on node "{{old_leader}}" pauses after execution
     When the web console is opened on node "{{old_leader}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -205,7 +206,8 @@ Feature: Web console Plexus REPL
     Given a 3 node nervix cluster is started
     Then the current leader node is saved as placeholder "leader"
     And a node other than placeholder "leader" is saved as placeholder "follower"
-    When the web console is opened on node "{{follower}}"
+    When leadership is transferred from node "{{follower}}" to node "{{leader}}"
+    And the web console is opened on node "{{follower}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".terminal" contains "connected to leader '{{leader}}'"
     When selector ".prompt-row input" is filled with "CREATE DOMAIN {{domain}};"
@@ -238,7 +240,8 @@ Feature: Web console Plexus REPL
     Given a 3 node nervix cluster is started
     Then the current leader node is saved as placeholder "leader"
     And a node other than placeholder "leader" is saved as placeholder "follower"
-    When the web console is opened on node "{{follower}}"
+    When leadership is transferred from node "{{follower}}" to node "{{leader}}"
+    And the web console is opened on node "{{follower}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".terminal" contains "connected to leader '{{leader}}'"
     When selector ".prompt-row input" is filled with "CREATE DOMAIN production;"
@@ -261,7 +264,8 @@ Feature: Web console Plexus REPL
     Given a 3 node nervix cluster is started
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    When the web console is opened on node "{{old_leader}}"
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
+    And the web console is opened on node "{{old_leader}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".prompt-row input" is filled with "CREATE DOMAIN {{domain}};"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -312,7 +316,8 @@ Feature: Web console Plexus REPL
       """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    When the web console is opened on node "{{old_leader}}"
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
+    And the web console is opened on node "{{old_leader}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".prompt-row input" is filled with "BEGIN;"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -339,7 +344,8 @@ Feature: Web console Plexus REPL
       """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    When the web console is opened on node "{{old_leader}}"
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
+    And the web console is opened on node "{{old_leader}}"
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".prompt-row input" is filled with "BEGIN;"
@@ -549,7 +555,8 @@ Feature: Web console Plexus REPL
     Given a 3 node nervix cluster is started
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    When the web console is opened on node "{{old_leader}}"
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
+    And the web console is opened on node "{{old_leader}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".prompt-row input" is filled with "CREATE DOMAIN {{domain}};"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -654,7 +661,8 @@ Feature: Web console Plexus REPL
       """
     Then the current leader node is saved as placeholder "leader"
     And a node other than placeholder "leader" is saved as placeholder "follower"
-    When the web console is opened on node "{{follower}}"
+    When leadership is transferred from node "{{follower}}" to node "{{leader}}"
+    And the web console is opened on node "{{follower}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".terminal" contains "connected to leader '{{leader}}'"
     And selector ".graph-error" contains "NO ACTIVE DATAFLOW GRAPH"
@@ -670,6 +678,37 @@ Feature: Web console Plexus REPL
     And selector ".resource-version-list" contains "nested/beta.txt"
     When selector ".modal-scrim" is clicked by script
     Then selector ".resource-dialog" does not exist
+
+  Scenario Outline: Web console uploads a version after its leader refused the upload start before proposing it
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And node "node-1" has resource directory "console_refused_start_dir" containing
+      """
+      {
+        "alpha.txt": "alpha"
+      }
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE console_bundle;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the web console is opened on node "{{leader}}"
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".nav-item.resources" contains "console_bundle"
+    Given node "{{leader}}" refuses its next resource upload start as a leader that could not confirm its lease
+    When selector ".nav-item.resources:has-text('console_bundle')" is clicked
+    Then selector ".resource-dialog" contains "console_bundle"
+    When selector ".resource-dialog .file-upload-input" uploads resource directory "console_refused_start_dir"
+    Then selector ".resource-upload-status" contains "uploaded resource version 1"
+    And node "{{leader}}" refused a resource upload start
+    And selector ".resource-version-list" contains "version 1"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   Scenario Outline: Web console shows the latest completed resource version and the usages bound to each version
     Given a <cluster_size> node nervix cluster is started
@@ -1247,7 +1286,8 @@ Feature: Web console Plexus REPL
       """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    When the web console is opened on node "{{old_leader}}"
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
+    And the web console is opened on node "{{old_leader}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".graph-hit-layer" contains "raw_metrics"
     When selector ".relay-hit:has-text('raw_metrics')" is clicked by script
@@ -1441,7 +1481,8 @@ Feature: Web console Plexus REPL
       """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    When the web console is opened on node "{{old_leader}}"
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
+    And the web console is opened on node "{{old_leader}}"
     Then selector ".graph-hit-layer" contains "raw_metrics"
     When selector ".prompt-row input" is filled with "CREATE SUBSCRIPTION restored_metrics TO raw_metrics;"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -1482,7 +1523,8 @@ Feature: Web console Plexus REPL
       """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    When the web console is opened on node "{{old_leader}}"
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
+    And the web console is opened on node "{{old_leader}}"
     Then selector ".graph-hit-layer" contains "raw_metrics"
     When selector ".prompt-row input" is filled with "CREATE SUBSCRIPTION restored_metrics TO raw_metrics;"
     And selector ".prompt-row input" is pressed with "Enter"
