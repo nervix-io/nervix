@@ -854,6 +854,108 @@ algorithm policy, the classification register and the inventory they refer to.
   `nervix-server` normal and build graph onto a crate implementing cryptography other than AWS-LC.
   `just ratchet --show non_aws_lc_crypto` lists every site; the chapter defines what counts.
 
+## Maintained Implementations
+
+A protocol, format, encoding or algorithm that someone else specifies has exactly two acceptable
+implementations in Nervix: a maintained implementation of it, or a custom implementation that
+meets the bar below. This covers network protocols and their handshakes, message and file formats,
+text and binary encodings, escaping and quoting rules, compression, and standard algorithms: HTTP,
+WebSocket, TLS, DNS, URLs, MIME and multipart, JSON, CSV, base64, percent-encoding, RFC 3339 dates
+and their peers. What Nervix never carries is the third form: an ad hoc fragment written inline
+where it is needed. Such a fragment handles the cases its author tried, speaks one version or
+variant at best, and repeats the parsing, framing, escaping, smuggling and security defects a
+maintained or deliberately built implementation has already found and fixed. These rules bind
+every change from the moment they land, including work in flight on other branches.
+
+The following are defects, not style preferences. Treat any of them as a change to reject, however
+small the piece is, unless it is part of an approved custom implementation:
+
+- Producing the wire or text syntax of a specified contract inline, whether by string
+  concatenation, `format!`, `write!`, `push_str`, byte literals, `extend_from_slice` or joining
+  delimiters.
+- Parsing it inline: splitting on its delimiters, scanning for its terminators, matching its
+  keywords or reading it line by line in place of its parser.
+- Implementing the subset a caller needs today: one version, one variant, the common case, or no
+  escaping, continuation, extension, error or limit handling.
+- Re-implementing framing, escaping, checksums, handshakes or negotiation that the implementation
+  in use already performs, or post-processing its output to change what it produced.
+- Pinning a contract to one version or variant that its implementation could negotiate, without a
+  documented contract that requires it.
+
+No justification makes an ad hoc fragment acceptable: not that it is minimal, internal, used at
+one site, temporary, only a probe or faster; not that a maintained implementation is a heavier
+dependency or a larger change; not that the code beside it already does it. Use the maintained
+implementation the workspace already depends on; otherwise add a maintained crate, within the
+[Cryptography](#cryptography) dependency rules; where a maintained crate falls short, fix it
+upstream or in a fork the repository maintains.
+
+A custom implementation is legitimate when no maintained implementation can express the contract,
+or when one costs what a measurement shows the product cannot afford. It is a deliberate piece of
+engineering and receives the attention one deserves. It meets all four of these conditions before
+any caller uses it:
+
+1. **Isolated.** It lives in one owning crate or module whose ownership contract names the
+   specification it implements, and nothing else in Nervix produces or parses that syntax. Callers
+   reach it only through its API.
+2. **Tested.** It ships with Bolero properties for every encoding it owns, as
+   [Test-first changes](#test-first-changes) requires, with unit tests against the specification's
+   own examples and edge cases, malformed-input targets for every parser, and differential tests
+   against a reference implementation where one exists, even if that implementation is not used in
+   the product.
+3. **Properly abstracted.** Its API exposes the contract's typed concepts, such as messages,
+   fields, states and errors, never raw syntax. It states which version, variants and extensions it
+   supports and rejects everything else with a typed error instead of guessing. It owns its limits
+   and bounds every allocation and wait. Its scope is the complete contract it states, never the
+   subset one caller needs.
+4. **Approved by the human directing the session.** Before it is written, the agent stops and
+   reports the contract, why no maintained implementation fits, with evidence, and the scope the
+   implementation will state. The approval is recorded on the owning ClickUp task. Approval for one
+   contract or scope does not extend to another, and a later change that widens its scope needs its
+   own approval.
+
+A contract Nervix itself owns is not someone else's: Plexus, the client session protocol, the
+interconnect, stored and archive shapes. Each has one owning implementation built on maintained
+lower layers, such as FlatBuffers, rkyv and Arrow, and the owning chapter specifies it. Connector
+codecs that decode into Arrow builders, as [Columnar data plane](#columnar-data-plane) requires,
+take the syntax of the external format from a maintained parser or tokenizer, or from an approved
+custom one, and own only the mapping into columns.
+
+Only a test fixture may write or parse a specified contract's bytes inline, and only to exercise
+how the code under test handles exact or deliberately malformed input: a scripted HTTP, Redis or
+NATS peer, for example. A test fixture is code no product build compiles: a file under `tests/`,
+or a `#[cfg(test)]` module or file. Code a product build compiles is never a fixture, whatever it
+is named, and product code never calls one.
+
+An ad hoc fragment that already exists in product code is debt to replace, recorded as a defect on
+ClickUp. It is never extended, copied or cited as precedent. An existing custom implementation that
+does not meet all four conditions is debt in the same way until it does.
+
+### HTTP
+
+HTTP is the contract agents most often hand-write, and the rule above applies to it as follows.
+Nervix speaks HTTP through `reqwest`, or `hyper` where `reqwest` cannot express a contract, with
+`hyper-util` and `tower-http` for what they provide, and `tokio-tungstenite` for a WebSocket
+handshake. Nervix has no approved custom HTTP implementation, so nothing below `hyper` speaks HTTP;
+one would need all four conditions above, and `hyper` leaves little that could justify it. These
+are defects:
+
+- A request line, status line or header block assembled inline, or a head parsed inline by
+  splitting on `\r\n` or `:`, scanning for `\r\n\r\n`, reading lines until a blank one, or
+  calling `httparse` directly.
+- Inline body framing: counting `Content-Length`, encoding or decoding chunks, or reading to
+  connection close in place of the stack's body.
+- An inline `CONNECT` tunnel, proxy exchange, `Upgrade` handshake or `Sec-WebSocket-Accept`
+  derivation.
+- A client pinned to one protocol version without a documented contract that requires it. A client
+  negotiates every version its stack supports, HTTP/2 through ALPN included.
+- A redirect followed by rewriting the request or its connection in place. A redirect a contract
+  follows is a new request through the same stack.
+
+Establishing the connection a contract needs stays below the HTTP layer and is not HTTP: dialling
+through the node resolver within a budget, or TLS through `tokio-rustls`. It hands its stream to
+`hyper`, and `hyper` speaks every byte of HTTP on it. Only the `nervix-scenarios` package rooted
+at `tests/` depends on `httparse`; a product crate that adds it is a defect.
+
 ## Runtime and Infrastructure Invariants
 
 ### Columnar data plane
@@ -1121,18 +1223,9 @@ algorithm policy, the classification register and the inventory they refer to.
   decoding and back to integers only at the boundary.
 - Parse URLs and URL-like service addresses with the `url` crate. Do not manually split schemes,
   authorities, hosts, ports, paths, or query strings unless the format is not URL-compatible.
-- Speak HTTP only through a maintained HTTP implementation: `reqwest`, or `hyper` where `reqwest`
-  cannot express a contract, with `hyper-util` and `tower-http` for what they provide. Never
-  implement HTTP by hand below `hyper`: no request or response head written or parsed directly, and
-  no hand-written message framing, chunking, `CONNECT` tunnel or connection upgrade. A hand-written
-  exchange speaks one protocol version at best and repeats the parsing, framing, smuggling and
-  security defects a maintained stack has already fixed. A client negotiates every protocol version
-  its stack supports, HTTP/2 through ALPN included, unless a documented contract requires one.
-  Establishing a connection a contract needs, such as dialling through the node resolver within a
-  budget or TLS through `tokio-rustls`, stays below the HTTP layer and hands its stream to `hyper`,
-  and a redirect a contract follows is a new request through the same stack. Hand-written HTTP
-  that already exists is debt to replace, never a pattern to extend. Only a test fixture may write
-  exact or deliberately malformed bytes, to exercise how a client handles them.
+- Implement a protocol, format, encoding or algorithm someone else specifies through a maintained
+  implementation or an approved custom one, never an ad hoc fragment; see
+  [Maintained Implementations](#maintained-implementations), and [HTTP](#http) for HTTP.
 - Do not add `#[allow(...)]` annotations without explicit approval.
 - Do not use `std::mem::forget`, `Closure::forget`, leaked boxes, or equivalent lifetime leaks to
   keep browser callbacks alive. Use explicit ownership and cleanup or a crate-managed abstraction.
