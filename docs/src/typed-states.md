@@ -1212,6 +1212,11 @@ owns established connection tasks and queued frames; source close ends that reta
 The testing capability shares one named listener-fault request between the connector and host:
 the selected bound address and its acknowledgement belong to that same armed request.
 
+The consensus append-submission test control is idle, armed for one follower, or delivered with
+that nonempty request's previous and last log identities and entry count. The delivered variant
+owns its observation, so it cannot also remain armed. A scoped stream control retains its target;
+the ordinary build's inert control is zero-sized and retains no target or shared state.
+
 A Syslog frame's peer is a UDP address, a TCP address or a shared TLS connection identity. Only the
 TLS variant can hold a verified client-certificate subject, whose absence represents a connection
 without client authentication. Subject decoding happens after successful TLS verification; a

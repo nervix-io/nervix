@@ -2597,6 +2597,14 @@ delivery and recovery behavior that the external runner observes.
 
 ## Deterministic Concurrency Verification
 
+The consensus failed-submission fixture retains one async-mutex-owned state: idle, armed for a
+follower, or delivered with the complete request boundary. Each append stream retains its scoped
+control, so submission reaches no concurrent registry. Only a nonempty request to the armed
+follower consumes it, and later requests proceed. The unit control check and three-node public
+regression qualify that fault and recovery; they make no memory-ordering or lock-free notification
+claim. Deloxide does not observe the async mutex. The fixture adds no tracked acquisition and is
+inert outside test builds.
+
 The relay interaction's ordinary output-wake test stages a collected batch through the production
 admission path and awaits its domain-owned collection deadline before making the output wake
 ready. It requires the wake to win and the exact batch to remain deliverable afterwards. Its initial

@@ -18,6 +18,16 @@ name, and the console recorder checks an opened WSS connection to the advertised
 
 ## Paced Interconnect Fixture
 
+The separate failed-append regression establishes retained history on all three nodes before
+stopping one follower and creating its backlog. It arms a single nonempty submission on the
+future leader before transferring leadership, then restarts the follower without waiting for
+catch-up. Arming therefore does not race the transfer, and the one failed submission happens
+after the follower is running again. Its request boundary is retained for the assertion. Native client
+attachment and commit, applied backlog and later writes, and a strict read on the successor
+verify recovery within the existing scenario and product budgets. The control uses an async
+mutex and releases the fault registry's guard before awaiting; neither the failure nor its
+observation requires a blocking lock or a new lifecycle task.
+
 The rate-limited follower catch-up scenario starts a TCP byte pacer before restarting a stopped
 node. Its listener takes the existing advertised endpoint and forwards opaque bytes to a private
 interconnect listener on the restarted node. The advertised endpoint stays fixed so retained peer

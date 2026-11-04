@@ -942,6 +942,30 @@ impl FaultInjection {
         state.test_probe.restore_connectivity();
     }
 
+    /// Arm one data submission on the future leader, before transferring leadership to it.
+    pub async fn fail_next_append_submission(
+        &self,
+        node: &ClusterNodeName,
+        target: ClusterNodeName,
+    ) {
+        let test_probe = {
+            let state = self.inner.consensus_probes.entry(node.clone()).or_default();
+            state.test_probe.clone()
+        };
+        test_probe.fail_next_append_submission(target).await;
+    }
+
+    pub async fn append_submission_failure(
+        &self,
+        node: &ClusterNodeName,
+    ) -> Option<nervix_consensus::AppendSubmissionFailure> {
+        let test_probe = {
+            let state = self.inner.consensus_probes.get(node)?;
+            state.test_probe.clone()
+        };
+        test_probe.append_submission_failure().await
+    }
+
     /// Makes whichever node proposes `reference`'s next `write` refuse it the way a leader whose
     /// lease lapsed refuses a write: before appending it, naming no leader, while it keeps leading
     /// its term. Only the leader proposes a command execution's writes, so every node is armed.
