@@ -535,6 +535,22 @@ scanning records or changing retention. Every node exposes its own applied count
 admission refusal events are counted only by the application process that handles the refusal,
 never by follower application or replay. See [Command Execution History](./metrics-and-observability.md#command-execution-history).
 
+Opening a consensus node establishes a `consensus_node` trace span with its cluster name, typed
+node name and concrete local interconnect address. OpenRaft captures that context when it starts
+its core. Parallel isolated clusters may use the same node names; the listener address distinguishes
+their core events in a shared log. The span belongs to that consensus lifetime and exposes no
+command, record or credential values.
+The unary append, vote and pre-vote receivers also establish trace-level contexts with the same
+local node and listener address. When detailed tracing is selected, their existing OpenRaft API
+events distinguish arrival at the Raft API from processing by that node's core. The annotations
+change no request, deadline or retry policy.
+Vote and pre-vote clients emit trace-level send and completion events with the local endpoint,
+peer, vote, request deadline, elapsed transport time and result. The elapsed measurement spans
+encoding, connection admission, the exchange and response decoding. An outer OpenRaft timeout may
+cancel the request before its completion event; its timeout event remains the outcome in that
+case. These infrequent requests take one additional monotonic-clock reading when they begin;
+completion timing and result formatting are evaluated only when their trace event is enabled.
+
 Durable record decoding and recovered catalog checks preserve decoding or nested report causes
 inside the standard-error carrier that the storage trait accepts. The carrier's ordinary rendering
 includes the entire chain when a later report names the I/O error as its context. Transaction

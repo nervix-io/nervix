@@ -2250,7 +2250,24 @@ A redirect that names no leader reports none. Every report comes first or last o
 because the console lets a session go as soon as a redirect names another leader, so the frames the
 recorder keeps hold every report. A frame larger than the recorder's bound is a domain snapshot or an
 archive chunk, which reports no leader, and a kept frame that does not decode as a frame of its
-connection's call fails the step that reads it. `the web console's session reached
+connection's call fails the step that reads it.
+
+The console switchover scenarios save the first serving leader from the session's typed leadership
+event after observing `CONNECTED`. A leader saved from a status request before opening the browser
+can have changed by the time the browser connects. Redirects and unknown-leader reports do not
+establish a serving session. Later connections do not replace its initial identity. The scenario
+then chooses a different node, transfers leadership and retains the assertion that the console
+connects to that selected node. The controlled case transfers leadership before opening the page
+as well as afterwards; both cases keep their three-node topology and existing assertion deadlines.
+Follower, backup and upload cases that deliberately assert a selected initial redirect establish
+that selected leader with a leadership move immediately before opening the page. The move reads
+the entry node's current leadership and returns immediately when the target already leads. Their
+selected-leader, single-session and backup-stream routing assertions remain in place.
+The bootstrap-leader failover and rejoin cases likewise establish leadership on the bootstrap
+node before asserting its role and stopping it. Their subsequent election, voter, catch-up and
+interconnect assertions retain the same bounds.
+
+`the web console's session reached
 node ... until it was redirected to node ..., and then only nodes reported to it as the leader`
 checks that the session started where the page was opened, that its first connection anywhere else
 reached the node it names as the redirect's, and that from then on every session connection reached
@@ -3848,6 +3865,18 @@ shard's `scenario-logs-<I>` artifact carries its `tests/logs`.
 
 Server processes write their logs into their own temporary directories, and a failure quotes the
 tail it needs.
+
+The scenario tracing default enables the consensus owner's trace contexts and vote send/completion
+events, while retaining the replication module's debug selection and OpenRaft's existing filter.
+The concrete local listener distinguishes same-named nodes in parallel isolated clusters. Vote
+events retain the peer, vote, deadline, elapsed transport time and existing result; receiver
+contexts identify the node whose Raft API accepted the request. These infrequent election events
+remain in the original failed attempt without enabling OpenRaft's per-tick and per-append debug
+stream. An explicit `RUST_LOG` still selects the run's filter. A detailed diagnostic replay may
+enable OpenRaft debug events to compare received append gaps and API-to-core processing, but
+neither a passing replay nor a final leader snapshot establishes why an earlier election stalled.
+Compare the same cluster's request, processing and reply boundaries with runner load and scheduler
+evidence; the Cucumber task's stall detector does not observe every node worker.
 
 The materialized input round and the delayed-coordinator publication observation each own a
 `BackupPhase`. It captures the existing 120-second deadline before dispatching the operation through

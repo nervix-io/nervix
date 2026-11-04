@@ -848,7 +848,9 @@ algorithm policy, the classification register and the inventory they refer to.
 - No change adds a dependency that brings a cryptography implementation other than AWS-LC into the
   `nervix-server` product graph. A connector need that cannot be met is recorded on its connector
   epic.
-- A second `aws-lc-*-sys` crate in the product is a defect.
+- A second `aws-lc-*-sys` crate in the product, or a second version of one, is a defect, and
+  `just ratchet` refuses it. An upgrade of `aws-lc-rs` that moves to another `aws-lc-sys` moves
+  Nervix's `rust-rdkafka` fork to it in the same change.
 - The `non_aws_lc_crypto` count only decreases. It counts authored uses of cryptography outside
   AWS-LC, found by the stable source parser in every configuration, and each dependency edge of the
   `nervix-server` normal and build graph onto a crate implementing cryptography other than AWS-LC.
