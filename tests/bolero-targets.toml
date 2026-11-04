@@ -3761,10 +3761,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/src/connector/__fuzz__/connector__config_schema__tests__bolero_schema_checked_client_entries_round_trip/corpus"
-domain_version = 29
+domain_version = 30
 features = []
 id = "client-config-schema"
-invariant = "Bounded entries drawn from every current client key schema preserve complete values and acceptance through JSON and archive round trips; effective defaults preserve authored entries and are idempotent, as is public inspection."
+invariant = "Bounded entries drawn from every current client key schema, choosing zero or one key of a declared exclusion group, preserve complete values and acceptance through JSON and archive round trips; effective defaults preserve authored entries and are idempotent, as is public inspection."
 manifest = "Cargo.toml"
 max_input_bytes = 1024
 package = "nervix-models"
@@ -3876,4 +3876,19 @@ package = "nervix-models"
 random_iterations = 256
 source = "crates/models/src/connector/mqtt/config_tests.rs"
 test = "connector::mqtt::config_tests::bolero_mqtt_client_config_preserves_every_valid_connection_setting"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/connectors/nats/src/client/authentication/__fuzz__/client__authentication__tests__bolero_nkey_authentication_preserves_identity_and_nonce/corpus"
+domain_version = 1
+features = []
+id = "nats-user-authentication"
+invariant = "Every 32-byte user seed decodes from the independent SDK's nkey to the same public key; AWS-LC signatures of bounded nonces verify through that SDK, both directly and through complete JWT credentials whose user token is preserved."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-connector-nats"
+random_iterations = 256
+source = "crates/connectors/nats/src/client/authentication/tests.rs"
+test = "client::authentication::tests::bolero_nkey_authentication_preserves_identity_and_nonce"
 test_target = "lib"

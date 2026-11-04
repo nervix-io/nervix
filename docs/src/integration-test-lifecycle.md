@@ -2,6 +2,20 @@
 
 *Plexus, the Nervix graph definition language.*
 
+The HTTPS console fixture uses the console's reserved port for its TLS listener and lets the
+system assign the accompanying plaintext listener's port. It advertises the reserved HTTPS
+address explicitly and presents the node's fixture certificate. The redirect scenario launches a
+fresh browser with `--ignore-certificate-errors` for its per-cluster test CA; the CLI and
+native-client TLS scenarios verify the server certificate against their explicitly supplied
+authority. These fixtures preserve the ordinary startup, observation and teardown budgets and
+the scenario suite's parallelism.
+
+HTTPS native session fixtures copy an explicit fixture certificate and key into each node's storage
+root during initial provisioning. Restart reuses those files. The rotation scenario replaces one
+node's files, observes the initially loaded leaf on a fresh connection before restart, then the
+replacement leaf after restart. CLI and Rust-client operations verify the supplied CA and endpoint
+name, and the console recorder checks an opened WSS connection to the advertised leader.
+
 ## Paced Interconnect Fixture
 
 The rate-limited follower catch-up scenario starts a TCP byte pacer before restarting a stopped
@@ -620,7 +634,13 @@ burst, physical scheduling at the slow rate, corrupt rows and a stalled or faile
 C binding its Python driver loads in the normal target directory. Every service a scenario depends
 on is a container that `crates/test-environment` starts through testcontainers, which pulls its
 image or, for the mock server that no registry holds, builds it on first use: no recipe or workflow
-prepares or starts one. The full and focused client coverage recipes build a standalone
+prepares or starts one. The NATS authentication fixture starts three independent enforcing
+servers: token authorization, a user NKey, and an operator/account JWT chain with an in-memory
+account resolver. Its checked-in identities are public test fixtures without expiration.
+Scenarios mount the credentials file as a resource, authenticate through public Nervix client
+definitions, and use an independently authenticated publisher to verify both ingestors and
+emitters on one and three nodes. Each scenario uses distinct subjects while sharing the suite's
+servers. The full and focused client coverage recipes build a standalone
 instrumented CLI beside their instrumented scenario executable and place the normal Plexus
 formatter there. The scenario runner selects the covered CLI through
 `NERVIX_TEST_CLI_PATH`, so its one-shot completion and command paths contribute to the same LCOV

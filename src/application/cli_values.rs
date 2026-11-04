@@ -37,10 +37,6 @@ impl InternalTransportMode {
             Self::Https => "https",
         }
     }
-
-    pub(in crate::application) fn is_tls(self) -> bool {
-        matches!(self, Self::Https)
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
