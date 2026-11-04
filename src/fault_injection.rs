@@ -50,6 +50,7 @@ mod backup_cut;
 #[cfg(test)]
 mod backup_cut_tests;
 mod client_inspection;
+mod command_reply;
 mod consensus;
 mod domain_clock;
 mod domain_resume;
@@ -93,6 +94,7 @@ mod wasm_reset_publication;
 
 pub use backup_cut::BackupCutBoundary;
 use backup_cut::{BackupCutGate, BackupCutGateKey};
+use command_reply::CommandReplyScript;
 use domain_clock::DomainClockProgressPausePoint;
 pub use domain_resume::DomainResumeBoundary;
 use entity_drain::ForcedEntityDrainTimeout;
@@ -166,6 +168,8 @@ pub struct FaultInjection {
 
 #[derive(Debug)]
 struct FaultInjectionState {
+    /// One bounded command-reply script per scenario domain, absent from ordinary builds.
+    command_reply_scripts: DashMap<DomainName, CommandReplyScript, RandomState>,
     emitter_faults: DashMap<String, EmitterFaultMode, RandomState>,
     failed_ingestors: DashMap<String, (), RandomState>,
     unavailable_emitter_clients: DashMap<String, (), RandomState>,
@@ -536,6 +540,7 @@ impl Default for FaultInjection {
         let (startup_observation_end, _) = watch::channel(StartupObservationEnd::Unarmed);
         Self {
             inner: Arc::new(FaultInjectionState {
+                command_reply_scripts: DashMap::default(),
                 emitter_faults: DashMap::default(),
                 failed_ingestors: DashMap::default(),
                 unavailable_emitter_clients: DashMap::default(),

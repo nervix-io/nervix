@@ -464,6 +464,12 @@ expired, while a settlement sent before losing its answer is separately uncertai
 `START` generation and endpoint contract fingerprint are required values on every successful
 consumer open, so absence cannot be mistaken for a matching contract.
 
+The browser retains an uncertain command's complete original request and issue order. Its retry
+availability is explicitly waiting or ready, with a bounded delay retained for the next attempt.
+The current connection owns the timer futures; ending it releases those waits for recovery on
+the replacement connection. A terminal reply removes the command's retry record. No timestamp or
+request-number sentinel stands for either state, and retry metadata carries no second payload.
+
 **Expression scopes and errors.** The VM frontend receives a scope policy that says whether a
 bare field may be read, written, both, or neither. A generated or set-only route reports an
 unavailable `message` or `input` scope during lowering, rather than inventing a namespace that

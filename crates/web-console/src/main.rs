@@ -18,7 +18,9 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use bytes::Bytes;
 use error_stack::Report;
-use futures_util::{FutureExt, SinkExt, StreamExt};
+use futures_util::{
+    FutureExt, SinkExt, StreamExt, future::LocalBoxFuture, stream::FuturesUnordered,
+};
 use gloo_net::websocket::{
     Message as WebSocketMessage, State as WebSocketState, futures::WebSocket,
 };
@@ -69,6 +71,7 @@ use wasm_bindgen_futures::spawn_local;
 
 mod backup_dialog;
 mod clock_display;
+mod command_retry;
 mod create_dialog;
 mod request_handoff;
 mod resource_upload;
@@ -79,6 +82,7 @@ use backup_dialog::{
     boxed_session_storage,
 };
 use clock_display::{ClockDisplay, ClockPanel, ClockSelection, ClockSelectionChange, ClockStatus};
+use command_retry::{CommandRetries, CommandRetryWait};
 use create_dialog::{
     ChoiceControl, ChoiceRequestContext, CommandDispatch, CreateCommandContext, CreateDialog,
     CreateDispatch, CreateKind, CreateMenu, CreateSignals, CreateSubmission, SubscriptionDispatch,
@@ -719,7 +723,7 @@ impl ConsoleRequest {
 
 /// The place of a request in the order the console issued its requests. A request keeps it when it
 /// is sent again, so requests sent again on a new connection keep their original order.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct IssueOrder(u64);
 
 /// A request and its place in the issue order.
@@ -852,6 +856,8 @@ impl OutstandingLoad {
 /// and never by arrival order. Unsolicited server messages answer no request, so they never
 /// complete or discard one.
 struct SessionRequests {
+    /// Availability and bounded backoff of commands whose outcome remains uncertain.
+    command_retries: CommandRetries,
     /// The place the next issued request takes.
     next_issue: u64,
     /// Ordered requests waiting until the session can serve them, in the order they were issued.
@@ -882,6 +888,7 @@ struct SessionRequests {
 impl SessionRequests {
     fn new() -> Self {
         Self {
+            command_retries: CommandRetries::default(),
             next_issue: 0,
             held: BTreeMap::new(),
             connection_held: BTreeMap::new(),
@@ -1101,6 +1108,7 @@ impl SessionRequests {
     }
 
     /// Fills the wire window without letting later controls overtake ready ordered work.
+    /// Ready ordered work is checked and removed through one occupied map entry.
     fn release_held(&mut self) -> Vec<ClientMessage> {
         let mut messages = Vec::new();
         while self.has_room_in_flight() {
@@ -1114,10 +1122,13 @@ impl SessionRequests {
                 if !self.is_ready() {
                     break;
                 }
-                let Some(next) = self.held.pop_first() else {
+                let Some(entry) = self.held.first_entry() else {
                     break;
                 };
-                next
+                if self.command_retries.is_waiting(*entry.key()) {
+                    break;
+                }
+                entry.remove_entry()
             };
             messages.push(self.dispatch(IssuedRequest { order, request }));
         }
@@ -1132,6 +1143,7 @@ impl SessionRequests {
     /// Drops every held request, because the session they were issued for is over.
     fn clear_held(&mut self) {
         self.held.clear();
+        self.command_retries.clear();
         let connection_held = std::mem::take(&mut self.connection_held);
         for held in connection_held.into_values() {
             let request = held.request;
@@ -1233,6 +1245,7 @@ impl SessionRequests {
     /// so the server recovers its recorded outcome instead of executing it twice. A request that
     /// belongs to the ended connection ends with it.
     fn end_connection(&mut self) {
+        self.command_retries.connection_ended();
         let in_flight = std::mem::take(&mut self.in_flight);
         for request in in_flight.into_values() {
             let Some(issued) = request.awaited else {
@@ -1258,6 +1271,8 @@ impl SessionRequests {
 enum SessionStep {
     /// Keep serving the connection.
     Continue,
+    /// Keep the connection open while this command waits to repeat under its original identity.
+    RetryCommand(CommandRetryWait),
     /// Attach the session's transaction again. The requests held for it follow once it is
     /// attached.
     Reattach { transaction_id: String },
@@ -2476,7 +2491,10 @@ async fn drain_closed_connection(
         received = true;
         match receive_frame(signals, state, requests, &frame) {
             SessionStep::Redirect(leader) => return Some(ConnectionEnd::Redirected(leader)),
-            SessionStep::Continue | SessionStep::Reattach { .. } | SessionStep::Reconnect => {}
+            SessionStep::Continue
+            | SessionStep::RetryCommand(_)
+            | SessionStep::Reattach { .. }
+            | SessionStep::Reconnect => {}
         }
     }
     if received {
@@ -2513,6 +2531,8 @@ async fn serve_connection(
         }
     }
     let mut retry_delay = Box::pin(wait_for_browser_delay(SUBSCRIPTION_RETRY_DELAY).fuse());
+    let mut command_waits: FuturesUnordered<LocalBoxFuture<'static, IssueOrder>> =
+        FuturesUnordered::new();
     loop {
         if signals.auth_token.get_untracked().as_deref() != Some(current_auth_token) {
             return ConnectionEnd::Dropped;
@@ -2569,6 +2589,10 @@ async fn serve_connection(
                     }
                 }
             }
+            order = next_command_retry(&mut command_waits).fuse() => {
+                requests.command_retries.ready(order);
+                SessionStep::Continue
+            }
             () = retry_delay.as_mut() => {
                 retry_delay = Box::pin(wait_for_browser_delay(SUBSCRIPTION_RETRY_DELAY).fuse());
                 // A tab whose restoration was refused is tried again while the session is ready,
@@ -2590,6 +2614,15 @@ async fn serve_connection(
         };
         match step {
             SessionStep::Continue => {}
+            SessionStep::RetryCommand(wait) => {
+                command_waits.push(
+                    async move {
+                        wait_for_browser_delay(wait.delay).await;
+                        wait.order
+                    }
+                    .boxed_local(),
+                );
+            }
             SessionStep::Reattach { transaction_id } => {
                 if !requests.is_attaching() {
                     let attach = ConsoleRequest::AttachTransaction(AttachTransactionRequest {
@@ -2611,6 +2644,19 @@ async fn serve_connection(
             }
         }
     }
+}
+
+/// An empty timer set must remain pending, so an idle connection never spins on an ended stream.
+async fn next_command_retry(
+    waits: &mut FuturesUnordered<LocalBoxFuture<'static, IssueOrder>>,
+) -> IssueOrder {
+    if waits.is_empty() {
+        return std::future::pending().await;
+    }
+    waits
+        .next()
+        .await
+        .assured("this connection owns the nonempty timer set exclusively")
 }
 
 /// An acknowledged subscription belongs to the connection that ended. Its tab remains desired,
@@ -2681,6 +2727,7 @@ async fn send_message(
         Ok(frame) => frame,
         Err(error) => {
             if let Some(unsent) = requests.answer(message.request_id) {
+                requests.command_retries.finished(unsent.order);
                 let reason = format!("the request cannot be sent: {}", error.current_context());
                 fail_request(signals, unsent.request, reason);
             }
@@ -2720,7 +2767,10 @@ fn receive_frame(
                 None => None,
             };
             match answered {
-                Some(unread) => fail_request(signals, unread.request, reason),
+                Some(unread) => {
+                    requests.command_retries.finished(unread.order);
+                    fail_request(signals, unread.request, reason);
+                }
                 None => {
                     signals
                         .terminal_lines
@@ -2735,6 +2785,7 @@ fn receive_frame(
         Routed::Reply(answered) => apply_reply(signals, requests, *answered),
         Routed::Unreadable(unreadable) => {
             let UnreadableReply { request, reason } = *unreadable;
+            requests.command_retries.finished(request.order);
             fail_request(signals, request.request, reason);
             SessionStep::Continue
         }
@@ -3030,6 +3081,9 @@ fn apply_reply(
 ) -> SessionStep {
     let AnsweredRequest { request, body } = answered;
     let IssuedRequest { order, request } = request;
+    if !matches!(&body, ReplyBody::Command(_)) {
+        requests.command_retries.finished(order);
+    }
     match (request, body) {
         (request, ReplyBody::Rejected(rejected)) => {
             fail_request(signals, request, rejected.message);
@@ -3171,8 +3225,9 @@ fn apply_reply(
 ///
 /// A command the serving node could not run because it does not lead is sent again at the leader's
 /// console, and a command the leader could not bind to the session's transaction is sent again
-/// once the transaction is attached. An unknown outcome reconnects before another attempt. Each
-/// attempt keeps the command's execution reference, so the server recovers its recorded outcome
+/// once the transaction is attached. An unknown outcome waits before repeating on the open
+/// connection, which continues serving other messages. Each attempt keeps the command's execution
+/// reference, so the server recovers its recorded outcome
 /// instead of running it twice. A definitive outcome goes to whoever reads the command.
 fn apply_command_outcome(
     signals: WebConsoleSignals,
@@ -3196,16 +3251,12 @@ fn apply_command_outcome(
         return step;
     }
     if matches!(outcome.disposition, CommandDisposition::OutcomeUnknown(_)) {
-        if let CommandPurpose::Create(context) = &purpose {
-            signals
-                .create
-                .queued_reconnect(context.attempt, context.draft_revision);
-        }
+        let wait = requests.command_retries.wait(order);
         requests.hold_again(IssuedRequest {
             order,
             request: ConsoleRequest::Command { request, purpose },
         });
-        return SessionStep::Reconnect;
+        return SessionStep::RetryCommand(wait);
     }
     let queued_transaction_position = queued_transaction_position(&outcome);
     if let Some(status) = outcome.transaction.take() {
@@ -3219,6 +3270,7 @@ fn apply_command_outcome(
         });
         return SessionStep::Reattach { transaction_id };
     }
+    requests.command_retries.finished(order);
     match purpose {
         CommandPurpose::Repl => show_command_outcome(signals, order, &request.query, outcome),
         CommandPurpose::Create(context) => {
@@ -11009,6 +11061,95 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_command_waits_before_repeating_on_its_open_connection() {
+        use nervix_client_wire::UnknownOutcomeCause;
+
+        for cause in [
+            UnknownOutcomeCause::LeadershipLost,
+            UnknownOutcomeCause::StillApplying,
+            UnknownOutcomeCause::NotYetAuthoritative,
+        ] {
+            Owner::new().with(|| {
+                let signals = subscription_signals(SubscriptionTabState::Pending);
+                let mut requests = SessionRequests::new();
+                requests.confirm_leader();
+                let mut first = repl_command("first");
+                let ConsoleRequest::Command { request, .. } = &mut first else {
+                    panic!("the test prepares a command");
+                };
+                request.expected_transaction_position = Some(TransactionPosition::new(2));
+                request.expected_preview = Some(TransactionPreviewIdentity {
+                    transaction_id: "attached".to_string(),
+                    position: TransactionPosition::new(2),
+                    planning_basis: ImpactPlanningBasis::new([7; 32]),
+                });
+                let issued = requests.issue(first);
+                let message = sent(requests.accept(issued));
+                let issued = requests
+                    .answer(message.request_id)
+                    .assured("the command is awaiting its reply");
+                let IssuedRequest { order, request } = issued;
+                let ConsoleRequest::Command { request, purpose } = request else {
+                    panic!("the test issued a command");
+                };
+                let original = request.clone();
+                let mut outcome = completed_outcome("the command's outcome is not known yet");
+                outcome.disposition = CommandDisposition::OutcomeUnknown(cause);
+                let step =
+                    apply_command_outcome(signals, &mut requests, order, request, purpose, outcome);
+                let SessionStep::RetryCommand(wait) = step else {
+                    panic!("an uncertain command waits on the open connection");
+                };
+                assert_eq!(wait.order, order);
+                assert_eq!(wait.delay, WEBSOCKET_INITIAL_RECONNECT_DELAY);
+
+                let later = requests.issue(repl_command("later"));
+                assert!(matches!(requests.accept(later), Admission::Held));
+                assert!(requests.is_ready(), "the serving leader is still confirmed");
+                assert!(
+                    requests.release_held().is_empty(),
+                    "an unknown {cause:?} outcome holds the command and later work for its retry \
+                     delay"
+                );
+                assert!(
+                    signals
+                        .terminal_lines
+                        .get_untracked()
+                        .into_lines()
+                        .is_empty()
+                );
+                requests.command_retries.ready(wait.order);
+                let repeated = requests.release_held();
+                assert_eq!(sent_queries(&repeated), vec!["first", "later"]);
+                assert_eq!(sent_commands(&repeated)[0], &original);
+
+                let mut completed = completed_outcome("created schema");
+                completed.execution_reference = original.execution_reference;
+                let terminal = reply(
+                    repeated[0].request_id,
+                    ReplyBody::Command(Box::new(completed)),
+                );
+                let Routed::Reply(answered) = requests.route(terminal.clone()) else {
+                    panic!("the repeated command awaits its terminal outcome");
+                };
+                assert!(matches!(
+                    apply_reply(signals, &mut requests, *answered),
+                    SessionStep::Continue
+                ));
+                assert!(matches!(requests.route(terminal), Routed::Untracked));
+                let lines = signals.terminal_lines.get_untracked().into_lines();
+                assert_eq!(
+                    lines
+                        .iter()
+                        .filter(|line| line.line.text == "created schema")
+                        .count(),
+                    1
+                );
+            });
+        }
+    }
+
+    #[test]
     fn unknown_command_outcome_retries_with_its_execution_reference() {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Pending);
@@ -11026,7 +11167,9 @@ mod tests {
 
             let step =
                 apply_command_outcome(signals, &mut requests, order, request, purpose, outcome);
-            assert!(matches!(step, SessionStep::Reconnect));
+            let SessionStep::RetryCommand(wait) = step else {
+                panic!("the uncertain command waits before repeating");
+            };
             assert!(
                 signals
                     .terminal_lines
@@ -11035,8 +11178,8 @@ mod tests {
                     .is_empty()
             );
 
-            requests.end_connection();
             requests.confirm_leader();
+            requests.command_retries.ready(wait.order);
             let resent = requests.release_held();
             assert_eq!(sent_commands(&resent)[0].execution_reference, reference);
         });
@@ -12463,7 +12606,7 @@ mod tests {
                     purpose,
                     unknown,
                 ),
-                SessionStep::Reconnect
+                SessionStep::RetryCommand(_)
             ));
         });
     }

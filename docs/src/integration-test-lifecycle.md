@@ -3098,6 +3098,22 @@ emitter stall, and checks every sequence and repeated header within the original
 followed by the 500-millisecond duplicate check. The source count does not confirm delivery to the
 broker's observing subscriber.
 
+## Console Command Reply Uncertainty
+
+The console command-recovery outline uses a scenario-local reply script keyed by domain and exact
+query. The real command executes and its durable outcome is retained. Only its first three
+successful public session replies are replaced, with `LeadershipLost`, `StillApplying` and
+`NotYetAuthoritative` respectively; the next request receives the real recovered outcome. The
+script retains at most four execution references and is disposed with that scenario's injector.
+It does not simulate a lease or change leadership, execution or the stored result.
+
+The browser's bounded connection recorder supplies the connection identities and the public
+domain-selection, clock-attachment and subscription replies before and after the command.
+Comparing those observations checks retention of the original session and attachments. The
+one- and three-node examples also require one terminal result and one unchanged execution
+reference across all four attempts. Retry-delay progression is checked separately through the
+browser's production request owner, without a wall-clock silence window.
+
 ## RabbitMQ Confirmation Ordering
 
 The RabbitMQ confirmation-order fixture forwards to the shared real broker. It leaves client
