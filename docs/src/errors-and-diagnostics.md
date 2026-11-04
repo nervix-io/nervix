@@ -2,6 +2,14 @@
 
 *Plexus, the Nervix graph definition language.*
 
+Native session TLS provisioning fails before a node opens its stores or listeners. Missing
+certificate/key paths and TLS files supplied in HTTP mode are distinct application errors. File
+reads retain their `io::Error` beneath `TlsMaterialError::ReadFile`, including the certificate or
+private-key role; malformed PEM and key mismatch retain the material owner's typed cause beneath
+`AppError::LoadGrpcTls`. Reporting renders the full chain without including certificate or key
+contents. The [Client Session Protocol](client-session-protocol.md#native-grpc) owns the TLS
+listener's startup and rotation contract.
+
 Client CONFIG validation keeps vocabulary `ClientConfigSchemaError` beneath the registry's
 client/domain context. The server's changed-model binding validation runs connector-owned offline
 checks before standalone mutation or transaction commit. `OfflineClientConfigError` retains typed

@@ -1452,7 +1452,8 @@ coverage-report-workspace *args:
 # consumer reads, and record its inputs, counts and dropped records in
 # target/coverage-merge/record.json. An input is a producer's artifact directory or one report, each
 # with the coverage-source-root.txt its producer wrote; CI names the three ordinary artifacts, and
-# without inputs this merges the lcov-workspace.info that test-coverage wrote, in place. It fails,
+# names tooling-only extras with --python-input while preserving required Rust inputs. With
+# no inputs this merges the lcov-workspace.info that test-coverage wrote, in place. It fails,
 # writing no report, when the report would be incomplete.
 coverage-merge *inputs:
     python3 -m scripts.coverage_merge --output lcov-workspace.info --record {{ quote(cargo_target_dir + "/coverage-merge/record.json") }} {{ inputs }}

@@ -269,6 +269,13 @@ command-line form of one owner's class-typed group: each option is named by its 
 the default its definition returns. Cluster-parameter help identifies it as a bootstrap default. Durations and byte quantities print in the edge's forms, such as `250ms`,
 `15m` and `64MiB`, which read back to exactly the same value.
 
+The session listener's `--grpc-tls-cert` and `--grpc-tls-key` paths belong to that provisioning
+group, with `NERVIX_GRPC_TLS_CERT` and `NERVIX_GRPC_TLS_KEY` as their environment variables. They
+have no default and are both required in HTTPS mode; HTTP mode refuses them. Resolution produces
+an HTTP transport or an HTTPS transport carrying both paths. Material is validated and loaded
+once before startup opens listeners; changing it requires a node restart. Console TLS paths have
+the same startup lifetime. TLS algorithm policy remains separate from these node-specific files.
+
 The edge converts each group once, and the application carries the result: a `NodeIdentity` and a
 `NodeSettings` holding every group. The shutdown coordinator is derived from the shutdown timeout
 the settings hold, so the two cannot disagree, and the runtime is built from its `RuntimeSettings`
