@@ -21,7 +21,34 @@ SERVER_TAG = "ghcr.io/nervix-io/nervix:build"
 OPERATOR_IMAGE = "ghcr.io/nervix-io/nervix-k8s-operator@sha256:" + "b" * 64
 
 
+def policy_description(revision: int = 7) -> str:
+    return f"replica-count committed=2 revision={revision}\n" + "\n".join(
+        f"node=node-{i} replica-count running=2 revision={revision}" for i in range(1, 4)
+    ) + "\n"
+
+
 class ObservationTests(unittest.TestCase):
+    def test_replica_policy_requires_one_commit_and_every_node_at_its_revision(self) -> None:
+        for revision in (0, 7):
+            with self.subTest(revision=revision):
+                self.assertEqual(deployment.replica_policy_revision(policy_description(revision), 2), revision)
+        description = policy_description()
+        changes = [
+            description.replace("committed=2", "committed=0"),
+            description.replace("node=node-3 replica-count running=2 revision=7\n", ""),
+            description.replace("node=node-3", "node=node-4"),
+            description.replace("node=node-3 replica-count running=2", "node=node-3 replica-count running=0"),
+            description.replace("node=node-3 replica-count running=2 revision=7", "node=node-3 replica-count running=2 revision=6"),
+            description + "replica-count committed=2 revision=7\n",
+            description + "node=node-3 replica-count running=2 revision=7\n",
+            description + "node=node-4 replica-count running=2 revision=7\n",
+            "node=node-1 cluster parameters running=not installed\n",
+            "error: DESCRIBE CLUSTER failed\n",
+        ]
+        for changed in changes:
+            with self.subTest(description=changed):
+                self.assertIsNone(deployment.replica_policy_revision(changed, 2))
+
     def test_image_identity_requires_the_tested_revision_and_native_architecture(self) -> None:
         image = {
             "Architecture": "amd64", "RepoDigests": ["ghcr.io/nervix-io/nervix@sha256:" + "c" * 64, IMAGE],
@@ -57,6 +84,7 @@ class ObservationTests(unittest.TestCase):
             {"kind": "Secret", "stringData": {"password": "nervix"}},
             {"kind": "NervixCluster", "spec": {
                 "image": "ghcr.io/nervix-io/nervix:debian-latest", "replicas": 3,
+                "initialClusterParameters": {"replicaCount": 2},
                 "storage": "20Gi", "resources": {"memoryLimit": "3Gi"},
                 "localAccess": {"enabled": True, "bootstrapGrpcNodePort": 31390},
             }},
@@ -70,6 +98,12 @@ class ObservationTests(unittest.TestCase):
             with self.subTest(items=items):
                 with self.assertRaisesRegex(ValueError, "exactly one NervixCluster"):
                     deployment.with_server_image("\n".join(json.dumps(item) for item in items), IMAGE)
+
+    def test_the_shipped_example_must_request_two_state_replicas(self) -> None:
+        for parameters in ({}, {"replicaCount": 0}, {"replicaCount": True}, {"replicaCount": "2"}):
+            manifest = {"kind": "NervixCluster", "spec": {"initialClusterParameters": parameters}}
+            with self.subTest(parameters=parameters), self.assertRaisesRegex(ValueError, "replicaCount: 2"):
+                deployment.with_server_image(json.dumps(manifest), IMAGE)
 
     def test_all_three_pods_must_be_ready_on_the_exact_image(self) -> None:
         pods = {"items": [{
@@ -137,12 +171,52 @@ class WorkflowTests(unittest.TestCase):
 
 
 class ControllerTests(unittest.TestCase):
+    def test_policy_observations_pin_the_first_complete_revision_and_keep_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            check = deployment.DeploymentCheck(IMAGE, REVISION, "amd64", Path(directory), Path(directory))
+            results = [
+                subprocess.CompletedProcess([], 1, policy_description(), "request failed"),
+                subprocess.CompletedProcess([], 0, "not installed", ""),
+                subprocess.CompletedProcess([], 0, policy_description(), ""),
+                subprocess.CompletedProcess([], 0, policy_description(8), ""),
+                subprocess.CompletedProcess([], 0, policy_description(), ""),
+            ]
+            with mock.patch.object(check, "command", side_effect=results):
+                self.assertFalse(check.public_policy(IMAGE, "http://node", "before"))
+                self.assertIsNone(check.policy_revision)
+                self.assertFalse(check.public_policy(IMAGE, "http://node", "before"))
+                self.assertTrue(check.public_policy(IMAGE, "http://node", "before"))
+                self.assertEqual(check.policy_revision, 7)
+                self.assertFalse(check.public_policy(IMAGE, "http://node", "after"))
+                self.assertEqual((check.output / "replica-policy-after.txt").read_text(), policy_description(8))
+                self.assertTrue(check.public_policy(IMAGE, "http://node", "after"))
+                self.assertEqual(check.policy_revision, 7)
+
+    def test_bootstrap_replacement_requires_a_new_pod_and_the_same_volume_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            check = deployment.DeploymentCheck(IMAGE, REVISION, "amd64", Path(directory), Path(directory))
+            pods = {"items": [{
+                "metadata": {"name": f"nervix-{i}", "uid": f"new-{i}"},
+                "spec": {"containers": [{"image": IMAGE}]},
+                "status": {"conditions": [{"type": "Ready", "status": "True"}],
+                           "containerStatuses": [{"ready": True, "imageID": IMAGE}]},
+            } for i in range(3)]}
+            for uid, claim, expected in (("before", "claim", True), ("new-0", "claim", False),
+                                         ("before", "different", False)):
+                with self.subTest(uid=uid, claim=claim):
+                    results = [subprocess.CompletedProcess([], 0, json.dumps(pods), ""),
+                               subprocess.CompletedProcess([], 0, json.dumps({"metadata": {"uid": claim}}), "")]
+                    with mock.patch.object(check, "kubectl", side_effect=results):
+                        self.assertEqual(check.bootstrap_restarted(IMAGE, uid, "claim"), expected)
+
     def test_the_controller_deploys_the_resolved_image_and_observes_public_membership(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             check = deployment.DeploymentCheck(SERVER_TAG, REVISION, "amd64", Path(directory), Path(directory) / "report")
             calls = []
+            replaced = False
 
             def command(*args, **_kwargs):
+                nonlocal replaced
                 calls.append(args)
                 output = ""
                 if args[:2] == ("docker", "pull"):
@@ -161,22 +235,32 @@ class ControllerTests(unittest.TestCase):
                 elif args[0] == "git":
                     output = "c" * 40
                 elif "--dry-run=client" in args:
-                    output = json.dumps({"kind": "NervixCluster", "spec": {"image": "server:current"}})
+                    output = json.dumps({"kind": "NervixCluster", "spec": {
+                        "image": "server:current", "initialClusterParameters": {"replicaCount": 2}}})
                 elif "nervixcluster/nervix" in args:
                     output = json.dumps({"status": {"initializationPhase": "initialized"}})
                 elif "pods" in args and args[-1] == "json":
                     output = json.dumps({"items": [{
-                        "metadata": {"name": f"nervix-{i}"},
+                        "metadata": {"name": f"nervix-{i}", "uid": f"{'after' if replaced else 'before'}-{i}"},
                         "spec": {"containers": [{"image": IMAGE}]},
                         "status": {"conditions": [{"type": "Ready", "status": "True"}],
                                    "containerStatuses": [{"ready": True, "imageID": IMAGE}]},
                     } for i in range(3)]})
+                elif "get" in args and "pod/nervix-0" in args:
+                    output = json.dumps({"metadata": {"uid": "before-0"}})
+                elif "pvc/data-nervix-0" in args:
+                    output = json.dumps({"metadata": {"uid": "claim"}})
+                elif "delete" in args and "pod/nervix-0" in args:
+                    replaced = True
                 elif args[-1] == "ip":
                     output = "192.168.49.2\n"
                 elif args[:2] == ("docker", "run"):
-                    output = "[raft]\nraft.current_leader: node-1\n"
-                    output += "\n".join(f"- node-{i} [voter] endpoint-{i}" for i in range(1, 4))
-                    output += "\n[interconnect]\n"
+                    if args[-1] == "DESCRIBE CLUSTER;":
+                        output = policy_description()
+                    else:
+                        output = "[raft]\nraft.current_leader: node-1\n"
+                        output += "\n".join(f"- node-{i} [voter] endpoint-{i}" for i in range(1, 4))
+                        output += "\n[interconnect]\n"
                 return subprocess.CompletedProcess(args, 0, output, "")
 
             def observed(description, observation, _timeout):
@@ -191,10 +275,17 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(identity["operator_source_revision"], "c" * 40)
             self.assertEqual(identity["server"], IMAGE)
             self.assertEqual(identity["operator"], OPERATOR_IMAGE)
-            cli, = [args for args in calls if args[:2] == ("docker", "run")]
-            self.assertIn(IMAGE, cli)
-            self.assertIn("/usr/local/bin/nervix-cli", cli)
-            self.assertIn("http://192.168.49.2:31390", cli)
+            commands = [args for args in calls if args[:2] == ("docker", "run")]
+            self.assertEqual([args[-1] for args in commands], ["SHOW CLUSTER STATUS;", "DESCRIBE CLUSTER;",
+                                                            "SHOW CLUSTER STATUS;", "DESCRIBE CLUSTER;"])
+            for cli in commands:
+                self.assertIn(IMAGE, cli)
+                self.assertIn("/usr/local/bin/nervix-cli", cli)
+                self.assertIn("http://192.168.49.2:31390", cli)
+            self.assertTrue(replaced)
+            policy = json.loads((check.output / "replica-policy.json").read_text())
+            self.assertEqual(policy, {"replica_count": 2, "revision": 7,
+                                      "bootstrap_pod_uid": "before-0", "volume_claim_uid": "claim"})
             self.assertEqual(calls[-1], ("minikube", "delete", "-p", check.profile))
             helm, = [args for args in calls if args[0] == "helm"]
             self.assertIn("image.tag=latest@sha256:" + "b" * 64, helm)
