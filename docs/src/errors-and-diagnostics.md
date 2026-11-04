@@ -145,8 +145,9 @@ The Plexus forms for error routes are in [Message Errors](./processors.md#messag
 
 Emitter ALTER validation belongs to the vocabulary: its typed declared-kind and replacement-kind
 failures retain both connector/entity kinds and render their Plexus phrases. The parser constructs
-only each destination's own publishing-policy enum, so no registry or planner failure represents an
-impossible entity/policy pair. Reference validation still rejects a configured client of the wrong
+only each destination's own change enum, whose mode change holds that destination's own
+publishing-policy enum, so no registry or planner failure represents an impossible entity/policy
+pair. Reference validation still rejects a configured client of the wrong
 kind; Iceberg reports its declared object-store alternatives and the actual resolved client kind.
 
 ## The Report Model
@@ -449,7 +450,19 @@ another connector and entity than the stored ingestor reads is refused with both
 its message renders as their phrases, such as `the stored ingestor reads HTTP ENDPOINT, so ALTER
 KAFKA TOPIC INGESTOR cannot alter it`. A Pulsar `SET START AT` on a provisioned subscription is a
 typed vocabulary alteration refusal; the existing definition and broker cursor are unchanged. A
-Pulsar subscription `TYPE` that reads through one consumer with more than one instance is the
+`DROP` of an option the stored Model does not write is refused with the entity's kind and the
+option's keywords in typed fields, and `SET CLIENT` on an entity that names no client with its
+kind. An envelope change is checked by the envelope itself and reported as a typed
+`EnvelopeDeclarationError` beneath the alteration's envelope context: a clause or properties the
+entity does not declare, a `DROP` of a clause or of properties the envelope does not write, an empty
+`SET PROPERTIES`, or a result whose keys the declaration does not admit, the envelope left as it
+was. A construction change that does not apply, such as a
+`DROP SET` of a field the construction writes twice or a `DROP INVOKE` past its last call, is
+reported as a typed `ConstructionAlterationError` beneath the alteration's own context, which names
+the route's relay for an ingestor. An emitter's `SET ON CONFLICT` keeps the destination's typed
+conflict-clause error beneath a context naming its entity, since the clause is checked against the
+stored `VALUES` mapping where the alteration applies.
+A Pulsar subscription `TYPE` that reads through one consumer with more than one instance is the
 registry's typed `ConnectorDeclarationIssue::PulsarSingleConsumerType`, which `CREATE` and every
 alteration reach through the same source validation, so `SET TYPE` and `SET FROM` also leave the
 stored definition unchanged.
@@ -1675,7 +1688,11 @@ null (`NullableNestedIntoRequired`). While opening, the error stays beneath
 way the report attaches the error's own description, which the emitter shows as its transient error
 while it retries. An Arrow schema that Iceberg cannot represent keeps the typed Iceberg conversion
 error beneath `IcebergColumnError::MappedSchema`. The plan compares names and nested types after
-narrowing UTC datetimes to microseconds.
+narrowing UTC datetimes to microseconds. A commit also refuses a table whose properties declare
+`encryption.key-id` each time it reloads the table, before it writes a data file and again before it
+appends: `IcebergEncryptedTable` stays beneath `EmitterWriteError::Commit`, its description is the
+emitter's transient error, and the commit keeps its staged rows and their acknowledgements for its
+retry.
 
 An Iceberg emitter with `BATCH` also lays out the selected rows against the table schema before
 staging, so a projection failure there remains an `IcebergColumnError` beneath
@@ -2363,8 +2380,11 @@ error beneath it for a storage or write failure.
 
 A refusal of the replicated state machine is data every voter must agree on, so it is a typed value
 in the Raft response and never a report. `ConsensusConflict` distinguishes an expired execution
-reference and a conflicting one, with the kind of the conflict, from a refusal described by its
-reason. `TransactionMutationError` is the refusal of a transaction mutation, such as an unknown or
+reference and a conflicting one, with the kind of the conflict, and preserves future-time,
+missing-timestamp and capacity admission refusals as `CommandExecutionAdmissionError` values.
+Admission metrics classify those typed values; rendered messages never select their reason.
+Other refusals retain their owning reason. `TransactionMutationError` is the refusal of a
+transaction mutation, such as an unknown or
 finished transaction, an owner or position that does not match, a stale preview, or a lost domain
 mutation fence. The state machine evaluates a mutation with reports and clones the report's current
 context into the response where the response is built; the report's frames stay on the node that
@@ -2538,11 +2558,20 @@ name's report beneath `InvalidResourceName`, a local archive's I/O error beneath
 `InvalidCursor` or `InvalidCompletionPageSize`, the event queue's overflow beneath `EventOverflow`,
 and the `BackupDownloadError` beneath `BackupDownload`. A failure that may hide an admitted command
 or an installed upload is `UncertainCommand` or `UncertainUpload` above the failure that left the
-outcome unknown. The client decides retries, session recovery and uncertainty from those typed
-contexts and never from text, and a context names its own operation without repeating its
-transport status, which the next frame shows. The CLI adds the operation it ran above the client's
-report, `failed to connect to the server` or `the request to the server failed`; its text and JSON
-failure reports, its JSON inspection errors and its event-stream notices render the whole chain. A
+outcome unknown. A call its caller cancels through `execute_prepared_with_cancellation` ends with
+the server's `RequestCancelled` at `BeforeAdmission` for a command that never ran,
+`UncertainCommand` above `RequestCancelled` at `AfterAdmission` for one that keeps running, or
+`CallCancelled` when no request of the call waited for a reply, beneath `UncertainCommand` or
+`UncertainUpload` where the call may already have taken effect. The client decides retries, session
+recovery and uncertainty from those typed contexts and never from text, and a context names its own
+operation without repeating its transport status, which the next frame shows. The CLI adds the
+operation it ran above the client's report, `failed to connect to the server` or `the request to
+the server failed`; its text and JSON failure reports, its JSON inspection errors and its
+event-stream notices render the whole chain. It decides its exit status from the outcome's typed
+disposition and the report's current context, never from text: a failure is `1`, an outcome that
+did not arrive is `3` with the reference or identity that recovers it, and a command the server
+cancelled before admitting it is `130`, as [Exit Status](./client-tools-cli.md#exit-status)
+describes. At the prompt it prints a failed request's whole chain and keeps the REPL running. A
 restoration failure the client reports as a subscription or domain clock event carries the whole
 chain as its message. The shared C binding classifies a failure from the current context, a failed
 backup download from the `BackupDownloadError` beneath it, and returns the whole chain as the

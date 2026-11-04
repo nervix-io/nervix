@@ -462,7 +462,12 @@ attached transaction stay as they were. See
 [Plexus Overview](plexus-overview.md) for its forms and output.
 
 Every persistent command keeps one execution reference while the browser waits, reconnects, or
-follows leadership. The transaction id and status are replicated. If the WebSocket closes
+follows leadership. When its outcome is not known yet, the console repeats it on the open session
+after a wait that starts at 250 milliseconds and doubles to at most five seconds. The command keeps
+its position ahead of later held commands, while session messages continue to arrive. The selected
+domain, clock and relay tabs keep their existing attachments. A redirect or an ended connection
+triggers recovery; an uncertain reply alone leaves the connection open. The transaction id and
+status are replicated. If the WebSocket closes
 unexpectedly or leadership changes, the console reconnects and attaches that id before resuming a
 pending command. Each append is matched by its reference and expected position, and an outstanding
 commit remains pending through `COMMITTING` until its exact terminal result. A
@@ -501,11 +506,18 @@ its session delivers, and says where it left something out:
   command larger than the whole history says that it cannot be recalled.
 - While the console connects or waits to reconnect, at most 64 requests of its controls wait for
   the session, carrying at most 4 MiB of statements, completion input, and search text. Once
-  connected, at most 256 requests, carrying at most 16 MiB, are held or awaiting their reply.
-  Commands, subscription changes, and inspections wait in the order they were issued while 64
-  requests, the most the server admits for one session, are in flight, and go out as earlier
-  replies arrive; a completion, choice lookup, or domain selection goes out at once and is reported
-  if the server finds the session full. A request past either bound is not sent, and the control
+  connected, controls can admit at most 256 outstanding requests carrying at most 16 MiB.
+  Connection setup also restores the retained tabs, selected domain and clock, and transaction,
+  so a full control backlog cannot prevent its own recovery.
+  Every request shares the session's 64-place request window, including completion, choice lookup,
+  domain selection, connection setup and transaction attachment. Requests wait for earlier terminal
+  replies to free a place. Waiting controls respect the issue order of ready commands, subscription
+  changes and inspections; setup and reattachment precede the commands waiting for them. A waiting
+  completion is replaced
+  by the latest input, and each choice control keeps its latest waiting lookup. Superseded requests
+  already sent still count until their terminal replies, while their text and partial replies are
+  released immediately. Waiting lookups, selections and attachments end with their connection;
+  the replacement connection issues its own. A request past either bound is not sent, and the control
   that issued it shows why where its outcome would have appeared: the REPL, a form, a tab, the
   resource dialog, or the inspector. A completion request that is not sent reports a failed lookup
   rather than an empty list.

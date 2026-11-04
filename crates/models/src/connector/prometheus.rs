@@ -260,6 +260,10 @@ impl IngestorEntityBody for PrometheusQueryIngestor {
         IngestorReference::Client(&self.client)
     }
 
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
+    }
+
     fn quiesce(&self) -> &IngestQuiesceMode {
         &self.quiesce
     }
@@ -290,6 +294,66 @@ impl PrometheusIngestMode {
     }
 }
 
+/// One change an `ALTER PROMETHEUS QUERY INGESTOR` writes to the body of the ingestor it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum PrometheusQueryIngestorChange {
+    /// `SET QUERY '<promql>'`.
+    Query(String),
+    /// `SET MAX BODY SIZE <bytes>`.
+    MaxBodySize(PayloadSizeLimit),
+    /// `DROP MAX BODY SIZE`: the declared default bounds a response again.
+    DropMaxBodySize,
+    /// `SET EVERY <duration>`.
+    Every(DomainClockPeriod),
+    /// `SET MODE <mode>`.
+    Mode(PrometheusIngestMode),
+}
+
+impl crate::IngestorEntityChange for PrometheusQueryIngestorChange {
+    type Entity = PrometheusQueryIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut PrometheusQueryIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Query(query) => entity.query = query.clone(),
+            Self::MaxBodySize(limit) => entity.max_body_size = Some(*limit),
+            Self::DropMaxBodySize => {
+                if entity.max_body_size.take().is_none() {
+                    return Err(error_stack::Report::new(
+                        crate::AlterIngestorError::OptionNotWritten {
+                            kind: <PrometheusQueryIngestor as crate::IngestorEntityModel>::KIND,
+                            option: "MAX BODY SIZE",
+                        },
+                    ));
+                }
+            }
+            Self::Every(every) => entity.every = *every,
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Query(query) => format!("SET QUERY {}", crate::string_literal(query)),
+            Self::MaxBodySize(limit) => format!("SET MAX BODY SIZE {limit}"),
+            Self::DropMaxBodySize => "DROP MAX BODY SIZE".to_owned(),
+            Self::Every(every) => format!(
+                "SET EVERY {}",
+                crate::canonical::duration_literal(every.as_nanos())
+            ),
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
+    }
+}
+
 connector_ingestors! {
     connector Prometheus = "PROMETHEUS";
     /// What a Prometheus source reads.
@@ -298,7 +362,7 @@ connector_ingestors! {
     pub enum PrometheusQueryIngestorAlteration;
     /// The entities a Prometheus source reads.
     pub enum PrometheusIngestorEntity {
-        Query(PrometheusQueryIngestor) = "QUERY", "Prometheus";
+        Query(PrometheusQueryIngestor => PrometheusQueryIngestorChange) = "QUERY", "Prometheus";
     }
 }
 

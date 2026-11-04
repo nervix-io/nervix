@@ -491,9 +491,9 @@ humantime = "2"
 hyper = "1"
 hyper-rustls = "0.27"
 hyper-util = "0.1"
-iceberg = "0.10"
-iceberg-catalog-rest = "0.10"
-iceberg-storage-opendal = { version = "0.10", features = [
+iceberg = "0.11"
+iceberg-catalog-rest = "0.11"
+iceberg-storage-opendal = { version = "0.11", features = [
   "opendal-s3",
   "opendal-gcs",
   "opendal-azdls",
@@ -600,7 +600,10 @@ nix = "0.30"
 # Compile-time checked non-zero literals, so a constant that must not be zero is rejected by the
 # compiler rather than by a runtime guard.
 nonzero_ext = "0.3"
-opendal = "0.57"
+opendal = "0.58"
+# The Reqwest transport an Iceberg object-store operator carries in its context, built over the
+# emitter's own client. Its TLS features stay off: that client brings its AWS-LC configuration.
+opendal-http-transport-reqwest = { version = "0.58", default-features = false }
 # OpenRaft prereleases change snapshot APIs without semver compatibility.
 openraft = { version = "=0.10.0-alpha.33", default-features = false, features = [
   "tokio-rt",

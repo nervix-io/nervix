@@ -228,15 +228,71 @@ impl EmitterEntityBody for MySqlTableEmitter {
     }
 }
 
+/// One change an `ALTER MYSQL TABLE EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum MySqlTableEmitterChange {
+    /// `SET TABLE '<table>'`.
+    Table(MySqlTableName),
+    /// `SET ON CONFLICT … DO NOTHING|UPDATE`, or `DROP ON CONFLICT` where the action is the
+    /// ordinary insert a statement that writes no `ON CONFLICT` makes.
+    OnConflict(MySqlConflictAction),
+    /// `SET MODE <mode>`.
+    Mode(MySqlTablePublishingMode),
+}
+
+impl crate::EmitterEntityChange for MySqlTableEmitterChange {
+    type Entity = MySqlTableEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut MySqlTableEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Table(table) => entity.table = table.clone(),
+            Self::OnConflict(action) => {
+                if *action == MySqlConflictAction::None
+                    && entity.conflict_action == MySqlConflictAction::None
+                {
+                    return Err(error_stack::Report::new(
+                        crate::AlterEmitterError::OptionNotWritten {
+                            entity: <MySqlTableEmitter as crate::EmitterEntityModel>::KIND,
+                            option: "ON CONFLICT",
+                        },
+                    ));
+                }
+                entity.conflict_action = action.clone();
+            }
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Table(table) => format!("SET TABLE {}", crate::string_literal(table.as_str())),
+            Self::OnConflict(action) => match action.conflict_clause() {
+                Some(clause) => format!("SET {clause}"),
+                None => "DROP ON CONFLICT".to_owned(),
+            },
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector MySql = "MYSQL";
     /// What a MySQL emitter writes.
     pub enum MySqlEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum MySqlTableEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum MySqlEmitterChange;
     /// The entities a MySQL emitter writes.
     pub enum MySqlEmitterEntity {
-        Table(MySqlTableEmitter, MySqlTablePublishingMode) = "TABLE";
+        Table(MySqlTableEmitter, MySqlTablePublishingMode, MySqlTableEmitterChange) = "TABLE";
     }
 }
 

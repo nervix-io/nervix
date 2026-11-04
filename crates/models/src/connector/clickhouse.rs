@@ -186,15 +186,51 @@ impl EmitterEntityBody for ClickHouseTableEmitter {
     }
 }
 
+/// One change an `ALTER CLICKHOUSE TABLE EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum ClickHouseTableEmitterChange {
+    /// `SET TABLE '<name>'`.
+    Table(ClickHouseTableName),
+    /// `SET MODE <mode>`.
+    Mode(ClickHouseTablePublishingMode),
+}
+
+impl crate::EmitterEntityChange for ClickHouseTableEmitterChange {
+    type Entity = ClickHouseTableEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut ClickHouseTableEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Table(name) => entity.table = name.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Table(name) => format!("SET TABLE {}", crate::string_literal(name.as_str())),
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector ClickHouse = "CLICKHOUSE";
     /// What a ClickHouse emitter writes.
     pub enum ClickHouseEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum ClickHouseTableEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum ClickHouseEmitterChange;
     /// The entities a ClickHouse emitter writes.
     pub enum ClickHouseEmitterEntity {
-        Table(ClickHouseTableEmitter, ClickHouseTablePublishingMode) = "TABLE";
+        Table(ClickHouseTableEmitter, ClickHouseTablePublishingMode, ClickHouseTableEmitterChange) = "TABLE";
     }
 }
 

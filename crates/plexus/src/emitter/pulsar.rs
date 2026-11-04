@@ -41,6 +41,21 @@ pub(super) fn topic_body<'src>(
     )
 }
 
+/// `SET TOPIC '<name>'` or `SET MODE <mode>`: one part of a `PULSAR TOPIC` body.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], PulsarTopicEmitterChange, extra::Err<ParseError<'src>>> + Clone
+{
+    let locator = kw(Identifier::Topic)
+        .ignore_then(external_name::<PulsarTopicName>())
+        .map(PulsarTopicEmitterChange::Topic);
+    let publishing = kw(Identifier::Mode)
+        .ignore_then(mode())
+        .map(PulsarTopicEmitterChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((locator, publishing)))
+        .boxed()
+}
+
 #[cfg(test)]
 mod tests {
     use meticulous::ResultExt as _;

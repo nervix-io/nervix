@@ -43,3 +43,13 @@ pub(super) fn consumer_body<'src>(
         )
         .boxed()
 }
+
+/// `SET MODE <mode>`: the one part of a `CLIENT CONSUMER` body an `ALTER` changes on its own.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], ClientConsumerEmitterChange, extra::Err<ParseError<'src>>> + Clone
+{
+    kw_phrase2(Identifier::Set, Identifier::Mode)
+        .ignore_then(mode())
+        .map(ClientConsumerEmitterChange::Mode)
+        .boxed()
+}

@@ -305,7 +305,20 @@ impl Display for WrittenChoice {
 }
 
 /// A clause an emitter writes to set what its transport carries beside each payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    EnumIter,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub enum EnvelopeClauseKind {
     Persistent,
     Mandatory,
