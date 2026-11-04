@@ -274,8 +274,13 @@ just coverage-merge coverage-inputs/tests coverage-inputs/coverage-scenarios-1 \
 It names one input for each shard that `SCENARIO_SHARDS` runs, so a shard whose report is missing
 fails the merge as a missing input. Native extras are a required input when the selected extra-tests
 job succeeds and a label selected a coverage-producing step; a missing download fails the merge.
+When only `extra-runners` selects coverage, those extras are Python tooling reports. The merge
+names that artifact with `--python-input coverage-inputs/coverage-native-extras`. A Rust-producing
+label instead names it as an ordinary input, including when `extra-runners` is also present, so a
+lost Rust export cannot be hidden by a surviving Python report. The full union downloads native
+extras only for a Rust-producing label; tooling-only counters already belong to its ordinary input.
 Extra jobs that collect no coverage, such as Miri, require no report. The extra-tests job publishes
-that selection once; both coverage jobs use it. Every download names one exact artifact and its destination directory, because
+both coverage selections once; the coverage jobs use them. Every download names one exact artifact and its destination directory, because
 `download-artifact` v8 extracts a single match directly into the supplied path. Workflow contract
 tests keep the scenario and Deloxide downloads aligned with their producer matrices. The merge sums
 the counters of every report that measured a file, so the shards' reports add up to the suite's.
@@ -287,6 +292,12 @@ collection below `native-coverage`. A collection of another mode describes model
 execution, so it is never read: the Shuttle, Loom, Turmoil and Deloxide primitive conformance
 collections in the native extras artifact are recorded as left out. The reports of the `shuttle`,
 `loom`, `turmoil`, `deloxide` and Bolero fuzz jobs are not inputs at all.
+
+An explicitly declared `--python-input` must contain at least one `python.lcov` report and no Rust
+workspace export or native collection. It uses the same root metadata, tracked-source mapping and
+report validation as every input. Ordinary inputs still require a Rust export or complete ordinary
+collection. Python-only inputs never waive the merged report's requirement to measure every Rust
+workspace member. The merge record names each input's declared kind.
 
 The Deloxide lane selections retain their reports, completion records and lane evidence in
 `deloxide-<selection>` artifacts. Live Bolero sanitizer campaigns publish each shard's source
@@ -319,7 +330,8 @@ others.
 
 The merge fails with a message naming what to fix when:
 
-- an input is missing, or holds neither a workspace export nor a complete ordinary collection;
+- an input is missing, or a Rust input holds neither a workspace export nor a complete ordinary collection;
+- a Python-only input holds no tooling report or contains Rust coverage;
 - an input has no root metadata;
 - none of a report's records lies below its producer's checkout root;
 - a report contributes no record of a tracked file;
