@@ -619,6 +619,12 @@ test-nats-driver checkout *args:
 test-pulsar-driver checkout *args:
     CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/pulsar-driver") }} cargo test --manifest-path {{ quote(checkout + "/Cargo.toml") }} --no-default-features --features compression,tokio-rustls-runtime --lib -- {{ args }}
 
+# Qualify the pinned Kafka driver's AWS-LC backend through its own tests with the product's enabled
+# features: librdkafka built against aws-lc-sys, an AWS-LC TLS context and an SSL client.
+test-kafka-driver checkout *args:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/kafka-driver") }} cargo test --manifest-path {{ quote(checkout + "/Cargo.toml") }} --package rdkafka-sys --no-default-features --features aws-lc,cmake_build,curl-static,curl-rustls,libz-static,static-linking --test aws_lc -- {{ args }}
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/kafka-driver") }} cargo test --manifest-path {{ quote(checkout + "/Cargo.toml") }} --package rdkafka --no-default-features --features aws-lc,cmake_build,curl-static,curl-rustls,libz-static,static-linking,tokio --test ssl_backends -- {{ args }}
+
 # Run the vocabulary settings' compiling and class-rejection API examples.
 test-settings:
     cargo test --package nervix-models --lib settings::
