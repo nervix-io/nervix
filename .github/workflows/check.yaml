@@ -794,7 +794,7 @@ jobs:
       contents: read
     outputs:
       shards: ${{ steps.shards.outputs.shards }}
-      # The tests job restores its archive on GitHub's hosted runner, at this path.
+      # The tests job restores its archive at this physical checkout path.
       checkout: ${{ github.workspace }}
     env:
       NO_COLOR: "1"
