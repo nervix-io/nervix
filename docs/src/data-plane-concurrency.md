@@ -1897,6 +1897,14 @@ checks below establish what a caller may do with them.
 
 ## Diagnostic Deadlock Detection
 
+The temporary CI execution policy disables all Deloxide execution, including the diagnostic
+evidence probes, primitive conformance and documentation checks, labeled lanes and diagnostic
+Chaos images. Labels, schedules, manual dispatch and reruns cannot re-enable them; that requires
+an explicit user decision. Ordinary report-tool diagnostics still run. Local diagnostic commands
+and their inventories remain available for targeted investigation. The
+[coverage contract](./coverage-reports.md) records the resulting CI producer selection and its
+qualification gap without weakening ordinary report integrity or the complexity gate.
+
 The resource-source-discovery workload exercises resource publication, a pending replica and
 installation once source visibility resumes, followed by a lookup of the replicated file. Its
 active, order and stressed records name the consensus-storage and cluster lifecycle owners it

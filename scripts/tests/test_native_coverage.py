@@ -255,13 +255,20 @@ class InventoryTests(unittest.TestCase):
                     continue
                 elif producer.name.startswith("test-deadlock-"):
                     selected_job = job_section(workflow, "diagnostic-evidence")
-                    self.assertIn("run: just coverage-deadlock\n", selected_job)
-                    justfile = (REPOSITORY / "justfile").read_text(encoding="utf-8")
-                    self.assertIn(f" run {producer.name} --output ", justfile)
+                    self.assertIn("run: just coverage-native-extras test-deadlock-report --output target/deadlock.lcov\n", selected_job)
+                    if producer.name == "test-deadlock-evidence-order":
+                        # The diagnostic producer remains available locally under the CI ban.
+                        justfile = (REPOSITORY / "justfile").read_text(encoding="utf-8")
+                        self.assertIn(f" run {producer.name} --output ", justfile)
                     continue
                 else:
                     selected_job = job
-                name = "test-primitives" if producer.name.startswith("test-primitives-") else producer.name
+                if producer.name.startswith("test-primitives-"):
+                    if producer.mode.startswith("deloxide"):
+                        continue
+                    name = "test-primitives-ordinary test-primitives-shuttle test-primitives-loom test-primitives-turmoil"
+                else:
+                    name = producer.name
                 if producer.name == "test-turmoil":
                     name += " --output target/turmoil.lcov"
                 self.assertIn(f"just coverage-native-extras {name}\n", selected_job)

@@ -682,11 +682,18 @@ test-primitives-deloxide:
 # attribute refuses a crate path, that a product binary has the forms each mode builds, and that the
 # diagnostic mode's tracked locks refuse the operations they cannot track; and the portable
 # surface's browser build.
-test-primitives-compile:
+test-primitives-compile diagnostic_modes="deloxide deloxide-order deloxide-stress":
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo test --package nervix-primitives --features native --doc
-    cargo test --package nervix-primitives --features 'deloxide native' --doc
-    cargo test --package nervix-primitives --features 'deloxide-order native' --doc
-    cargo test --package nervix-primitives --features 'deloxide-stress native' --doc
+    read -r -a modes <<< {{ quote(diagnostic_modes) }}
+    for mode in "${modes[@]}"; do
+        case "$mode" in
+            deloxide|deloxide-order|deloxide-stress) ;;
+            *) echo "unknown diagnostic execution mode: $mode" >&2; exit 2 ;;
+        esac
+        cargo test --package nervix-primitives --features "$mode native" --doc
+    done
     cargo check --package nervix-primitives --lib --target wasm32-unknown-unknown
 
 # Run the Deloxide diagnostic lane in its active-only selection: every workload
@@ -1483,7 +1490,7 @@ coverage-full *inputs:
 
 # Exercise the union's selection, validation, attribution and CI contract.
 test-coverage-full:
-    python3 -m unittest scripts.tests.test_coverage_full
+    python3 -m unittest scripts.tests.test_coverage_full scripts.tests.test_ci_execution_policy
 
 # Retain the union's own measured line coverage beside the other Python tooling reports.
 coverage-full-runner:
@@ -1491,7 +1498,7 @@ coverage-full-runner:
     set -euo pipefail
     mkdir -p "{{ cargo_target_dir }}/coverage-full"
     coverage=(uvx --from coverage==7.11.0 coverage)
-    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/coverage-full/python.coverage" --branch --source=scripts.coverage_full,scripts.tests.test_coverage_full -m unittest scripts.tests.test_coverage_full
+    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/coverage-full/python.coverage" --branch --source=scripts.coverage_full,scripts.tests.test_coverage_full,scripts.tests.test_ci_execution_policy -m unittest scripts.tests.test_coverage_full scripts.tests.test_ci_execution_policy
     "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/coverage-full/python.coverage" -o "{{ cargo_target_dir }}/coverage-full/python.lcov"
 
 # Report CRAP over the merged ordinary workspace report as the coverage job does: the pinned cargo-crap
