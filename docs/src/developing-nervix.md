@@ -319,6 +319,9 @@ every CPU, and in Check 41126961308, which compiled the server cold, one recipe 
 enough Clippy compilations to pass the runner's 32 GB and one was killed. The typed ratchet's
 admission queue admits its server analyses as if nothing else ran: beside the lints, the kernel's
 out-of-memory killer ended the ratchet's Shuttle analysis of the server in Check 41066649586.
+`just test-ratchet-units` fails when the shards stop being every check or the gate stops running
+after the second shard's lints, as [the debt ratchet's CI contract](architecture-enforcement.md)
+describes.
 
 Each package and configuration is a dependency of one shared Clippy recipe, and the configurations
 run in lanes. A lane holds the configurations that can reuse one another's build artifacts: one

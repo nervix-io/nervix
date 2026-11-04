@@ -2965,22 +2965,22 @@ validate-dns-dependencies:
 # Check formatting and validate with the same concurrency default as local validation. The checks run
 # beside each other, each Cargo build in a target directory of its own, so a check never waits for
 # another's directory lock; `jobs` bounds how many recipes run at once. The ratchet's tools build
-# beside them, and the ratchet runs after them, as the dependency of
-# `validate-deloxide-applicability`, which reads its gate: its analyses admit themselves against the
-# host's memory as if nothing else ran, and beside the lints the kernel killed its server analysis
-# for memory (Check 41066649586).
+# beside them, and the ratchet runs after them, before `validate-deloxide-applicability` reads its
+# gate: its analyses admit themselves against the host's memory as if nothing else ran, and beside
+# the lints the kernel killed its server analysis for memory (Check 41066649586).
 #
 # `shard`, `1/2` or `2/2`, runs one of the two parts the checks job's matrix divides them into, on a
 # runner of its own; without it every check runs. The first part checks formatting, the ordinary,
 # Turmoil and Deloxide lints and the source, dependency and documentation validations. The second
 # lints the Shuttle and Loom modes and the compiler tooling, builds the ratchet's tools and runs the
-# ratchet once its own lints have finished. Together the two parts are every check.
+# ratchet once its own lints have finished. Together the two parts are every check `validate` runs,
+# which scripts/tests/test_ratchet.py holds the checks job's matrix to.
 validate-ci jobs=default_jobs shard="": (run-with-jobs validate_ci_recipe(shard) jobs)
 
 validate_ci_recipe(shard) := if shard == "" { "validate-ci-targets" } else if shard == "1/2" { "validate-ci-shard-1" } else if shard == "2/2" { "validate-ci-shard-2" } else { error("validate-ci takes shard 1/2 or 2/2, or none for every check, not " + shard) }
 
 [private]
-validate-ci-targets: validate-ci-checks validate-deloxide-applicability
+validate-ci-targets: validate-ci-checks ratchet validate-deloxide-applicability
 
 [private, parallel]
 validate-ci-checks: validate-ci-shard-1-checks validate-ci-shard-2-checks
@@ -2989,7 +2989,7 @@ validate-ci-checks: validate-ci-shard-1-checks validate-ci-shard-2-checks
 validate-ci-shard-1: validate-ci-shard-1-checks
 
 [private]
-validate-ci-shard-2: validate-ci-shard-2-checks validate-deloxide-applicability
+validate-ci-shard-2: validate-ci-shard-2-checks ratchet validate-deloxide-applicability
 
 [private, parallel]
 validate-ci-shard-1-checks: fmt-check validate-ci-shard-1-lints validate-skill validate-plexus-docs validate-connector-capabilities validate-connector-matrix validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies test-go-ci-tool
