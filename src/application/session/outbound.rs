@@ -207,6 +207,12 @@ pub(in crate::application) fn channel(
 }
 
 impl SessionOutbound {
+    /// Observes actual control backpressure without consuming or reserving a slot.
+    #[cfg(feature = "testing")]
+    pub(super) fn control_has_no_room(&self) -> bool {
+        self.inner.control.capacity() == 0
+    }
+
     /// Queues a control frame, waiting for room until the session ends.
     pub(in crate::application) async fn send(
         &self,

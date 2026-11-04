@@ -2528,6 +2528,28 @@ deadline is running the final stops the product lets run to completion, while on
 `DrainSupport` is still inside a drain its scenario configured. A node that had already been left
 stopping under a keeper has handed its coordinator over, and its record says so instead.
 
+An in-process node's application future also carries a `scenario_node` log span naming its
+reserved native gRPC port. A scenario that inspects a stop log reads from the offset captured
+before its stop request and matches that launch's span, so a parallel node's message cannot
+satisfy the assertion.
+
+The unread-native-session outline in `session_protocol.feature` opens a real HTTP/2 `Exchange`
+with a zero response window and queues at most 8,192 cancel requests within a 1 MiB request
+budget. It reads response headers but no response data. A testing-only observer, resolved once
+when that session starts, records the identity of an acceptance future that actually polls
+pending while its outbound control channel has no available slot. The capacity query reserves
+nothing and excludes a cooperative-budget yield while there is still room. Cancel requests
+answer within acceptance, so this observes a wait for reply capacity,
+without a scheduling delay or a sleep standing in for the precondition. The observer neither
+pauses the production future nor grants response capacity and has no ordinary-build path.
+The peer's connection is polled independently before the stop; its receipt timestamp must be at
+least the existing two-second connection grace after the recorded stop request and inside the
+configured 30-second shutdown deadline. The outline also checks the completed admission phase,
+the node's elapsed stop and its scoped connection-cut log on one and three nodes. Cleanup drops
+the peer before cluster teardown if a step fails. The registered diagnostic and stressed
+workloads reach the existing session locks; HTTP/2 flow control, the observer, the listener join
+and the cut remain outside Deloxide's tracked-lock evidence.
+
 ## Ports
 
 Every port the harness binds is drawn from one pool shared by all scenarios in the process. A draw
