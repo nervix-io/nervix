@@ -34,7 +34,7 @@ use nervix_primitives::sync::{
 use nervix_recovery::{Discarded as _, Reported as _};
 use serde_json::{Value, json};
 
-use super::{ClientError, backup::CliReportFormat, human_bytes};
+use super::{ClientError, backup::CliReportFormat, statement::human_bytes};
 
 /// What a restore recreates, as the subcommand names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
