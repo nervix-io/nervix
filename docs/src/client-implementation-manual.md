@@ -381,8 +381,12 @@ reset. A genuine reset failure arrives as `RequestFailed` and follows the failur
   definitive failure for a command that was never admitted.
 - **X-7.** Ending a session cleanly, by half-closing the gRPC request stream or sending a WebSocket
   close with no request in flight, reverts the open transaction the session holds. A client MUST end
-  a session that way only when it intends that revert. Any other ending leaves the transaction open
-  for a later attach.
+  a session that way only when it intends that revert. An append or commit whose `OutcomeUnknown`
+  the client has not yet repeated to a definitive outcome may never have been admitted, so ending
+  the session cleanly then discards the transaction with it. Any other ending leaves the transaction
+  open for a later attach. The server reports that revert to no one, and a revert it cannot record
+  leaves the transaction open until it expires; a client that must know the transaction ended sends
+  `REVERT` and ends the session after its outcome.
 - **X-8.** A client MUST expect an open transaction to expire after its idle timeout, 15 minutes by
   default, whether or not a session is bound to it. Only attaching, appending, and commit admission
   renew it.

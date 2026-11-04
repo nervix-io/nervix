@@ -888,8 +888,13 @@ cleanup removes it and its identity is unknown; command finalization starts no a
 the server ending it, only releases its binding; the transaction stays open for attach until it
 expires. A session that the client closes cleanly, with no request in flight, reverts the open
 transaction it is bound to on the leader, which is how an interactive client that exits discards its
-unfinished work. Neither ending affects admitted work: an append already admitted stays admitted,
-and a `COMMITTING` transaction continues without its client.
+unfinished work. That revert is the leader's last act for the session, and nothing reports it to the
+client. The leader does not retry it: when the leader cannot record it, for example because it could
+not confirm its lease or its consensus storage failed, it logs the failure with its cause at `warn`,
+and the transaction stays open for attach until it expires, as after an unclean ending. A client
+that must know the transaction ended sends `REVERT` and closes the session after its outcome.
+Neither ending affects admitted work: an append already admitted stays admitted, and a
+`COMMITTING` transaction continues without its client.
 
 **Read consistency.** A read, such as `SHOW`, `DESCRIBE`, or `LOOKUP`, is served by the node the
 session is on from its locally applied replicated state; it is not a linearizable read. Once a
@@ -2201,8 +2206,10 @@ logged at `info`. A reply replaced by a rejection, a reply the session ended bef
 a subscription notice or loss report that does not fit a frame, domain clock attach, detach, and
 end, and producer opens, refusals, closes, and ends are logged at `debug`. A session that falls behind the notice bus, an event or snapshot that
 does not fit a frame, a failed revert at a clean close, and a failed remote subscription dispatch
-are logged at `warn`. Session opening and closing, individual requests, and rows are not logged, and
-no log line carries a payload value. The server exports no metric for sessions, requests,
+are logged at `warn`. A failed revert at a clean close names its transaction and renders the
+revert's whole cause chain, so a lease the leader could not confirm, a lost leadership and a
+storage failure read differently. Session opening and closing, individual requests, and rows are
+not logged, and no log line carries a payload value. The server exports no metric for sessions, requests,
 rejections, or authentication attempts; a client that needs them measures them itself. Producer
 counts are exported by the node that executes the client ingestor, not per session.
 

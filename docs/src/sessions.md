@@ -477,9 +477,11 @@ client matches the attached progress to the outstanding append or commit and doe
 request from an unrelated transaction count. During election convergence, a client also retries a
 bounded interval when a peer cannot yet advertise the new leader. A session that its client closes
 cleanly, with no request in flight, reverts the open transaction bound to it on the leader; any
-other ending only releases the binding. Ending a session never reverts admitted append work or a
-transaction whose replicated state is already `COMMITTING`; the leader finishes it without a
-client.
+other ending only releases the binding. A revert the leader cannot record at that close, for
+example while it cannot confirm its lease, leaves the transaction open until its idle timeout
+expires it, so a client that must know the transaction ended runs `REVERT` before it exits.
+Ending a session never reverts admitted append work or a transaction whose replicated state is
+already `COMMITTING`; the leader finishes it without a client.
 
 Finished transaction outcomes remain available during tombstone retention. Attach during that
 window reports `COMMITTED`, `FAILED`, `REVERTED`, or `EXPIRED` with the structured final status and
