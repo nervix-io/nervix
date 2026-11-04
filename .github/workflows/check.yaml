@@ -424,8 +424,8 @@ jobs:
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
 
-  # The Deloxide diagnostic lane, only for a pull request labeled `deloxide`: every workload
-  # tests/deloxide-inventory.toml registers, each selection on a runner of its own in the
+  # Retained Deloxide lane configuration while the temporary CI policy disables its execution:
+  # every workload tests/deloxide-inventory.toml registers, each selection on a runner in the
   # instrumented build of the feature it compiles under the native coverage collector, then the
   # qualification of the lane's supervision on deliberately failing processes. Each selection keeps
   # its own budget, so the stressed restore scenarios, which share the stress selection's build,
@@ -1381,9 +1381,9 @@ jobs:
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
 
-  # The workspace line-coverage union of every producer this run's event and labels select: the
-  # ordinary report, the modeled and diagnostic native collections, and the live fuzz campaigns a
-  # pull request carrying `fuzz` requests. It waits for every producer job, including a skipped or
+  # The line-coverage union of producers the event, labels and temporary CI policy permit:
+  # the ordinary report, selected modeled collections and ordinary report-tool diagnostics.
+  # Deloxide and fuzz execution stay disabled. It waits for every producer, including a skipped or
   # failed one, so a producer that did not succeed fails the union instead of hiding behind a skip.
   # It downloads the exported reports and records and rebuilds nothing. The ordinary report, its
   # CRAP report and its patch coverage stay with the coverage job.
