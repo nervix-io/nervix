@@ -260,10 +260,13 @@ async fn table_data_files(world: &ScenarioWorld, table: &str) -> Result<Vec<(u64
     files
         .into_iter()
         .map(|file| {
-            file.record_count
-                .map(|rows| (rows, file.file_size_in_bytes))
+            file.record_count()
+                .map(|rows| (rows, file.file_size_in_bytes()))
                 .ok_or_else(|| {
-                    format!("Iceberg data file {} has no row count", file.data_file_path)
+                    format!(
+                        "Iceberg data file {} has no row count",
+                        file.data_file_path()
+                    )
                 })
         })
         .collect()

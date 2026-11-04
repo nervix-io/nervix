@@ -19,6 +19,7 @@
 )]
 
 use ahash::HashMap;
+use arch_into::ArchInto as _;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::{StreamExt as _, stream::BoxStream};
@@ -28,7 +29,7 @@ use iceberg::{
         ADLS_ACCOUNT_KEY, ADLS_ACCOUNT_NAME, ADLS_AUTHORITY_HOST, ADLS_CLIENT_ID,
         ADLS_CLIENT_SECRET, ADLS_CONNECTION_STRING, ADLS_SAS_TOKEN, ADLS_TENANT_ID, CLIENT_REGION,
         FileMetadata, FileRead, FileWrite, GCS_ALLOW_ANONYMOUS, GCS_CREDENTIALS_JSON,
-        GCS_DISABLE_CONFIG_LOAD, GCS_DISABLE_VM_METADATA, GCS_NO_AUTH, GCS_SERVICE_PATH, GCS_TOKEN,
+        GCS_DISABLE_CONFIG_LOAD, GCS_DISABLE_VM_METADATA, GCS_NO_AUTH, GCS_SERVICE_HOST, GCS_TOKEN,
         InputFile, OutputFile, S3_ACCESS_KEY_ID, S3_ALLOW_ANONYMOUS, S3_ASSUME_ROLE_ARN,
         S3_ASSUME_ROLE_EXTERNAL_ID, S3_ASSUME_ROLE_SESSION_NAME, S3_DISABLE_CONFIG_LOAD,
         S3_DISABLE_EC2_METADATA, S3_ENDPOINT, S3_PATH_STYLE_ACCESS, S3_REGION,
@@ -36,27 +37,28 @@ use iceberg::{
         StorageConfig, StorageFactory,
     },
 };
+use meticulous::OptionExt as _;
 use nervix_connector::ConfiguredDeadline;
 use nervix_dns::DnsResolver;
 use nervix_models::IcebergStorageBackend;
 use nervix_primitives::sync::StdArc;
 use opendal::{
-    Operator,
-    layers::{HttpClientLayer, TimeoutLayer},
-    raw::HttpClient,
+    HttpTransporter, Operator,
+    layers::TimeoutLayer,
     services::{AzdlsConfig, GcsConfig, S3Config},
 };
+use opendal_http_transport_reqwest::ReqwestTransport;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::Url;
 
-/// The pinned Iceberg OpenDAL factory does not expose its operator's HTTP client. This factory
-/// constructs the same three backends with OpenDAL's client layer, so data requests and the
-/// credential provider's `AccessorInfoHttpSend` use the resolver installed by the node and the
-/// TLS configuration of the emitter's storage client.
+/// The pinned Iceberg OpenDAL factory does not expose its operator's HTTP transport. This factory
+/// constructs the same three backends with the emitter's transport in each operator's context, so
+/// data requests and the credential requests its signer sends through that context use the
+/// resolver installed by the node and the TLS configuration of the emitter's storage client.
 #[derive(Clone, Debug)]
 pub(super) struct DnsStorageFactory {
     backend: IcebergStorageBackend,
-    client: HttpClient,
+    transport: HttpTransporter,
     root: Url,
     deadline: StorageDeadline,
 }
@@ -83,7 +85,7 @@ impl DnsStorageFactory {
             })?;
         Ok(Self {
             backend,
-            client: HttpClient::with(client),
+            transport: HttpTransporter::new(ReqwestTransport::new(client)),
             root: root.clone(),
             deadline: StorageDeadline {
                 configured: deadline,
@@ -125,7 +127,7 @@ impl StorageFactory for DnsStorageFactory {
         };
         Ok(StdArc::new(DnsStorage::new(
             backend,
-            self.client.clone(),
+            self.transport.clone(),
             self.root.clone(),
             self.deadline,
         )?))
@@ -203,7 +205,7 @@ impl<'de> Deserialize<'de> for DnsStorage {
 impl DnsStorage {
     fn new(
         backend: Backend,
-        client: HttpClient,
+        transport: HttpTransporter,
         root: Url,
         deadline: StorageDeadline,
     ) -> Result<Self> {
@@ -214,32 +216,26 @@ impl DnsStorage {
                 })?;
                 let mut config = *config;
                 config.bucket = bucket.to_string();
-                Operator::from_config(config)
-                    .map_err(from_opendal_error)?
-                    .layer(HttpClientLayer::new(client))
-                    .finish()
+                Operator::from_config(config).map_err(from_opendal_error)?
             }
             Backend::Gcs(mut config) => {
                 let bucket = root.host_str().ok_or_else(|| {
                     Error::new(ErrorKind::DataInvalid, "GCS object URL requires a bucket")
                 })?;
                 config.bucket = bucket.to_string();
-                Operator::from_config(config)
-                    .map_err(from_opendal_error)?
-                    .layer(HttpClientLayer::new(client))
-                    .finish()
+                Operator::from_config(config).map_err(from_opendal_error)?
             }
             Backend::Azure(config) => {
                 let (config, _) = azure_path(&config, root.as_str(), &root)?;
-                Operator::from_config(config)
-                    .map_err(from_opendal_error)?
-                    .layer(HttpClientLayer::new(client))
-                    .finish()
+                Operator::from_config(config).map_err(from_opendal_error)?
             }
         };
+        // The context keeps the builder's executor and replaces only its transport. Each request
+        // and each credential its signer loads goes through the emitter's client.
+        let context = operator.base_context().with_http_transport(transport);
         Ok(Self {
             root,
-            operator: operator.layer(deadline.layer()),
+            operator: operator.with_context(context).layer(deadline.layer()),
             deadline,
         })
     }
@@ -339,6 +335,7 @@ impl Storage for DnsStorage {
                 .await
                 .map_err(|error| self.deadline.failure(error))?,
             deadline: self.deadline,
+            written: 0,
         }))
     }
 
@@ -412,22 +409,32 @@ impl FileRead for DnsStorageReader {
 struct DnsStorageWriter {
     writer: opendal::Writer,
     deadline: StorageDeadline,
+    /// The bytes the object store accepted for this object, which `close` reports as its size.
+    written: u64,
 }
 
 #[async_trait]
 impl FileWrite for DnsStorageWriter {
     async fn write(&mut self, bytes: Bytes) -> Result<()> {
+        let accepted: u64 = bytes.len().arch_into();
         opendal::Writer::write(&mut self.writer, bytes)
             .await
-            .map_err(|error| self.deadline.failure(error))
+            .map_err(|error| self.deadline.failure(error))?;
+        self.written = self
+            .written
+            .checked_add(accepted)
+            .assured("no object store holds an object of 2^64 bytes");
+        Ok(())
     }
 
-    async fn close(&mut self) -> Result<()> {
+    /// The stored size is the count of bytes this writer handed the store. The operator's
+    /// completion layer refuses a close whose store reports another size.
+    async fn close(&mut self) -> Result<FileMetadata> {
         self.writer
             .close()
             .await
             .map_err(|error| self.deadline.failure(error))?;
-        Ok(())
+        Ok(FileMetadata { size: self.written })
     }
 }
 
@@ -502,7 +509,7 @@ fn gcs_config(props: &HashMap<String, String>) -> GcsConfig {
     let mut config = GcsConfig::default();
     config.credential = props.get(GCS_CREDENTIALS_JSON).cloned();
     config.token = props.get(GCS_TOKEN).cloned();
-    config.endpoint = props.get(GCS_SERVICE_PATH).cloned();
+    config.endpoint = props.get(GCS_SERVICE_HOST).cloned();
     if let Some(value) = props.get(GCS_NO_AUTH)
         && truthy(value)
     {
@@ -641,19 +648,18 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
-    use opendal::raw::Access as _;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
 
-    fn client() -> HttpClient {
-        HttpClient::with(reqwest::Client::new())
+    fn transport() -> HttpTransporter {
+        HttpTransporter::new(ReqwestTransport::new(reqwest::Client::new()))
     }
 
     fn test_storage(backend: Backend, root: &str) -> DnsStorage {
         DnsStorage::new(
             backend,
-            client(),
+            transport(),
             Url::parse(root).assured("the fixture root is a URL"),
             StorageDeadline::default(),
         )
@@ -662,11 +668,11 @@ mod tests {
 
     struct UnansweredObjectStore;
 
-    impl opendal::raw::HttpFetch for UnansweredObjectStore {
+    impl opendal::HttpTransport for UnansweredObjectStore {
         async fn fetch(
             &self,
             _: http::Request<opendal::Buffer>,
-        ) -> opendal::Result<http::Response<opendal::raw::HttpBody>> {
+        ) -> opendal::Result<http::Response<opendal::HttpBody>> {
             std::future::pending().await
         }
     }
@@ -680,7 +686,7 @@ mod tests {
         .assured("one second is a valid client deadline");
         let factory = DnsStorageFactory {
             backend: IcebergStorageBackend::S3,
-            client: HttpClient::with(UnansweredObjectStore),
+            transport: HttpTransporter::new(UnansweredObjectStore),
             root: Url::parse("s3://bucket/").assured("the fixture root is a URL"),
             deadline: StorageDeadline {
                 configured: deadline,
@@ -726,7 +732,7 @@ mod tests {
         assert_eq!(first_path, "tables/first.parquet");
         assert_eq!(second_path, "tables/second.parquet");
         assert!(
-            std::ptr::eq(first.inner().as_ref(), second.inner().as_ref()),
+            std::ptr::eq(first.service().as_ref(), second.service().as_ref()),
             "objects of one storage owner must use its retained operator"
         );
         for path in [
@@ -848,7 +854,7 @@ mod tests {
         let props = |no_auth: &str| {
             HashMap::from_iter([
                 (
-                    GCS_SERVICE_PATH.to_string(),
+                    GCS_SERVICE_HOST.to_string(),
                     "http://gcs.nervix.test".to_string(),
                 ),
                 (GCS_TOKEN.to_string(), "token".to_string()),
@@ -921,7 +927,7 @@ mod tests {
     fn runtime_storage_does_not_serialize_without_its_resolver() {
         let factory = DnsStorageFactory {
             backend: IcebergStorageBackend::S3,
-            client: client(),
+            transport: transport(),
             root: Url::parse("s3://bucket/").assured("the fixture root is a URL"),
             deadline: StorageDeadline::default(),
         };
@@ -995,7 +1001,7 @@ mod tests {
         config.skip_signature = true;
         let storage = DnsStorage::new(
             Backend::S3(Box::new(config)),
-            factory.client,
+            factory.transport,
             root,
             StorageDeadline::default(),
         )
@@ -1003,7 +1009,9 @@ mod tests {
         let (operator, _) = storage
             .operator("s3://bucket/file")
             .expect("the S3 operator can be built without a network request");
-        let sender = opendal::raw::AccessorInfoHttpSend::new(operator.inner().info());
+        // The S3 signer loads credentials through the transport of the context each operation
+        // receives, which is the operator's composed context.
+        let sender = operator.context().http_transport().clone();
         let request = http::Request::get(format!("http://{NAME}:{port}/token"))
             .body(Bytes::new())
             .expect("the token request is valid");

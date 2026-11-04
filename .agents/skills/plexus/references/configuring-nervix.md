@@ -366,9 +366,10 @@ current connection, retry and deadline limits.
   a null, such as an `OPTIONAL` field; wrap it in `coalesce(...)` with a never-null argument. A
   commit refuses a table changed after open in the same way, naming the column, and retries until
   the table can take the mapped columns again.
-- Point an Iceberg emitter at an unpartitioned table. Its data files carry no partition values, so
-  a table whose current partition spec has a field opens but fails every commit, and the emitter
-  retries it without end. The emitter only appends Parquet data files with the Parquet library's
+- Point an Iceberg emitter at an unpartitioned, unencrypted table. Its data files carry no partition
+  values, so a table whose current partition spec has a field opens but fails every commit, and the
+  emitter retries it without end; a table whose properties declare `encryption.key-id` does the
+  same, because the emitter writes no encrypted files. The emitter only appends Parquet data files with the Parquet library's
   default writer properties: it writes no deletes or upserts, never changes the table's schema and
   commits only through an `ICEBERG_REST` catalog client. Set `'path_style_access' = true` on an
   `S3` client whose S3-compatible store serves buckets as paths, or whose bucket name contains a
