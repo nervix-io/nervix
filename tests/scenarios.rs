@@ -7448,13 +7448,15 @@ async fn then_append_submission_failed_above_replay_boundary(
         }
     })
     .await
-    .verified("the successor submits data to the restored follower within the scenario wait");
+    .unwrap_or_else(|error| {
+        panic!("the successor did not submit data to the restored follower: {error}")
+    });
     tracing::info!(%source, ?failure, "consensus append submission fault delivered");
     assert_eq!(failure.target, crate::common::cluster::node_name(&target));
     let previous = failure
         .previous
         .as_ref()
-        .verified("the initial probe starts beyond the first replay batch");
+        .unwrap_or_else(|| panic!("the failed initial probe has no previous entry: {failure:?}"));
     assert!(
         previous.index >= 256,
         "a replay's first 256 entries must end below the probe's previous index: {failure:?}"
