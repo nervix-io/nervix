@@ -8,10 +8,10 @@
 //!   injector.
 //! - **Must not know.** How a node authenticates, counts or accepts.
 
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use cucumber::{then, when};
-use meticulous::ResultExt as _;
+use meticulous::OptionExt as _;
 use nervix_approx_into::CheckedApproxInto as _;
 
 use super::{ScenarioWorld, expand_placeholders};
@@ -32,6 +32,38 @@ const CREDENTIALS_JOBS: &str = "nervix_execution_jobs_completed_total";
 const CREDENTIALS_JOBS_CLASS: &str = "class=\"credentials_cpu\"";
 const CREDENTIALS_RESERVATIONS: &str = "nervix_execution_memory_reservations_total";
 const CREDENTIALS_RESERVATIONS_CLASS: &str = "class=\"credentials\"";
+
+/// The family a node counts its client listeners' authentications in.
+const CLIENT_AUTHENTICATIONS: &str = "nervix_client_authentications_total";
+
+/// The client listeners and authentication outcomes the family is labelled by.
+const TRANSPORTS: [&str; 2] = ["grpc", "console"];
+const OUTCOMES: [&str; 4] = ["authenticated", "missing", "rejected", "unavailable"];
+
+/// One series of the authentication family.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct AuthenticationSeries {
+    transport: String,
+    outcome: String,
+}
+
+impl AuthenticationSeries {
+    fn labels(&self) -> Vec<String> {
+        vec![
+            format!("outcome=\"{}\"", self.outcome),
+            format!("transport=\"{}\"", self.transport),
+        ]
+    }
+}
+
+/// The authentication counts one node exported before a scenario's attempts. Every node of a
+/// cluster refuses the harness's own calls while it starts, before the cluster has its first user,
+/// so a scenario measures the attempts it makes from what the node counted before them.
+#[derive(Debug, Default)]
+pub(crate) struct AuthenticationBaseline {
+    node: Option<String>,
+    counts: BTreeMap<AuthenticationSeries, i64>,
+}
 
 /// Credentials a scenario presents that do not authenticate their call.
 #[derive(Debug, Clone, Copy)]
@@ -191,8 +223,8 @@ async fn credentials_figure(world: &ScenarioWorld, node: &str, metric: &str, cla
         .await
         .unwrap_or_else(|error| panic!("node '{node}' reported no {metric}{{{class}}}: {error}"));
     value
-        .try_approx_into()
-        .unwrap_or_else(|_| panic!("{metric}{{{class}}} on node '{node}' is not a count: {value}"))
+        .checked_approx_into()
+        .unwrap_or_else(|| panic!("{metric}{{{class}}} on node '{node}' is not a count: {value}"))
 }
 
 /// Opens a native session on `node` with `credentials`, asserts it was refused, and asserts the
@@ -374,4 +406,78 @@ async fn listener_serves_a_request(world: &mut ScenarioWorld, listener: String, 
             );
         }
     }
+}
+
+/// One series of a node's authentication family, as a whole count.
+async fn authentication_count(
+    world: &ScenarioWorld,
+    node: &str,
+    series: &AuthenticationSeries,
+) -> i64 {
+    let value = world
+        .cluster()
+        .read_observability_metric(node, CLIENT_AUTHENTICATIONS, &series.labels())
+        .await
+        .unwrap_or_else(|error| panic!("node '{node}' reported no {series:?}: {error}"));
+    value
+        .checked_approx_into()
+        .unwrap_or_else(|| panic!("{series:?} on node '{node}' is not a count: {value}"))
+}
+
+#[when(expr = "the client authentication counts of node {string} are remembered")]
+async fn client_authentication_counts_are_remembered(world: &mut ScenarioWorld, node: String) {
+    let node = expand_placeholders(world, &node);
+    let mut counts = BTreeMap::new();
+    for transport in TRANSPORTS {
+        for outcome in OUTCOMES {
+            let series = AuthenticationSeries {
+                transport: transport.to_string(),
+                outcome: outcome.to_string(),
+            };
+            let count = authentication_count(world, &node, &series).await;
+            counts.insert(series, count);
+        }
+    }
+    world.client_authentication_baseline = AuthenticationBaseline {
+        node: Some(node),
+        counts,
+    };
+}
+
+#[then(expr = "node {string} counted {int} more {word} authentication(s) on its {word} listener")]
+async fn node_counted_more_authentications(
+    world: &mut ScenarioWorld,
+    node: String,
+    more: i64,
+    outcome: String,
+    transport: String,
+) {
+    let node = expand_placeholders(world, &node);
+    let baseline = &world.client_authentication_baseline;
+    assert_eq!(
+        baseline.node.as_deref(),
+        Some(node.as_str()),
+        "the scenario remembers node '{node}' counts before it compares them"
+    );
+    let series = AuthenticationSeries { transport, outcome };
+    let before = *baseline
+        .counts
+        .get(&series)
+        .unwrap_or_else(|| panic!("no {series:?} count was remembered for node '{node}'"));
+    let expected = before
+        .checked_add(more)
+        .assured("a node counts far fewer than i64::MAX authentications");
+    world
+        .cluster()
+        .wait_for_observability_metric_value(
+            &node,
+            CLIENT_AUTHENTICATIONS,
+            &series.labels(),
+            expected,
+            None,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("node '{node}' must count {more} more {series:?} than before: {error}")
+        });
 }

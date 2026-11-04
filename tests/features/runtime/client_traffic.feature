@@ -13,25 +13,15 @@ Feature: Client traffic
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then the current leader node is saved as placeholder "leader"
-    And a native session opened on node "{{leader}}" with a wrong password is refused with status "Unauthenticated"
+    When the client authentication counts of node "{{leader}}" are remembered
+    Then a native session opened on node "{{leader}}" with a wrong password is refused with status "Unauthenticated"
     And a native session opened on node "{{leader}}" as an unknown user is refused with status "Unauthenticated"
     And a native session opened on node "{{leader}}" without credentials is refused with status "Unauthenticated"
     And a console authentication check on node "{{leader}}" with a wrong password is refused with status 401
-    And node "{{leader}}" observability metric "nervix_client_authentications_total" with labels eventually equals 2
-      """
-      outcome="rejected"
-      transport="grpc"
-      """
-    And node "{{leader}}" observability metric "nervix_client_authentications_total" with labels eventually equals 1
-      """
-      outcome="missing"
-      transport="grpc"
-      """
-    And node "{{leader}}" observability metric "nervix_client_authentications_total" with labels eventually equals 1
-      """
-      outcome="rejected"
-      transport="console"
-      """
+    And node "{{leader}}" counted 2 more rejected authentications on its grpc listener
+    And node "{{leader}}" counted 1 more missing authentication on its grpc listener
+    And node "{{leader}}" counted 1 more rejected authentication on its console listener
+    And node "{{leader}}" counted 0 more unavailable authentications on its grpc listener
     And node "{{leader}}" observability metric "nervix_client_authentications_total" with labels eventually reaches at least 1
       """
       outcome="authenticated"
