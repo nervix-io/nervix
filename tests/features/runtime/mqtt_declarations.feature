@@ -368,6 +368,15 @@ Feature: MQTT TOPIC declarations
       """
       MODE NO ACK RETRY POLICY BACKOFF 1s MAX 30s
       """
+    When these Plexus commands are executed on the leader node
+      """
+      DESCRIBE EMITTER publishing;
+      """
+    Then the last command output contains
+      """
+      options: QOS 0
+      mode: NO ACK RETRY POLICY BACKOFF 1s MAX 30s
+      """
     When these Plexus commands fail
       """
       ALTER MQTT TOPIC EMITTER publishing SET QOS 1;
@@ -390,15 +399,6 @@ Feature: MQTT TOPIC declarations
     And the last command output contains
       """
       MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s
-      """
-    When these Plexus commands are executed on the leader node
-      """
-      DESCRIBE EMITTER publishing;
-      """
-    Then the last command output contains
-      """
-      options: QOS 0
-      mode: NO ACK RETRY POLICY BACKOFF 1s MAX 30s
       """
 
     Examples:
