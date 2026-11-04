@@ -49,6 +49,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Session subscriptions and domain clock attachment | `Sessions` |
 | Configuration backups, their archives, bounded waits and exact-reference recovery, `DESCRIBE BACKUP`, and `RESTORE` | `Backup And Restore`; cut timeout phases and their elapsed measurements: `Backup And Restore Architecture` → `Observability` |
 | Metrics and runtime inspection | `Metrics And Observability` |
+| Persistent-command history size, retry-fence age and admission refusal metrics | `Metrics And Observability` → `Command Execution History` |
 | Full graph examples | `Examples` |
 | Applications that pace producers and consumers by an attached domain clock, and the `TIMESTAMP AT`/`TIMESTAMP NOW` admission they meet | `Paced Simulation Drivers` and `Domains And Time` |
 | WASM guest ABI and output timing | `WASM Processor Guests` |
@@ -66,6 +67,12 @@ is outside the curated Plexus index.
 For the CLI's `subscribe` and `domain-clock` shell streams and their line formats, read
 [Command Line Client](https://docs.nervix.io/client-tools-cli.html) directly. Follow the same
 documentation version as the selected index; this client chapter is outside the curated Plexus index.
+
+For browser controls waiting behind commands, lookup replacement and reconnect behavior, read
+[Web Console](https://docs.nervix.io/client-tools-web-console.html#bounded-buffers) and
+[Client Session Protocol](https://docs.nervix.io/client-session-protocol.html#restoration-and-bounded-consumers)
+directly. Follow the same documentation version as the selected index; these client chapters are
+outside the curated Plexus index.
 
 Prefer the narrow indexed topic over an old copied snippet. Do not leave the immutable version
 selected by the documentation index when following related material.

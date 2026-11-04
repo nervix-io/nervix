@@ -909,3 +909,140 @@ async fn attaching_to_committed_transaction_returns_the_recorded_aggregate() {
     observer.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }
+
+/// Commits a one-schema transaction for `owner` in `domain` and returns its identity.
+async fn commit_owner_transaction(
+    service: &crate::application::SessionServiceImpl,
+    domain: &str,
+    owner: &mut SessionSubscriptions,
+) -> String {
+    let committed = service
+        .test_command(
+            CommandRequest {
+                query: "BEGIN; CREATE SCHEMA notification ( user_id U32 ); COMMIT".to_string(),
+                domain: Some(named(domain)),
+                execution_reference: test_execution_reference(),
+                expected_transaction_position: None,
+                expected_preview: None,
+            },
+            owner,
+        )
+        .await;
+    assert!(
+        committed.succeeded(),
+        "commit must succeed: {}",
+        committed.message
+    );
+    committed
+        .transaction
+        .as_ref()
+        .assured("a commit result carries its transaction status")
+        .transaction_id()
+        .to_string()
+}
+
+#[nervix_primitives::test]
+async fn a_session_that_held_a_transaction_another_commit_finished_commits_it_after_reconciliation()
+{
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(false).await;
+    create_test_domain(&service.inner.consensus, "held_commit").await;
+    let mut owner = SessionSubscriptions::new();
+    let transaction_id = commit_owner_transaction(&service, "held_commit", &mut owner).await;
+    // A second session attached the transaction before the owner's commit finished it.
+    let mut resumed = SessionSubscriptions::new();
+    resumed.bind_transaction(transaction_id.clone());
+    service
+        .inner
+        .transaction_bindings
+        .insert(transaction_id.clone(), resumed.session_id.clone());
+
+    service.reconcile_transactions_once().await;
+    let committed = service
+        .test_command(
+            CommandRequest {
+                query: "COMMIT".to_string(),
+                domain: Some(named("held_commit")),
+                execution_reference: test_execution_reference(),
+                expected_transaction_position: None,
+                expected_preview: None,
+            },
+            &mut resumed,
+        )
+        .await;
+
+    assert!(
+        committed.succeeded(),
+        "the session that held the finished transaction receives its recorded commit: {}",
+        committed.message
+    );
+    let status = committed
+        .transaction
+        .as_ref()
+        .assured("a commit result carries its transaction status");
+    assert_eq!(status.lifecycle(), &TransactionLifecycle::Committed);
+    assert!(!resumed.transaction_active());
+    assert!(
+        !service
+            .inner
+            .transaction_bindings
+            .contains_key(&transaction_id)
+    );
+
+    owner.stop_all().await;
+    resumed.stop_all().await;
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[nervix_primitives::test]
+async fn reattaching_a_finished_transaction_the_session_still_named_releases_it() {
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(false).await;
+    create_test_domain(&service.inner.consensus, "finished_reattach").await;
+    let mut owner = SessionSubscriptions::new();
+    let transaction_id = commit_owner_transaction(&service, "finished_reattach", &mut owner).await;
+    // The session still names the transaction, but the leader holds no binding for it, as after
+    // a leadership change.
+    let mut resumed = SessionSubscriptions::new();
+    resumed.bind_transaction(transaction_id.clone());
+
+    let attached = service
+        .attach_transaction(transaction_id, &mut resumed)
+        .await;
+    let TransactionAttachment::AlreadyFinished { transaction, .. } = attached else {
+        panic!("attaching a finished transaction must be terminal, found {attached:?}");
+    };
+    assert_eq!(transaction.lifecycle(), &TransactionLifecycle::Committed);
+    assert!(
+        !resumed.transaction_active(),
+        "a finished attach must end the hold of the session that still named the transaction"
+    );
+    let begun = service
+        .test_command(
+            CommandRequest {
+                query: "BEGIN".to_string(),
+                domain: Some(named("finished_reattach")),
+                execution_reference: test_execution_reference(),
+                expected_transaction_position: None,
+                expected_preview: None,
+            },
+            &mut resumed,
+        )
+        .await;
+
+    assert!(
+        begun.succeeded(),
+        "the released session begins a new transaction: {}",
+        begun.message
+    );
+
+    owner.stop_all().await;
+    resumed.stop_all().await;
+    let _ = std::fs::remove_dir_all(&path);
+}

@@ -916,6 +916,14 @@ impl SessionServiceImpl {
             ))));
         }
         if let Some(attachment) = finished_transaction_attachment(&transaction) {
+            // An attach that reports a finished transaction grants no binding. A session that
+            // still named the transaction, as after its binding was lost, therefore no longer
+            // holds it: the commands it repeats under their own references are planned without
+            // it, and receive their recorded outcomes or a definitive failure instead of being
+            // refused as detached again.
+            if subscriptions.transaction_id() == Some(transaction_id.as_str()) {
+                self.release_session_transaction_binding(subscriptions);
+            }
             return attachment;
         }
 
@@ -2573,8 +2581,11 @@ impl SessionServiceImpl {
                     }
                 }
                 TransactionState::Committing(_) => {}
+                // A finished transaction keeps the binding of the session that holds it. That
+                // session's next transaction request is answered from the recorded outcome and
+                // releases the binding, as a commit another reference finished is reported to a
+                // session that attached before it finished.
                 TransactionState::Finished(_) => {
-                    self.inner.transaction_bindings.remove(&transaction.id);
                     #[cfg(feature = "testing")]
                     self.inner
                         .runtime

@@ -693,9 +693,9 @@ JSON protocol's error type `QueueDoesNotExist`. Any other failure to reach the s
 certificate that does not name the configured host, is described by every cause of the driver's
 connection error, which describes the connection and never a record; a service's own response keeps
 its existing description. None of these failures rejects a record or acknowledges input. Both
-directions keep the SDK's own retries disabled, so the SDK makes each request once and the host
-retries a failed one on the entity's declared backoff alone. A request that runs out of `timeout_ms`
-keeps the contract's `DeadlineElapsed` as its innermost cause, naming the request and the key.
+directions keep the SDK's own retries disabled, so the SDK makes each request once. The host owns
+retry scheduling for resume, read, acknowledgement and publish failures. A request that runs out of
+`timeout_ms` keeps the contract's `DeadlineElapsed` as its innermost cause, naming the request and the key.
 Pooled connections stay open when their host's answer changes or expires; the next connection
 resolves again.
 
@@ -2966,6 +2966,18 @@ sequenceDiagram
   the existing assignment publication. The host's announcer retains its route and follows replica
   assignment changes without reading node-wide state or execution registries. The Kafka commit and
   acknowledgement boundary remains the state's highest durable replica progress.
+
+- **Kafka client build.** Kafka clients, ingestors and emitters run librdkafka 2.12.1 through
+  Nervix's fork of `rust-rdkafka`, `nervix-io/rust-rdkafka`, which carries the librdkafka backport
+  of the duplicate `FETCH_STOP` fix and builds librdkafka's TLS on AWS-LC instead of OpenSSL. Its
+  `aws-lc` feature compiles librdkafka with CMake against the libcrypto and libssl that
+  `aws-lc-sys` builds with its `ssl` feature: the same `aws-lc-sys` `aws-lc-rs` links, so Kafka
+  TLS, SASL SCRAM and OAUTHBEARER share the product's one AWS-LC. The fork's build reads the
+  `links` metadata of the AWS-LC crate its backend selects under that crate's versioned key, so a
+  new `aws-lc-sys` release changes only the version the fork requires. An upgrade of `aws-lc-rs`
+  that moves to another `aws-lc-sys` moves the fork in the same change, because `just ratchet`
+  refuses a product that links two; [Cryptography](cryptography.md) owns that rule and lists what
+  librdkafka and the libcurl of its OAUTHBEARER token requests implement themselves.
 
 - **Pulsar client.** The Pulsar ingestor and emitter build on Nervix's fork of `pulsar-rs`,
   `nervix-io/pulsar-rs`, because the released crate discards delivered redelivery counts and
