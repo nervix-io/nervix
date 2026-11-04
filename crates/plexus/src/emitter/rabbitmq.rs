@@ -78,6 +78,40 @@ pub(super) fn exchange_body<'src>(
     )
 }
 
+/// `SET QUEUE '<name>'` or `SET MODE <mode>`: one part of a `RABBITMQ QUEUE` body.
+pub(super) fn queue_change<'src>()
+-> impl Parser<'src, &'src [Token], RabbitMqQueueEmitterChange, extra::Err<ParseError<'src>>> + Clone
+{
+    let locator = kw(Identifier::Queue)
+        .ignore_then(external_name::<RabbitMqQueueName>())
+        .map(RabbitMqQueueEmitterChange::Queue);
+    let publishing = kw(Identifier::Mode)
+        .ignore_then(mode())
+        .map(RabbitMqQueueEmitterChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((locator, publishing)))
+        .boxed()
+}
+
+/// `SET EXCHANGE '<name>'`, `SET ROUTING KEY <expression>` or `SET MODE <mode>`: one part of a
+/// `RABBITMQ EXCHANGE` body.
+pub(super) fn exchange_change<'src>()
+-> impl Parser<'src, &'src [Token], RabbitMqExchangeEmitterChange, extra::Err<ParseError<'src>>> + Clone
+{
+    let exchange = kw(Identifier::Exchange)
+        .ignore_then(external_name::<RabbitMqExchangeName>())
+        .map(RabbitMqExchangeEmitterChange::Exchange);
+    let routing_key = kw_phrase2(Identifier::Routing, Identifier::Key)
+        .ignore_then(embedded_expression("routing_key_expression"))
+        .map(RabbitMqExchangeEmitterChange::RoutingKey);
+    let publishing = kw(Identifier::Mode)
+        .ignore_then(exchange_mode())
+        .map(RabbitMqExchangeEmitterChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((exchange, routing_key, publishing)))
+        .boxed()
+}
+
 #[cfg(test)]
 mod tests {
     use meticulous::ResultExt as _;

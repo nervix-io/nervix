@@ -33,7 +33,7 @@ macro_rules! connector_ingestor_kinds {
         pub enum $Entity:ident {
             $(
                 $(#[$variant_meta:meta])*
-                $Variant:ident($Model:ident) = $keyword:literal, $form_label:literal;
+                $Variant:ident($Model:ident => $Change:ident) = $keyword:literal, $form_label:literal;
             )+
         }
     ) => {
@@ -92,6 +92,7 @@ macro_rules! connector_ingestor_kinds {
             impl $crate::IngestorEntityModel for $Model {
                 const KIND: $crate::IngestorEntityKind =
                     $crate::IngestorEntityKind::$Connector($Entity::$Variant);
+                type Change = $Change;
             }
         )+
     };
@@ -103,23 +104,12 @@ pub(crate) const ALTERED_PAIR_CHECKED: &str =
     "apply_alter compared the stored pair with the pair the alteration's head names before \
      applying any operation, and no operation changes the pair an input reads";
 
-/// The shared transport operations, or the typed operations the entity declares beside itself.
-macro_rules! ingestor_operation_type {
-    ($Model:ident) => {
-        $crate::AlterTransportIngestorOperation<$Model>
-    };
-    ($Model:ident, $Operation:ident) => {
-        $Operation
-    };
-}
-pub(crate) use ingestor_operation_type;
-
 /// Declares the sources of one connector: the union of its entity Models, the kind that names each
 /// entity, and the alterations of the ingestors that read each entity.
 ///
-/// An alteration of one entity holds operations whose `SET FROM` states that entity's own Model,
-/// so it can set no source of another entity, and its operations decode a transport's payloads
-/// with the codec `SET DECODE USING` names.
+/// An alteration of one entity holds operations whose `SET FROM` states that entity's own Model
+/// and whose changes are that entity's own, so it can set no source of another entity, and its
+/// operations decode a transport's payloads with the codec `SET DECODE USING` names.
 macro_rules! connector_ingestors {
     (
         connector $Connector:ident = $connector_keyword:literal;
@@ -131,7 +121,7 @@ macro_rules! connector_ingestors {
         pub enum $Entity:ident {
             $(
                 $(#[$variant_meta:meta])*
-                $Variant:ident($Model:ident $(=> $Operation:ident)?) = $keyword:literal, $form_label:literal;
+                $Variant:ident($Model:ident => $Change:ident) = $keyword:literal, $form_label:literal;
             )+
         }
     ) => {
@@ -224,7 +214,7 @@ macro_rules! connector_ingestors {
         pub enum $Alteration {
             $(
                 $(#[$variant_meta])*
-                $Variant(Vec<$crate::connector::entity_union::ingestor_operation_type!($Model $(, $Operation)?)>),
+                $Variant(Vec<$crate::AlterTransportIngestorOperation<$Model>>),
             )+
         }
 
@@ -269,7 +259,6 @@ macro_rules! connector_ingestors {
         $(
             impl From<Vec<$crate::AlterTransportIngestorOperation<$Model>>> for $Alteration {
                 fn from(operations: Vec<$crate::AlterTransportIngestorOperation<$Model>>) -> Self {
-                    $(let operations = operations.into_iter().map($Operation::from).collect();)?
                     Self::$Variant(operations)
                 }
             }
@@ -282,38 +271,33 @@ macro_rules! connector_ingestors {
                 }
             }
 
-            $(
-                impl From<Vec<$Operation>> for $Alteration {
-                    fn from(operations: Vec<$Operation>) -> Self {
-                        Self::$Variant(operations)
-                    }
-                }
-
-                impl From<Vec<$Operation>> for $crate::IngestorAlteration {
-                    fn from(operations: Vec<$Operation>) -> Self {
-                        Self::$Connector($Alteration::$Variant(operations))
-                    }
-                }
-            )?
-
             impl $crate::connector::ingestor::AlteredIngestorEntity for $Model {
-                fn set_into(&self, input: &mut $crate::IngestorInput) {
-                    let source = ::meticulous::OptionExt::verified(
-                        input.transport_source_mut(),
+                fn entity_of_mut(input: &mut $crate::IngestorInput) -> &mut Self {
+                    let source = input.transport_source_mut();
+                    let entity = if let Some($crate::IngestorEntity::$Connector(
+                        $Source::$Variant(entity),
+                    )) = source
+                    {
+                        Some(entity)
+                    } else {
+                        None
+                    };
+                    ::meticulous::OptionExt::verified(
+                        entity,
                         $crate::connector::entity_union::ALTERED_PAIR_CHECKED,
-                    );
-                    *source = self.clone().into();
+                    )
                 }
 
                 fn set_quiesce_of(
                     input: &mut $crate::IngestorInput,
                     quiesce: $crate::IngestQuiesceMode,
                 ) -> ::error_stack::Result<(), $crate::AlterIngestorError> {
-                    let source = ::meticulous::OptionExt::verified(
-                        input.transport_source_mut(),
-                        $crate::connector::entity_union::ALTERED_PAIR_CHECKED,
-                    );
-                    source.set_quiesce(quiesce)
+                    *$crate::IngestorEntityBody::quiesce_mut(Self::entity_of_mut(input)) = quiesce;
+                    Ok(())
+                }
+
+                fn client_of_mut(input: &mut $crate::IngestorInput) -> Option<&mut $crate::ClientName> {
+                    $crate::IngestorEntityBody::client_mut(Self::entity_of_mut(input))
                 }
             }
         )+
@@ -324,7 +308,7 @@ macro_rules! connector_ingestors {
             pub enum $Entity {
                 $(
                     $(#[$variant_meta])*
-                    $Variant($Model) = $keyword, $form_label;
+                    $Variant($Model => $Change) = $keyword, $form_label;
                 )+
             }
         }
@@ -341,13 +325,15 @@ macro_rules! connector_emitters {
         connector $Connector:ident = $connector_keyword:literal;
         $(#[$emitter_meta:meta])*
         pub enum $Emitter:ident;
-        $(#[$change_meta:meta])*
+        $(#[$mode_change_meta:meta])*
         pub enum $ModeChange:ident;
+        $(#[$change_meta:meta])*
+        pub enum $Change:ident;
         $(#[$entity_meta:meta])*
         pub enum $Entity:ident {
             $(
                 $(#[$variant_meta:meta])*
-                $Variant:ident($Model:ident, $Mode:ident) = $keyword:literal;
+                $Variant:ident($Model:ident, $Mode:ident, $EntityChange:ident) = $keyword:literal;
             )+
         }
     ) => {
@@ -370,10 +356,31 @@ macro_rules! connector_emitters {
             )+
         }
 
-        $(#[$change_meta])*
+        $(#[$mode_change_meta])*
         #[derive(Debug, Clone, PartialEq, Eq, ::serde::Serialize, ::serde::Deserialize,
                  ::rkyv::Archive, ::rkyv::Serialize, ::rkyv::Deserialize)]
         pub enum $ModeChange { $($Variant($Mode),)+ }
+
+        $(#[$change_meta])*
+        #[derive(Debug, Clone, PartialEq, Eq, ::serde::Serialize, ::serde::Deserialize,
+                 ::rkyv::Archive, ::rkyv::Serialize, ::rkyv::Deserialize)]
+        pub enum $Change { $($Variant($EntityChange),)+ }
+
+        impl $Change {
+            /// The entity whose emitters this change applies to.
+            pub const fn entity(&self) -> $Entity {
+                match self { $(Self::$Variant(_) => $Entity::$Variant,)+ }
+            }
+
+            /// The change as the `ALTER` operation that writes it.
+            pub(crate) fn to_canonical_plexus(
+                &self,
+            ) -> ::error_stack::Result<String, $crate::CanonicalPlexusError> {
+                match self {
+                    $(Self::$Variant(change) => $crate::EmitterEntityChange::to_canonical_plexus(change),)+
+                }
+            }
+        }
 
         impl $ModeChange {
             pub const fn entity(&self) -> $Entity {
@@ -395,11 +402,16 @@ macro_rules! connector_emitters {
                 -> ::error_stack::Result<(), $crate::AlterEmitterError> {
                 match self { $(Self::$Variant(destination) => $crate::EmitterPublication::replace_mode(destination, mode),)+ }
             }
+            fn apply_change(&mut self, change: &$crate::EmitterChange)
+                -> ::error_stack::Result<(), $crate::AlterEmitterError> {
+                match self { $(Self::$Variant(destination) => $crate::EmitterPublication::apply_change(destination, change),)+ }
+            }
         }
 
         $(
             impl $crate::EmitterEntityModel for $Model {
                 type PublishingMode = $Mode;
+                type Change = $EntityChange;
                 const KIND: $crate::EmitterEntityKind = $crate::EmitterEntityKind::$Connector($Entity::$Variant);
             }
             impl $crate::EmitterPublication for $Model {
@@ -417,12 +429,29 @@ macro_rules! connector_emitters {
                         }))
                     }
                 }
+                fn apply_change(&mut self, requested: &$crate::EmitterChange)
+                    -> ::error_stack::Result<(), $crate::AlterEmitterError> {
+                    if let $crate::EmitterChange::$Connector($Change::$Variant(change)) = requested {
+                        $crate::EmitterEntityChange::apply_to(change, self)
+                    } else {
+                        Err(::error_stack::Report::new($crate::AlterEmitterError::DestinationKindMismatch {
+                            stored: <Self as $crate::EmitterEntityModel>::KIND,
+                            requested: requested.kind(),
+                        }))
+                    }
+                }
             }
             impl From<$Mode> for $ModeChange {
                 fn from(mode: $Mode) -> Self { Self::$Variant(mode) }
             }
             impl From<$Mode> for $crate::EmitterModeChange {
                 fn from(mode: $Mode) -> Self { Self::$Connector($ModeChange::$Variant(mode)) }
+            }
+            impl From<$EntityChange> for $Change {
+                fn from(change: $EntityChange) -> Self { Self::$Variant(change) }
+            }
+            impl From<$EntityChange> for $crate::EmitterChange {
+                fn from(change: $EntityChange) -> Self { Self::$Connector($Change::$Variant(change)) }
             }
         )+
 
@@ -746,13 +775,15 @@ pub(crate) use connector_ingestors;
 pub(crate) use entity_union;
 pub(crate) use ingestor_alteration_union;
 
-/// Declare destination Models, their kinds and policy changes from one connector catalog.
+/// Declare destination Models, their kinds, policy changes and entity changes from one connector
+/// catalog.
 macro_rules! emitter_destinations {
     (
         $(#[$model_meta:meta])* pub enum $Model:ident as $Body:path;
         $(#[$kind_meta:meta])* pub enum $Kind:ident as $EntityKind:path;
         pub enum $Change:ident;
-        models { $($Connector:ident($Destination:ident, $Entity:ident, $Mode:ident),)+ }
+        $(#[$entity_change_meta:meta])* pub enum $EntityChangeUnion:ident;
+        models { $($Connector:ident($Destination:ident, $Entity:ident, $Mode:ident, $ConnectorChange:ident),)+ }
     ) => {
         $crate::connector::entity_union::entity_union! {
             $(#[$model_meta])* pub enum $Model as $Body;
@@ -772,6 +803,24 @@ macro_rules! emitter_destinations {
             }
             pub fn publishing(&self) -> $crate::EmitterPublishing<'_> {
                 match self { $(Self::$Connector(mode) => mode.publishing(),)+ }
+            }
+        }
+
+        $(#[$entity_change_meta])*
+        #[derive(Debug, Clone, PartialEq, Eq, ::serde::Serialize, ::serde::Deserialize,
+                 ::rkyv::Archive, ::rkyv::Serialize, ::rkyv::Deserialize)]
+        pub enum $EntityChangeUnion { $($Connector($ConnectorChange),)+ }
+        impl $EntityChangeUnion {
+            /// The connector and entity whose emitters this change applies to.
+            pub const fn kind(&self) -> $Kind {
+                match self { $(Self::$Connector(change) => $Kind::$Connector(change.entity()),)+ }
+            }
+
+            /// The change as the `ALTER` operation that writes it.
+            pub(crate) fn to_canonical_plexus(
+                &self,
+            ) -> ::error_stack::Result<String, $crate::CanonicalPlexusError> {
+                match self { $(Self::$Connector(change) => change.to_canonical_plexus(),)+ }
             }
         }
     };

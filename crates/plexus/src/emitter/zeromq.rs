@@ -31,6 +31,15 @@ pub(super) fn push_body<'src>(
     )
 }
 
+/// `SET MODE <mode>`: the one part of a `ZEROMQ PUSH` body an `ALTER` changes on its own.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], ZeroMqPushEmitterChange, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase2(Identifier::Set, Identifier::Mode)
+        .ignore_then(mode())
+        .map(ZeroMqPushEmitterChange::Mode)
+        .boxed()
+}
+
 #[cfg(test)]
 #[cfg_attr(
     nervix_lint,
