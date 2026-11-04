@@ -866,8 +866,12 @@ is declared as it behaves, and a buffer that nothing bounds yet is declared unbo
 shows each gap until its connector closes it. A `PROMETHEUS QUERY` or `HTTP REQUEST` response is
 bounded by its statement's `MAX BODY SIZE` (16 MiB where omitted). A response that exceeds the
 bound fails the poll, which the ingestor reports as its transient error, and the next poll reads
-again. The HTTP polling request's method and headers are carried by the typed ingestor plan;
-its client supplies the required total `timeout_ms` and TLS settings. The polling client follows
+again. The HTTP polling request's method, literal or client-secret header declarations and captured
+committed header caps are carried by the typed ingestor plan. After the host resolves client
+configuration, the connector checks the complete header values and count before opening the
+request and retains sensitivity on secret values. Admission and parameter transitions check every
+known value and name; a templated secret's full value is checked at open. Its client supplies the
+required total `timeout_ms` and TLS settings. The polling client follows
 redirects and uses a proxy only as [HTTP client transport](#http-client-transport) describes. An
 HTTP response carries its status and scheduled poll instant into the same metadata group as its
 response headers, including when quiescence buffers the poll.
@@ -3443,3 +3447,23 @@ That evidence supports the current ingestor and emitter behavior; it does not cl
 Its Kafka A/B measurements found lower bounded-pressure rates and a separate 16-partition commit
 failure that require owner investigation. An integration must preserve its own transport and
 delivery semantics rather than assuming a generic envelope or exactly-once external outcome.
+
+## Committed Host Bounds
+
+The Nervix host validates batch counts and client-emitter batch bytes against the committed
+cluster policy. HTTP request preparation captures typed header-byte and field-count bounds for that publication.
+Transition validation counts known HTTP header names independently of their values and preserves
+guaranteed byte contributions across dynamic replacements. `HttpApplicationHeaders` enforces the
+captured limits and the syntax contract on the evaluated envelope. Connector
+transport ownership and per-record acknowledgement boundaries are unchanged.
+HTTP polling headers are literal plan inputs. Their complete count and byte requirements are
+checked against that same committed policy at model admission and parameter transitions, with
+case-insensitive replacement and the last written value retained. A lowering cannot invalidate
+an existing request. The field-count setting ends at 16,384 application fields, leaving native
+capacity for client and transport fields. The connector receives the validated literal fields
+without a second fixed default.
+Each literal name/value write and the final retained envelope must fit the byte cap.
+WebSocket upgrade headers use the same committed caps at model admission and parameter
+transitions. Their canonical subprotocol offer counts as one field, and its comma-joined tokens
+contribute to the byte count. Syntax and plan conversion enforce physical HTTP representation
+bounds; they impose no second fixed default on a model admitted under raised cluster caps.

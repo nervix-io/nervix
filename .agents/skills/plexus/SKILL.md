@@ -210,6 +210,10 @@ transaction again before retrying the commit against its reviewed basis. Do not 
 undivided request can mix
 those phases.
 
+A committed cluster parameter revision invalidates an identified transaction preview even when
+the queued Models still fit its caps or the parameter values later return to their earlier values.
+Inspect the transaction again before committing; a parameter notice does not review a new preview.
+
 Treat a successful administrative command as a completed effect. After `UPLOAD RESOURCE`, model or
 lookup creation, `START`, `STOP`, placement changes, or `COMMIT` returns `OK`, issue the dependent
 operation immediately. Do not add a readiness request, `DESCRIBE` polling loop, arbitrary delay, or
@@ -250,6 +254,17 @@ Every reingestor and generator ALTER uses entity pause; reingestor route bodies 
 per-route branch selection, while generator route bodies remain set-only.
 `ALTER DOMAIN SET PLACEMENT` is nameless, targets the active domain, and performs a normal schedule
 activation; a newly effective hard colocation requirement can relocate runtime nodes.
+
+During node startup, `SHOW CLUSTER STATUS;` and `DESCRIBE CLUSTER;` remain available while live cluster policy is discovered. Status reports `node.initialization=initializing` until initialization finishes; wait for `ready` before policy-dependent commands or transfers.
+
+Use `ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;`
+for committed Nervix cluster policy changes. Keep it outside domain transactions; it needs no
+selected domain. Read `Node Settings` for the complete parameter set, positive duration bounds,
+existing-model cap refusals, live installation and committed-versus-running inspection. Seed flags
+belong only to the first bootstrap, including when their value equals the default. Later starts,
+including the returning bootstrap node, omit them.
+`HTTP_HEADER_FIELDS` ranges from 1 to 16,384, leaving capacity for client and transport headers. Committed header byte and field caps also protect
+literal HTTP polling headers, at model creation and when a later cap is lowered.
 
 ## Preserve Plexus semantics
 
