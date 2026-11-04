@@ -141,7 +141,9 @@ use crate::common::{
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     command_probe::{CommandPause, CommandProbe, CommandProbes, ProbeReply},
-    command_recovery::{LeaderRoutes, LearnedOutcome, NodeSession},
+    command_recovery::{
+        LEADER_POLL_INTERVAL, LeaderRoutes, LearnedOutcome, NodeSession, UNKNOWN_OUTCOME_RECOVERY,
+    },
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, CollectorSignal, CollectorWait, DependencyEndpoints,
         ICEBERG_REST_ADDR, KAFKA_ADDR, KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR,
@@ -493,7 +495,7 @@ struct ScenarioWorld {
     /// them as and then by version.
     saved_resource_details: BTreeMap<String, BTreeMap<u64, String>>,
     /// How the last restore stream a scenario shaped itself ended.
-    last_restore_end: Option<crate::common::raw_session::TestRestoreEnd>,
+    last_restore_end: Option<crate::backup::restore::RestoreStreamEnd>,
     /// A restore stream a scenario sent in the background.
     background_restore: Option<crate::backup::restore::BackgroundRestore>,
     /// Real filesystem capacity held while an accepted restore tries its client inspection.
@@ -17842,9 +17844,32 @@ async fn when_incomplete_resource_upload_is_sent(
     resource: String,
     identity: String,
 ) {
-    let resource = expand_placeholders(world, &resource);
-    let identity = expand_placeholders(world, &identity);
     let leader = current_leader_node(world).await;
+    send_incomplete_resource_upload(world, &resource, &identity, &leader).await;
+}
+
+#[when(
+    expr = "an incomplete upload of resource {string} with identity {string} is sent to node \
+            {string}"
+)]
+async fn when_incomplete_resource_upload_is_sent_to_node(
+    world: &mut ScenarioWorld,
+    resource: String,
+    identity: String,
+    node: String,
+) {
+    let node = expand_placeholders(world, &node);
+    send_incomplete_resource_upload(world, &resource, &identity, &node).await;
+}
+
+async fn send_incomplete_resource_upload(
+    world: &mut ScenarioWorld,
+    resource: &str,
+    identity: &str,
+    node: &str,
+) {
+    let resource = expand_placeholders(world, resource);
+    let identity = expand_placeholders(world, identity);
     // Declares two bytes and carries one, so the server must refuse it.
     let upload = TestUpload {
         domain: &world.domain,
@@ -17859,7 +17884,7 @@ async fn when_incomplete_resource_upload_is_sent(
     };
     let result = world
         .cluster()
-        .send_shaped_resource_upload(&leader, upload)
+        .send_shaped_resource_upload(node, &upload)
         .await
         .unwrap_or_else(|error| panic!("incomplete upload request failed: {error}"));
     let nervix_client_wire::UploadDisposition::Failed {
@@ -17892,7 +17917,7 @@ async fn when_malformed_resource_upload_is_sent(world: &mut ScenarioWorld, resou
     };
     let result = world
         .cluster()
-        .send_shaped_resource_upload(&leader, upload)
+        .send_shaped_resource_upload(&leader, &upload)
         .await
         .expect("the server answers the malformed archive upload");
     assert!(
@@ -18764,6 +18789,34 @@ async fn when_this_plexus_command_request_is_executed_on_leader_node(
     }
 }
 
+/// A command a new session sends again under its original execution reference and transaction
+/// position, after it attaches the transaction the original request was issued in.
+struct ReplayedCommand {
+    transaction_id: String,
+    execution_reference: String,
+    expected_transaction_position: usize,
+    query: String,
+}
+
+impl ReplayedCommand {
+    fn read(
+        world: &mut ScenarioWorld,
+        transaction_id: &str,
+        execution_reference: &str,
+        expected_transaction_position: u64,
+        step: &Step,
+    ) -> Self {
+        let expected_transaction_position = usize::try_from(expected_transaction_position)
+            .assured("a 64-bit target's usize holds every scenario transaction position");
+        Self {
+            transaction_id: expand_placeholders(world, transaction_id),
+            execution_reference: command_execution_reference(world, execution_reference),
+            expected_transaction_position,
+            query: expand_placeholders(world, docstring(step)),
+        }
+    }
+}
+
 #[when(
     expr = "a new session attaches to transaction {string} and executes this Plexus command with \
             execution reference {string} at transaction position {int}"
@@ -18775,34 +18828,127 @@ async fn when_new_session_attaches_and_executes_referenced_command(
     expected_transaction_position: u64,
     #[step] step: &Step,
 ) {
-    let transaction_id = expand_placeholders(world, &transaction_id);
-    let execution_reference = command_execution_reference(world, &execution_reference);
-    let query = expand_placeholders(world, docstring(step));
-    let leader = current_leader_node(world).await;
-    let mut session = world
-        .cluster()
-        .open_session(&leader, &world.domain)
-        .await
-        .unwrap_or_else(|error| panic!("failed to open replay session: {error}"));
-    let attached = session
-        .attach_transaction(&transaction_id)
-        .await
-        .unwrap_or_else(|error| panic!("failed to attach replay session: {error}"));
-    assert!(
-        attached.succeeded(),
-        "failed to attach replay session: {}",
-        attached.message
+    let replayed = ReplayedCommand::read(
+        world,
+        &transaction_id,
+        &execution_reference,
+        expected_transaction_position,
+        step,
     );
-    let expected_transaction_position = usize::try_from(expected_transaction_position)
-        .expect("a scenario transaction position fits in usize");
-    let result = session
-        .run_command_result_with_reference_at_position(
-            &query,
-            &execution_reference,
-            expected_transaction_position,
-        )
+    let leader = current_leader_node(world).await;
+    replay_command_from_node(world, leader, replayed).await;
+}
+
+#[when(
+    expr = "a new session on node {string} attaches to transaction {string} and executes this \
+            Plexus command with execution reference {string} at transaction position {int}"
+)]
+async fn when_new_session_on_node_attaches_and_executes_referenced_command(
+    world: &mut ScenarioWorld,
+    node: String,
+    transaction_id: String,
+    execution_reference: String,
+    expected_transaction_position: u64,
+    #[step] step: &Step,
+) {
+    let node = expand_placeholders(world, &node);
+    let replayed = ReplayedCommand::read(
+        world,
+        &transaction_id,
+        &execution_reference,
+        expected_transaction_position,
+        step,
+    );
+    replay_command_from_node(world, node, replayed).await;
+}
+
+/// Opens a session on `node` and attaches `transaction_id` to it, as a replay session must before
+/// it sends a command again.
+///
+/// An attach that a node redirects decides nothing, and neither does one that a leader refuses
+/// because it could not confirm its lease. The attach goes again, from a new session, to the node
+/// [`LeaderRoutes::after`] names, until a node attaches the transaction or refuses it
+/// definitively; the step asserts that attach. No attempt starts once
+/// [`UNKNOWN_OUTCOME_RECOVERY`] has passed, and the step then fails with the last refusal.
+async fn attach_replay_session(
+    world: &ScenarioWorld,
+    routes: &LeaderRoutes,
+    mut node: String,
+    transaction_id: &str,
+) -> NodeSession {
+    let deadline = PhaseDeadline::after(UNKNOWN_OUTCOME_RECOVERY);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let mut session = world
+            .cluster()
+            .open_session(&node, &world.domain)
+            .await
+            .unwrap_or_else(|error| panic!("failed to open replay session on '{node}': {error}"));
+        let attached = session
+            .attach_transaction(transaction_id)
+            .await
+            .unwrap_or_else(|error| panic!("failed to attach replay session on '{node}': {error}"));
+        let nervix_client_wire::AttachDisposition::NotLeader(redirect) = &attached.disposition
+        else {
+            assert!(
+                attached.succeeded(),
+                "failed to attach replay session: {}",
+                attached.message
+            );
+            return NodeSession { node, session };
+        };
+        append_cucumber_log_line(&format!(
+            "replay session attach of transaction {transaction_id} on node {node} decided \
+             nothing: {}",
+            attached.message
+        ));
+        deadline.pause(LEADER_POLL_INTERVAL).await;
+        assert!(
+            !deadline.has_passed(),
+            "no node attached transaction '{transaction_id}' to a replay session within \
+             {UNKNOWN_OUTCOME_RECOVERY:?}; node '{node}' last answered: {}",
+            attached.message
+        );
+        node = routes.after(&node, redirect.leader.as_ref()).to_string();
+    }
+}
+
+/// Opens a replay session on `node`, attaches the replayed command's transaction to it, and sends
+/// the command again under its original reference and position.
+///
+/// The attach follows its refusals as [`attach_replay_session`] describes. A replayed command that
+/// is answered before its outcome is known, by a node that no longer leads or a leader that lost
+/// its lease, learns the outcome through command recovery under the same frozen request, so the
+/// step records a definitive answer and never sends the command under another reference.
+async fn replay_command_from_node(
+    world: &mut ScenarioWorld,
+    node: String,
+    replayed: ReplayedCommand,
+) {
+    let routes = world.cluster().leader_routes();
+    let NodeSession {
+        mut node,
+        mut session,
+    } = attach_replay_session(world, &routes, node, &replayed.transaction_id).await;
+    let prepared = session.prepare_command_at_position(
+        &replayed.query,
+        &replayed.execution_reference,
+        replayed.expected_transaction_position,
+    );
+    let mut result = prepared
+        .run(&mut session)
         .await
         .unwrap_or_else(|error| panic!("replayed command request failed: {error}"));
+    if prepared.awaits_recovery(&result) {
+        let learned = learn_command_outcome(&routes, &prepared, result, None).await;
+        result = learned.outcome;
+        if let Some(answered) = learned.answered_on
+            && let Some(moved) =
+                session.retain_recovered_binding(&prepared, answered.node, answered.session)
+        {
+            node = moved;
+        }
+    }
     if result.succeeded() {
         world.last_command_error = None;
         world.last_command_output = Some(result.message);
@@ -18811,7 +18957,7 @@ async fn when_new_session_attaches_and_executes_referenced_command(
         world.last_command_error = Some(result.message);
     }
     world.active_session = Some(session);
-    world.active_session_node = Some(leader);
+    world.active_session_node = Some(node);
     world.active_session_has_subscription = false;
 }
 

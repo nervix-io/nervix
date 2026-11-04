@@ -1201,7 +1201,7 @@ async fn when_shaped_upload_is_sent(
     };
     let reply = world
         .cluster()
-        .send_shaped_resource_upload(&leader, upload)
+        .send_shaped_resource_upload(&leader, &upload)
         .await
         .unwrap_or_else(|error| panic!("the upload that {shape} was not answered: {error}"));
     world.last_command_error = Some(reply.message.clone());

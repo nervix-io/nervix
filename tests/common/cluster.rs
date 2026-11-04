@@ -36,7 +36,7 @@ use lapin::{
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
 use nervix_client_core::{Client, ConnectOptions, TlsRequirement};
-use nervix_client_wire::UploadReply;
+use nervix_client_wire::{UploadDisposition, UploadReply};
 use nervix_connector_kafka::testing_rdkafka::{
     admin::{AdminClient, AdminOptions, NewPartitions, NewTopic, TopicReplication},
     client::DefaultClientContext,
@@ -119,7 +119,7 @@ use zeromq::{PullSocket, PushSocket, Socket, SocketRecv, SocketSend};
 use super::{
     broker_observer::BROKER_TIMEOUT,
     cluster_teardown::{CLUSTER_TEARDOWN_BUDGET, ClusterTeardown, TeardownNode},
-    command_recovery::LeaderRoutes,
+    command_recovery::{LEADER_POLL_INTERVAL, LeaderRoutes, UNKNOWN_OUTCOME_RECOVERY},
     dependencies::{
         DependencyEndpoints, KAFKA_ADDR, MQTT_ADDR, NATS_ADDR, NATS_TLS_ADDR, PULSAR_ADDR,
         PULSAR_ADMIN_ADDR, PULSAR_AUTH_ADDR, PULSAR_AUTH_TOKEN, PULSAR_TLS_ADDR, RABBITMQ_ADDR,
@@ -2464,14 +2464,40 @@ impl Cluster {
         Ok(handle.spec.grpc_uri(handle.config.grpc_mode))
     }
 
-    /// Streams an upload whose frames a scenario shaped to `node_id` and returns its reply.
+    /// Streams an upload whose frames a scenario shaped to `node_id` and returns the reply that
+    /// decided it.
+    ///
+    /// A reply that redirects the upload, or says that no leader is known, decides nothing: the
+    /// same frames go again, under the same upload identity, to the node [`LeaderRoutes::after`]
+    /// names. No call starts once [`UNKNOWN_OUTCOME_RECOVERY`] has passed, and the reply returned
+    /// then is the last refusal, which the step's assertion reports.
     pub(crate) async fn send_shaped_resource_upload(
         &self,
         node_id: &str,
-        upload: TestUpload<'_>,
+        upload: &TestUpload<'_>,
     ) -> io::Result<UploadReply> {
-        let server = self.grpc_uri(node_id)?;
-        send_upload(&server, upload).await
+        let routes = self.leader_routes();
+        let deadline = PhaseDeadline::after(UNKNOWN_OUTCOME_RECOVERY);
+        let mut node = node_id.to_string();
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let server = self.grpc_uri(&node)?;
+            let reply = send_upload(&server, upload).await?;
+            let UploadDisposition::NotLeader(redirect) = &reply.disposition else {
+                return Ok(reply);
+            };
+            tracing::info!(
+                node,
+                identity = upload.identity,
+                message = %reply.message,
+                "a shaped upload's reply decided nothing"
+            );
+            deadline.pause(LEADER_POLL_INTERVAL).await;
+            if deadline.has_passed() {
+                return Ok(reply);
+            }
+            node = routes.after(&node, redirect.leader.as_ref()).to_string();
+        }
     }
 
     pub(crate) fn web_console_url(&self, node_id: &str) -> io::Result<String> {
