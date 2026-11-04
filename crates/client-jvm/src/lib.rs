@@ -6,6 +6,7 @@
 //! - **Must not know.** The server, C ABI, or how sessions recover, route or decide outcomes.
 //!
 //! Java's Cleaner owns every handle. Short calls borrow it under its Java State monitor;
+//! the State fences reentrant access and defers close until an admitted call returns.
 //! blocking calls take an independent shared lease before releasing that monitor. No monitor
 //! is held while a host call waits, and no library thread calls Java. Mutable field lists and
 //! batch builders are accessed exclusively under their Java State monitor.
@@ -44,8 +45,8 @@ macro_rules! native {
 macro_rules! value {
     ($handle:expr) => {{
         // SAFETY: Native is package-private. Its only callers hold the owning State monitor
-        // for a short call or an independent lease for a blocking call. Neither can release
-        // this allocation until the call has returned.
+        // for a short call or an independent lease for a blocking call. State defers
+        // reentrant close until that call returns, so the allocation remains live.
         unsafe { crate::handles::Value::borrow($handle)? }
     }};
 }
@@ -54,7 +55,8 @@ macro_rules! value {
 macro_rules! mutable {
     ($handle:expr) => {{
         // SAFETY: Fields and BatchBuilder expose no shared leases. Every read, mutation and
-        // cleanup of their allocation is serialized by the same Java State monitor.
+        // cleanup of their allocation is serialized by the same Java State monitor;
+        // State also refuses reentrant access while a mutable borrow is live.
         unsafe { crate::handles::Value::borrow_mut($handle)? }
     }};
 }
@@ -96,8 +98,9 @@ fn release<'local>(
     _class: jni::objects::JClass<'local>,
     handle: jlong,
 ) -> Result<(), crate::error::Error> {
-    // SAFETY: State removes its handle under its monitor before calling release, exactly
-    // once. A lease owns a separate allocation, so releasing either never races its borrows.
+    // SAFETY: State removes its handle under its monitor after the last admitted call,
+    // exactly once. A lease owns a separate allocation, so releasing either never races
+    // its borrows, including a close reentered during JNI marshalling.
     unsafe { handles::Value::release(handle)? };
     Ok(())
 }

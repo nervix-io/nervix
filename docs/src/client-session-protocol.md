@@ -2105,6 +2105,8 @@ loaded; `-Dio.nervix.client.library=/absolute/path/to/library` selects an explic
 A jar without a bundled library uses `System.loadLibrary`. Build an artifact for the host's native
 target; no Java preview feature or native-access flag is required on Java 21. Every handle is
 `AutoCloseable` with Cleaner fallback. A short call borrows under its handle's private monitor;
+reentrant close stops new admission and defers release until the short call returns, and nested
+access to that handle is refused;
 a blocking call first takes an independent native lease and releases that monitor. Closing the
 original handle cannot invalidate that call, and another thread may trigger its `Cancel`.
 The library calls no Java from its own threads. A frame or IPC `ByteBuffer` is direct and read-only;

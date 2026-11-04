@@ -847,7 +847,10 @@ classes and enums. The C retain/release and borrowed-pointer rules become these 
 
 - **J-1.** Close each `AutoCloseable` handle promptly. Cleaner releases unreachable handles once; its action
   holds no reference to its Java referent. Java references share the same object; closing that object
-  ends access through every reference. Producers, consumers and deliveries retain the session
+  ends new access through every reference immediately. An admitted short call keeps its native allocation
+  alive through JNI marshalling even if class loading reenters `close()` on the same thread; the
+  allocation is released as that call returns. Nested access to the same handle is refused.
+  Producers, consumers and deliveries retain the session
   runtime they require. Releasing a delivery never settles it.
 - **J-2.** A blocking call takes independent leases on its inputs before waiting, with no Java monitor held.
   Another thread may trigger the same `Cancel`, close the original handle, or use independent

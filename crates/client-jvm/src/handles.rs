@@ -6,7 +6,8 @@
 //! - **Must not know.** Session recovery or Java scheduling beyond the State monitor contract.
 //!
 //! A Java long is an external pointer encoding only here. State serializes borrowing and
-//! release of each allocation. A blocking call borrows a distinct allocation holding a shared
+//! release of each allocation, defers reentrant close until the active borrow ends, and refuses
+//! nested native access to the same allocation. A blocking call borrows a distinct allocation holding a shared
 //! host object, so release of the original cannot invalidate the call. Mutable drafts never
 //! leave their State monitor; a field list passed to a blocking open is a complete snapshot.
 

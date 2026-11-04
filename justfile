@@ -1230,6 +1230,8 @@ test-client-jvm-api-run:
     artifacts={{ quote(cargo_target_dir + "/client-conformance/java") }}
     java -Xcheck:jni -cp "${artifacts}/nervix-client.jar:${artifacts}/tests" \
         io.nervix.client.BoundaryTests
+    java -Xcheck:jni -cp "${artifacts}/tests" io.nervix.client.ReentrantClose \
+        "${artifacts}/nervix-client.jar"
 
 # Exercise the actual JNI implementations and Java classes in one embedded JVM.
 test-client-jvm: test-client-jvm-api

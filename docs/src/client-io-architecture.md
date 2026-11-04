@@ -357,7 +357,9 @@ canonical IPC, without per-value language callbacks or row-map payloads.
 | `nx_producer_close`, `nx_consumer_close`, handle free | End attachments and fence late restoration; an abandoned close continues cleanup |
 
 The JNI edge leases every input before a blocking host call, then releases the Java handle's
-monitor. Cleaner cleanup and explicit `close()` release each allocation once; retained leases keep
+monitor. Cleaner cleanup and explicit `close()` release each allocation once, after any admitted
+short call returns; reentrant close ends new admission immediately, and nested access is refused.
+Retained leases keep
 an in-flight call valid. Java arrays copy whole column levels. A read-only direct buffer holds a
 native owner lease through its root; slices and duplicates retain that root, so closing a Java
 handle cannot invalidate a buffer. Field snapshots preserve order, all type levels, nullability and

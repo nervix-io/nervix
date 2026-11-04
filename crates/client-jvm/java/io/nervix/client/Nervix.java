@@ -290,21 +290,52 @@ public final class Nervix {
 
     /** State never references its Cleaner referent. Its monitor covers only native short calls. */
     private static final class State implements Runnable {
+        private enum Phase { OPEN, CLOSING, CLOSED }
         private long pointer;
+        private Phase phase = Phase.OPEN;
+        private boolean active;
         State(long pointer) {
             if (pointer == 0) throw new IllegalArgumentException("a handle must be present");
             this.pointer = pointer;
         }
         private long present() {
-            if (pointer == 0) throw new ClosedException("the Java handle is closed", null, 0);
+            if (phase != Phase.OPEN) throw new ClosedException("the Java handle is closed", null, 0);
             return pointer;
         }
-        synchronized <T> T read(LongFunction<T> call) { return call.apply(present()); }
-        synchronized void write(LongConsumer call) { call.accept(present()); }
-        synchronized Lease lease() { return new Lease(Native.retain(present())); }
+        private long enter() {
+            long owned = present();
+            if (active) throw new IllegalStateException("reentrant access to a native handle");
+            active = true;
+            return owned;
+        }
+        private void leave() {
+            active = false;
+            if (phase == Phase.CLOSING) release();
+        }
+        private void release() {
+            long owned = pointer;
+            pointer = 0;
+            phase = Phase.CLOSED;
+            Native.release(owned);
+        }
+        synchronized <T> T read(LongFunction<T> call) {
+            long owned = enter();
+            try { return call.apply(owned); } finally { leave(); }
+        }
+        synchronized void write(LongConsumer call) {
+            long owned = enter();
+            try { call.accept(owned); } finally { leave(); }
+        }
+        synchronized Lease lease() {
+            long owned = enter();
+            try { return new Lease(Native.retain(owned)); } finally { leave(); }
+        }
         @Override public synchronized void run() {
-            if (pointer != 0) {
-                long owned = pointer; pointer = 0; Native.release(owned);
+            if (phase == Phase.OPEN) {
+                // A class loader may call close again on this same thread during JNI marshalling.
+                // Stop admission immediately; the last admitted call releases its live borrow.
+                phase = Phase.CLOSING;
+                if (!active) release();
             }
         }
     }
