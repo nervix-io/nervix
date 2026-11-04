@@ -41,18 +41,24 @@ configured_client!(Nats: unpooled, config CLIENT_CONFIG, CreateClientNats => Nat
 
 /// The current keys this connector reads, shared by validation, completion and inspection.
 const CLIENT_CONFIG: crate::ClientConfigSchema = {
-    use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    use crate::{
+        ClientConfigFile as F, ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V,
+    };
     ClientConfigSchema::new(
         &[
             K::required("addr", V::DriverAddress),
+            K::optional("credentials_file", V::File(F::MountedFile)).secret(),
+            K::optional("nkey_seed", V::String).secret(),
             K::TIMEOUT,
             K::TLS_CA,
             K::TLS_CERT,
             K::TLS_KEY,
+            K::optional("token", V::String).secret(),
         ],
         &[],
         &[],
     )
+    .with_mutually_exclusive(&["credentials_file", "nkey_seed", "token"])
 };
 
 /// The longest subject Nervix subscribes to, in bytes.

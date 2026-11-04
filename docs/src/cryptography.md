@@ -30,10 +30,11 @@ debt the `non_aws_lc_crypto` count records. Nervix obtains that cryptography tod
 
 | Purpose | Where Nervix obtains it today |
 | --- | --- |
-| TLS provider | Three direct installs of AWS-LC's default provider: in the interconnect, in the connectors' shared TLS configuration and in the client core. The HTTPS listener reads the installed default. |
+| TLS provider | Three direct installs of AWS-LC's default provider: in the interconnect, in the connectors' shared TLS configuration and in the client core. The application's shared certificate/key constructor reads the installed default for native sessions and TLS VHOSTs. |
 | Security digests | RustCrypto SHA-256, for the interconnect's trust-root fingerprint and the expression function `sha256()`. |
 | Secure randomness | The operating-system generator of `rand_core`, for interconnect entropy and for password salts. |
 | Password derivation | Argon2, for user passwords. |
+| NATS user authentication | AWS-LC Ed25519 in the NATS connection owner; its nonce callback signs nkey and credentials-file authentication. This operation moves to the boundary when FIPS Prep 02 establishes it. |
 | Other digests | BLAKE3, for backups, resources, checkpoints, archives, identities and fingerprints. No site is classified yet. |
 
 ## Algorithm Policy
@@ -61,8 +62,13 @@ defect. Today there are two: `aws-lc-rs` links `aws-lc-sys` 0.46, and `rdkafka-s
 ## Classification Register
 
 A site that uses a non-approved hash records its non-security purpose where it is written, and this
-register lists it with the site and the hash. No site is classified yet: the count recognises no
-recorded purpose, so it holds every BLAKE3 site as unclassified.
+register lists it with the site and the hash. The count recognises no recorded BLAKE3 purpose yet,
+so it holds every BLAKE3 site as unclassified.
+
+The NATS authentication wire codec in
+`crates/connectors/nats/src/client/authentication.rs` uses CRC-16/XMODEM only to detect transcription
+errors in a seed or public-key encoding, as the [NATS nkeys format](https://github.com/nats-io/nkeys/blob/main/strkey.go)
+requires. It makes no authenticity decision from the checksum; AWS-LC signs the server nonce.
 
 ## Inventory Outside AWS-LC
 
@@ -147,6 +153,22 @@ lower the count but never raise it. `scripts/tests/test_ratchet.py` pins both pa
 including an added dependency on `sha2` or `argon2` and a dependency that brings `ring`. The
 registered `typed-non-aws-lc-crypto` property checks every generated authored location and the
 complete source and site representations.
+
+## NATS Signing And The Preparation Boundary
+
+NATS nkey and credentials-file authentication signs the server's nonce through AWS-LC Ed25519.
+The connector uses async-nats' authentication callback, and the product does not enable that
+driver's `nkeys` feature. The independent `nkeys` signer is a test-only interoperability oracle
+and scenario fixture, outside the release product graph. Adding the callback therefore adds no
+non-AWS-LC cryptography edge and leaves the count unchanged.
+
+The signing operation currently lives in `crates/connectors/nats/src/client/authentication.rs`
+while `nervix-crypto` is still a target. FIPS Prep 02 moves it into the boundary; wire decoding
+continues to belong to the connector. This is preparation, with no FIPS-validation claim. The
+pinned [aws-lc-rs Ed25519 implementation](https://github.com/aws/aws-lc-rs/blob/v1.18.2/aws-lc-rs/src/ed25519.rs)
+marks signing as unsuitable for FIPS use, so the future FIPS mode must refuse these NATS methods
+until its boundary has a validated signing service for the protocol. Token authentication has no
+Nervix-owned nonce-signing operation.
 
 ## What The FIPS Migration Will Refuse
 

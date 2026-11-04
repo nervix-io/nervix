@@ -20,6 +20,13 @@ Change the address with `--web-console-listen-addr` or `NERVIX_WEB_CONSOLE_LISTE
 published ports differ by installation method: see [Docker](installation-docker.md) and
 [Kubernetes Operator](installation-kubernetes.md).
 
+To serve HTTPS, configure `--web-console-https-listen-addr`, `--web-console-tls-cert`, and
+`--web-console-tls-key`. Set `--web-console-advertise-addr` to the client-reachable HTTPS host and
+port on each node; leader redirects then advertise HTTPS and the console reconnects over `wss`.
+Without an explicit advertise address, the HTTPS listen address is used. The certificate must be
+trusted by the browser and cover that host. It is loaded at startup, so restart after rotation.
+These options configure the console independently of the native session listener's TLS options.
+
 Any node works. Opening the console on a follower is supported — the console follows the leader
 redirect, reconnects there, and reports which node it reached:
 

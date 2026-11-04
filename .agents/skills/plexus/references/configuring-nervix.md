@@ -268,6 +268,8 @@ current connection, retry and deadline limits.
 - For Core NATS completion, reconnect retries and finish outcomes, read
   [Emitters → NATS](../../../../docs/src/emitters.md#nats) and
   [Finishing an emitter](../../../../docs/src/connector-contract.md#finishing-an-emitter).
+  For NATS client authentication, secret inspection and mounted credentials, read
+  [Ingestors → NATS](../../../../docs/src/ingestors.md#nats) before choosing a client CONFIG key.
 - CLIENT, ClickHouse, Postgres, MySQL, and MongoDB emitters declare `BATCH MAX MESSAGES <n> MAX SIZE
   <bytes>` before `FLUSH`; other supported emitters may, with `MAX MESSAGES` from 1 to 65,536, a positive
   whole-unit `MAX SIZE`, at most `1MiB` for SQS, `ON EMITTING BATCH` in a batching Sentry
