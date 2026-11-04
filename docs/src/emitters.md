@@ -246,7 +246,7 @@ connector `CLIENT` object, codec, header operations, or direct `VALUES` form. Th
 uses its ordinary `FROM` predicates, optional collection, materialized dependencies, ordered
 `INHERIT` and `SET`, route `WHERE`, error policies, placement, and `ATTACHED` or `DETACHED`
 boundary. A client emitter requires `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX <n>`, an explicit
-`ACK TIMEOUT` and `RETRY POLICY`, `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>`, and its
+`ACK TIMEOUT` and `RETRY POLICY`, `BATCH MAX MESSAGES <n> MAX SIZE <bytes>`, and its
 ordinary required `FLUSH` policy. `SHOW CREATE EMITTER` preserves this full contract.
 
 The declared output schema is exact. Construction starts empty; only explicitly inherited or set
@@ -353,8 +353,8 @@ whitespace or control character; normalization must keep it on that origin and m
 leading `//`. The normalized target is limited to 8 KiB. `write_header` accepts valid HTTP field
 names and UTF-8 values without control characters or leading/trailing whitespace in a nonempty
 value. The request carries those values as their exact UTF-8 bytes, including non-ASCII characters.
-Transport-owned headers cannot be written. After case-insensitive replacement, at most 128
-application headers and 32 KiB of name/value bytes are allowed.
+Transport-owned headers cannot be written. After case-insensitive replacement, application headers
+use the committed field-count and byte caps, 128 fields and 32 KiB by default.
 
 `ENCODE USING` permits the ordinary transforming construction clauses. `WITHOUT BODY` selects an
 absent request body and permits `WHERE` and `INVOKE` but no `INHERIT`, `SET` or `VALUES`. HTTP
@@ -428,7 +428,7 @@ an empty string is sent as an empty value. Two writes whose names are string lit
 same field, such as `write_header('X-Tenant', …)` and `write_header('x-tenant', …)`, are refused when
 the statement is validated, because the earlier one could never be sent; a name an expression
 computes is replaced at run time. An invalid or reserved write rejects its record even when a later
-write would replace it, and the 128-header and 32 KiB bounds apply after every replacement. The body is exactly the bytes the codec produced, with no wrapper, array,
+write would replace it, and the publication's captured committed field-count and byte caps apply after every replacement. The body is exactly the bytes the codec produced, with no wrapper, array,
 newline, form encoding or compression added; Nervix adds no `Content-Type`, and a declared
 `Content-Encoding` does not transform the bytes. `WITHOUT BODY` sends zero content bytes.
 
@@ -654,7 +654,8 @@ clause and its route construction, and before the flush policy:
 BATCH MAX MESSAGES <n> MAX SIZE <bytes>
 ```
 
-`MAX MESSAGES` is the most source records one batch carries, from 1 to 65,536. `MAX SIZE` is the
+`MAX MESSAGES` is the most source records one batch carries, from 1 through the committed
+`MAX_BATCH_MESSAGES` cap (65,536 by default), within the unsigned 32-bit representation. `MAX SIZE` is the
 most bytes its encoded payload may occupy: a positive whole number followed by `B`, `KB`, `KiB`,
 `MB`, `MiB`, `GB`, `GiB`, `TB` or `TiB`. Neither limit has a default, neither may be omitted, and
 neither is derived from the other or from `FLUSH ... MAX BATCH SIZE`, which measures Arrow memory
@@ -681,7 +682,7 @@ CREATE KAFKA TOPIC EMITTER kafka_notifications
 
 A statement is rejected, naming the offending value, when:
 
-- `MAX MESSAGES` is zero or above 65,536;
+- `MAX MESSAGES` is zero, exceeds its representation, or exceeds the committed batch-count cap;
 - `MAX SIZE` is zero, fractional, written without a unit, or past the 64-bit byte range;
 - `MAX SIZE` is above 1 MiB on an SQS emitter, the largest SQS message Nervix sends;
 - the clause is absent on a ClickHouse, Postgres, MySQL or MongoDB emitter;
@@ -821,7 +822,7 @@ counting what it writes around the payload:
 | Emitter | Limit checked before a message is written | Counted around the payload |
 | --- | --- | --- |
 | Kafka | The producer's `message.max.bytes` client setting | The record key, headers and record overhead |
-| MQTT | The Maximum Packet Size the broker declared in its latest `CONNACK`, and the largest packet the protocol can express | The fixed header, topic, packet identifier and property length |
+| MQTT | The Maximum Packet Size the broker declared in its latest `CONNACK`, and the largest packet the protocol can express | The fixed header, topic, packet identifier, every property and both variable-length prefixes |
 | NATS | The `max_payload` the server announced | The message headers |
 | Pulsar | The `maxMessageSize` the broker announced when the producer's connection opened | The message metadata: the properties, the partition key and the producer's own fields |
 | SQS | 1 MiB | Message attribute names, types and values, and the FIFO message group |
@@ -1060,10 +1061,11 @@ Each emitter that writes transport headers declares a
 | `PULSAR TOPIC` | `last_wins`, exact names | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | `RABBITMQ QUEUE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `RABBITMQ EXCHANGE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
+| `MQTT TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `NATS SUBJECT` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | `SQS QUEUE` | `last_wins`, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included; a value's exact type decides the type it travels as |
 
-`CLIENT CONSUMER`, `REDIS PUBSUB`, `MQTT TOPIC`, `ZEROMQ PUSH`, `SENTRY EVENT`, `SYSLOG COLLECTOR`, `OTEL LOGS`, `OTEL TRACES`, `OTEL METRICS`, `CLICKHOUSE TABLE`, `POSTGRES TABLE`, `MYSQL TABLE`, `MONGODB COLLECTION`, `ICEBERG TABLE` write no transport headers and refuse `write_header`.
+`CLIENT CONSUMER`, `REDIS PUBSUB`, `ZEROMQ PUSH`, `SENTRY EVENT`, `SYSLOG COLLECTOR`, `OTEL LOGS`, `OTEL TRACES`, `OTEL METRICS`, `CLICKHOUSE TABLE`, `POSTGRES TABLE`, `MYSQL TABLE`, `MONGODB COLLECTION`, `ICEBERG TABLE` write no transport headers and refuse `write_header`.
 <!-- connector-matrix:emit-headers:end -->
 
 Where an emitter keeps one value per name, a second `write_header` whose name is a string literal equal,
@@ -1527,6 +1529,7 @@ CREATE RABBITMQ QUEUE EMITTER <name>
     [PERSISTENT]
     [MANDATORY]
     [TIMESTAMP occurred_at]
+    [PROPERTIES { '<key>' = <expression>, ... }]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
@@ -1568,6 +1571,7 @@ CREATE RABBITMQ EXCHANGE EMITTER <name>
     [PERSISTENT]
     [MANDATORY]
     [TIMESTAMP occurred_at]
+    [PROPERTIES { '<key>' = <expression>, ... }]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
@@ -1849,6 +1853,8 @@ CREATE MQTT TOPIC EMITTER <name>
   (QOS 0 | QOS 1 | QOS 2)
     MODE <mode>
     ENCODE USING <codec>
+    [RETAIN]
+    [PROPERTIES { '<key>' = <expression>, ... }]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
@@ -1864,13 +1870,13 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | TOPIC 'devices/Orders' (mqtt_topic) |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 0)<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 1 or 2) |
 | Options in statement order | `QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |
-| Headers | Not offered: A publication carries its topic, payload and quality of service; this implementation writes no MQTT 5 user property on it. |
+| Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
 | Batch transformation required | no |
-| Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
-| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Envelope | RETAIN |
+| PROPERTIES keys and exact types | content_type: STRING<br>message_expiry: U32<br>response_topic: STRING<br>correlation_data: BYTES |
 | Buffers | publishes queued for the driver: set by 1 under NO ACK and ACK SEQUENTIAL, ACK PARALLEL MAX under ACK PARALLEL; when full, fails the publish for the host to retry |
 | Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>answers to QOS 1 and 2 publishes: `ACK TIMEOUT`<br>writes to the connection: unbounded<br>a silent connection: client key `keep_alive_ms`; two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 s when omitted |
 | Driver limits | Packets above the broker's maximum packet size are rejected.<br>QOS 0 connects a clean session; QOS 1 and 2 connect a persistent one with the maximum Session Expiry Interval, and SESSION is not an emitter option: a publisher without acknowledgement needs no session, and an acknowledged one always keeps it.<br>The client resumes its own session across reconnects, and a new client is refused while the broker keeps a session under its identity, since it holds no state to resume it with. |
@@ -1883,6 +1889,30 @@ See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#m
 the [ingestion topic filter rule](ingestors.md#external-names) without the `+` and `#` wildcards,
 so `TOPIC 'devices/+'` is refused when the emitter is created. The client's `addr` names the broker
 by its scheme, host and port alone, as [MQTT ingestion](ingestors.md#mqtt) describes.
+
+Write `RETAIN` after `ENCODE USING <codec>` to ask the broker to retain each publication for later
+subscribers. Optional `PROPERTIES { '<key>' = <expression>, ... }` follows `RETAIN`, or the codec
+when the flag is omitted. Each key may occur once, and every value must have its exact, required,
+non-sensitive type (use explicit sensitive-value leakage where intended):
+
+| Property | Exact type | Meaning |
+| --- | --- | --- |
+| `content_type` | `STRING` | The content type of the encoded payload. |
+| `message_expiry` | `U32` | Message lifetime in seconds, including zero; this is not a duration literal. |
+| `response_topic` | `STRING` | A nonempty MQTT publication topic, without subscription wildcards or NUL. |
+| `correlation_data` | `BYTES` | Opaque correlation bytes, including an empty value. |
+
+`INVOKE write_header(name, value)` writes MQTT 5 user properties. Both arguments are strings;
+names compare exactly, repeated names remain repeated and writes keep their order. MQTT string
+and binary property fields are limited to 65,535 bytes, and strings contain no NUL. A record that
+violates a field limit follows `ON MESSAGE ERROR` before it reaches the client. Packet admission
+counts every property and both variable-length prefixes, in addition to the topic, payload and
+packet identifier. A rejected record does not prevent its valid neighbours from being sent.
+
+Nervix evaluates this envelope once with its payload. Every retry carries identical flags,
+properties and user properties, including the original expiry interval. A broker may reduce
+that interval while storing or forwarding the message. Retention is broker state; it does not
+change the completion point of the emitter's QoS or make Nervix's in-memory attempts durable.
 
 CREATE refuses an unsupported QoS number with its value and accepted levels, such as
 `MQTT QOS must be 0, 1 or 2, found 3`, underlining the supplied number. Completion after `MODE`
@@ -2000,6 +2030,10 @@ The client connects again on its own after it loses its server, on the emitter's
 waits `BACKOFF` before its first attempt and doubles the wait for each further attempt up to `MAX`.
 When the emitter stops, its finish flushes what the client still holds by the finish deadline; see
 [Finishing an emitter](./connector-contract.md#finishing-an-emitter).
+
+NATS emitters use the same optional token, user NKey or mounted credentials-file authentication
+as ingestors. The [NATS client authentication rules](ingestors.md#nats) define mutual exclusion,
+confidential inspection and TLS configuration for both directions.
 
 `JETSTREAM` waits for one `PubAck` per record. The stream must already exist and capture the
 subject; a missing stream is an infrastructure error that remains under backpressure until an

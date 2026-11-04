@@ -46,7 +46,12 @@ impl NatsSubjectIngestorStartPlan {
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .change_context_lazy(|| ingestor.initialize_failure())?;
         BrokerIngestorStart {
-            connector: NatsSubjectIngestorPlan::new(resolved.entries, subject, queue_group),
+            connector: NatsSubjectIngestorPlan::new(
+                runtime.executor().clone(),
+                resolved.entries,
+                subject,
+                queue_group,
+            ),
             instances,
             acknowledgement: mode.acknowledgement(),
             buffered_intake: true,

@@ -293,7 +293,7 @@ jobs:
           path: ${{ runner.temp }}/go-tool-bootstrap
           if-no-files-found: ignore
 
-  # Diagnostic coverage is a distinct execution mode and never contributes to native cost counts.
+  # Ordinary report-tool coverage stays separate from the ordinary workspace report.
   diagnostic-evidence:
     name: diagnostic-evidence
     needs: [test-selection]
@@ -369,7 +369,7 @@ jobs:
           label: check-diagnostic-evidence-and-report-tool-coverage
 
       - name: Check diagnostic evidence and report tool coverage
-        run: just coverage-deadlock
+        run: just coverage-native-extras test-deadlock-report --output target/deadlock.lcov
         env:
           NERVIX_DEADLOCK_PROBE_ARTIFACTS: target/diagnostic-evidence/probes
 
@@ -424,8 +424,8 @@ jobs:
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
 
-  # The Deloxide diagnostic lane, only for a pull request labeled `deloxide`: every workload
-  # tests/deloxide-inventory.toml registers, each selection on a runner of its own in the
+  # Retained Deloxide lane configuration while the temporary CI policy disables its execution:
+  # every workload tests/deloxide-inventory.toml registers, each selection on a runner in the
   # instrumented build of the feature it compiles under the native coverage collector, then the
   # qualification of the lane's supervision on deliberately failing processes. Each selection keeps
   # its own budget, so the stressed restore scenarios, which share the stress selection's build,
@@ -433,7 +433,8 @@ jobs:
   # from ordinary coverage and its CRAP report.
   deloxide:
     name: deloxide (${{ matrix.selection }})
-    if: contains(github.event.pull_request.labels.*.name, 'deloxide')
+    # Temporary CI policy: re-enabling execution requires an explicit user decision.
+    if: ${{ false }}
     runs-on: boat-xlarge
     # Setup, then at most the lane's bound, the qualification's bound and the reserve the uploads
     # and the kache report keep after them, within the six hours a Boat CI job may run.
@@ -1380,9 +1381,9 @@ jobs:
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
 
-  # The workspace line-coverage union of every producer this run's event and labels select: the
-  # ordinary report, the modeled and diagnostic native collections, and the live fuzz campaigns a
-  # pull request carrying `fuzz` requests. It waits for every producer job, including a skipped or
+  # The line-coverage union of producers the event, labels and temporary CI policy permit:
+  # the ordinary report, selected modeled collections and ordinary report-tool diagnostics.
+  # Deloxide and fuzz execution stay disabled. It waits for every producer, including a skipped or
   # failed one, so a producer that did not succeed fails the union instead of hiding behind a skip.
   # It downloads the exported reports and records and rebuilds nothing. The ordinary report, its
   # CRAP report and its patch coverage stay with the coverage job.
@@ -2005,7 +2006,7 @@ jobs:
 
       - name: Primitive boundary conformance
         if: contains(github.event.pull_request.labels.*.name, 'extra-primitives')
-        run: just coverage-native-extras test-primitives
+        run: just coverage-native-extras test-primitives-ordinary test-primitives-shuttle test-primitives-loom test-primitives-turmoil
 
       - name: Runner diagnostics before Primitive boundary compile and browser checks
         if: contains(github.event.pull_request.labels.*.name, 'extra-primitives')
@@ -2015,7 +2016,7 @@ jobs:
 
       - name: Primitive boundary compile and browser checks
         if: contains(github.event.pull_request.labels.*.name, 'extra-primitives')
-        run: just test-primitives-compile
+        run: just test-primitives-compile ''
 
       # The walk saturates every core, and its failures are about completion reachability rather
       # than about any one test.

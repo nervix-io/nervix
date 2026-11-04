@@ -55,6 +55,7 @@ impl HttpRequestIngestorStartPlan {
                 dns: dns.clone(),
                 method,
                 headers,
+                header_limits: runtime.cluster_parameters().http_header_limits(),
                 max_body_size,
             },
             every,

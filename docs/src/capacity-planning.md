@@ -156,8 +156,10 @@ cannot hold it:
   `--resource-max-archive-bytes` and `--resource-max-extracted-bytes`, keep their 4 GiB and 16 GiB
   defaults whatever the volume, so a node on a smaller volume needs them set below its size: a
   5 GiB volume might take `NERVIX_RESOURCE_MAX_ARCHIVE_BYTES=1GiB` and
-  `NERVIX_RESOURCE_MAX_EXTRACTED_BYTES=2GiB`. They are cluster parameters, so give every node the
-  same values. Each quota is compared with the volume's total size on its own, and what the volume
+  `NERVIX_RESOURCE_MAX_EXTRACTED_BYTES=2GiB` as seeds on the new cluster's bootstrapping node.
+  Later node starts omit those seed variables and use the committed values. Change an existing
+  cluster's quotas through `ALTER CLUSTER SET` before joining a node with a smaller volume;
+  [Node Settings](node-settings.md#committed-parameter-changes) defines that contract. Each quota is compared with the volume's total size on its own, and what the volume
   already holds is not subtracted, so size the volume for the log, snapshots and state the node
   keeps beside them.
 

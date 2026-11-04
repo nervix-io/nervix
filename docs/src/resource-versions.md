@@ -122,6 +122,13 @@ Each node keeps the verified archive beside the extracted tree, which is what it
 node fetches the version. The quotas and their defaults are listed in
 [Resources](./resources.md#upload-format); each node enforces them itself.
 
+The archive-byte, extracted-byte and file-count quotas are committed cluster parameters. Live
+installation updates the same resource store; newly constructed staging owners capture its typed
+limits. A parameter transition validates completed catalog versions against its candidate quotas,
+and a concurrent catalog change invalidates that validation before the record can commit.
+[Node Settings](node-settings.md#committed-parameter-changes) owns bootstrap seeds, the administrative
+statement and the parameter publication contract.
+
 ### Publication And Transfer
 
 After the leader installs its own copy, one consensus command publishes the version: it stores the
@@ -360,6 +367,12 @@ of its resources, makes the plan stale. The step is then rejected as
 `domain '<domain>' resource inputs changed` before any model is committed. The leader's check runs
 before anything pauses; a rejection at the replicated boundary first releases the pause, gates, and
 handoff the step had engaged and rolls back the leader's local registry.
+
+A restored model batch pins its versions from the same authoritative snapshot that supplies its
+Models and committed parameter record for validation. Binding and content preparation retain those
+inputs until publication. A parameter publication also makes that captured plan stale, even when
+the resource catalog is unchanged; the leader and replicated boundary compare the complete record
+and revision before accepting the Models.
 
 What follows depends on who owns the plan. An ordinary command retains that failed attempt and
 starts another attempt, derived from the newer revision, under the same execution reference, so it

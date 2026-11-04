@@ -408,6 +408,7 @@ use domain_execution::{
     DomainExecution, DomainRoutingError, DomainRoutingSnapshot, ObservedDomainTick,
     RuntimeDomainState,
 };
+#[cfg(test)]
 use domain_rebuild::branch_relays_from_plans;
 use emitter_buffer::{
     DeliveredAcknowledgements, EmitterBatchBuffer, EmitterBufferedMessages, EmitterPublication,
@@ -477,8 +478,8 @@ use force_flush::{
 };
 use generator::GeneratorTaskSpec;
 use http_request_fields::{
-    AcceptedHttpRequests, AdmittedHttpRequests, CompiledHttpRequestFields, HttpRequestFields,
-    HttpRequestInput, HttpRequestSchemas, SourceRecords,
+    AcceptedHttpRequests, AdmittedHttpRequests, CompiledHttpRequestFields, HttpRequestEvaluation,
+    HttpRequestFields, HttpRequestInput, HttpRequestSchemas, SourceRecords,
 };
 use inferencer_output::flush_branch_inferencer_output;
 pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
@@ -583,11 +584,13 @@ use record_metadata::RecordMetadataColumns;
 use reingestor::{PlannedReingestorInput, ReingestorInputConsumer, ReingestorRuntimes};
 pub(in crate::runtime) use relay_batch::RelayDispatchResult;
 use relay_batch::build_stream_record_batch_preserving_acks;
+#[cfg(test)]
+use relay_boundary::RelayRetention;
 use relay_boundary::{
     BranchRelayDispatchGateLease, ConcreteRelayRuntime, ConcreteRelayRuntimeBuild,
     RelayBoundaryBuilder, RelayBoundaryFanout, RelayBoundaryFanoutMap, RelayBoundaryServices,
-    RelayBranchPresence, RelayOutboundSlot, RelayOwnerTask, RelayRetention, RelayRuntimeFanIn,
-    RelayStateTask, RelayStateTaskSpec, RemoteRuntimeConsumer, addressable_count,
+    RelayBranchPresence, RelayOutboundSlot, RelayOwnerTask, RelayRuntimeFanIn, RelayStateTask,
+    RelayStateTaskSpec, RemoteRuntimeConsumer, addressable_count,
 };
 pub(in crate::runtime) use relay_channel::{
     OwnedRelayDispatchPermit, RelayDispatchGate, RelayDispatchGateLease, RelayTryRecv,
@@ -616,9 +619,8 @@ pub(crate) use snapshot_staging::{
 };
 use state_replication::{
     ActivatedRuntimeStateHandoff, CheckpointWriter, DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
-    DEFAULT_STATE_SNAPSHOT_INTERVAL, PreparedForcedRuntimeStateRecovery,
-    PreparedRuntimeStateHandoff, PreparedRuntimeStateSnapshot, PublishedBranchState,
-    RestorableBranchLifecycle,
+    PreparedForcedRuntimeStateRecovery, PreparedRuntimeStateHandoff, PreparedRuntimeStateSnapshot,
+    PublishedBranchState, RestorableBranchLifecycle,
 };
 pub(in crate::runtime) use state_store::{
     ForcedRuntimeStateRecoveryAuthorization, ForcedRuntimeStateRecoveryIdentity,
@@ -968,7 +970,7 @@ pub mod subscription_predicate_capability_compile_tests {
 /// What the data plane exposes. Everything else this module and its submodules declare is
 /// `pub(in crate::runtime)` or narrower, so the layers above reach the runtime only through the
 /// names below.
-pub use entity_gate::{DEFAULT_DOMAIN_DRAIN_TIMEOUT, branch_task_stop_timeout};
+pub use entity_gate::branch_task_stop_timeout;
 pub(crate) use entity_gate::{
     EmitterPublishingDrainState, EmitterPublishingDrainStatus, EntityGateLease,
 };

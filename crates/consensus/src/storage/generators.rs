@@ -285,6 +285,7 @@ fn planning_inputs_with(
     let schedule = optional_schedule(arbitrary, &domain);
     let topology = schedule_topology_inputs(arbitrary);
     DomainPlanningInputs {
+        parameters: Some(arbitrary.cluster_parameter_record()),
         domain,
         state: state.map(Box::new),
         resources: DomainResourcePlanningInputs {
@@ -1121,7 +1122,11 @@ fn command_execution_effect(
     arbitrary: &mut Arbitrary<'_>,
     reference: &CommandExecutionReference,
 ) -> CommandExecutionEffect {
-    match arbitrary.entropy().byte() % 7 {
+    match arbitrary.entropy().byte() % 8 {
+        7 => CommandExecutionEffect::AlterCluster {
+            changes: arbitrary.cluster_parameter_values().assignments(),
+            applied: optional(arbitrary, Arbitrary::cluster_parameter_record).map(Box::new),
+        },
         0 => create_domain_effect(arbitrary),
         1 => CommandExecutionEffect::Transaction {
             transaction_id: format!("command.{}", reference.as_str()),
@@ -1325,6 +1330,7 @@ fn command_execution_result(
             });
         }
         CommandExecutionEffect::CreateDomain { .. }
+        | CommandExecutionEffect::AlterCluster { .. }
         | CommandExecutionEffect::CreateUser { .. }
         | CommandExecutionEffect::DropNode { .. } => {}
     }
@@ -1386,6 +1392,7 @@ pub(super) fn state_machine(arbitrary: &mut Arbitrary<'_>) -> StateMachineData {
     let runtime_revision = arbitrary.entropy().any_u64();
 
     let mut state = StateMachineData {
+        parameters: Some(arbitrary.cluster_parameter_record()),
         last_applied_log_id,
         last_membership,
         runtime_revision,
@@ -1776,6 +1783,8 @@ fn complete_application_command(arbitrary: &mut Arbitrary<'_>) -> ConsensusComma
 /// as any other and a coverage check can name each one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, strum::EnumIter)]
 enum CommandVariant {
+    SeedClusterParameters,
+    AlterClusterParameters,
     AdmitCommandExecution,
     AcquireCommandDomainMutation,
     ReleaseCommandDomainMutation,
@@ -1822,6 +1831,8 @@ impl CommandVariant {
     /// [`command`] is taught to build it.
     fn of(command: &ConsensusCommand) -> Self {
         match command {
+            ConsensusCommand::SeedClusterParameters { .. } => Self::SeedClusterParameters,
+            ConsensusCommand::AlterClusterParameters { .. } => Self::AlterClusterParameters,
             ConsensusCommand::AdmitCommandExecution { .. } => Self::AdmitCommandExecution,
             ConsensusCommand::AcquireCommandDomainMutation { .. } => {
                 Self::AcquireCommandDomainMutation
@@ -1900,6 +1911,18 @@ pub(super) fn command(arbitrary: &mut Arbitrary<'_>) -> ConsensusCommand {
 /// lifecycle step with the reports and plans it carries.
 fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> ConsensusCommand {
     match variant {
+        CommandVariant::SeedClusterParameters => ConsensusCommand::SeedClusterParameters {
+            values: arbitrary.cluster_parameter_values(),
+        },
+        CommandVariant::AlterClusterParameters => ConsensusCommand::AlterClusterParameters {
+            reference: arbitrary.execution_reference(),
+            inputs: Box::new(crate::ClusterParameterPlanningInputs {
+                current: arbitrary.cluster_parameter_record(),
+                schedule: BTreeMap::new(),
+                domains: BTreeMap::new(),
+                resources: arbitrary.records(resource_version),
+            }),
+        },
         CommandVariant::AdmitCommandExecution => admit_command(arbitrary),
         CommandVariant::AcquireCommandDomainMutation => {
             ConsensusCommand::AcquireCommandDomainMutation {
@@ -2136,7 +2159,7 @@ fn seeded_bytes(seed: u64, length: usize) -> Vec<u8> {
 
 /// Every variant and shape of the transaction, commit plan, report and command execution records
 /// [`state_machine`] promises to reach, as [`RecordWalk`] names them.
-const EXPECTED_RECORDS: [&str; 46] = [
+const EXPECTED_RECORDS: [&str; 47] = [
     "ReplicatedTransaction::session",
     "ReplicatedTransaction::command",
     "ReplicatedTransaction::latest_preview",
@@ -2164,6 +2187,7 @@ const EXPECTED_RECORDS: [&str; 46] = [
     "CommandExecutionState::domain_mutations",
     "CommandExecutionState::Finished",
     "CommandExecutionState::Expired",
+    "CommandExecutionEffect::AlterCluster",
     "CommandExecutionEffect::CreateDomain",
     "CommandExecutionEffect::Transaction",
     "CommandExecutionEffect::TransactionRequest",
@@ -2332,6 +2356,9 @@ impl RecordWalk {
 
     fn effect(&mut self, effect: &CommandExecutionEffect) {
         match effect {
+            CommandExecutionEffect::AlterCluster { .. } => {
+                self.see("CommandExecutionEffect::AlterCluster")
+            }
             CommandExecutionEffect::CreateDomain { .. } => {
                 self.see("CommandExecutionEffect::CreateDomain");
             }

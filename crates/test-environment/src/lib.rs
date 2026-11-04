@@ -87,6 +87,9 @@ const DEPENDENCY_CONFIGURATION_FILES: &[&[u8]] = &[
     include_bytes!("../../../docker/mock-server/Dockerfile"),
     include_bytes!("../../../docker/mock-server/app.py"),
     include_bytes!("../../../docker/nats/nats-tls.conf"),
+    include_bytes!("../../../docker/nats/nats-token.conf"),
+    include_bytes!("../../../docker/nats/nats-nkey.conf"),
+    include_bytes!("../../../docker/nats/nats-jwt.conf"),
     OTEL_COLLECTOR_CONFIG,
     include_bytes!("../../../docker/prometheus/prometheus.yml"),
     include_bytes!("../../../docker/prometheus/web.yml"),
@@ -214,6 +217,9 @@ const MQTT_AUTH_USERNAME_VALUE: &str = "nervix-mqtt-user";
 const MQTT_AUTH_PASSWORD_VALUE: &str = "nervix-mqtt-password";
 pub const NATS_ADDR: &str = "nats_addr";
 pub const NATS_TLS_ADDR: &str = "nats_tls_addr";
+pub const NATS_TOKEN_ADDR: &str = "nats_token_addr";
+pub const NATS_NKEY_ADDR: &str = "nats_nkey_addr";
+pub const NATS_CREDENTIALS_ADDR: &str = "nats_credentials_addr";
 pub const SQS_ENDPOINT: &str = "sqs_endpoint";
 pub const SQS_TLS_ENDPOINT: &str = "sqs_tls_endpoint";
 pub const CLICKHOUSE_ADDR: &str = "clickhouse_addr";
@@ -1151,6 +1157,56 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         self.endpoints
             .insert(NATS_ADDR, format!("nats://127.0.0.1:{port}"));
         self.containers.push(RunningContainer::Generic(container));
+        Ok(())
+    }
+
+    /// Independent servers enforce each public NATS authentication method.
+    pub async fn start_nats_auth(&mut self) -> io::Result<()> {
+        if !self.mark_starting("nats-auth").await? {
+            return Ok(());
+        }
+        struct AuthenticationServer {
+            role: &'static str,
+            endpoint: &'static str,
+            config: &'static [u8],
+        }
+        for AuthenticationServer {
+            role,
+            endpoint,
+            config,
+        } in [
+            AuthenticationServer {
+                role: "nats-token",
+                endpoint: NATS_TOKEN_ADDR,
+                config: include_bytes!("../../../docker/nats/nats-token.conf"),
+            },
+            AuthenticationServer {
+                role: "nats-nkey",
+                endpoint: NATS_NKEY_ADDR,
+                config: include_bytes!("../../../docker/nats/nats-nkey.conf"),
+            },
+            AuthenticationServer {
+                role: "nats-credentials",
+                endpoint: NATS_CREDENTIALS_ADDR,
+                config: include_bytes!("../../../docker/nats/nats-jwt.conf"),
+            },
+        ] {
+            nervix_primitives::task::consume_budget().await;
+            let container = self
+                .start_container(role, 4222.tcp(), "authenticated NATS", || {
+                    GenericImage::new("nats", "2.11-alpine")
+                        .with_wait_for(WaitFor::message_on_either_std("Server is ready"))
+                        .with_exposed_port(4222.tcp())
+                        .with_copy_to("/etc/nats/auth.conf", config.to_vec())
+                        .with_cmd(["-c", "/etc/nats/auth.conf"])
+                        .with_startup_timeout(STARTUP_TIMEOUT)
+                })
+                .await?;
+            let port = mapped_port(&container, 4222, "authenticated NATS").await?;
+            self.endpoints
+                .insert(endpoint, format!("nats://127.0.0.1:{port}"));
+            self.containers.push(RunningContainer::Generic(container));
+        }
         Ok(())
     }
 

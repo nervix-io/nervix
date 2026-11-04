@@ -844,7 +844,7 @@ session, is served only by the leader.
 A batch is one canonical Arrow IPC stream: the schema message, exactly one record batch, and the
 end-of-stream marker. It is uncompressed and has no dictionary or extension encodings, and its
 Arrow schema is exactly the input schema in Nervix's Arrow representation of each type, with no
-field metadata. A batch carries at most 65,536 rows and at most the bytes one submission may carry,
+field metadata. A batch carries at most the rows in its producer grant (65,536 by default) and at most the bytes one submission may carry,
 which is the smaller of the producer's granted bytes and what one session frame holds. The node
 that executes the ingestor validates the whole batch, its structure, bounds, and every column,
 before any row is admitted; a batch that fails is refused whole and has no effect on the graph.
@@ -892,10 +892,10 @@ may ask for, the session or node has no room left, or the session holds a transa
 | Limit | Value |
 | --- | --- |
 | Producers per session | 32 |
-| Outstanding bytes per session | 32 MiB |
+| Outstanding bytes per session | Committed producer cap, 32 MiB by default |
 | Outstanding bytes per node, including batches retained for forwarded producers | 128 MiB |
 | Batches one producer may ask to have outstanding | 1,024 |
-| Rows per batch | 65,536 |
+| Rows per batch | Grant's committed client-row cap, 65,536 by default |
 
 A batch holds its share of the credit from the moment it is sent until its outcome is observed. A
 batch sent beyond the credit is refused as `credit exceeded` without reaching the graph, and the
@@ -2243,6 +2243,19 @@ subject are not exposed as typed metadata; programs read its payload and headers
 NATS ingestors use Core NATS queue subscriptions. `QUEUE GROUP` and `INSTANCES`
 are mandatory; use `INSTANCES 1` for a single queue member.
 
+The NATS client accepts one optional authentication key: `token`, `nkey_seed` for a user NKey
+seed, or `credentials_file` for a NATS user credentials file containing its JWT and signing seed.
+These three keys are mutually exclusive; `CREATE NATS CLIENT` refuses any pair before connecting.
+Mount a resource containing a credentials file and write its resolved path, such as
+`'credentials_file' = '{{identity}}/user.creds'`. All three keys are confidential in public
+inspection. URL user information remains delegated to the NATS driver.
+
+Ingestors and emitters use the same authentication and TLS options. A `tls://` address requires
+TLS on both sides, with the configured CA and optional paired client certificate and key.
+An unreadable or malformed credentials file is a configuration failure; a broker refusing the
+identity is a connection failure reported by the boundary's existing general error policy and
+retry cadence. Nervix does not create accounts or users on the broker.
+
 Core NATS retains no backlog, so `SUSPEND` is unavailable. A quiesced instance remains a member of
 its queue group and keeps receiving its share; that share is buffered or discarded rather than
 shifted to other members.
@@ -3032,9 +3045,12 @@ This opens an outbound WebSocket connection through a `WEBSOCKETS CLIENT` and de
 binary frames. Its optional `HEADERS { 'authorization' = 'Bearer token' }` clause follows `FROM
 <client>` and takes literal string names and values. Names are case-insensitive; repeated names,
 protocol-owned fields (`Host`, hop-by-hop framing fields and every `Sec-WebSocket-*` field except
-`Sec-WebSocket-Protocol`), malformed values, more than 128 fields, or more than 32 KiB of field
-name/value bytes are refused before activation. Each value, a credential included, is visible in
-`DESCRIBE INGESTOR` and `SHOW CREATE INGESTOR`.
+`Sec-WebSocket-Protocol`) and malformed values are refused before activation. The committed
+`http-header-fields` and `http-header-bytes` parameters bound the field count and the total field
+name/value bytes; their defaults are 128 fields and 32 KiB. Admission and parameter changes check
+these requirements, so lowering a cap cannot invalidate an existing ingestor. Raising a cap
+permits new declarations above those defaults, within the HTTP representation's bounds. Each
+value, a credential included, is visible in `DESCRIBE INGESTOR` and `SHOW CREATE INGESTOR`.
 
 `HEADERS { 'sec-websocket-protocol' = 'v2.events, v1.events' }` offers subprotocols in the order
 of preference written. The value lists one or more subprotocol tokens (RFC 6455): elements

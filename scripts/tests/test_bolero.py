@@ -204,10 +204,12 @@ class InventoryTests(unittest.TestCase):
             "backup-section-mapping",
             "stopping-node-drain-wire",
             "cluster-peer-clock-probes",
+            "cluster-parameters",
             "restore-installation-storage",
             "restore-staging-kept-measurement",
             "typed-report", "typed-source-contract", "typed-site-union", "typed-source-syntax", "typed-hidden-tunables",
             "typed-non-aws-lc-crypto",
+            "nats-user-authentication",
             "plexus-statement",
             "plexus-statement-text",
             "plexus-emitter-envelopes",
@@ -372,6 +374,7 @@ class InventoryTests(unittest.TestCase):
             "http-poll-response-headers",
             "http-emitter-requests",
             "mqtt-publish-packets",
+            "mqtt-publish-properties",
             "mqtt-publish-metadata",
             "postgres-insert-measures",
             "mysql-insert-measures",
@@ -397,6 +400,7 @@ class InventoryTests(unittest.TestCase):
             "dns-operation-budget",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
+            "nervix-connector-nats",
             "nervix-client-core",
             "nervix-client-wire",
             "nervix-client-ffi",

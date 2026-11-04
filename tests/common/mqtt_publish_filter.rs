@@ -170,13 +170,13 @@ impl Drop for MqttPublishFilter {
 }
 
 /// One whole MQTT control packet: its first byte, its Remaining Length and the bytes that counts.
-struct MqttPacket {
-    bytes: Vec<u8>,
+pub(crate) struct MqttPacket {
+    pub(crate) bytes: Vec<u8>,
 }
 
 impl MqttPacket {
     /// Reads the next packet, or none when the stream ends before another one begins.
-    async fn read(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Option<Self>> {
+    pub(crate) async fn read(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Option<Self>> {
         let mut first = [0_u8; 1];
         if reader.read(&mut first).await? == 0 {
             return Ok(None);

@@ -20,11 +20,14 @@
     )
 )]
 
+#[cfg(test)]
 use error_stack::ResultExt as _;
 use imbl::{GenericHashMap, shared_ptr::DefaultSharedPtr};
 use nervix_connector_websockets::CompiledSignalingProtocol;
 
-use super::{domain_rebuild::ActivatedDomainSurfaces, *};
+#[cfg(test)]
+use super::domain_rebuild::ActivatedDomainSurfaces;
+use super::*;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub(super) enum DomainRoutingError {
@@ -553,6 +556,7 @@ impl Runtime {
         installation
     }
 
+    #[cfg(test)]
     pub(in crate::runtime) async fn rebuild_domain_execution(
         &self,
         domain: &DomainName,

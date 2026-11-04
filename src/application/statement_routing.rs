@@ -1,21 +1,27 @@
-//! Admission policy for typed session statements.
+//! Pure routing requirements of semantic server statements.
 //!
 //! Layer: decisions.
-//! - **Owns.** Domain, leader and persistence requirements for a semantic statement.
-//! - **Depends on.** The statement vocabulary and its mutation classification.
-//! - **Must not know.** Sessions, registry state, consensus, transports or execution.
+//!
+//! - **Owns.** Whether a statement needs a request domain, an existing domain, leadership or
+//!   durable command admission.
+//! - **Depends on.** Semantic statement Models from the vocabulary.
+//! - **Must not know.** Parsing, sessions, consensus, runtime state or transports.
 
 #![cfg_attr(
     nervix_lint,
-    nervix::layer(decisions, reason = "owns pure statement admission policy")
+    nervix::layer(
+        decisions,
+        reason = "classifies statement routing from semantic Models only"
+    )
 )]
 
 use nervix_models::Statement;
 
-pub(super) fn requires_request_domain(statement: &Statement) -> bool {
+pub(in crate::application) fn requires_request_domain(statement: &Statement) -> bool {
     !matches!(
         statement,
-        Statement::CreateDomain(_)
+        Statement::AlterCluster(_)
+            | Statement::CreateDomain(_)
             | Statement::CreateUser(_)
             | Statement::Backup(_)
             | Statement::Restore(_)
@@ -31,10 +37,11 @@ pub(super) fn requires_request_domain(statement: &Statement) -> bool {
     )
 }
 
-pub(super) fn requires_existing_domain(statement: &Statement) -> bool {
+pub(in crate::application) fn requires_existing_domain(statement: &Statement) -> bool {
     !matches!(
         statement,
-        Statement::CreateDomain(_)
+        Statement::AlterCluster(_)
+            | Statement::CreateDomain(_)
             | Statement::CreateUser(_)
             | Statement::Backup(_)
             | Statement::Restore(_)
@@ -50,7 +57,7 @@ pub(super) fn requires_existing_domain(statement: &Statement) -> bool {
     )
 }
 
-pub(super) fn requires_leader(statement: &Statement) -> bool {
+pub(in crate::application) fn requires_leader(statement: &Statement) -> bool {
     !matches!(
         statement,
         Statement::ShowClusterStatus(_)
@@ -84,11 +91,12 @@ pub(super) fn requires_leader(statement: &Statement) -> bool {
     )
 }
 
-pub(super) fn is_persistent_statement(statement: &Statement) -> bool {
+pub(in crate::application) fn is_persistent_statement(statement: &Statement) -> bool {
     statement.is_model_mutation()
         || matches!(
             statement,
-            Statement::CreateDomain(_)
+            Statement::AlterCluster(_)
+                | Statement::CreateDomain(_)
                 | Statement::AlterDomain(_)
                 | Statement::CreateUser(_)
                 | Statement::CreateResource(_)
@@ -103,7 +111,6 @@ pub(super) fn is_persistent_statement(statement: &Statement) -> bool {
                 | Statement::Backup(_)
         )
 }
-
 #[cfg(test)]
 #[cfg_attr(
     nervix_lint,
@@ -115,8 +122,13 @@ mod tests {
     //! - **Depends on.** The routing decisions and semantic statement constructors.
     //! - **Must not know.** Sessions, storage or runtime execution.
 
+    use std::time::Duration;
+
     use meticulous::ResultExt as _;
-    use nervix_models::{ClientName, DescribeClient, DescribeCluster};
+    use nervix_models::{
+        AlterCluster, ClientName, ClusterParameterChange, ClusterParameterUpdates, DescribeClient,
+        DescribeCluster,
+    };
 
     use super::*;
 
@@ -138,5 +150,18 @@ mod tests {
         assert!(!requires_existing_domain(&statement));
         assert!(!requires_leader(&statement));
         assert!(!is_persistent_statement(&statement));
+    }
+
+    #[test]
+    fn parameter_changes_use_durable_cluster_admission() {
+        let parameters = ClusterParameterUpdates::try_from(vec![
+            ClusterParameterChange::NodeUnavailabilityTimeout(Duration::from_secs(15)),
+        ])
+        .assured("a positive timeout is a valid cluster parameter change");
+        let statement = Statement::AlterCluster(AlterCluster { parameters });
+        assert!(!requires_request_domain(&statement));
+        assert!(!requires_existing_domain(&statement));
+        assert!(requires_leader(&statement));
+        assert!(is_persistent_statement(&statement));
     }
 }
