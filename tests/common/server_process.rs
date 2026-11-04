@@ -174,7 +174,7 @@ pub(crate) enum ServerProcessOption {
     /// can read it.
     Environment { variable: String, value: String },
     /// `--grpc-mode https`, with the session listener on the port a plaintext one would use. The
-    /// node presents the development certificate, which the suite's clients trust.
+    /// explicitly provisioned development certificate is trusted by the suite's clients.
     GrpcTls,
 }
 
@@ -242,13 +242,18 @@ impl ServerProcessOption {
                 command.env(variable, value);
             }
             Self::GrpcTls => {
+                let tls_directory = crate::workspace_root().join("tls/dev");
                 command
                     .arg("--grpc-mode")
                     .arg("https")
                     .arg("--grpc-https-listen-addr")
                     .arg(loopback(grpc_port))
                     .arg("--grpc-https-advertise-addr")
-                    .arg(loopback(grpc_port));
+                    .arg(loopback(grpc_port))
+                    .arg("--grpc-tls-cert")
+                    .arg(tls_directory.join("node.pem"))
+                    .arg("--grpc-tls-key")
+                    .arg(tls_directory.join("node-key.pem"));
             }
         }
     }
