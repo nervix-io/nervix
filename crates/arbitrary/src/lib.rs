@@ -24,6 +24,7 @@
     )
 )]
 
+mod alteration;
 mod client;
 mod client_io;
 mod cluster_parameters;

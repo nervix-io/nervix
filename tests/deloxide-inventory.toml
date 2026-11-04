@@ -472,6 +472,7 @@ tags = [
   "@backup_holder_download",
   "@snapshot_receive_admission",
   "@session_shutdown_ending",
+  "@session_shutdown_unread",
 ]
 target = "test:scenarios"
 
@@ -1076,6 +1077,16 @@ id = "scenario.session-shutdown-ending-admitted-command"
 invariant = "A native session whose admitted command still runs when its node stops receives SessionEnding with reason ServerShuttingDown, and its call ends with status OK before the command or the shutdown deadline ends."
 invocation = "scenarios"
 scenario = "A native session whose admitted command still runs is told its node is shutting down before its call ends"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A real unread native Exchange with no HTTP/2 response credit fills the session's control lane, and a test-only observer sees accept_frame actually wait for reply capacity before the serving node stops. The session's in-flight and ending locks run during admission shutdown. The observer, transport flow control, listener join and connection cut are untracked."
+examples = 2
+feature = "tests/features/runtime/session_protocol.feature"
+id = "scenario.session-shutdown-unread"
+invariant = "An unread native client's connection is cut after the two-second grace, the node stops within its deadline, admission completes and that launch logs its connection cut, on one and three nodes."
+invocation = "scenarios"
+scenario = "A native client reading nothing cannot hold a node stop past the connection grace period"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -2102,6 +2113,16 @@ id = "stress.session-shutdown-ending-admitted-command"
 invariant = "A native session whose admitted command still runs when its node stops receives SessionEnding with reason ServerShuttingDown, and its call ends with status OK before the command or the shutdown deadline ends."
 invocation = "stress-scenarios"
 scenario = "A native session whose admitted command still runs is told its node is shutting down before its call ends"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a real native Exchange grants no response credit until a request's production acceptance future waits for room, then its node stops through the session's tracked in-flight and ending locks. The test-only observation, flow control, listener join and cut remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/session_protocol.feature"
+id = "stress.session-shutdown-unread"
+invariant = "An unread native client's connection is cut after the two-second grace, the node stops within its deadline, admission completes and that launch logs its connection cut, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "A native client reading nothing cannot hold a node stop past the connection grace period"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -3716,6 +3737,8 @@ workloads = [
 [[owner]]
 path = "src/application/session/mod.rs"
 workloads = [
+  "scenario.session-shutdown-unread",
+  "stress.session-shutdown-unread",
   "scenario.session-shutdown-ending",
   "stress.session-shutdown-ending",
   "scenario.session-shutdown-ending-admitted-command",
@@ -3739,6 +3762,8 @@ workloads = [
 [[owner]]
 path = "src/application/session/outbound.rs"
 workloads = [
+  "scenario.session-shutdown-unread",
+  "stress.session-shutdown-unread",
   "scenario.session-shutdown-ending",
   "stress.session-shutdown-ending",
   "scenario.session-shutdown-ending-admitted-command",

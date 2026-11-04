@@ -1961,6 +1961,14 @@ repeats each outstanding command under its execution reference, which joins the 
 returns its retained outcome, and sends again each upload, restore or download whose call did not
 answer.
 
+The shutdown outlines in `session_protocol.feature` verify both client observations on one and
+three nodes. Reading clients receive their ending and an `OK` end of call, including while an
+admitted command still runs. The unread-client outline first establishes an actual wait for
+response capacity, then measures the connection's ending from the stop request, requires the
+grace-period cut log from that launch and checks that admission completed within the shutdown
+deadline. [Integration Test Lifecycle](./integration-test-lifecycle.md#scenario-driven-stops)
+owns the harness observations and their diagnostic scope.
+
 **Forced ending.** A repeated signal, an expired shutdown deadline, `SIGKILL`, or a crash ends the
 connection without warning. A command whose reply was not received may or may not have been
 admitted, and the client cannot tell which from the connection. It repeats the command under the
