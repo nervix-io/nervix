@@ -13,7 +13,7 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{ClientIngestMode, ClientProducerIngestor};
+use nervix_models::{ClientIngestMode, ClientProducerIngestor, ClientProducerIngestorChange};
 
 use super::delivery::suspend_only_quiesce_clause;
 use crate::{
@@ -47,5 +47,16 @@ pub(super) fn producer_body<'src>()
         .then(mode())
         .then_ignore(suspend_only_quiesce_clause())
         .map(|(schema, mode)| ClientProducerIngestor { schema, mode })
+        .boxed()
+}
+
+/// `SET MODE`: the one part of a `CLIENT PRODUCER` body beside its schema.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], ClientProducerIngestorChange, extra::Err<ParseError<'src>>> + Clone
+{
+    kw(Identifier::Set)
+        .ignore_then(kw(Identifier::Mode))
+        .ignore_then(mode())
+        .map(ClientProducerIngestorChange::Mode)
         .boxed()
 }

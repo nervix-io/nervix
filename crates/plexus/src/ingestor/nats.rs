@@ -16,7 +16,8 @@
 use chumsky::prelude::*;
 use nervix_models::{
     NatsConsumerName, NatsIngestMode, NatsQueueGroupName, NatsStreamIngestMode, NatsStreamIngestor,
-    NatsStreamName, NatsSubjectIngestor, NatsSubjectName,
+    NatsStreamIngestorChange, NatsStreamName, NatsSubjectIngestor, NatsSubjectIngestorChange,
+    NatsSubjectName,
 };
 
 use super::delivery::{
@@ -61,6 +62,29 @@ pub(super) fn subject_body<'src>()
 /// <n> … ON QUIESCE SUSPEND|BUFFER …|DROP`.
 pub(super) fn stream_body<'src>()
 -> impl Parser<'src, &'src [Token], NatsStreamIngestor, extra::Err<ParseError<'src>>> + Clone {
+    client_ref()
+        .then_ignore(kw(Identifier::Stream))
+        .then(external_name::<NatsStreamName>())
+        .then_ignore(kw(Identifier::Consumer))
+        .then(external_name::<NatsConsumerName>())
+        .then_ignore(kw(Identifier::Mode))
+        .then(stream_mode())
+        .then(flexible_quiesce_clause())
+        .map(
+            |((((client, stream), consumer), mode), quiesce)| NatsStreamIngestor {
+                client,
+                stream,
+                consumer,
+                mode,
+                quiesce,
+            },
+        )
+        .boxed()
+}
+
+/// `ACK SEQUENTIAL …|ACK PARALLEL MAX <n> …`: how a `NATS STREAM` source settles each delivery.
+fn stream_mode<'src>()
+-> impl Parser<'src, &'src [Token], NatsStreamIngestMode, extra::Err<ParseError<'src>>> + Clone {
     let sequential = ack_sequential().map(
         |SequentialAck {
              timeout,
@@ -83,23 +107,42 @@ pub(super) fn stream_body<'src>()
             retry_policy,
         },
     );
-    client_ref()
-        .then_ignore(kw(Identifier::Stream))
-        .then(external_name::<NatsStreamName>())
-        .then_ignore(kw(Identifier::Consumer))
-        .then(external_name::<NatsConsumerName>())
-        .then_ignore(kw(Identifier::Mode))
-        .then(choice((parallel, sequential)))
-        .then(flexible_quiesce_clause())
-        .map(
-            |((((client, stream), consumer), mode), quiesce)| NatsStreamIngestor {
-                client,
-                stream,
-                consumer,
-                mode,
-                quiesce,
-            },
-        )
+    choice((parallel, sequential))
+}
+
+/// `SET SUBJECT`, `SET QUEUE GROUP` or `SET MODE`: one part of a `NATS SUBJECT` body.
+pub(super) fn subject_change<'src>()
+-> impl Parser<'src, &'src [Token], NatsSubjectIngestorChange, extra::Err<ParseError<'src>>> + Clone
+{
+    let subject = kw(Identifier::Subject)
+        .ignore_then(external_name::<NatsSubjectName>())
+        .map(NatsSubjectIngestorChange::Subject);
+    let group = kw_phrase2(Identifier::Queue, Identifier::Group)
+        .ignore_then(external_name::<NatsQueueGroupName>())
+        .map(NatsSubjectIngestorChange::QueueGroup);
+    let mode = kw(Identifier::Mode)
+        .ignore_then(no_ack().to(NatsIngestMode::NoAck))
+        .map(NatsSubjectIngestorChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((subject, group, mode)))
+        .boxed()
+}
+
+/// `SET STREAM`, `SET CONSUMER` or `SET MODE`: one part of a `NATS STREAM` body.
+pub(super) fn stream_change<'src>()
+-> impl Parser<'src, &'src [Token], NatsStreamIngestorChange, extra::Err<ParseError<'src>>> + Clone
+{
+    let stream = kw(Identifier::Stream)
+        .ignore_then(external_name::<NatsStreamName>())
+        .map(NatsStreamIngestorChange::Stream);
+    let consumer = kw(Identifier::Consumer)
+        .ignore_then(external_name::<NatsConsumerName>())
+        .map(NatsStreamIngestorChange::Consumer);
+    let mode = kw(Identifier::Mode)
+        .ignore_then(stream_mode())
+        .map(NatsStreamIngestorChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((stream, consumer, mode)))
         .boxed()
 }
 

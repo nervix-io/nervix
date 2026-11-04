@@ -16,7 +16,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -2077,15 +2077,26 @@ impl CreateIngestor {
     }
 
     /// Applies the operations of an alteration of a transport's pair in order.
-    pub(crate) fn apply_transport_operations<Operation>(
+    pub(crate) fn apply_transport_operations<Source>(
         &mut self,
-        operations: &[Operation],
+        operations: &[AlterTransportIngestorOperation<Source>],
     ) -> error_stack::Result<(), AlterIngestorError>
     where
-        Operation: crate::connector::TransportIngestorOperation,
+        Source: crate::connector::AlteredIngestorEntity,
     {
         for operation in operations {
-            operation.apply_to(self)?;
+            match operation {
+                AlterTransportIngestorOperation::Ingestor(operation) => {
+                    self.apply_operation(operation)?;
+                }
+                AlterTransportIngestorOperation::SetDecodeUsing { codec } => {
+                    let held = self
+                        .input
+                        .codec_mut()
+                        .verified(crate::connector::ALTERED_PAIR_CHECKED);
+                    *held = codec.clone();
+                }
+            }
         }
         Ok(())
     }
@@ -2115,6 +2126,20 @@ impl CreateIngestor {
             AlterIngestorOperation::SetSource { source } => {
                 source.set_into(&mut self.input);
             }
+            AlterIngestorOperation::Change { change } => {
+                crate::IngestorEntityChange::apply_to(
+                    change,
+                    Source::entity_of_mut(&mut self.input),
+                )?;
+            }
+            AlterIngestorOperation::SetClient { client } => {
+                let Some(held) = Source::client_of_mut(&mut self.input) else {
+                    return Err(Report::new(AlterIngestorError::ClientUnsupported {
+                        kind: Source::KIND,
+                    }));
+                };
+                *held = client.clone();
+            }
             AlterIngestorOperation::SetQuiesce { quiesce } => {
                 Source::set_quiesce_of(&mut self.input, quiesce.clone())?;
             }
@@ -2143,6 +2168,15 @@ impl CreateIngestor {
             AlterIngestorOperation::ReplaceRoute { route } => {
                 let index = self.unique_route_index(&route.relay)?;
                 self.output_routes.routes[index] = route.clone();
+            }
+            AlterIngestorOperation::AlterRoute { relay, alteration } => {
+                let index = self.unique_route_index(relay)?;
+                self.output_routes.routes[index]
+                    .construction
+                    .apply_alteration(alteration)
+                    .change_context(AlterIngestorError::RouteConstruction {
+                        relay: relay.clone(),
+                    })?;
             }
             AlterIngestorOperation::SetGeneralError { policy } => {
                 self.general_error_policy = policy.clone();
@@ -2193,21 +2227,52 @@ impl AlterIngestor {
 }
 
 /// One operation every ingestor accepts, whose `SET FROM` states a source of the entity
-/// `Source`.
+/// `Source` and whose changes are that entity's own.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub enum AlterIngestorOperation<Source> {
-    SetSource { source: Source },
-    SetQuiesce { quiesce: IngestQuiesceMode },
-    SetTimestamp { source: IngestTimestampSource },
+pub enum AlterIngestorOperation<Source: crate::IngestorEntityModel> {
+    SetSource {
+        source: Source,
+    },
+    /// `SET MODE`, `SET <locator>`, `SET <option>` or `DROP <option>`, as the entity's own grammar
+    /// writes it, changing that part of the body and leaving the rest as it was.
+    Change {
+        change: Source::Change,
+    },
+    /// `SET CLIENT <client>`: the client the source reads through.
+    SetClient {
+        client: ClientName,
+    },
+    SetQuiesce {
+        quiesce: IngestQuiesceMode,
+    },
+    SetTimestamp {
+        source: IngestTimestampSource,
+    },
     DropTimestamp,
-    SetFilterWhere { where_clause: crate::Expression },
+    SetFilterWhere {
+        where_clause: crate::Expression,
+    },
     DropFilterWhere,
-    AddRoute { route: ProcessorOutput },
-    DropRoute { relay: RelayName },
-    ReplaceRoute { route: ProcessorOutput },
-    SetGeneralError { policy: GeneralErrorPolicy },
+    AddRoute {
+        route: ProcessorOutput,
+    },
+    DropRoute {
+        relay: RelayName,
+    },
+    ReplaceRoute {
+        route: ProcessorOutput,
+    },
+    /// `ALTER ROUTE TO <relay> <alteration>`: changes the construction of the one route to `relay`
+    /// where it stands.
+    AlterRoute {
+        relay: RelayName,
+        alteration: crate::ConstructionAlteration,
+    },
+    SetGeneralError {
+        policy: GeneralErrorPolicy,
+    },
 }
 
 /// One operation of an ingestor that reads a transport: an operation every ingestor accepts, or
@@ -2215,7 +2280,7 @@ pub enum AlterIngestorOperation<Source> {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub enum AlterTransportIngestorOperation<Source> {
+pub enum AlterTransportIngestorOperation<Source: crate::IngestorEntityModel> {
     /// Boxed because a shared operation can carry a whole route, which would otherwise size every
     /// codec operation like one.
     Ingestor(Box<AlterIngestorOperation<Source>>),
@@ -2224,41 +2289,11 @@ pub enum AlterTransportIngestorOperation<Source> {
     },
 }
 
-impl<Source> From<AlterIngestorOperation<Source>> for AlterTransportIngestorOperation<Source> {
+impl<Source: crate::IngestorEntityModel> From<AlterIngestorOperation<Source>>
+    for AlterTransportIngestorOperation<Source>
+{
     fn from(operation: AlterIngestorOperation<Source>) -> Self {
         Self::Ingestor(Box::new(operation))
-    }
-}
-
-impl<Source> crate::connector::TransportIngestorOperation
-    for AlterTransportIngestorOperation<Source>
-where
-    Source: crate::connector::AlteredIngestorEntity + crate::canonical::IngestorBodyPlexus,
-{
-    fn apply_to(
-        &self,
-        ingestor: &mut CreateIngestor,
-    ) -> error_stack::Result<(), AlterIngestorError> {
-        match self {
-            Self::Ingestor(operation) => ingestor.apply_operation(operation)?,
-            Self::SetDecodeUsing { codec } => {
-                let held = ingestor
-                    .input
-                    .codec_mut()
-                    .verified(crate::connector::ALTERED_PAIR_CHECKED);
-                *held = codec.clone();
-            }
-        }
-        Ok(())
-    }
-
-    fn to_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
-        match self {
-            Self::Ingestor(operation) => {
-                crate::canonical::alter_ingestor_operation_to_plexus(operation)
-            }
-            Self::SetDecodeUsing { codec } => Ok(format!("SET DECODE USING {}", codec.as_str())),
-        }
     }
 }
 
@@ -2297,6 +2332,15 @@ pub enum AlterIngestorError {
         kind: crate::IngestorEntityKind,
         mode: &'static str,
     },
+    #[error("{kind} ingestors read through no client, so SET CLIENT has none to change")]
+    ClientUnsupported { kind: crate::IngestorEntityKind },
+    #[error("the stored {kind} ingestor writes no {option}, so there is no {option} to drop")]
+    OptionNotWritten {
+        kind: crate::IngestorEntityKind,
+        option: &'static str,
+    },
+    #[error("ALTER ROUTE TO `{relay}` cannot change that route's construction")]
+    RouteConstruction { relay: RelayName },
 }
 
 #[derive(

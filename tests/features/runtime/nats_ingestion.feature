@@ -518,6 +518,96 @@ Feature: NATS ingestion
       | 1            |
       | 3            |
 
+  # An in-place alteration writes only the parts it names: the ingestor moves to another stream and
+  # another delivery mode and keeps its consumer and quiesce mode. Its next deliveries come from the
+  # consumer of the stream it now names, and the consumer it left keeps its position, with what is
+  # published to its stream afterwards pending for it.
+  @nats_stream_ingestion @nats_stream_alter_in_place
+  Scenario Outline: ALTER NATS STREAM INGESTOR changes its stream and delivery mode in place
+    Given NATS is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And NATS JetStream stream "first_{{test_id}}" exists for subject "first_{{test_id}}"
+    And NATS JetStream durable pull consumer "nervix_{{test_id}}" exists on stream "first_{{test_id}}"
+    And NATS JetStream stream "second_{{test_id}}" exists for subject "second_{{test_id}}"
+    And NATS JetStream durable pull consumer "nervix_{{test_id}}" exists on stream "second_{{test_id}}"
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE NATS CLIENT nats_main CONFIG {
+        'addr' = '{{nats_addr}}'
+      };
+      CREATE NATS STREAM INGESTOR nats_orders
+        FROM nats_main STREAM 'first_{{test_id}}' CONSUMER 'nervix_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
+      START;
+      """
+    And NATS JetStream message is published to subject "first_{{test_id}}"
+      """
+      {"user_id":1}
+      """
+    Then within "30s" the relay subscription receives payloads
+      """
+      "user_id":1
+      """
+    And within "30s" NATS JetStream consumer "nervix_{{test_id}}" of stream "first_{{test_id}}" acknowledges through stream sequence 1 with nothing pending
+    When these Plexus commands are executed
+      """
+      ALTER NATS STREAM INGESTOR nats_orders
+        SET STREAM 'second_{{test_id}}',
+        SET MODE ACK PARALLEL MAX 4 BATCH TIMEOUT 50ms ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 1s;
+      """
+    And these Plexus commands are executed
+      """
+      SHOW CREATE INGESTOR nats_orders;
+      """
+    Then the last command output contains
+      """
+      STREAM 'second_{{test_id}}' CONSUMER 'nervix_{{test_id}}' MODE ACK PARALLEL MAX 4 BATCH TIMEOUT 50ms ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 1s
+      """
+    And the last command output contains
+      """
+      ON QUIESCE SUSPEND
+      """
+    When NATS JetStream message is published to subject "second_{{test_id}}"
+      """
+      {"user_id":2}
+      """
+    Then within "30s" the relay subscription receives payloads
+      """
+      "user_id":2
+      """
+    And within "30s" NATS JetStream consumer "nervix_{{test_id}}" of stream "second_{{test_id}}" acknowledges through stream sequence 1 with nothing pending
+    When NATS JetStream message is published to subject "first_{{test_id}}"
+      """
+      {"user_id":3}
+      """
+    And NATS JetStream message is published to subject "first_{{test_id}}"
+      """
+      {"user_id":4}
+      """
+    Then within "10s" NATS JetStream consumer "nervix_{{test_id}}" of stream "first_{{test_id}}" holds 2 messages for delivery and none awaiting acknowledgement
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   # The consumer's position lives in the stream, so an ingestor that moves to another node when its
   # owner stops resumes after the last message it acknowledged: nothing it acknowledged is delivered
   # again and nothing published while it moved is lost.

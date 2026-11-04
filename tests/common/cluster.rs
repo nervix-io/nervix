@@ -112,6 +112,7 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, client_async, connect_async,
     tungstenite::{Message as WsMessage, client::IntoClientRequest, http::HeaderValue},
 };
+use tracing::Instrument as _;
 use uuid::Uuid;
 use zeromq::{PullSocket, PushSocket, Socket, SocketRecv, SocketSend};
 
@@ -4507,11 +4508,12 @@ impl NodeHandle {
         let (stop_clock, ended) = NodeStopClock::start();
         self.shutdown = Some(shutdown);
         self.stop_clock = Some(stop_clock);
+        let node_log = tracing::info_span!("scenario_node", grpc_port = self.spec.grpc_port);
         self.task = OwnedNodeTask::spawn(async move {
             let _live = live;
             // Dropped when this task ends, however it ends, which records when that was.
             let _ended = ended;
-            application.run().await
+            application.run().instrument(node_log).await
         });
         Ok(())
     }

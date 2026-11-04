@@ -40,8 +40,10 @@ select another connector or entity. Nervix references remain typed identifiers, 
 locators preserve the text admitted by their entity's name rule.
 
 An ingestor or emitter alteration repeats its stored connector and entity. `SET FROM` or `SET TO`
-is parsed as that entity's complete replacement body, and applying the alteration validates the
-stored kind before publishing any operation. Changing the connector/entity pair requires dropping
+is parsed as that entity's complete replacement body, and an operation that changes one part of
+the body, such as `SET <option>`, `DROP <option>` or `SET MODE`, is parsed by the entity's own
+grammar into that entity's typed change. Applying the alteration validates the stored kind before
+publishing any operation. Changing the connector/entity pair requires dropping
 and creating the boundary node. Addressing uses the node's ordinary identity instead:
 `DESCRIBE INGESTOR`, `DROP EMITTER`, `SHOW CREATE CLIENT`, and placement selections name the Model
 kind and name without repeating a connector/entity head.

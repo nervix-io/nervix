@@ -145,8 +145,9 @@ The Plexus forms for error routes are in [Message Errors](./processors.md#messag
 
 Emitter ALTER validation belongs to the vocabulary: its typed declared-kind and replacement-kind
 failures retain both connector/entity kinds and render their Plexus phrases. The parser constructs
-only each destination's own publishing-policy enum, so no registry or planner failure represents an
-impossible entity/policy pair. Reference validation still rejects a configured client of the wrong
+only each destination's own change enum, whose mode change holds that destination's own
+publishing-policy enum, so no registry or planner failure represents an impossible entity/policy
+pair. Reference validation still rejects a configured client of the wrong
 kind; Iceberg reports its declared object-store alternatives and the actual resolved client kind.
 
 ## The Report Model
@@ -449,7 +450,19 @@ another connector and entity than the stored ingestor reads is refused with both
 its message renders as their phrases, such as `the stored ingestor reads HTTP ENDPOINT, so ALTER
 KAFKA TOPIC INGESTOR cannot alter it`. A Pulsar `SET START AT` on a provisioned subscription is a
 typed vocabulary alteration refusal; the existing definition and broker cursor are unchanged. A
-Pulsar subscription `TYPE` that reads through one consumer with more than one instance is the
+`DROP` of an option the stored Model does not write is refused with the entity's kind and the
+option's keywords in typed fields, and `SET CLIENT` on an entity that names no client with its
+kind. An envelope change is checked by the envelope itself and reported as a typed
+`EnvelopeDeclarationError` beneath the alteration's envelope context: a clause or properties the
+entity does not declare, a `DROP` of a clause or of properties the envelope does not write, an empty
+`SET PROPERTIES`, or a result whose keys the declaration does not admit, the envelope left as it
+was. A construction change that does not apply, such as a
+`DROP SET` of a field the construction writes twice or a `DROP INVOKE` past its last call, is
+reported as a typed `ConstructionAlterationError` beneath the alteration's own context, which names
+the route's relay for an ingestor. An emitter's `SET ON CONFLICT` keeps the destination's typed
+conflict-clause error beneath a context naming its entity, since the clause is checked against the
+stored `VALUES` mapping where the alteration applies.
+A Pulsar subscription `TYPE` that reads through one consumer with more than one instance is the
 registry's typed `ConnectorDeclarationIssue::PulsarSingleConsumerType`, which `CREATE` and every
 alteration reach through the same source validation, so `SET TYPE` and `SET FROM` also leave the
 stored definition unchanged.

@@ -1080,4 +1080,69 @@ mod tests {
             ));
         }
     }
+
+    /// What nats-server 2.11 and every Nervix NATS name refuse beyond the client's own check of a
+    /// JetStream API name: a path separator, a control character or any other whitespace, and a
+    /// name longer than the server's `JSMaxNameLen` of 255 bytes.
+    fn refused_beyond_the_client(name: &str) -> bool {
+        if name.len() > 255 {
+            return true;
+        }
+        for ch in name.chars() {
+            if matches!(ch, '/' | '\\') || ch.is_control() || ch.is_whitespace() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The rule Nervix holds `STREAM` and `CONSUMER` to, tried differentially against the client's
+    /// refusal of a JetStream API name, which the consumer lookup applies to both names before it
+    /// sends anything. Every ASCII character is tried alone and inside a name, beside characters
+    /// beyond ASCII the two rules could tell apart and both sides of the length limit: Nervix
+    /// refuses every name the client refuses, and beyond it exactly what the server's rule adds.
+    #[nervix_primitives::test]
+    async fn the_jetstream_name_rule_is_the_clients_refusal_with_the_servers_additions() {
+        let server = ScriptedServer::start().await;
+        let config = vec![ClientConfigEntry {
+            key: "addr".to_string(),
+            value: server.addr(),
+        }];
+        let (lost, _connection_lost) = mpsc::channel(PENDING_LOSS_SIGNALS);
+        let (client, _connection) = join(
+            NatsSubjectIngestorPlan::client_from_config(&Executor::default(), &config, lost),
+            server.accept(1024),
+        )
+        .await;
+        let context =
+            async_nats::jetstream::new(client.assured("the scripted server greets the client"));
+        let beyond_ascii = [
+            '\u{85}', '\u{a0}', '\u{200b}', '\u{2028}', '\u{3000}', '\u{feff}', 'é', '😀',
+        ];
+        let mut names = vec![
+            String::new(),
+            "a".repeat(255),
+            "a".repeat(256),
+            format!("{}é", "a".repeat(253)),
+            format!("{}é", "a".repeat(254)),
+        ];
+        for ch in (0..=127_u8).map(char::from).chain(beyond_ascii) {
+            names.push(ch.to_string());
+            names.push(format!("orders{ch}eu"));
+        }
+        for name in names {
+            let client_accepts = context.get_stream_no_info(&name).await.is_ok();
+            let admitted = client_accepts && !refused_beyond_the_client(&name);
+            assert_eq!(
+                NatsStreamName::try_from(name.as_str()).is_ok(),
+                admitted,
+                "stream name {name:?}"
+            );
+            assert_eq!(
+                NatsConsumerName::try_from(name.as_str()).is_ok(),
+                admitted,
+                "consumer name {name:?}"
+            );
+        }
+    }
 }

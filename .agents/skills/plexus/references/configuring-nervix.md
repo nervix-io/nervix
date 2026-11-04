@@ -354,8 +354,9 @@ current connection, retry and deadline limits.
   required `NAMESPACE` names the catalog namespace independently of the Nervix domain; provision
   each of its case-preserving dot-separated levels before starting the emitter. Until the catalog
   holds the namespace and the table, the emitter retries its open and `DESCRIBE EMITTER` names the
-  namespace or the table it lacks. Move an emitter to another namespace with `SET TO`, restating
-  its complete destination with the new `NAMESPACE` and that table's `LOCATION`. A
+  namespace or the table it lacks. Move an emitter to another namespace with
+  `SET NAMESPACE '...', SET LOCATION '...'` in one `ALTER`, naming that table's `LOCATION`, or with
+  `SET TO` restating its complete destination. A
   `DATETIME`, at the top level or inside a `VEC` or `ARRAY`, is written at the containing
   microsecond and needs a `timestamptz` column, not `timestamptz_ns`. A commit writes each mapped
   column into the table column of its name, in any `VALUES` order, and a null into each optional
@@ -462,9 +463,10 @@ current connection, retry and deadline limits.
   `metadata.correlation_data` explicitly before using it as text.
 - An `MQTT TOPIC` emitter writes its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, `NO ACK` only at
   `QOS 0` and `ACK` only at `QOS 1` or `QOS 2`. `SET MODE` stays within the written quality of
-  service, and `SET TO` changes it. Read `Emitters` → `MQTT` for what each level completes on and
-  for the persistent session a new client cannot take over. Use that section for `RETAIN`, typed
-  publish `PROPERTIES` and ordered, repeated user properties written with `write_header`.
+  service; `SET QOS` changes it, beside `SET MODE` in the same `ALTER` when it crosses `QOS 0`, and
+  `SET TO` changes both. Read `Emitters` → `MQTT` for what each level completes on and for the
+  persistent session a new client cannot take over. Use that section for `RETAIN`, typed publish
+  `PROPERTIES` and ordered, repeated user properties written with `write_header`.
 - An `MQTT CLIENT`'s `addr` is `mqtt://` or `mqtts://`, a host and a port, with no credentials,
   path or query: write `username` and `password` (redacted on inspection), `keep_alive_ms` in
   whole seconds and the source admission bound `max_packet_size` as their own keys, checked against
@@ -510,8 +512,10 @@ current connection, retry and deadline limits.
 - A `NATS STREAM` ingestor reads a durable pull consumer an operator provisioned:
   `STREAM '<stream>' CONSUMER '<consumer>'` with `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL`, and
   `SUSPEND`, `BUFFER` or `DROP` quiesce. Nervix creates neither the stream nor the consumer, and it
-  refuses a push consumer and one whose acknowledgement policy is not explicit. Read `Ingestors` →
-  `NATS` for redelivery, `MaxRequestBatch`, `MaxRequestExpires` and `AckWait`.
+  refuses a push consumer and one whose acknowledgement policy is not explicit. `SET STREAM` and
+  `SET CONSUMER` move it in place, and it continues from the position of the consumer it then
+  names. Read `Ingestors` → `NATS` for redelivery, `MaxRequestBatch`, `MaxRequestExpires` and
+  `AckWait`.
 - A `PULSAR TOPIC` emitter's `TIMESTAMP <expression>` is each message's event time: an exact,
   non-null, non-sensitive `DATETIME`, written as the millisecond that contains it, and a time before
   `1970-01-01T00:00:00.001Z` rejects its record through `ON MESSAGE ERROR`. Its `DELIVER AFTER
