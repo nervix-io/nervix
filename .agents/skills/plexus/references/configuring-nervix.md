@@ -68,6 +68,12 @@ For the CLI's `subscribe` and `domain-clock` shell streams and their line format
 [Command Line Client](https://docs.nervix.io/client-tools-cli.html) directly. Follow the same
 documentation version as the selected index; this client chapter is outside the curated Plexus index.
 
+For browser controls waiting behind commands, lookup replacement and reconnect behavior, read
+[Web Console](https://docs.nervix.io/client-tools-web-console.html#bounded-buffers) and
+[Client Session Protocol](https://docs.nervix.io/client-session-protocol.html#restoration-and-bounded-consumers)
+directly. Follow the same documentation version as the selected index; these client chapters are
+outside the curated Plexus index.
+
 Prefer the narrow indexed topic over an old copied snippet. Do not leave the immutable version
 selected by the documentation index when following related material.
 

@@ -2242,6 +2242,16 @@ act on it, so a frame comes before every connection the page makes because of it
 `the web console never held two session connections at once` tells a reconnect of the console's one
 session from a second session without counting the leader notices, which every reconnect repeats.
 
+The request-window regression also installs a frame observer before the console's scripts. It
+retains at most 1,024 binary session frames and 4 MiB, failing if the observation is incomplete.
+The public codecs recover sent request identities and terminal replies, including the final part
+of a transferred reply. Observations reserve their position before copying outgoing binary Blobs
+asynchronously, so a reply cannot pass its request in the record. Its message listener precedes the
+console's: a browser microtask between listeners may otherwise send the next request before the
+observer accounts for the reply that freed its place. The fixture waits for the input's actual
+scheduled callbacks and their continuations rather than guessing the completion debounce delay. It changes neither frames nor
+their delivery and introduces no product deadline or scenario-admission rule.
+
 The harness reads from those frames which node the nodes reported as the leader on the page's own
 connections. The leader opens every console session it serves by reporting that it leads; any other
 node ends a console session with a redirect naming the leader's web console, and answers a command,

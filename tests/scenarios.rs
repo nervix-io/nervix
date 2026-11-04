@@ -247,6 +247,7 @@ mod session_protocol;
 mod session_tls;
 mod standalone_transaction;
 mod web_console_connections;
+mod web_console_request_window;
 mod websocket_lifecycle;
 
 const SCENARIOS_PATH: &str = "tests/features";
