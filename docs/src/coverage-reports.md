@@ -73,6 +73,9 @@ separate Python interpreters, so each supervisor retains ownership of its own ch
 Only reports the artifact actually exports are inputs; running a focused coverage recipe does not
 register it in CI by itself. Focused Backup, Visual Create, client and runtime recipes export local
 ordinary reports for `coverage-patch`, using the same normalization as the workspace merge.
+`just coverage-web-console <output> <test arguments...>` measures selected native console owner
+tests, preserving each argument. It does not instrument the browser asset; public console
+scenarios execute that asset separately and measure the native server and harness they exercise.
 `just coverage-otel` appends the OTEL and related connector-admission scenarios to current-source
 ordinary profiles, with the browser build and configured ORT environment. It exports a local
 focused report, rather than a CI merge input. Start a new source generation with

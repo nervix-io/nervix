@@ -592,6 +592,15 @@ because a client recovers from both the same way.
 from the durable record of an earlier attempt with the same reference, `Recovered`. A recovered
 failure is the same failure: its message and diagnostics are the ones retained when it happened.
 
+Every `OutcomeUnknown` cause permits a repeat on the existing open session. `LeadershipLost` can
+mean an unconfirmed lease on the node that still leads; it does not by itself identify another
+endpoint. The Rust client and web console back off and repeat there under the same execution
+reference. A subsequent redirect, a session-ending event, or a transport ending supplies the reason
+to reconnect. The console starts its per-command wait at 250 milliseconds, doubles it up to five
+seconds while the answer remains unknown, and keeps processing session messages during the wait.
+Held commands retain their issue order, and the selected domain, clock and subscription tabs keep
+their existing attachments. Only a terminal disposition is rendered as the command's outcome.
+
 For a WASM state reset, loss of Raft leadership during generation publication leaves the durable
 step applying under its original reference. The request can wait for recovery or answer
 `OutcomeUnknown` if its coordinator no longer leads; it does not retain a failed outcome merely
@@ -1070,7 +1079,8 @@ stateDiagram-v2
     Connecting --> Failed: retry deadline passed
     Open --> Open: reply routed by request identity
     Open --> Redirecting: LeaderRedirect names the leader's endpoint
-    Open --> AwaitingLeader: LeaderRedirect names no endpoint, or OutcomeUnknown
+    Open --> AwaitingLeader: LeaderRedirect names no endpoint
+    Open --> Open: OutcomeUnknown, back off and repeat on this session
     AwaitingLeader --> Open: back off, then repeat under the same reference
     Redirecting --> Restoring: new session on the leader
     Open --> Lost: transport failure, session ending, or protocol violation

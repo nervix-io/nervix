@@ -250,6 +250,7 @@ mod restarted_voter;
 mod session_protocol;
 mod session_tls;
 mod standalone_transaction;
+mod web_console_command_retry;
 mod web_console_connections;
 mod web_console_request_window;
 mod websocket_lifecycle;
@@ -437,6 +438,8 @@ struct BlockedConsensusConnectivity {
 
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
+    console_before_command_retry:
+        Option<crate::common::console_connections::ConsoleSetupObservation>,
     mqtt_envelope_observer: Option<mqtt_publish_properties::Observer>,
     mqtt_publication_endpoint: Option<mqtt_publish_properties::Endpoint>,
     rabbitmq_envelope_broker:
