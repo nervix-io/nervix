@@ -294,3 +294,179 @@ Feature: CLI public session dispatch
     And within "20s" the CLI clock output has a tick for generation 1 after its state of domain "{{domain}}"
     When the CLI clock process receives Ctrl-C
     Then the CLI clock process exits successfully
+
+  Scenario Outline: The CLI exits with the status of each outcome
+    Given a <cluster_size> node nervix cluster is started
+    And node "node-1" has resource directory "exit_bundle" containing
+      """
+      {
+        "readme.txt": "an upload fixture of the CLI exit statuses\n"
+      }
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI executes "CREATE RESOURCE exit_resource;" on node "{{leader}}"
+    Then the CLI exited with status 0 and printed "created resource 'exit_resource'"
+    When the CLI executes "CREATE RESOURCE exit_resource;" on node "{{leader}}"
+    Then the CLI exited with status 1 and printed "resource 'exit_resource' already exists"
+    When the CLI runs "uncordon-node node-1" on node "{{leader}}"
+    Then the CLI exited with status 0 and printed "uncordoned node 'node-1'"
+    When the CLI runs "cordon-node node-9" on node "{{leader}}"
+    Then the CLI exited with status 1 and printed "error: node 'node-9' is not a raft member"
+    When the CLI runs "subscribe watch missing_relay" on node "{{leader}}"
+    Then the CLI exited with status 1 and printed "error: "
+    When the CLI executes "UPLOAD RESOURCE undeclared_bundle VERSION '{{exit_bundle}}';" on node "{{leader}}"
+    Then the CLI exited with status 1 and printed "upload resource 'undeclared_bundle' failed"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: Ctrl-C cancels a CLI command the leader has not admitted
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given command admission on node "{{leader}}" pauses before proposal
+    When the CLI starts executing "CREATE RESOURCE cancelled_resource;" on node "{{leader}}"
+    Then the command admission pause on node "{{leader}}" is reached
+    When the started CLI receives Ctrl-C
+    Then the started CLI exits with status 130 and prints "cancelled: the command was not admitted, so it changed nothing"
+    When the command admission pause on node "{{leader}}" is released
+    And the CLI executes "CREATE RESOURCE cancelled_resource;" on node "{{leader}}"
+    Then the CLI exited with status 0 and printed "created resource 'cancelled_resource'"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: A CLI command cancelled after admission is uncertain until its execution reference recovers it
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given command execution on node "{{leader}}" pauses after durable admission
+    When the CLI starts executing "CREATE RESOURCE admitted_resource;" on node "{{leader}}"
+    Then the durable command admission pause on node "{{leader}}" is reached
+    When the started CLI receives Ctrl-C
+    Then the started CLI exits with status 3 and prints "outcome: not known yet"
+    And the execution reference the CLI printed is saved as placeholder "admitted_reference"
+    When the durable command admission pause on node "{{leader}}" is released
+    And the CLI executes "CREATE RESOURCE admitted_resource;" under execution reference "{{admitted_reference}}" on node "{{leader}}"
+    Then the CLI exited with status 0 and printed "created resource 'admitted_resource'"
+    When the CLI executes "CREATE RESOURCE admitted_resource;" on node "{{leader}}"
+    Then the CLI exited with status 1 and printed "resource 'admitted_resource' already exists"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: The CLI REPL survives a cancelled and an uncertain command, and running the uncertain one again recovers it
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI REPL is started on node "{{leader}}"
+    Given command admission on node "{{leader}}" pauses before proposal
+    When the CLI REPL runs "CREATE RESOURCE repl_cancelled;"
+    Then the command admission pause on node "{{leader}}" is reached
+    When the CLI REPL receives Ctrl-C
+    Then the CLI REPL eventually displays "cancelled: the command was not admitted, so it changed nothing"
+    When the command admission pause on node "{{leader}}" is released
+    Given command execution on node "{{leader}}" pauses after durable admission
+    When the CLI REPL runs "CREATE RESOURCE repl_admitted;"
+    Then the durable command admission pause on node "{{leader}}" is reached
+    When the CLI REPL receives Ctrl-C
+    Then the CLI REPL eventually displays "outcome: not known yet"
+    When the durable command admission pause on node "{{leader}}" is released
+    And the CLI REPL runs "CREATE RESOURCE repl_admitted;"
+    Then the CLI REPL eventually displays "repeating the uncertain statement under execution reference"
+    And the CLI REPL eventually displays "created resource 'repl_admitted'"
+    When the CLI REPL runs "CREATE RESOURCE repl_cancelled;"
+    Then the CLI REPL eventually displays "created resource 'repl_cancelled'"
+    When the CLI REPL runs "exit"
+    Then the CLI REPL ends successfully
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: The CLI REPL refuses an upload inside a transaction and recovers an uncertain upload by running it again
+    Given a <cluster_size> node nervix cluster is started
+    And node "node-1" has resource directory "repl_bundle" containing
+      """
+      {
+        "readme.txt": "an upload fixture of the CLI REPL\n"
+      }
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE repl_bundle;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI REPL is started on node "{{leader}}"
+    And the CLI REPL runs "BEGIN;"
+    Then the CLI REPL eventually displays "transaction started"
+    When the CLI REPL runs "UPLOAD RESOURCE repl_bundle VERSION '{{repl_bundle}}';"
+    Then the CLI REPL eventually displays "error: client-local commands are not allowed while a transaction is active"
+    When the CLI REPL runs "REVERT;"
+    Then the CLI REPL eventually displays "transaction reverted"
+    Given resource installation on node "{{leader}}" pauses before promotion
+    When the CLI REPL runs "UPLOAD RESOURCE repl_bundle VERSION '{{repl_bundle}}';"
+    Then the resource installation pause on node "{{leader}}" is reached
+    When the CLI REPL receives Ctrl-C
+    Then the CLI REPL eventually displays "upload outcome: not known yet"
+    When the resource installation pause on node "{{leader}}" is released
+    And the CLI REPL runs "UPLOAD RESOURCE repl_bundle VERSION '{{repl_bundle}}';"
+    Then the CLI REPL eventually displays "repeating the uncertain upload under upload identity"
+    And the CLI REPL eventually displays "uploaded resource version 1"
+    When the CLI REPL runs "exit"
+    Then the CLI REPL ends successfully
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: An uncertain CLI upload is recovered by repeating it under its upload identity
+    Given a <cluster_size> node nervix cluster is started
+    And node "node-1" has resource directory "uncertain_bundle" containing
+      """
+      {
+        "readme.txt": "an upload fixture of an uncertain CLI upload\n"
+      }
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE uncertain_bundle;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given resource installation on node "{{leader}}" pauses before promotion
+    When the CLI starts executing "UPLOAD RESOURCE uncertain_bundle VERSION '{{uncertain_bundle}}';" on node "{{leader}}"
+    Then the resource installation pause on node "{{leader}}" is reached
+    When the started CLI receives Ctrl-C
+    Then the started CLI exits with status 3 and prints "upload outcome: not known yet"
+    And the upload identity the CLI printed is saved as placeholder "uncertain_identity"
+    When the resource installation pause on node "{{leader}}" is released
+    And the CLI executes "UPLOAD RESOURCE uncertain_bundle VERSION '{{uncertain_bundle}}';" under upload identity "{{uncertain_identity}}" on node "{{leader}}"
+    Then the CLI exited with status 0 and printed "uploaded resource version 1"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

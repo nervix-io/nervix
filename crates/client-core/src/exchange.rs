@@ -26,10 +26,10 @@ use ahash::{HashMap, HashSet};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
-    self as wire, ClientFrame, DomainInfo, EncodedFrame, Leadership, OpenIngestorDisposition,
-    ProducerId, Reply, ReplyBody, RequestId, RowSchema, ServerFrame, ServerMessage, SessionLimits,
-    SubscribeDisposition, SubscriptionHandle, SubscriptionOpened, TransferAssembly, TransferPart,
-    UnsubscribeDisposition, VerifiedFrame,
+    self as wire, CancelRequest, ClientFrame, ClientMessage, ClientRequest, DomainInfo,
+    EncodedFrame, Leadership, OpenIngestorDisposition, ProducerId, Reply, ReplyBody, RequestId,
+    RowSchema, ServerFrame, ServerMessage, SessionLimits, SubscribeDisposition, SubscriptionHandle,
+    SubscriptionOpened, TransferAssembly, TransferPart, UnsubscribeDisposition, VerifiedFrame,
     grpc::{ClientExchangeCodec, EXCHANGE_PATH},
 };
 use nervix_models::RelayName;
@@ -542,6 +542,27 @@ impl ExchangeRequests {
             reply: registered.reply,
             pending: self.pending.clone(),
         })
+    }
+
+    /// Asks the server to cancel `target`, a request of this exchange that waits for its reply,
+    /// under an identity of the cancellation's own. The server answers the cancellation and ends
+    /// `target` with a terminal reply of its own, which alone decides what became of it, so the
+    /// cancellation's outcome is only given a waiter to arrive at. `None` when the exchange has
+    /// ended, which ends `target`'s wait as well.
+    pub(crate) async fn cancel(&self, target: RequestId) -> Option<PendingRequest> {
+        let cancellation = self.register()?;
+        let message = ClientMessage {
+            request_id: cancellation.request_id,
+            request: ClientRequest::Cancel(CancelRequest { target }),
+        };
+        let frame = message
+            .encode(&SESSION_LIMITS)
+            .assured("a cancellation names one request identity, far within the frame limit");
+        if self.frames.send(frame).await.is_err() {
+            self.pending.lock().close();
+            return None;
+        }
+        Some(cancellation)
     }
 }
 

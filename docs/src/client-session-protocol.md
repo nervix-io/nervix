@@ -970,9 +970,14 @@ that outlives `request_timeout` is the client's only sign that its session may b
 every request still waiting on that session, and the next request opens a new one. While an
 election converges it retries with a delay that starts at 100 milliseconds and doubles up to one
 second. When a call's deadline passes before a command's outcome is known, and the command may have
-been admitted, the call fails as uncertain and names the execution reference. The Rust client, the
-CLI, and the console never send `CancelRequest`: a caller that stops waiting only drops its waiter,
-and the reply, when it comes, is discarded.
+been admitted, the call fails as uncertain and names the execution reference. The console never
+sends `CancelRequest`. The Rust client sends one only for a call made through
+`execute_prepared_with_cancellation`, when its caller cancels the call while the command waits for
+its reply, and it keeps waiting for the command's terminal reply: `RequestCancelled` before
+admission fails the call as cancelled with no effect, and after admission as uncertain under the
+execution reference. The CLI cancels that way when its operator presses Ctrl-C while a command runs;
+see [Interrupting A Statement](./client-tools-cli.md#interrupting-a-statement). Any other caller that
+stops waiting only drops its waiter, and the reply, when it comes, is discarded.
 
 `nervix-cli backup --timeout` sets only each running domain's quiesce timeout; its request and
 retry budgets stay at their defaults, and `--backup-wait-timeout` bounds the overall command wait.
@@ -2177,7 +2182,10 @@ The protocol makes a client's view of its own work explicit rather than inferred
 - **Correlation.** Every reply names the request identity it answers, and every command outcome
   names its execution reference. A client that logs both can pair a reply with the request it sent
   and with every later attempt of the same command. The CLI prints the execution reference of a
-  command whose outcome is unknown, so an operator can see what a later retry will recover.
+  command whose outcome is unknown, and the upload identity of such an upload, and sends it again
+  under that identity when the operator runs the same statement again at the prompt or passes it to
+  `--execution-reference` or `--upload-identity`, so the later attempt recovers the outcome rather
+  than starting another command.
 - **Dispositions and origin.** A command outcome states its disposition, and whether it was executed
   now or recovered from the durable record. `OutcomeUnknown` names its cause, a conflict names what
   differed, and a stale preview names both identities.

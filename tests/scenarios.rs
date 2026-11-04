@@ -204,6 +204,7 @@ use crate::common::{
 };
 
 mod backup;
+mod cli_outcomes;
 mod clickhouse_connections;
 mod client_consumers;
 mod client_producers;
@@ -536,6 +537,8 @@ struct ScenarioWorld {
     cli_clock_process: Option<CliClockProcess>,
     /// The interactive CLI a scenario types into through a pseudo-terminal.
     cli_terminal: Option<CliTerminal>,
+    /// A CLI command a scenario started in the background, to interrupt it or read how it ends.
+    started_cli: Option<cli_outcomes::StartedCli>,
     /// The whole outcome of the last command a named client ran, for assertions that read more
     /// than its message.
     last_client_outcome: Option<ClientCommandOutcome>,
@@ -13173,11 +13176,21 @@ async fn then_command_admission_pause_is_reached(world: &mut ScenarioWorld, node
             }
             return;
         }
-        // A request the active session sent under a name answers only when a later step reads
-        // it, so its pause is awaited on its own.
+        if let Some(started) = world.started_cli.as_mut() {
+            let node_name = crate::common::cluster::node_name(&node_id);
+            started
+                .keeps_running_until(
+                    fault_injection.wait_for_command_admission_pause(&node_name),
+                    "its command reached the admission pause",
+                )
+                .await;
+            return;
+        }
+        // A request the active session sent under a name, or a command typed into the CLI REPL,
+        // answers only when a later step reads it, so its pause is awaited on its own.
         assert!(
-            !world.session_requests.is_empty(),
-            "a background command request or a named session request must be active"
+            !world.session_requests.is_empty() || world.cli_terminal.is_some(),
+            "a background command request, a named session request or the CLI REPL must be active"
         );
         let node_name = crate::common::cluster::node_name(&node_id);
         fault_injection
@@ -13273,15 +13286,28 @@ async fn then_command_durable_admission_pause_is_reached(
     let node_id = expand_placeholders(world, &node_id);
     let node_name = crate::common::cluster::node_name(&node_id);
     let fault_injection = world.fault_injection.clone();
+    if let Some(started) = world.started_cli.as_mut() {
+        let reached = started.keeps_running_until(
+            fault_injection.wait_for_command_durable_admission_pause(&node_name),
+            "its command reached the durable admission pause",
+        );
+        nervix_primitives::time::timeout(Duration::from_secs(30), reached)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("durable command admission pause on '{node_id}' was not reached: {error}")
+            });
+        return;
+    }
+    let repl_waits = world.cli_terminal.is_some();
     let task = world.background_command_result.as_mut();
     assert!(
-        task.is_some() || !world.session_requests.is_empty(),
-        "a background command request or a named session request must be active"
+        task.is_some() || !world.session_requests.is_empty() || repl_waits,
+        "a background command request, a named session request or the CLI REPL must be active"
     );
     nervix_primitives::time::timeout(Duration::from_secs(30), async {
         let Some(task) = task else {
-            // A request the active session sent under a name answers only when a later step
-            // reads it, so its pause is awaited on its own.
+            // A request the active session sent under a name, or a command typed into the CLI
+            // REPL, answers only when a later step reads it, so its pause is awaited on its own.
             fault_injection
                 .wait_for_command_durable_admission_pause(&node_name)
                 .await;
@@ -13626,16 +13652,32 @@ async fn given_https_listener_installation_failure(world: &mut ScenarioWorld, no
 async fn then_resource_installation_pause_is_reached(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
     let node_name = crate::common::cluster::node_name(&node_id);
+    let fault_injection = world.fault_injection.clone();
+    if let Some(started) = world.started_cli.as_mut() {
+        let reached = started.keeps_running_until(
+            fault_injection.wait_for_resource_installation_pause(&node_name),
+            "its upload reached the resource installation pause",
+        );
+        nervix_primitives::time::timeout(Duration::from_secs(30), reached)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("resource installation pause on '{node_id}' was not reached: {error}")
+            });
+        return;
+    }
     nervix_primitives::time::timeout(
         Duration::from_secs(30),
-        world
-            .fault_injection
-            .wait_for_resource_installation_pause(&node_name),
+        fault_injection.wait_for_resource_installation_pause(&node_name),
     )
     .await
     .unwrap_or_else(|error| {
         panic!("resource installation pause on '{node_id}' was not reached: {error}")
     });
+    // An upload typed into the CLI REPL holds the REPL until it ends, so reaching the pause is
+    // all this step can observe of it.
+    if world.cli_terminal.is_some() {
+        return;
+    }
     let background = world
         .background_plexus
         .as_ref()

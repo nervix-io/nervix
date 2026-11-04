@@ -35,14 +35,15 @@ use nervix_client_core::{
     AutocompleteOutcome, AutocompleteSuggestion, Client, ClientError as CoreClientError,
     CommandExecutionReference, ConnectDns, ConnectOptions, DomainClockAttachDisposition,
     DomainClockAttachOutcome, DomainClockDetachDisposition, DomainClockDetachOutcome,
-    DomainClockEvent, DomainName, NoticeLevel, ServerEvent, SubscriptionDeliveryBehavior,
-    SubscriptionEvent, SubscriptionRequest, SuggestionKind as ClientSuggestionKind, TlsRequirement,
-    TransactionLifecycle, TransactionStatus,
+    DomainClockEvent, DomainName, NoticeLevel, ResourceUploadIdentity, ServerEvent,
+    SubscriptionDeliveryBehavior, SubscriptionEvent, SubscriptionRequest,
+    SuggestionKind as ClientSuggestionKind, TlsRequirement, TransactionLifecycle,
+    TransactionStatus,
 };
 use nervix_dns::{DnsConfiguration, NameServers};
 use nervix_models::{ClusterNodeName, InspectionFormat, Statement};
 use nervix_plexus::client_statement::{
-    ClientStatement, local_path_fragment, parse_client_statements,
+    ClientStatement, local_path_fragment, parse_client_statements, parse_upload_resource_query,
 };
 use nervix_primitives::{
     runtime::Handle,
@@ -63,13 +64,17 @@ use thiserror::Error;
 use tokio::signal;
 
 mod backup;
+mod interrupt;
 mod restore;
 mod statement;
+mod status;
 
 use self::{
     backup::{BackupRequest, CliBackupScope, CliReportFormat},
+    interrupt::interrupted,
     restore::{CliExistingUsers, CliRestoreScope, RestoreRequest},
-    statement::{execute_and_print, print_diagnostics},
+    statement::{Repetition, StatementRunner, print_diagnostics},
+    status::RunEnd,
 };
 
 nervix_primitives::product_binary!("nervix-cli");
@@ -124,6 +129,14 @@ struct Args {
     /// Run Plexus statements once and exit instead of starting the interactive REPL
     #[arg(long, conflicts_with = "suggest")]
     command: Option<String>,
+    /// With `--command` or a node administration subcommand, send the command under the execution
+    /// reference the CLI printed for an earlier run of it whose outcome did not arrive
+    #[arg(long, value_parser = |value: &str| CommandExecutionReference::parse(value), conflicts_with = "suggest")]
+    execution_reference: Option<CommandExecutionReference>,
+    /// With a `--command` that is one UPLOAD RESOURCE, send it under the upload identity the CLI
+    /// printed for an earlier run of it whose outcome did not arrive
+    #[arg(long, value_parser = |value: &str| ResourceUploadIdentity::parse(value), requires = "command", conflicts_with = "execution_reference")]
+    upload_identity: Option<ResourceUploadIdentity>,
     /// Print completion candidates for Plexus input as JSON and exit
     #[arg(long, conflicts_with = "command")]
     suggest: Option<String>,
@@ -450,12 +463,13 @@ impl GrpcCompleter {
 }
 
 #[nervix_primitives::main]
-async fn main() -> Result<(), StackReport<ClientError>> {
+async fn main() -> Result<RunEnd, StackReport<ClientError>> {
     let args = Args::parse();
+    let repetition = repetition_of(&args);
     match args.subcommand.clone() {
         Some(Command::Completions { shell }) => {
             print_completions(shell);
-            return Ok(());
+            return Ok(RunEnd::Completed);
         }
         Some(Command::Subscribe {
             name,
@@ -484,52 +498,20 @@ async fn main() -> Result<(), StackReport<ClientError>> {
         }
         Some(Command::DomainClock) => return run_domain_clock_mode(&args).await,
         Some(Command::RemoveNode { node_id }) => {
-            let connect_options = connect_options_from_args(&args)?;
-            let client = Client::connect_with_options(
-                &args.server,
-                Some(args.domain.clone()),
-                connect_options,
-            )
-            .await
-            .change_context(ClientError::Connect)?;
-            execute_and_print(&client, format!("DROP NODE {node_id};")).await?;
-            return Ok(());
+            let statement = format!("DROP NODE {node_id};");
+            return run_administration(&args, repetition, statement).await;
         }
         Some(Command::CordonNode { node_id }) => {
-            let connect_options = connect_options_from_args(&args)?;
-            let client = Client::connect_with_options(
-                &args.server,
-                Some(args.domain.clone()),
-                connect_options,
-            )
-            .await
-            .change_context(ClientError::Connect)?;
-            execute_and_print(&client, format!("CORDON NODE {node_id};")).await?;
-            return Ok(());
+            let statement = format!("CORDON NODE {node_id};");
+            return run_administration(&args, repetition, statement).await;
         }
         Some(Command::UncordonNode { node_id }) => {
-            let connect_options = connect_options_from_args(&args)?;
-            let client = Client::connect_with_options(
-                &args.server,
-                Some(args.domain.clone()),
-                connect_options,
-            )
-            .await
-            .change_context(ClientError::Connect)?;
-            execute_and_print(&client, format!("UNCORDON NODE {node_id};")).await?;
-            return Ok(());
+            let statement = format!("UNCORDON NODE {node_id};");
+            return run_administration(&args, repetition, statement).await;
         }
         Some(Command::DrainNode { node_id }) => {
-            let connect_options = connect_options_from_args(&args)?;
-            let client = Client::connect_with_options(
-                &args.server,
-                Some(args.domain.clone()),
-                connect_options,
-            )
-            .await
-            .change_context(ClientError::Connect)?;
-            execute_and_print(&client, format!("DRAIN NODE {node_id};")).await?;
-            return Ok(());
+            let statement = format!("DRAIN NODE {node_id};");
+            return run_administration(&args, repetition, statement).await;
         }
         Some(Command::Backup {
             scope,
@@ -543,7 +525,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
             format,
         }) => {
             let connect_options = connect_options_from_args(&args)?;
-            return backup::run_backup(BackupRequest {
+            backup::run_backup(BackupRequest {
                 server: args.server,
                 connect_options,
                 session_domain: args.domain,
@@ -557,7 +539,8 @@ async fn main() -> Result<(), StackReport<ClientError>> {
                 execution_reference,
                 format,
             })
-            .await;
+            .await?;
+            return Ok(RunEnd::Completed);
         }
         Some(Command::Restore {
             scope,
@@ -572,7 +555,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
             format,
         }) => {
             let connect_options = connect_options_from_args(&args)?;
-            return restore::run_restore(RestoreRequest {
+            restore::run_restore(RestoreRequest {
                 server: args.server,
                 connect_options,
                 session_domain: args.domain,
@@ -587,7 +570,8 @@ async fn main() -> Result<(), StackReport<ClientError>> {
                 without_source_offsets,
                 format,
             })
-            .await;
+            .await?;
+            return Ok(RunEnd::Completed);
         }
         None => {}
     }
@@ -595,12 +579,14 @@ async fn main() -> Result<(), StackReport<ClientError>> {
     if let Some(command) = args.command.as_deref()
         && let Some(describe) = backup::describe_backup_statement(command)
     {
-        return backup::run_describe_backup(&describe);
+        backup::run_describe_backup(&describe)?;
+        return Ok(RunEnd::Completed);
     }
     if let Some(command) = args.command.as_deref()
         && is_json_inspection_command(command)
     {
-        return run_json_inspection_mode(&args, command).await;
+        run_json_inspection_mode(&args, command).await?;
+        return Ok(RunEnd::Completed);
     }
 
     let connect_options = connect_options_from_args(&args)?;
@@ -655,15 +641,16 @@ async fn main() -> Result<(), StackReport<ClientError>> {
                 "suggestions": suggestions,
             })
         );
-        return Ok(());
+        return Ok(RunEnd::Completed);
     }
     let (event_sender, mut event_receiver) =
         nervix_primitives::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
     let event_sender = EventLineSender::new(event_sender);
     spawn_event_collectors(client.clone(), event_sender.clone());
     if let Some(command) = args.command {
-        execute_and_print(&client, command).await?;
-        return Ok(());
+        return StatementRunner::for_arguments(repetition)
+            .run(&client, command)
+            .await;
     }
 
     let buffer_prefix = Arc::new(Mutex::new(String::new()));
@@ -679,6 +666,8 @@ async fn main() -> Result<(), StackReport<ClientError>> {
     println!("Type 'exit' to quit. Trailing ';' is optional.");
     println!("[events] notifications are printed above the prompt");
 
+    // A statement's outcome never ends the REPL: the runner prints it, whatever it is.
+    let mut statements = StatementRunner::at_prompt();
     loop {
         let prompt_domain = prompt_domain(
             client.domain().await.as_ref(),
@@ -720,7 +709,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
 
                 if command_buffer_is_complete(&buffer) {
                     let payload = std::mem::take(&mut buffer);
-                    execute_and_print(&client, payload).await?;
+                    statements.run(&client, payload).await?;
                     drain_event_queue(&mut event_receiver, &event_sender);
                 }
             }
@@ -732,7 +721,66 @@ async fn main() -> Result<(), StackReport<ClientError>> {
         }
     }
 
-    Ok(())
+    Ok(RunEnd::Completed)
+}
+
+/// Runs the statement a node administration subcommand sends, as `--command` runs it.
+async fn run_administration(
+    args: &Args,
+    repetition: Repetition,
+    statement: String,
+) -> Result<RunEnd, StackReport<ClientError>> {
+    let connect_options = connect_options_from_args(args)?;
+    let client =
+        Client::connect_with_options(&args.server, Some(args.domain.clone()), connect_options)
+            .await
+            .change_context(ClientError::Connect)?;
+    StatementRunner::for_arguments(repetition)
+        .run(&client, statement)
+        .await
+}
+
+/// What `--execution-reference` and `--upload-identity` ask the run to repeat. Either one given
+/// where it would repeat nothing ends the run as invalid arguments.
+fn repetition_of(args: &Args) -> Repetition {
+    let repetition = Repetition {
+        reference: args.execution_reference.clone(),
+        upload_identity: args.upload_identity.clone(),
+    };
+    let uploads = match args.command.as_deref() {
+        Some(command) => parse_upload_resource_query(command).is_ok(),
+        None => false,
+    };
+    if repetition.upload_identity.is_some() && !uploads {
+        refuse_arguments(
+            "--upload-identity repeats an upload, so --command must be one UPLOAD RESOURCE              statement",
+        );
+    }
+    if repetition.reference.is_some() {
+        let repeats_command = match &args.subcommand {
+            None => args.command.is_some() && !uploads,
+            Some(
+                Command::RemoveNode { .. }
+                | Command::CordonNode { .. }
+                | Command::UncordonNode { .. }
+                | Command::DrainNode { .. },
+            ) => true,
+            Some(_) => false,
+        };
+        if !repeats_command {
+            refuse_arguments(
+                "--execution-reference repeats the command --command or a node administration                  subcommand sends; an upload is repeated with --upload-identity, and a backup with                  the backup subcommand's own --execution-reference",
+            );
+        }
+    }
+    repetition
+}
+
+/// Ends the run as invalid arguments, the way the argument parser ends it.
+fn refuse_arguments(message: &str) -> ! {
+    Args::command()
+        .error(clap::error::ErrorKind::ArgumentConflict, message)
+        .exit()
 }
 
 /// A one-shot JSON inspection reserves stdout for exactly one machine-readable document.
@@ -970,7 +1018,9 @@ struct SubscribeModeOptions {
     where_clause: Option<String>,
 }
 
-async fn run_subscribe_mode(options: SubscribeModeOptions) -> Result<(), StackReport<ClientError>> {
+async fn run_subscribe_mode(
+    options: SubscribeModeOptions,
+) -> Result<RunEnd, StackReport<ClientError>> {
     let client = Client::connect_with_options(
         &options.server,
         Some(options.domain),
@@ -998,7 +1048,7 @@ async fn run_subscribe_mode(options: SubscribeModeOptions) -> Result<(), StackRe
         } else {
             print_diagnostics("subscribe", &query, &result.diagnostics);
         }
-        return Ok(());
+        return Ok(RunEnd::Failed);
     }
 
     println!("{}", result.message);
@@ -1006,13 +1056,11 @@ async fn run_subscribe_mode(options: SubscribeModeOptions) -> Result<(), StackRe
         "listening for events from relay '{}'. Press Ctrl-C to stop.",
         options.relay
     );
-    signal::ctrl_c()
-        .await
-        .change_context(ClientError::InterruptSignal)?;
-    Ok(())
+    interrupted().await?;
+    Ok(RunEnd::Completed)
 }
 
-async fn run_domain_clock_mode(args: &Args) -> Result<(), StackReport<ClientError>> {
+async fn run_domain_clock_mode(args: &Args) -> Result<RunEnd, StackReport<ClientError>> {
     let connect_options = connect_options_from_args(args)?;
     let client =
         Client::connect_with_options(&args.server, Some(args.domain.clone()), connect_options)
@@ -1033,7 +1081,7 @@ async fn run_domain_clock_mode(args: &Args) -> Result<(), StackReport<ClientErro
                 let event = event.change_context(ClientError::ClockEventRead)?;
                 println!("{}", format_domain_clock_event(&event));
                 if let DomainClockEvent::Ended(_) = event {
-                    return Ok(());
+                    return Ok(RunEnd::Completed);
                 }
             }
             interrupted = &mut interrupt => {
@@ -1043,7 +1091,7 @@ async fn run_domain_clock_mode(args: &Args) -> Result<(), StackReport<ClientErro
                     .await
                     .change_context(ClientError::ClockDetachRequest)?;
                 clock_detach_completed(outcome)?;
-                return Ok(());
+                return Ok(RunEnd::Completed);
             }
         }
     }
