@@ -863,6 +863,9 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Setup uv for the Python driver wheel
+        uses: astral-sh/setup-uv@v6
+
       # The Python package's unit tests embed CPython, so the unit tests link its library.
       - name: Install apt deps
         run: |

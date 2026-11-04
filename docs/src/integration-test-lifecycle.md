@@ -655,7 +655,8 @@ scenarios.
 paced simulation's Rust driver and native Python extension with coverage flags. The scenario runner
 selects them through `NERVIX_PACED_SIMULATION_PATH` and `NERVIX_PACED_SIMULATION_PYTHON`, the latter
 naming the interpreter whose environment holds the package. The archive carries exactly one wheel,
-and `test-scenarios-coverage-unpack` installs it with coverage into a fresh CPython 3.12 environment
+and the build job installs `uv` to run maturin and prepare CPython. `test-scenarios-coverage-unpack`
+installs the wheel with coverage into a fresh CPython 3.12 environment
 before any scenario starts. The shard compiles nothing. The instrumented extension also remains
 beside the suite as an object for LLVM's report. Each driver process inherits the scenario
 binary's profile location, so both the Rust driver and Python extension contribute their counters
