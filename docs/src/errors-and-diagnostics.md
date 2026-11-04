@@ -643,6 +643,12 @@ Membership-incarnation refusals name the affected node and its source or destina
 Replicas receiving prepared state are destinations of that transfer, so a layout's additional
 participants retain the same diagnostic precision as a single-unit handoff.
 
+Fixed ingestor counts are checked for native conversion and execution-unit layout before
+placement allocates their units. A conversion or layout failure remains beneath
+`IngestorInstancingError::UnaddressableCount` and `RegistryError::IngestorInstancing`; the report
+names the complete declared count, ingestor and domain. It is refused at model admission rather
+than ending the session's ordered task while materializing an impossible unit map.
+
 The vocabulary's `ArchivedCountError` reports a fixed-width archived count that the receiving
 target's `usize` cannot represent. Archive decoding retains it beneath the owning storage or
 transport failure. Registry Model records validate their current frame signature and report

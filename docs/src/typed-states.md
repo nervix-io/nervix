@@ -300,6 +300,9 @@ declaration in the committed schedule. The runtime state store's
 `wide-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the
 unsigned 64-bit instance identity and the unit every branch-aggregated metric series carries.
 Fixed intake counts remain `NonZeroU64`; branch partition counts remain `NonZeroU16`. The
+registry's instancing boundary checks native count conversion and the layout of the scheduled
+unit entries before materialization. An unaddressable declaration is a typed validation failure;
+its full-width Model remains representable independently of the target's execution capacity. The
 client placement union carries an instance index as an unsigned 64-bit value. Backup format
 major `4` and its unit-bearing record versions own a primitive unit encoding with a 32-bit
 partition ordinal and a 64-bit instance ordinal. The native `NervixKafkaState` checkpoint contains

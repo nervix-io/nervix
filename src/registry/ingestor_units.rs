@@ -16,7 +16,7 @@ use std::{
     num::{NonZeroU16, NonZeroU64},
 };
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     BranchSelection, CreateIngestor, DomainName, IngestorEntity, IngestorEntityKind,
@@ -29,6 +29,8 @@ use super::{error::RegistryError, validation::branching::resolved_branch_selecti
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum IngestorInstancingError {
+    #[error("INSTANCES {count} cannot be represented as execution units on this target")]
+    UnaddressableCount { count: NonZeroU64 },
     #[error("{entity} does not support the declared instancing form")]
     Unsupported { entity: IngestorEntityKind },
     #[error("{entity} INSTANCES PER PARTITION requires OFFSET BY DOMAIN")]
@@ -63,12 +65,11 @@ impl IngestorUnits {
     ) -> Result<Self, Report<RegistryError>> {
         let entity = ingestor.input.entity_kind();
         let capability = entity.capabilities().instancing;
-        let refusal = |issue| {
-            Report::new(issue).change_context(RegistryError::IngestorInstancing {
-                domain: domain.clone(),
-                ingestor: ingestor.name.clone(),
-            })
+        let context = || RegistryError::IngestorInstancing {
+            domain: domain.clone(),
+            ingestor: ingestor.name.clone(),
         };
+        let refusal = |issue| Report::new(issue).change_context(context());
         let Some(instances) = ingestor.input.instances() else {
             return if capability == IngestorInstancingCapability::Single {
                 Ok(Self::Single)
@@ -80,7 +81,15 @@ impl IngestorUnits {
             return Err(refusal(IngestorInstancingError::Unsupported { entity }));
         }
         match instances {
-            IngestorInstances::Count(count) => return Ok(Self::Instances(count)),
+            IngestorInstances::Count(count) => {
+                let capacity = usize::try_from(count.get())
+                    .change_context(IngestorInstancingError::UnaddressableCount { count })
+                    .change_context_lazy(context)?;
+                std::alloc::Layout::array::<(Unit, nervix_models::ScheduledUnit)>(capacity)
+                    .change_context(IngestorInstancingError::UnaddressableCount { count })
+                    .change_context_lazy(context)?;
+                return Ok(Self::Instances(count));
+            }
             IngestorInstances::PerPartition => {}
         }
         if let Some(IngestorEntity::Kafka(KafkaIngestor::Topic(source))) =

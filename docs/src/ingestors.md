@@ -3362,7 +3362,9 @@ The following entities declare `INSTANCES`; presence and defaults follow the voc
 form. The six broker entities in the table declare `PerPartition`. Polling, connection, listener,
 and client-producer entities declare `Single`.
 
-`INSTANCES <n>` accepts every positive 64-bit count (1 through 18,446,744,073,709,551,615). Nervix schedules each global index `0..n-1` as an
+`INSTANCES <n>` uses a positive 64-bit count (1 through 18,446,744,073,709,551,615). Before
+placement, Nervix refuses a count whose execution-unit entries cannot be addressed on the target.
+The declaration and its encodings retain the complete count. Nervix schedules each global index `0..n-1` as an
 independent execution unit with its own primary, replicas, readiness, intake buffer, ACK roots,
 branch lifecycle and metric checkpoints. Eligible nodes share the primary work; when fewer nodes
 are available, several instances can run on one node. A hard whole-entity colocation rule can

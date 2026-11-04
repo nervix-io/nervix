@@ -106,11 +106,11 @@ For intake parallelism, read [Ingestors → Instancing](../../../docs/src/ingest
 Kafka, Pulsar, RabbitMQ, SQS, NATS and MQTT declare `INSTANCES <positive-u64>` and
 `INSTANCES PER PARTITION`. For Pulsar parallelism, choose `SHARED` or `KEY_SHARED`; `FAILOVER` and
 `EXCLUSIVE` require one fixed instance. Fixed counts are independent globally indexed placement
-units; the
+units; Nervix refuses an unaddressable unit count before placement. The
 partition form colocates instance `p` with constructed relay partition `p` and requires one key
 structure across constructing routes. Kafka requires `OFFSET BY DOMAIN` for that form. A
-domain-offset unit-count change is refused in place; explicitly drop the source in one committed
-mutation, then recreate it to establish a new offset lifetime. `DESCRIBE INGESTOR` lists every
+domain-offset unit-count change preserves recorded positions while running or stopped through
+the unit-layout handoff. `DESCRIBE INGESTOR` lists every
 instance and its node, and source metrics carry `instance`.
 
 ## Assemble the graph

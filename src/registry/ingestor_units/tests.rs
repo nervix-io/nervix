@@ -15,6 +15,33 @@ use crate::registry::{
     domain_state::DomainState, test_fixtures::*, unit_placement::UnitPlacementGroups,
 };
 
+#[test]
+fn an_unaddressable_instance_count_is_refused_before_unit_materialization() {
+    let mut source = ingestor_statement("source", "events", "json", "broker", &[]);
+    let IngestorInput::Transport(input) = &mut source.input else {
+        unreachable!("the fixture reads Kafka")
+    };
+    let IngestorEntity::Kafka(KafkaIngestor::Topic(input)) = &mut input.source else {
+        unreachable!("the fixture reads Kafka")
+    };
+    input.instances = IngestorInstances::Count(NonZeroU64::MAX);
+    let error = IngestorUnits::decide(&named("instances"), &source, &ModelIndex::default())
+        .expect_err("a count whose unit entries are unaddressable is refused without allocation");
+    assert!(matches!(
+        error.current_context(),
+        RegistryError::IngestorInstancing { .. }
+    ));
+    assert!(matches!(
+        error.downcast_ref::<IngestorInstancingError>(),
+        Some(IngestorInstancingError::UnaddressableCount { count })
+            if *count == NonZeroU64::MAX
+    ));
+    assert!(
+        error.contains::<std::alloc::LayoutError>()
+            || error.contains::<std::num::TryFromIntError>()
+    );
+}
+
 fn graph(instances: IngestorInstances, branched: bool) -> super::super::graph::ActiveGraph {
     let mut source = ingestor_statement(
         "source",

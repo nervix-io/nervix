@@ -188,11 +188,13 @@ current connection, retry and deadline limits.
 
 - Choose fixed `INSTANCES <positive-u64>` or `INSTANCES PER PARTITION` only for an entity whose
   instancing capability permits it. Kafka, Pulsar, RabbitMQ, SQS, NATS and MQTT support both.
+  Nervix refuses a count whose execution-unit entries are unaddressable on the target.
   Each global index has its own primary, readiness, ACK roots and state. Partition-following
   sources require at least one constructing route and the same ordered key fields and partition
   count across all constructing destinations; Kafka additionally requires domain offsets.
   Inspect each instance/node with `DESCRIBE INGESTOR`; metric labels retain the global `instance`.
-  Change a Kafka domain-offset unit count only by an explicit committed drop followed by recreation.
+  Kafka domain-offset count changes preserve recorded positions while running or stopped through
+  the unit-layout handoff.
 - Every referenced name is declared in the active domain before use.
 - Every placement rule has non-empty `FROM` and `TO` sets whose members already exist and are
   schedulable runtime nodes. Every relay is eligible and participates in corridor coverage,
