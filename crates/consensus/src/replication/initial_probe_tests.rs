@@ -526,6 +526,63 @@ async fn an_unavailable_data_prefix_ends_its_input_before_stream_admission() {
 }
 
 #[nervix_primitives::test]
+async fn a_batch_the_stream_cannot_submit_ends_the_answers_with_its_failure() {
+    let mut peer = probe_peer(wire::AppendEntriesResponseRecord::Success).await;
+    let boundary = peer.log_id(11);
+    let first = peer.log_id(12);
+    let answered = peer.data_request(boundary, first.clone());
+    // Every entry encodes at least its term and index, so this many entries outgrow the
+    // replication class's payload limit, and the sender refuses the batch before it reaches the
+    // follower.
+    let payload_limit = peer
+        .client
+        .executor
+        .limits()
+        .replication_batch_bytes
+        .as_u64();
+    let unsendable_entries = payload_limit / 16 + 1;
+    let mut unsendable = peer.empty_request(Some(first.clone()));
+    for index in 13..13 + unsendable_entries {
+        unsendable.entries.push(Entry {
+            log_id: peer.log_id(index),
+            payload: EntryPayload::Blank,
+        });
+    }
+    let input = stream::iter([answered, unsendable]);
+    let mut answers = peer
+        .client
+        .stream_append(input, RPCOption::new(Duration::from_secs(5)))
+        .await
+        .assured("the peer accepts the prefix and opens the stream");
+    let first_answer = answers
+        .next()
+        .await
+        .assured("the submitted batch has an answer");
+    let failure = answers.next().await;
+    let after_failure = match failure {
+        Some(_) => answers.next().await,
+        None => None,
+    };
+    drop(answers);
+    peer.close().await;
+    assert_eq!(first_answer, Ok(Ok(Some(first))));
+    // A stream that ends without an error tells OpenRaft that every request was answered, and
+    // OpenRaft then sends the unanswered rest again from the follower's last confirmed position
+    // under the same in-flight request. Only the failure keeps that request unacknowledged.
+    let Some(Err(openraft::error::RPCError::Unreachable(_))) = failure else {
+        panic!(
+            "a batch the stream could not submit must end the answers with its failure, not as an \
+             exhausted input: {failure:?}"
+        );
+    };
+    assert!(
+        after_failure.is_none(),
+        "nothing follows the failure that ended the stream"
+    );
+    assert_eq!(peer.append_streams.load(Ordering::Relaxed), 1);
+}
+
+#[nervix_primitives::test]
 async fn a_rejected_data_prefix_returns_its_result_before_transferring_entries() {
     use openraft::raft::{AppendEntriesResponse, StreamAppendError};
     let leader = ClusterNodeName::parse("node-1").assured("valid fixture leader");

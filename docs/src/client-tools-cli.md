@@ -29,6 +29,11 @@ Point it at another cluster with `--server`, which takes a full URL. An `https:/
 nervix-cli --server https://nervix.example.com:47390 --tls required --tls-ca-cert ./ca.pem
 ```
 
+The server presents the certificate configured by its `--grpc-tls-cert` and `--grpc-tls-key`
+options in `--grpc-mode https`. Provision the certificate for the hostname in `--server`, and give
+the CLI its issuing CA. [Native session TLS](installation-cargo.md#native-session-tls) shows the
+server options and their environment variables.
+
 ## Options
 
 | Option | Environment variable | Default | Meaning |

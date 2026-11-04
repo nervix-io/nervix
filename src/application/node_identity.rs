@@ -21,16 +21,34 @@ use typed_builder::TypedBuilder;
 
 use super::{InternalTransportMode, authentication::DEFAULT_USER};
 
+/// The provisioned native session transport. HTTPS carries every address and TLS file it needs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum GrpcTransport {
+    #[default]
+    Http,
+    Https {
+        listen_addr: SocketAddr,
+        advertise_addr: NodeEndpoint,
+        certificate: PathBuf,
+        private_key: PathBuf,
+    },
+}
+
+impl GrpcTransport {
+    pub(in crate::application) fn mode(&self) -> InternalTransportMode {
+        match self {
+            Self::Http => InternalTransportMode::Http,
+            Self::Https { .. } => InternalTransportMode::Https,
+        }
+    }
+}
+
 /// Who a node is, where it listens and is reached, and the files and directories it uses.
 #[derive(Debug, Clone, TypedBuilder)]
 pub struct NodeIdentity {
     pub addr: SocketAddr,
     #[builder(default)]
-    pub grpc_mode: InternalTransportMode,
-    #[builder(default)]
-    pub grpc_https_listen_addr: Option<SocketAddr>,
-    #[builder(default)]
-    pub grpc_https_advertise_addr: Option<NodeEndpoint>,
+    pub grpc_transport: GrpcTransport,
     pub http_listen_addr: SocketAddr,
     pub https_listen_addr: SocketAddr,
     pub observability_listen_addr: SocketAddr,

@@ -69,6 +69,13 @@ required, validates it there, and passes the resulting typed value to the next l
 the registry, execution plans, runtime, clients, and diagnostics from assigning different meanings
 to the same raw value.
 
+The resolved node identity distinguishes a plaintext gRPC transport from an HTTPS transport that
+carries its listen and advertised addresses and both provisioned TLS paths. The CLI edge refuses
+incomplete pairs and TLS material in HTTP mode before constructing that identity. File availability,
+PEM parsing and key consistency are checked at startup before stores or listeners open; invalid
+material is a typed failure, never a substituted identity. The [Client Session Protocol](client-session-protocol.md#native-grpc)
+owns the listener and certificate lifetime.
+
 Materialized relay inspection requires the payload schema and resolved branching from its
 captured schedule. Incomplete scheduled metadata is an inspection failure, never an empty
 sensitivity set. The prepared sensitivity governs local, stored and remote record rendering;
@@ -834,6 +841,14 @@ FlatBuffers encoding preserves these optional fields and typed variants across t
 [Client Session Protocol](./client-session-protocol.md#verification-before-reading) defines how a
 receiver keeps an absent optional value distinct from a present zero.
 
+The console distinguishes an awaited sent request from a superseded lookup whose result it no
+longer needs. The latter retains its request identity and capacity place until its terminal reply,
+without retaining the request text or partial reply. A latest lookup is either held under its issue
+order or sent under its request identity. A transaction attachment keeps its issue order while
+held and in flight, so ordered work cannot run before a queued attachment completes. A held
+connection request distinguishes setup from ordinary controls: setup precedes ordered work, while
+ordinary controls share issue order with ready commands.
+
 The shared C binding gives clock observations their own `nx_clock_event_kind` and installations
 their own `nx_clock_state`. Only `NX_CLOCK_PACED` has a mapping for `nx_clock_event_paced`; tick and
 end-reason accessors likewise require their corresponding event kinds. An interruption or a refused
@@ -1060,7 +1075,10 @@ string is only a presentation of the state and never an input to execution.
 Replicated command admission distinguishes a reference that has expired from one bound to a
 different owner, domain, transaction position, or content in its typed conflict result. The
 session carries that distinction into the public command disposition; rendering its message does
-not choose the disposition.
+not choose the disposition. Future-time, missing-timestamp and capacity admission refusals also
+remain typed through the consensus response, so bounded metric reasons come from the actual
+refusal rather than from its rendered text. History observations keep an unestablished retry fence
+as `None`; exposition omits that timestamp instead of inventing an epoch fence.
 
 Error-route branch validation carries the node, source route, error relay, and both branch
 declarations as typed data. Direct emitter `VALUES` validation identifies a sensitive external
