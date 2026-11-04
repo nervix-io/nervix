@@ -26,24 +26,26 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AckMode, AckWindow, AlterProcessorOperation, AssignmentTargetScope, BranchName,
-    BranchSelection, ClientConfigEntry, ClientName, ClusterNodeName, CodecName, CorrelatorName,
-    DeduplicatorName, DomainClockPeriod, DomainName, EmitterName, EndpointName, Expression,
-    ExternalName, FieldName, FlushPolicy, GeneralErrorPolicy, GeneratorName, InferencerName,
-    IngestorName, InputCollectPolicy, InspectionFormat, JunctionName, LookupName,
-    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, ModelName, MqttQos,
-    NameError, OutputBranch, PayloadSizeLimit, PlacementName, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutput, ProcessorOutputs, ReingestorName, RelayName, ReordererName,
-    RequestedResourceVersion, ResourceName, RetryPolicy, RouteConstruction, SchemaName,
-    SignalingProtocolName, SubscriptionName, TransactionOperationNumber, UdfName, UserName,
-    VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
+    BranchSelection, ClientConfigEntry, ClientName, ClusterNodeName, CodecName,
+    ConstructionAlteration, CorrelatorName, DeduplicatorName, DomainClockPeriod, DomainName,
+    EmitterName, EndpointName, Expression, ExternalName, FieldName, FlushPolicy,
+    GeneralErrorPolicy, GeneratorName, InferencerName, IngestorName, InputCollectPolicy,
+    InspectionFormat, JunctionName, LookupName, MaterializedStateDependency,
+    MaterializedStatePolicy, MessageErrorPolicy, ModelName, MqttQos, NameError, OutputBranch,
+    PayloadSizeLimit, PlacementName, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
+    ProcessorOutputs, ReingestorName, RelayName, ReordererName, RequestedResourceVersion,
+    ResourceName, RetryPolicy, RouteConstruction, SchemaName, SignalingProtocolName,
+    SubscriptionName, TransactionOperationNumber, UdfName, UserName, VhostName, WasmProcessorName,
+    WindowProcessorName, WireSchemaName,
 };
 use sorted_vec::SortedSet;
 
 use crate::{
     lexer::{Identifier, SpannedToken, Token, Word, lex},
     semantic_program::{
-        Prefix, RouteClause, read_assignments_prefix, read_expression_list_prefix,
-        read_expression_prefix, read_route_construction_prefix,
+        Prefix, RouteClause, read_assignment_prefix, read_assignment_target_prefix,
+        read_assignments_prefix, read_expression_list_prefix, read_expression_prefix,
+        read_inheritance_prefix, read_invocation_prefix, read_route_construction_prefix,
     },
 };
 
@@ -1450,7 +1452,23 @@ where
 pub fn general_error_policy<'src>()
 -> impl Parser<'src, &'src [Token], GeneralErrorPolicy, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::On)
-        .ignore_then(kw(Identifier::General))
+        .ignore_then(general_error_clause())
+        .boxed()
+}
+
+/// `SET GENERAL ERROR IGNORE|LOG`, which an `ALTER` writes in place of the policy its node
+/// declared.
+pub fn set_general_error_policy<'src>()
+-> impl Parser<'src, &'src [Token], GeneralErrorPolicy, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Set)
+        .ignore_then(general_error_clause())
+        .boxed()
+}
+
+/// `GENERAL ERROR IGNORE|LOG`, as a statement declares the policy and an `ALTER` replaces it.
+fn general_error_clause<'src>()
+-> impl Parser<'src, &'src [Token], GeneralErrorPolicy, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::General)
         .then_ignore(kw(Identifier::Error))
         .ignore_then(choice((
             kw(Identifier::Ignore).to(GeneralErrorPolicy::Ignore),
@@ -1557,6 +1575,72 @@ pub fn alter_route_construction<'src>()
         route_construction_clause(RouteClause::Where, alter_list_separator()),
         route_construction_clause(RouteClause::Invoke, alter_list_separator()),
     )
+}
+
+/// Which in-place changes a construction can take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstructionChanges {
+    /// Every part: its inheritance, assignments, filter and invocations.
+    Every,
+    /// Its filter alone, for an emitter whose entity writes its own values.
+    FilterOnly,
+}
+
+/// One in-place change to a construction inside an `ALTER`: `SET INHERIT …`, `DROP INHERIT`,
+/// `ADD SET <target> = <expression>`, `DROP SET <target>`, `ADD INVOKE <call>`,
+/// `DROP INVOKE <n>`, `SET WHERE <expression>` or `DROP WHERE`, of those `changes` admits.
+pub fn construction_alteration<'src>(
+    changes: ConstructionChanges,
+) -> Boxed<'src, 'src, &'src [Token], ConstructionAlteration, extra::Err<ParseError<'src>>> {
+    let set_where = kw(Identifier::Set)
+        .ignore_then(where_expression())
+        .map(|where_clause| ConstructionAlteration::SetWhere { where_clause })
+        .boxed();
+    let drop_where = kw_phrase2(Identifier::Drop, Identifier::Where)
+        .to(ConstructionAlteration::DropWhere)
+        .boxed();
+    if changes == ConstructionChanges::FilterOnly {
+        return choice((set_where, drop_where)).boxed();
+    }
+    let set_inherit = kw_phrase2(Identifier::Set, Identifier::Inherit)
+        .ignore_then(embedded(RouteClause::Inherit.body_label(), |tokens| {
+            read_inheritance_prefix(tokens, alter_list_separator())
+        }))
+        .map(|inheritance| ConstructionAlteration::SetInherit { inheritance });
+    let drop_inherit =
+        kw_phrase2(Identifier::Drop, Identifier::Inherit).to(ConstructionAlteration::DropInherit);
+    let add_set = kw_phrase2(Identifier::Add, Identifier::Set)
+        .ignore_then(embedded(
+            RouteClause::Set.body_label(),
+            read_assignment_prefix,
+        ))
+        .map(|assignment| ConstructionAlteration::AddSet { assignment });
+    let drop_set = kw_phrase2(Identifier::Drop, Identifier::Set)
+        .ignore_then(embedded("assignment_target", read_assignment_target_prefix))
+        .map(|target| ConstructionAlteration::DropSet { target });
+    let add_invoke = kw_phrase2(Identifier::Add, Identifier::Invoke)
+        .ignore_then(embedded(
+            RouteClause::Invoke.body_label(),
+            read_invocation_prefix,
+        ))
+        .map(|invocation| ConstructionAlteration::AddInvoke { invocation });
+    let drop_invoke = kw_phrase2(Identifier::Drop, Identifier::Invoke)
+        .ignore_then(nonzero_u64_value(
+            "invocation_number",
+            "DROP INVOKE counts invocations from 1",
+        ))
+        .map(|position| ConstructionAlteration::DropInvoke { position });
+    choice((
+        set_inherit.boxed(),
+        drop_inherit.boxed(),
+        add_set.boxed(),
+        drop_set.boxed(),
+        add_invoke.boxed(),
+        drop_invoke.boxed(),
+        set_where,
+        drop_where,
+    ))
+    .boxed()
 }
 
 fn explicit_route_construction<'src>()

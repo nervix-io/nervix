@@ -116,11 +116,12 @@ mod snapshot;
 pub use command_execution::{
     CommandExecution, CommandExecutionAdmissionError, CommandExecutionAdmissionPolicy,
     CommandExecutionDiagnostic, CommandExecutionDisposition, CommandExecutionEffect,
-    CommandExecutionPreviewStale, CommandExecutionReconciliation, CommandExecutionRequestConflict,
-    CommandExecutionResult, CommandExecutionState, CommandExecutionStatementDisposition,
-    CommandExecutionStatementResult, CommandExecutionTransactionOperation,
-    CommandExecutionTransactionRequest, CommandExecutionTransactionStatus,
-    CommandExecutionTransactionTarget, DiagnosticSpan, RecordedBackupArchive,
+    CommandExecutionHistory, CommandExecutionPreviewStale, CommandExecutionReconciliation,
+    CommandExecutionRequestConflict, CommandExecutionResult, CommandExecutionState,
+    CommandExecutionStatementDisposition, CommandExecutionStatementResult,
+    CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
+    CommandExecutionTransactionStatus, CommandExecutionTransactionTarget, DiagnosticSpan,
+    RecordedBackupArchive,
 };
 pub use domain_mutation::{DomainMutationLease, DomainMutationOwner, DomainMutationRecoveryFence};
 pub use leadership::LeadershipObservation;
@@ -637,9 +638,10 @@ pub enum ConsensusConflict {
     },
     #[error("{0}")]
     Reason(String),
-    #[error("command execution reference '{reference}' has expired")]
-    ExecutionReferenceExpired {
+    #[error("command execution reference '{reference}' {refusal}")]
+    ExecutionReferenceAdmissionRefused {
         reference: nervix_models::CommandExecutionReference,
+        refusal: CommandExecutionAdmissionError,
     },
     #[error("command execution reference '{reference}' conflicts by {kind}")]
     ExecutionReferenceConflict {
@@ -2980,6 +2982,12 @@ impl Observer {
             .inner
             .with_restore_state_reclamation(reclaim)
     }
+    /// Levels and retry fence of this node's applied command history, read without a record scan.
+    pub fn command_execution_history(&self) -> CommandExecutionHistory {
+        let state = self.inner.store.inner.state();
+        state.command_executions.observation()
+    }
+
     pub async fn current_command_execution(
         &self,
         reference: &nervix_models::CommandExecutionReference,
@@ -5425,8 +5433,9 @@ fn apply_consensus_command_at(
             if let Some(existing) = state.command_executions.get(&execution.reference) {
                 if existing.is_expired() {
                     return AppliedConsensusCommand::conflict(
-                        ConsensusConflict::ExecutionReferenceExpired {
+                        ConsensusConflict::ExecutionReferenceAdmissionRefused {
                             reference: execution.reference.clone(),
+                            refusal: CommandExecutionAdmissionError::Expired,
                         },
                     );
                 }
@@ -5455,17 +5464,12 @@ fn apply_consensus_command_at(
                     .command_executions
                     .validate_admission(&execution.reference, policy)
                 {
-                    if let CommandExecutionAdmissionError::Expired = reason.current_context() {
-                        return AppliedConsensusCommand::conflict(
-                            ConsensusConflict::ExecutionReferenceExpired {
-                                reference: execution.reference.clone(),
-                            },
-                        );
-                    }
-                    return AppliedConsensusCommand::conflict(format!(
-                        "command execution reference '{}' {reason}",
-                        execution.reference,
-                    ));
+                    return AppliedConsensusCommand::conflict(
+                        ConsensusConflict::ExecutionReferenceAdmissionRefused {
+                            reference: execution.reference.clone(),
+                            refusal: *reason.current_context(),
+                        },
+                    );
                 }
                 let owner = DomainMutationOwner::command(execution.reference.clone());
                 let admitted = match admit_domain_mutations(state, mutation_domains, &owner) {
@@ -8972,8 +8976,9 @@ mod tests {
         );
         assert_eq!(
             retained_retry.response,
-            ConsensusResponse::Conflict(ConsensusConflict::ExecutionReferenceExpired {
+            ConsensusResponse::Conflict(ConsensusConflict::ExecutionReferenceAdmissionRefused {
                 reference: reference.clone(),
+                refusal: crate::CommandExecutionAdmissionError::Expired,
             })
         );
 
@@ -8996,8 +9001,9 @@ mod tests {
         );
         assert_eq!(
             response.response,
-            ConsensusResponse::Conflict(ConsensusConflict::ExecutionReferenceExpired {
+            ConsensusResponse::Conflict(ConsensusConflict::ExecutionReferenceAdmissionRefused {
                 reference: reference.clone(),
+                refusal: crate::CommandExecutionAdmissionError::Expired,
             })
         );
         assert!(state.command_executions.get(&reference).is_none());

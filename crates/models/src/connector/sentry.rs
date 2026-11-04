@@ -140,15 +140,64 @@ impl EmitterEntityBody for SentryEventEmitter {
     }
 }
 
+/// One change an `ALTER SENTRY EVENT EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum SentryEventEmitterChange {
+    /// `SET PLATFORM '<platform>'`.
+    Platform(String),
+    /// `DROP PLATFORM`: the emitter names no platform.
+    DropPlatform,
+    /// `SET MODE <mode>`.
+    Mode(SentryEventPublishingMode),
+}
+
+impl crate::EmitterEntityChange for SentryEventEmitterChange {
+    type Entity = SentryEventEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut SentryEventEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Platform(platform) => entity.platform = Some(platform.clone()),
+            Self::DropPlatform => {
+                if entity.platform.take().is_none() {
+                    return Err(error_stack::Report::new(
+                        crate::AlterEmitterError::OptionNotWritten {
+                            entity: <SentryEventEmitter as crate::EmitterEntityModel>::KIND,
+                            option: "PLATFORM",
+                        },
+                    ));
+                }
+            }
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Platform(platform) => format!("SET PLATFORM {}", crate::string_literal(platform)),
+            Self::DropPlatform => "DROP PLATFORM".to_owned(),
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector Sentry = "SENTRY";
     /// What a Sentry emitter writes.
     pub enum SentryEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum SentryEventEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum SentryEmitterChange;
     /// The entities a Sentry emitter writes.
     pub enum SentryEmitterEntity {
-        Event(SentryEventEmitter, SentryEventPublishingMode) = "EVENT";
+        Event(SentryEventEmitter, SentryEventPublishingMode, SentryEventEmitterChange) = "EVENT";
     }
 }
 

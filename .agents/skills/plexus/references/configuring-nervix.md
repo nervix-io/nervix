@@ -49,6 +49,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Session subscriptions and domain clock attachment | `Sessions` |
 | Configuration backups, their archives, bounded waits and exact-reference recovery, `DESCRIBE BACKUP`, and `RESTORE` | `Backup And Restore`; cut timeout phases and their elapsed measurements: `Backup And Restore Architecture` → `Observability` |
 | Metrics and runtime inspection | `Metrics And Observability` |
+| Persistent-command history size, retry-fence age and admission refusal metrics | `Metrics And Observability` → `Command Execution History` |
 | Full graph examples | `Examples` |
 | Applications that pace producers and consumers by an attached domain clock, and the `TIMESTAMP AT`/`TIMESTAMP NOW` admission they meet | `Paced Simulation Drivers` and `Domains And Time` |
 | WASM guest ABI and output timing | `WASM Processor Guests` |
@@ -70,6 +71,13 @@ documentation version as the selected index; this client chapter is outside the 
 For native subscription and clock recovery, read [Rust Client Library](https://docs.nervix.io/client-library.html)
 and [Client Implementation Manual](https://docs.nervix.io/client-implementation-manual.html), especially
 S-7 and K-5. Keep an unanswered reopening distinct from a refusal, and account for the live-edge gap.
+
+For browser controls waiting behind commands, lookup replacement, uncertain-command recovery on
+the open session and reconnect behavior, read
+[Web Console](https://docs.nervix.io/client-tools-web-console.html#bounded-buffers) and
+[Client Session Protocol](https://docs.nervix.io/client-session-protocol.html#restoration-and-bounded-consumers)
+directly. Follow the same documentation version as the selected index; these client chapters are
+outside the curated Plexus index.
 
 Prefer the narrow indexed topic over an old copied snippet. Do not leave the immutable version
 selected by the documentation index when following related material.
@@ -351,8 +359,9 @@ current connection, retry and deadline limits.
   required `NAMESPACE` names the catalog namespace independently of the Nervix domain; provision
   each of its case-preserving dot-separated levels before starting the emitter. Until the catalog
   holds the namespace and the table, the emitter retries its open and `DESCRIBE EMITTER` names the
-  namespace or the table it lacks. Move an emitter to another namespace with `SET TO`, restating
-  its complete destination with the new `NAMESPACE` and that table's `LOCATION`. A
+  namespace or the table it lacks. Move an emitter to another namespace with
+  `SET NAMESPACE '...', SET LOCATION '...'` in one `ALTER`, naming that table's `LOCATION`, or with
+  `SET TO` restating its complete destination. A
   `DATETIME`, at the top level or inside a `VEC` or `ARRAY`, is written at the containing
   microsecond and needs a `timestamptz` column, not `timestamptz_ns`. A commit writes each mapped
   column into the table column of its name, in any `VALUES` order, and a null into each optional
@@ -362,9 +371,10 @@ current connection, retry and deadline limits.
   a null, such as an `OPTIONAL` field; wrap it in `coalesce(...)` with a never-null argument. A
   commit refuses a table changed after open in the same way, naming the column, and retries until
   the table can take the mapped columns again.
-- Point an Iceberg emitter at an unpartitioned table. Its data files carry no partition values, so
-  a table whose current partition spec has a field opens but fails every commit, and the emitter
-  retries it without end. The emitter only appends Parquet data files with the Parquet library's
+- Point an Iceberg emitter at an unpartitioned, unencrypted table. Its data files carry no partition
+  values, so a table whose current partition spec has a field opens but fails every commit, and the
+  emitter retries it without end; a table whose properties declare `encryption.key-id` does the
+  same, because the emitter writes no encrypted files. The emitter only appends Parquet data files with the Parquet library's
   default writer properties: it writes no deletes or upserts, never changes the table's schema and
   commits only through an `ICEBERG_REST` catalog client. Set `'path_style_access' = true` on an
   `S3` client whose S3-compatible store serves buckets as paths, or whose bucket name contains a
@@ -459,9 +469,10 @@ current connection, retry and deadline limits.
   `metadata.correlation_data` explicitly before using it as text.
 - An `MQTT TOPIC` emitter writes its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, `NO ACK` only at
   `QOS 0` and `ACK` only at `QOS 1` or `QOS 2`. `SET MODE` stays within the written quality of
-  service, and `SET TO` changes it. Read `Emitters` → `MQTT` for what each level completes on and
-  for the persistent session a new client cannot take over. Use that section for `RETAIN`, typed
-  publish `PROPERTIES` and ordered, repeated user properties written with `write_header`.
+  service; `SET QOS` changes it, beside `SET MODE` in the same `ALTER` when it crosses `QOS 0`, and
+  `SET TO` changes both. Read `Emitters` → `MQTT` for what each level completes on and for the
+  persistent session a new client cannot take over. Use that section for `RETAIN`, typed publish
+  `PROPERTIES` and ordered, repeated user properties written with `write_header`.
 - An `MQTT CLIENT`'s `addr` is `mqtt://` or `mqtts://`, a host and a port, with no credentials,
   path or query: write `username` and `password` (redacted on inspection), `keep_alive_ms` in
   whole seconds and the source admission bound `max_packet_size` as their own keys, checked against
@@ -733,8 +744,9 @@ Choose checks relevant to the configured graph:
   `nervix_restore_staging_reclaimed_bytes_total` at `/metrics`; the backup chapter distinguishes
   logical usage from SST allocation. Recover an uncertain applying restore by sending it again
   under its exact execution reference, as the Rust client's `restore_with_reference` does;
-  `nervix-cli restore` starts every run under a fresh reference. After a terminal failed restore,
-  restore into a fresh target name.
+  `nervix-cli restore` starts every run under a fresh reference, while a `RESTORE` statement the CLI
+  reported as not known yet is sent again under its reference when it runs again at the prompt or
+  with `--execution-reference`. After a terminal failed restore, restore into a fresh target name.
   Restore metadata preparation has a separate per-node `restore_metadata` memory grant, defaulting
   to 2 GiB and admitted before decoding or planning. Native lifecycle, Kafka, deduplicator and
   window checkpoints stream through quota-owned files and 64 KiB windows with a fixed 2 MiB bulk

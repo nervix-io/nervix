@@ -11,7 +11,11 @@
 // Shuttle test, so the tests over a real connection, and those that pause Tokio's clock, drive the
 // production build only.
 #[cfg(not(feature = "shuttle"))]
+mod cancellation;
+#[cfg(not(feature = "shuttle"))]
 mod clock_restoration;
+#[cfg(not(feature = "shuttle"))]
+mod host_stack;
 #[cfg(not(feature = "shuttle"))]
 mod reports;
 #[cfg(not(feature = "shuttle"))]

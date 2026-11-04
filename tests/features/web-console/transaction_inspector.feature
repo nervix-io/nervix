@@ -50,6 +50,7 @@ Feature: Web console transaction inspector
     And selector ".prompt-row input" is filled with "COMMIT;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "COMMIT;"
+    And selector ".terminal" contains "quiesce level: DYNAMIC" exactly 3 times
     And selector ".transaction-indicator" eventually disappears
 
   Scenario: A stale browser preview is refused before effects and refresh supplies a usable basis
@@ -140,6 +141,7 @@ Feature: Web console transaction inspector
     And selector ".prompt-row input" is filled with "COMMIT;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "COMMIT;"
+    And selector ".terminal" contains "quiesce level: DYNAMIC" exactly 2 times
     And selector ".transaction-indicator" eventually disappears
     And client "other_owner_session" transaction state is "OPEN"
     When client "other_owner_session" executes these Plexus commands
@@ -307,7 +309,8 @@ Feature: Web console transaction inspector
     When selector ".transaction-inspector button[aria-label='Close transaction inspector']" is pressed with "Enter"
     And selector ".prompt-row input" is filled with "COMMIT;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".transaction-indicator" eventually disappears
+    Then selector ".terminal" contains "quiesce level: DYNAMIC" exactly 2 times
+    And selector ".transaction-indicator" eventually disappears
     When selector ".prompt-row input" is filled with "SHOW CREATE SCHEMA retained_after_reconnect;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "CREATE SCHEMA retained_after_reconnect"
@@ -436,7 +439,8 @@ Feature: Web console transaction inspector
     When selector ".transaction-inspector button[aria-label='Close transaction inspector']" is pressed with "Enter"
     And selector ".prompt-row input" is filled with "COMMIT;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".transaction-indicator" eventually disappears
+    Then selector ".terminal" contains "quiesce level: DYNAMIC" exactly 3 times
+    And selector ".transaction-indicator" eventually disappears
 
   Scenario: A shared intake gate is drawn once with both contributing operations
     Given a 1 node nervix cluster is started

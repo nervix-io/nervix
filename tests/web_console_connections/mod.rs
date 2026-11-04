@@ -31,11 +31,12 @@ use crate::common::{
 /// What a console page runs before any script of its own.
 const RECORDER: &str = include_str!("recorder.js");
 
-/// Whether the initial session frames reach the page immediately or at the scenario's release.
+/// The page's initial session delivery and optional bounded frame observations.
 #[derive(Clone, Copy)]
 pub(super) enum InitialSession {
     Deliver,
     Hold,
+    ObserveRequests,
 }
 
 /// A bounded gate installed after the recorder and before the console's own scripts.
@@ -54,7 +55,7 @@ pub(super) async fn record_console_connections(
     initial_session: InitialSession,
 ) -> playwright_rs::Result<()> {
     let initial_hold = match initial_session {
-        InitialSession::Deliver => "false",
+        InitialSession::Deliver | InitialSession::ObserveRequests => "false",
         InitialSession::Hold => "true",
     };
     let path = serde_json::to_string(CONSOLE_SESSION_PATH)
@@ -63,6 +64,13 @@ pub(super) async fn record_console_connections(
         .replace("__NERVIX_CONSOLE_SESSION_PATH__", &path)
         .replace("__NERVIX_HOLD_INITIAL_SESSION__", initial_hold);
     let script = format!("{RECORDER}\n{gate}");
+    let script = match initial_session {
+        InitialSession::Deliver | InitialSession::Hold => script,
+        InitialSession::ObserveRequests => {
+            let observer = super::web_console_request_window::observer_script();
+            format!("{script}\n{observer}")
+        }
+    };
     page.add_init_script(&script).await
 }
 

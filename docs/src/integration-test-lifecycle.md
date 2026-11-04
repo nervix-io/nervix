@@ -298,6 +298,7 @@ resubmitting an outcome that might already have produced output.
 | Syslog mixed-framing TCP publication | One abort-on-drop task on the binary's runtime, owning connection establishment, the complete framed bytes and the sender through shutdown | The mixed-framing sender step in `tests/scenarios.rs`, using `tests/common/runner_observation.rs` |
 | Syslog TLS publication and split-frame writes | One abort-on-drop task on the binary's runtime, owning TCP connection establishment, the TLS handshake and the complete prepared write. Publication closes the connection there; a split-frame write returns its sender for the later remainder | `tests/common/syslog_tls.rs`, using `tests/common/runner_observation.rs` |
 | Command outcome recovery | On the task awaiting the command, including a backup or its recovery, or on its background execution. It retains the original request and transaction position, asks nodes in turn, and keeps at most one recovery exchange per node until the answering binding can be retained | `tests/common/command_recovery.rs`, over the prepared request and raw exchange in `tests/common/raw_session.rs` |
+| Undecided request routing | On the step or background task that sends a replay session's attach, a scenario-shaped upload or a restore stream. A redirect that names a node of the cluster sends the request there next; any other answer that decides nothing sends it to the next node in node order. The request keeps its identity and its existing bound | `LeaderRoutes::after` in `tests/common/command_recovery.rs`, used by the replay attach in `tests/scenarios.rs`, the shaped uploads in `tests/common/cluster.rs` and the restore streams in `tests/backup/restore.rs` |
 | Armed command observations | On the command's background task or the step awaiting a named request. Earlier unresolved outcomes repeat the original request; a witness tied to the current attempt preserves the raw outcome after the intended boundary. Named cancellation follows the repeated request's correlation id | `tests/common/command_probe.rs`, `tests/session_protocol/mod.rs`, and the command steps in `tests/scenarios.rs` |
 | Publication-relative receipt timing | A runtime task owns the subscription read before publication and retains its receipt timestamp. The assertion bounds completion after the HTTP publishing step returns; scenario teardown cancels an unfinished reader before stopping nodes | `tests/common/runner_observation.rs`, `tests/common/raw_session.rs` and the timed subscription steps in `tests/scenarios.rs` |
 | Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive, preparing ONNX fixtures or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
@@ -1298,7 +1299,20 @@ The harness keeps these boundaries explicit.
   as live observers. Opening or deleting a subscription, attaching a clock and changing the domain
   are not replayed on another exchange. A request a step sends once
   under a scenario-chosen execution reference learns its outcome the same way before the step
-  records its disposition. The backup steps that send a backup through the raw session learn each
+  records its disposition. A replay session, which a step opens to attach a transaction and send
+  a command again under its original reference and transaction position, attaches the transaction
+  the way a client must: an attach that a node redirects, or that a leader which could not confirm
+  its lease refuses, decides nothing, so a new session sends it again to the leader the redirect
+  names, or otherwise to the next node in node order, until a node attaches the transaction or
+  refuses it definitively. No attempt starts once 60 seconds have passed, and the step fails with
+  the last refusal. The replayed command then learns its outcome through the same command
+  recovery, under its frozen reference and position, so the step records a definitive answer and
+  never sends the command under another reference. An upload whose frames a scenario shapes
+  itself follows its refusals the same way: a reply that redirects it, or says that no leader is
+  known, sends the same frames again under the same upload identity, within the same 60 seconds,
+  and the step asserts the reply that decided the upload. A stream the server refuses before it
+  checks leadership, such as an empty one, is decided by that refusal and is never sent again.
+  The backup steps that send a backup through the raw session learn each
   outcome the same way before they assert what it carries: a cluster backup under a fresh
   reference, its recovery to another local destination under that reference, and a kept archive's
   recovery under the reference the CLI reported. A leader whose lease lapsed at admission
@@ -1328,8 +1342,9 @@ The harness keeps these boundaries explicit.
   The paced simulation's published graph is loaded through one native client so its
   BEGIN/COMMIT state and command references survive an interrupted finalization. Restore stream
   probes retain the protocol's received dispositions. A restore completion probe explicitly requesting
-  outcome recovery repeats its same reference, statement and archive against the cluster's nodes
-  after an unknown outcome, redirect or interrupted transport. It starts no further attempt after
+  outcome recovery repeats its same reference, statement and archive after an unknown outcome,
+  redirect or interrupted transport: to the leader a redirect names when that leader is a node of
+  the cluster, and otherwise to the next node in node order. It starts no further attempt after
   its 120-second recovery budget; each stream keeps its existing reply timeout. It returns a
   definitive failure or upload refusal immediately, and keeps the terminal reply's actual origin
   and complete report. A scenario whose subject is what a restore did, rather than how the
@@ -1341,10 +1356,25 @@ The harness keeps these boundaries explicit.
   as it records the outcome; a single-node leader is its own quorum, and its lease never lapses. A
   raw probe therefore stays only where the answer is the subject: a repetition joining an applying
   restore or returning its recorded outcome, a reference conflict, a redirect, a controlled
-  leadership loss, or an interrupted upload sent again. When a raw background probe must reach an
-  armed restore step or finalization pause, a redirect may repeat the raw request before its first
-  observed pause. A `LeadershipLost` reply stays the raw answer, including its actual origin and
-  execution reference. A separate completion observer may drive only setup to the armed execution
+  leadership loss, or an interrupted upload sent again. Even there, the stream's own answer is the
+  subject only when the scenario names that answer. When a scenario names a definitive outcome for
+  a raw stream, completed, failed or a reference conflict, or requires a raw background stream to
+  complete, and the stream's own answer decided nothing, the step learns the outcome through the
+  same repetition before it asserts it, within the same 120-second budget. It asserts the
+  disposition it learns with the stream's own origin: the origin of the first answer to the stream
+  from a node that looked its reference up, since a redirect comes before that lookup. A stream
+  that admitted the restore before a lapsed lease or a leadership move took its answer therefore
+  still reports that it executed the restore, although the repetition that learned the outcome is
+  answered `Recovered`, and a redirected stream reports the origin the leader answered it with. The
+  report and message a scenario reads afterwards are the learned outcome's. A raw answer that a
+  scenario names itself, a redirect, a restore still applying or a lost leadership, is asserted as
+  it arrived. The lapsed-admission outlines and the leadership move while a restore applies in
+  `restore.feature` hold such answers for raw streams, as the replay attach from a former leader in
+  `client_wire_failures.feature`, and the lapsed upload start and the incomplete upload sent to a
+  follower in `resource_describe.feature`, hold them for attaches and uploads. When a raw
+  background probe must reach an armed restore step or finalization pause, a redirect may repeat
+  the raw request, routed the same way, before its first observed pause. A `LeadershipLost` reply
+  stays the raw answer, including its actual origin and execution reference. A separate completion observer may drive only setup to the armed execution
   pause under the same reference, statement and immutable archive; its recovered answer never
   replaces the retained raw reply. This matters after an applying loss: the admitted execution can
   resume through reconciliation, and a repetition can answer `StillApplying` or `Recovered` rather
@@ -1703,6 +1733,12 @@ on closing the browser during cleanup, neither of which has a budget of its own.
 explicitly awaits the Playwright driver's shutdown before dropping its handle. The driver's own
 five-second exit grace is asynchronous, so cleanup keeps the shared scenario runner and its
 watchdog available rather than waiting in Playwright's blocking destructor.
+
+The cluster-wide metric-total and saved-metric comparison steps use the canonical 40-second
+status-wait budget around the whole polling operation, with 100 milliseconds between reads. A
+metric read failure ends the step immediately; a comparison timeout retains each node's latest
+value, or the last observed value and its saved target. These steps read the public metrics
+endpoint and do not substitute internal counter state for an observation.
 
 ## Absolute Phase Deadlines
 
@@ -2222,6 +2258,11 @@ Browser assertions that wait for an acknowledged subscription tab to disappear p
 seconds. This bounds the server reply and browser update together; on expiry, the step reports the
 tab text that remains visible.
 
+Transaction inspector fixtures wait for COMMIT's own rendered outcome before starting the
+transaction indicator's 10-second disappearance check. The command echo only confirms
+submission. When earlier statement replies contain the same outcome text, the fixture counts
+occurrences so that only the COMMIT reply can satisfy the wait.
+
 A continuous browser assertion begins after its readiness predicate holds. The console reconnect
 scenario first waits for the restored clock's `PACED` state, then observes the complete stability
 period and advancing ticks. Leader confirmation and the clock's attach reply are separate events;
@@ -2264,6 +2305,16 @@ however late it reads and however loaded the machine is. The page receives a fra
 act on it, so a frame comes before every connection the page makes because of it. The console lets go of its session connection before it constructs the next one, so
 `the web console never held two session connections at once` tells a reconnect of the console's one
 session from a second session without counting the leader notices, which every reconnect repeats.
+
+The request-window regression also installs a frame observer before the console's scripts. It
+retains at most 1,024 binary session frames and 4 MiB, failing if the observation is incomplete.
+The public codecs recover sent request identities and terminal replies, including the final part
+of a transferred reply. Observations reserve their position before copying outgoing binary Blobs
+asynchronously, so a reply cannot pass its request in the record. Its message listener precedes the
+console's: a browser microtask between listeners may otherwise send the next request before the
+observer accounts for the reply that freed its place. The fixture waits for the input's actual
+scheduled callbacks and their continuations rather than guessing the completion debounce delay. It changes neither frames nor
+their delivery and introduces no product deadline or scenario-admission rule.
 
 The harness reads from those frames which node the nodes reported as the leader on the page's own
 connections. The leader opens every console session it serves by reporting that it leads; any other
@@ -2573,6 +2624,28 @@ node has no deadline supervision to end it, so a node read in `TerminalTeardown`
 deadline is running the final stops the product lets run to completion, while one read in
 `DrainSupport` is still inside a drain its scenario configured. A node that had already been left
 stopping under a keeper has handed its coordinator over, and its record says so instead.
+
+An in-process node's application future also carries a `scenario_node` log span naming its
+reserved native gRPC port. A scenario that inspects a stop log reads from the offset captured
+before its stop request and matches that launch's span, so a parallel node's message cannot
+satisfy the assertion.
+
+The unread-native-session outline in `session_protocol.feature` opens a real HTTP/2 `Exchange`
+with a zero response window and queues at most 8,192 cancel requests within a 1 MiB request
+budget. It reads response headers but no response data. A testing-only observer, resolved once
+when that session starts, records the identity of an acceptance future that actually polls
+pending while its outbound control channel has no available slot. The capacity query reserves
+nothing and excludes a cooperative-budget yield while there is still room. Cancel requests
+answer within acceptance, so this observes a wait for reply capacity,
+without a scheduling delay or a sleep standing in for the precondition. The observer neither
+pauses the production future nor grants response capacity and has no ordinary-build path.
+The peer's connection is polled independently before the stop; its receipt timestamp must be at
+least the existing two-second connection grace after the recorded stop request and inside the
+configured 30-second shutdown deadline. The outline also checks the completed admission phase,
+the node's elapsed stop and its scoped connection-cut log on one and three nodes. Cleanup drops
+the peer before cluster teardown if a step fails. The registered diagnostic and stressed
+workloads reach the existing session locks; HTTP/2 flow control, the observer, the listener join
+and the cut remain outside Deloxide's tracked-lock evidence.
 
 ## Ports
 
@@ -3110,6 +3183,22 @@ latter. Each example publishes all 32,768 records, waits for the source's sent c
 emitter stall, and checks every sequence and repeated header within the original 90-second budget,
 followed by the 500-millisecond duplicate check. The source count does not confirm delivery to the
 broker's observing subscriber.
+
+## Console Command Reply Uncertainty
+
+The console command-recovery outline uses a scenario-local reply script keyed by domain and exact
+query. The real command executes and its durable outcome is retained. Only its first three
+successful public session replies are replaced, with `LeadershipLost`, `StillApplying` and
+`NotYetAuthoritative` respectively; the next request receives the real recovered outcome. The
+script retains at most four execution references and is disposed with that scenario's injector.
+It does not simulate a lease or change leadership, execution or the stored result.
+
+The browser's bounded connection recorder supplies the connection identities and the public
+domain-selection, clock-attachment and subscription replies before and after the command.
+Comparing those observations checks retention of the original session and attachments. The
+one- and three-node examples also require one terminal result and one unchanged execution
+reference across all four attempts. Retry-delay progression is checked separately through the
+browser's production request owner, without a wall-clock silence window.
 
 ## RabbitMQ Confirmation Ordering
 

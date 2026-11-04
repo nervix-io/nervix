@@ -8,6 +8,8 @@
 //! - **Depends on.** The harness's own session client and the scenario cluster.
 //! - **Must not know.** How the server correlates, admits or cancels a request.
 
+use std::io::{BufRead as _, Seek as _};
+
 use cucumber::{given, then, when};
 use nervix_client_wire::{
     CancelState, CancellationStage, ClientMessage, ClientRequest, CommandDisposition,
@@ -28,6 +30,151 @@ use crate::common::{
 
 /// How long a scenario waits for the server to end a session it broke.
 const SESSION_END_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The unchanged public-listener grace, measured from the actual stop request.
+const CONNECTION_GRACE: Duration = Duration::from_secs(2);
+const UNREAD_STOP_DEADLINE: Duration = Duration::from_secs(30);
+
+pub(crate) enum UnreadSession {
+    Open {
+        node: String,
+        port: u16,
+        peer: crate::common::unread_session::UnreadSession,
+    },
+    Stopped(UnreadSessionStop),
+}
+
+pub(crate) struct UnreadSessionStop {
+    node: String,
+    port: u16,
+    requested_at: Instant,
+    node_elapsed: Duration,
+    ended: crate::common::runner_observation::ObservedArrival<Result<(), h2::Error>>,
+    log_offset: u64,
+}
+
+#[given("a native session on the leader reads nothing until request acceptance waits")]
+async fn given_unread_native_session_waits(world: &mut ScenarioWorld) -> std::io::Result<()> {
+    let node = world.cluster().wait_for_leader_among_running().await?;
+    let endpoint = world.cluster().grpc_uri(&node)?;
+    let port = url::Url::parse(&endpoint)
+        .map_err(std::io::Error::other)?
+        .port()
+        .ok_or_else(|| std::io::Error::other("the native listener has a port"))?;
+    let mut waiting = world
+        .fault_injection
+        .observe_session_backpressure_on(crate::common::cluster::node_name(&node));
+    let peer = nervix_primitives::time::timeout(
+        SESSION_END_TIMEOUT,
+        crate::common::unread_session::UnreadSession::open(&endpoint),
+    )
+    .await
+    .map_err(std::io::Error::other)??;
+    // Cancel requests are answered inside accept_frame. The observer requires Pending and a full
+    // control channel, so a cooperative-budget yield with room cannot satisfy this precondition.
+    let request =
+        nervix_primitives::time::timeout(SESSION_END_TIMEOUT, waiting.wait_for(Option::is_some))
+            .await
+            .map_err(std::io::Error::other)?
+            .map_err(std::io::Error::other)?
+            .verified("the wait predicate selected a request identity");
+    append_cucumber_log_line(&format!(
+        "unread native Exchange on {node}: request {request} is waiting for response capacity"
+    ));
+    world.unread_session = Some(UnreadSession::Open { node, port, peer });
+    Ok(())
+}
+
+#[when("the node serving the unread native session is stopped")]
+async fn when_unread_native_session_node_stops(world: &mut ScenarioWorld) -> std::io::Result<()> {
+    let Some(UnreadSession::Open { node, port, peer }) = world.unread_session.take() else {
+        return Err(std::io::Error::other(
+            "an unread native session must be open",
+        ));
+    };
+    let log_offset = std::fs::metadata("tests/logs/scenarios.log")?.len();
+    let requested_at = Instant::now();
+    world.cluster_mut().stop_node(&node).await?;
+    let node_elapsed = requested_at.elapsed();
+    let remaining = UNREAD_STOP_DEADLINE
+        .checked_sub(requested_at.elapsed())
+        .ok_or_else(|| std::io::Error::other("the unread peer held the node past its deadline"))?;
+    let ended = nervix_primitives::time::timeout(remaining, peer.ended())
+        .await
+        .map_err(std::io::Error::other)?;
+    world.unread_session = Some(UnreadSession::Stopped(UnreadSessionStop {
+        node,
+        port,
+        requested_at,
+        node_elapsed,
+        ended,
+        log_offset,
+    }));
+    Ok(())
+}
+
+#[then(
+    "the unread native connection ends after its grace period and the stop completes within its \
+     deadline"
+)]
+fn then_unread_native_session_was_cut(world: &mut ScenarioWorld) -> std::io::Result<()> {
+    let Some(UnreadSession::Stopped(stopped)) = &world.unread_session else {
+        return Err(std::io::Error::other(
+            "the unread session's node must have stopped",
+        ));
+    };
+    let elapsed = stopped
+        .ended
+        .received_at
+        .checked_duration_since(stopped.requested_at)
+        .ok_or_else(|| std::io::Error::other("the unread connection ended before the stop"))?;
+    assert!(
+        elapsed >= CONNECTION_GRACE && elapsed <= UNREAD_STOP_DEADLINE,
+        "the unread connection must end after its {CONNECTION_GRACE:?} grace and within \
+         {UNREAD_STOP_DEADLINE:?}; ended after {elapsed:?}: {:?}",
+        stopped.ended.value
+    );
+    assert!(
+        stopped.node_elapsed <= UNREAD_STOP_DEADLINE,
+        "the node outlasted its shutdown deadline: {:?}",
+        stopped.node_elapsed
+    );
+    let shutdown = world
+        .cluster()
+        .last_shutdown_outcome(&stopped.node)
+        .verified("the node stop retained its shutdown outcome");
+    assert_eq!(
+        shutdown.stop_admission,
+        nervix_server::application::ShutdownPhaseOutcome::Completed,
+        "the listener join must finish after cutting the unread connection: {shutdown:?}"
+    );
+    let mut log = std::fs::File::open("tests/logs/scenarios.log")?;
+    log.seek(std::io::SeekFrom::Start(stopped.log_offset))?;
+    let scope = format!("scenario_node{{grpc_port={}}}", stopped.port);
+    let mut cut = false;
+    for line in std::io::BufReader::new(log).lines() {
+        let line = line?;
+        if line.contains(&scope)
+            && line.contains(
+                "public listeners still hold client connections after their grace period; cutting \
+                 them",
+            )
+        {
+            cut = true;
+            break;
+        }
+    }
+    assert!(
+        cut,
+        "the stopping node must log its connection cut within {scope}"
+    );
+    append_cucumber_log_line(&format!(
+        "unread native Exchange on {}: connection ended after {elapsed:?}, node stopped after \
+         {:?}, admission {:?}, scoped cut log present",
+        stopped.node, stopped.node_elapsed, shutdown.stop_admission
+    ));
+    Ok(())
+}
 
 /// One named correlation and, for commands, the immutable request behind that correlation.
 pub(crate) struct NamedRequest {
@@ -1054,7 +1201,7 @@ async fn when_shaped_upload_is_sent(
     };
     let reply = world
         .cluster()
-        .send_shaped_resource_upload(&leader, upload)
+        .send_shaped_resource_upload(&leader, &upload)
         .await
         .unwrap_or_else(|error| panic!("the upload that {shape} was not answered: {error}"));
     world.last_command_error = Some(reply.message.clone());

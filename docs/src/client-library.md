@@ -14,6 +14,7 @@ Capabilities:
 
 - `Client::connect(...)` and `Client::connect_with_options(...)`
 - `Client::execute(...)`, and `Client::prepare_execution(...)` with `Client::execute_prepared(...)`
+  and `Client::execute_prepared_with_cancellation(...)`
 - `Client::transaction_status()`, `Client::attach_transaction(...)` and
   `Client::inspect_transaction(...)`
 - `Client::list_domains()`, `Client::domain()` and `Client::set_domain(...)`
@@ -26,7 +27,8 @@ Capabilities:
 - `Client::subscribe_emitter(...)`, with `EmitterConsumer::next_batch()`,
   `EmitterDelivery::ack()`, `EmitterDelivery::retry()`, `EmitterDelivery::reject(...)` and
   `EmitterConsumer::close()`
-- `Client::upload_resource_from_directory(...)`
+- `Client::upload_resource_from_directory(...)` and
+  `Client::upload_resource_from_directory_with_identity(...)`
 - `Client::download_backup(...)`
 - `Client::restore(...)` and `Client::restore_with_reference(...)`
 - `Client::next_server_event()`, `Client::next_domain_list()` and `Client::leadership()`
@@ -53,11 +55,27 @@ leader's endpoints when discovery knows them, `TransactionDetached`, `Transactio
 
 Each `execute` call creates one stable execution reference and retains it through leader redirects,
 transaction reattachment, and transport reconnects. A successful outcome means the command's
-administrative effect is usable on the current live-node set. If the caller cancels its future, the
+administrative effect is usable on the current live-node set. If the caller drops its future, the
 cluster still owns any already-admitted effect; the client sends no cancellation and discards the
 reply when it arrives. To submit the same logical request again, prepare it once with
 `prepare_execution`, which fixes its execution reference, domain, and upload identity, and pass the
-same `ExecutionHandle` to `execute_prepared` after an uncertain, cancelled, or timed-out attempt.
+same `ExecutionHandle` to `execute_prepared` after an uncertain, cancelled, or timed-out attempt. A
+process that recovers what an earlier one left uncertain builds the handle again from the reported
+reference or identity, with `ExecutionHandle::with_reference` or
+`ExecutionHandle::with_upload_identity`.
+
+`execute_prepared_with_cancellation` takes a `CancellationToken` its caller may cancel. While a
+command, `BACKUP` included, waits for its reply, cancelling the token sends `CancelRequest` for it,
+and the call keeps waiting for the reply that ends the command. A command the server cancelled
+before admitting it fails with `ClientError::RequestCancelled` at `BeforeAdmission` and had no
+effect; one it had admitted keeps running, and the call fails with `UncertainCommand` above the
+cancellation; one that finished first returns its outcome. A call cancelled while no request of it
+waits for a reply, between attempts or while it reopens a session or follows a redirect, sends
+nothing more and fails with `ClientError::CallCancelled`, beneath `UncertainCommand` when it may
+already have sent the command. A statement the client serves itself, or streams on a call of its
+own, stops where it waits, as when its caller drops the future: an upload then fails with
+`UncertainUpload`, and a restore with `UncertainCommand`. The archive download of a `BACKUP` that
+completed is not stopped.
 
 The client classifies a command's statements before it sends them, with the Plexus statement
 grammar. It builds the grammar once on each thread that prepares a command and keeps it for the
@@ -221,6 +239,19 @@ digest, the capture time, what the users step did, each restored domain, and eac
 A stream the leader refused before the restore ran is a failed outcome whose message names the
 typed failure. The C binding runs `RESTORE` through `nx_session_execute` and reports the report's
 counts, whether it was a dry run, and whether a step failed through `nx_outcome_restore`.
+
+## Uploading A Resource
+
+`execute` serves `UPLOAD RESOURCE` itself, under the upload identity its `ExecutionHandle` fixed.
+`Client::upload_resource_from_directory(identifier, directory, on_progress)` uploads a directory as a
+version of a resource in the selected domain under a new identity, and
+`Client::upload_resource_from_directory_with_identity(identifier, directory, domain, identity,
+on_progress)` under one the caller chose. Every call of one upload carries the same identity and
+archive, so sending the same archive again under the identity recovers the version an earlier call
+installed rather than installing another. An error that may hide an installed version is
+`ClientError::UncertainUpload` with the identity. While the session holds an active transaction,
+both refuse the upload before sending anything, as `execute` refuses every client-local statement:
+a version is never transaction content, so reverting the transaction could not take it back.
 
 ## Following A Domain Clock
 

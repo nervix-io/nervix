@@ -1,4 +1,33 @@
 Feature: Web console Plexus REPL
+  @client_wire67
+  Scenario Outline: Web console recovers an uncertain command on its existing session
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA source_event ( value I64 );
+      CREATE RELAY events SCHEMA source_event UNBRANCHED;
+      START;
+      """
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".prompt-row" contains "{{domain}}"
+    And selector ".domain-clock" contains "UNPACED"
+    When selector ".prompt-row input" is filled with "CREATE SUBSCRIPTION live_events TO events;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".subscription-tab[data-subscription-state='active']" contains "EVENTS"
+    When selector ".repl-toolbar button:has-text('Plexus REPL')" is clicked
+    Given the next three successful replies to console command "CREATE SCHEMA recovered_once ( value I64 );" are uncertain
+    When selector ".prompt-row input" is filled with "CREATE SCHEMA recovered_once ( value I64 );"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then the uncertain console command kept its connection and existing attachments
+    And selector ".terminal" contains "quiesce level: DYNAMIC; planned relocations: 0" exactly 1 times
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @connector_completion
   Scenario Outline: Web console completes connector expressions from their declared scope
     Given a <cluster_size> node nervix cluster is started
@@ -89,6 +118,25 @@ Feature: Web console Plexus REPL
     When selector ".prompt-row input" is filled with "LIST DOMAINS;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "no domains registered"
+
+  @client_wire36
+  Scenario: Web console completes its latest input after a full command request window drains
+    Given a 1 node nervix cluster is started
+    Then the current leader node is saved as placeholder "leader"
+    When the web console is opened on the leader node with its request window observed
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    Given command response delivery on node "{{leader}}" pauses after execution
+    When selector ".prompt-row input" is filled with "SHOW CLUSTER STATUS;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then the command response delivery pause on node "{{leader}}" is reached
+    When the web console submits "SHOW CLUSTER STATUS;" 63 times
+    Then the web console has sent 64 observed commands
+    When selector ".prompt-row input" is filled with "CREATE "
+    And the web console finishes its scheduled input callbacks
+    Then the observed web console session stays within its request window
+    When the command response delivery pause on node "{{leader}}" is released
+    Then selector ".suggestions" contains "DOMAIN"
+    And the observed web console session stays within its request window
 
   @client_wire13
   Scenario: Web console preserves several pending commands across a leader change
@@ -680,6 +728,37 @@ Feature: Web console Plexus REPL
     And selector ".resource-version-list" contains "nested/beta.txt"
     When selector ".modal-scrim" is clicked by script
     Then selector ".resource-dialog" does not exist
+
+  Scenario Outline: Web console uploads a version after its leader refused the upload start before proposing it
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And node "node-1" has resource directory "console_refused_start_dir" containing
+      """
+      {
+        "alpha.txt": "alpha"
+      }
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE console_bundle;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the web console is opened on node "{{leader}}"
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".nav-item.resources" contains "console_bundle"
+    Given node "{{leader}}" refuses its next resource upload start as a leader that could not confirm its lease
+    When selector ".nav-item.resources:has-text('console_bundle')" is clicked
+    Then selector ".resource-dialog" contains "console_bundle"
+    When selector ".resource-dialog .file-upload-input" uploads resource directory "console_refused_start_dir"
+    Then selector ".resource-upload-status" contains "uploaded resource version 1"
+    And node "{{leader}}" refused a resource upload start
+    And selector ".resource-version-list" contains "version 1"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   Scenario Outline: Web console shows the latest completed resource version and the usages bound to each version
     Given a <cluster_size> node nervix cluster is started

@@ -52,38 +52,128 @@ class MetadataTests(unittest.TestCase):
 
 
 class CalibrationTests(unittest.TestCase):
-    def test_real_tools_retain_rates_identity_and_remove_the_file(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            output = root / "reports"
-            summary = root / "summary.md"
-            with mock.patch("sys.argv", ["runner_diagnostics", "--label", "build", "--output",
-                                         str(output), "--storage-path", str(root)]), \
-                 mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}), \
-                 contextlib.redirect_stdout(io.StringIO()):
-                diagnostics.main()
-            record = json.loads((output / "build.json").read_text())
-            result = record["calibration"]
-            self.assertEqual(result["tools"]["sysbench"].get("returncode"), 0,
-                             result["tools"]["sysbench"])
-            self.assertIn("sysbench", result["tools"]["sysbench"]["stdout"])
-            for name in ("cpu", "memory-sequential", "memory-random"):
-                with self.subTest(name=name):
-                    probe = result["measurements"][name]
-                    self.assertEqual(probe.get("returncode"), 0, probe)
-                    self.assertGreater(probe["wall_seconds"], 0)
-                    self.assertGreater(probe["cpu_seconds"], 0)
-                    self.assertIn("total number of events:", probe["stdout"])
-            disk = result["measurements"]["disk"]
-            self.assertEqual(disk.get("returncode"), 0, disk)
-            jobs = json.loads(disk["stdout"])["jobs"]
+    def publish_report(self, root: Path) -> tuple[dict, str]:
+        output = root / "reports"
+        summary = root / "summary.md"
+        with mock.patch("sys.argv", ["runner_diagnostics", "--label", "build", "--output",
+                                     str(output), "--storage-path", str(root)]), \
+             mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}), \
+             contextlib.redirect_stdout(io.StringIO()):
+            diagnostics.main()
+        record = json.loads((output / "build.json").read_text())
+        rendered = (output / "build.md").read_text()
+        self.assertEqual(summary.read_text(), rendered)
+        self.assertEqual(sorted(path.name for path in root.iterdir()), ["reports", "summary.md"])
+        return record, rendered
+
+    def assert_completed_measurement(self, name: str, probe: dict) -> None:
+        self.assertGreater(probe["wall_seconds"], 0)
+        self.assertGreater(probe["cpu_seconds"], 0)
+        if name == "disk":
+            jobs = json.loads(probe["stdout"])["jobs"]
             self.assertEqual([job["error"] for job in jobs], [0, 0, 0])
             self.assertEqual(jobs[0]["write"]["io_bytes"], 64 * 2**20)
             self.assertEqual(jobs[1]["read"]["io_bytes"], 64 * 2**20)
             self.assertEqual(jobs[2]["read"]["io_bytes"], 128 * 4096)
-            self.assertEqual(summary.read_text(), (output / "build.md").read_text())
-            self.assertIn("MiB/sec", summary.read_text())
-            self.assertEqual(sorted(path.name for path in root.iterdir()), ["reports", "summary.md"])
+        else:
+            self.assertIn("total number of events:", probe["stdout"])
+            if name.startswith("memory-"):
+                self.assertIn("MiB/sec", probe["stdout"])
+
+    def test_real_tools_retain_available_measurements_and_remove_the_file(self) -> None:
+        # A bounded diagnostic reports the machine's outcome; it does not require the machine
+        # to complete every measurement. Successful measurements still retain their full oracle.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            record, rendered = self.publish_report(root)
+            result = record["calibration"]
+            self.assertEqual(result["tools"]["sysbench"]["command"], ["sysbench", "--version"])
+            if result["tools"]["sysbench"].get("returncode") == 0:
+                self.assertIn("sysbench", result["tools"]["sysbench"]["stdout"])
+            self.assertEqual(result["execution_limit_seconds"], 10)
+            self.assertEqual(set(result["measurements"]),
+                             {"cpu", "memory-sequential", "memory-random", "disk"})
+            for name, probe in result["measurements"].items():
+                with self.subTest(name=name):
+                    if "unavailable" in probe:
+                        self.assertTrue(probe["unavailable"])
+                        self.assertIn(f"| {name} | unavailable: {probe['unavailable']} |", rendered)
+                        continue
+                    self.assertGreater(probe["timeout_seconds"], 0)
+                    self.assertLessEqual(probe["timeout_seconds"], 4 if name == "disk" else 3)
+                    self.assertIn(probe["stdout"], rendered)
+                    self.assertIn(probe["stderr"], rendered)
+                    if probe.get("timed_out"):
+                        self.assertLess(probe["returncode"], 0)
+                        self.assertIn(f"| {name} | wall guard elapsed |", rendered)
+                    else:
+                        self.assertIn(f"| {name} | exit {probe['returncode']} |", rendered)
+                        if probe["returncode"] == 0:
+                            self.assert_completed_measurement(name, probe)
+
+    def test_complete_measurements_publish_rates_byte_counts_and_identity(self) -> None:
+        cpu = "total number of events: 12\n"
+        memory = "total number of events: 2\n128.00 MiB transferred (128.00 MiB/sec)\n"
+        disk = json.dumps({"jobs": [
+            {"error": 0, "write": {"io_bytes": 64 * 2**20}},
+            {"error": 0, "read": {"io_bytes": 64 * 2**20}},
+            {"error": 0, "read": {"io_bytes": 128 * 4096}},
+        ]})
+
+        def completed(command: list[str], timeout: float) -> dict:
+            if "--output-format=json" in command:
+                stdout = disk
+                self.assertEqual(timeout, 4)
+            else:
+                stdout = memory if "memory" in command else cpu
+                self.assertEqual(timeout, 3)
+            return {"command": command, "timeout_seconds": timeout, "returncode": 0,
+                    "stdout": stdout, "stderr": "", "wall_seconds": 0.5, "cpu_seconds": 0.4}
+
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(diagnostics, "run_probe", side_effect=completed) as run, \
+             mock.patch.object(diagnostics.time, "monotonic", return_value=100), \
+             mock.patch.dict(os.environ, {"GITHUB_SHA": "qualified-source", "RUNNER_NAME": "runner-a"}):
+            record, rendered = self.publish_report(Path(directory))
+        self.assertEqual(run.call_count, 4)
+        self.assertEqual(record["identity"]["GITHUB_SHA"], "qualified-source")
+        self.assertEqual(record["identity"]["RUNNER_NAME"], "runner-a")
+        for name, probe in record["calibration"]["measurements"].items():
+            self.assert_completed_measurement(name, probe)
+            self.assertIn(probe["stdout"], rendered)
+            self.assertIn(f"| {name} | exit 0 |", rendered)
+        self.assertIn("128.00 MiB/sec", rendered)
+
+    def test_partial_measurements_publish_failure_timeout_and_exhausted_budget(self) -> None:
+        outcomes = [
+            {"returncode": 0, "stdout": "total number of events: 12\n", "stderr": ""},
+            {"returncode": 1, "stdout": "", "stderr": "measurement refused\n"},
+            {"returncode": -9, "timed_out": True, "stdout": "Threads started!\n", "stderr": ""},
+        ]
+
+        def measured(command: list[str], timeout: float) -> dict:
+            return {"command": command, "timeout_seconds": timeout,
+                    "wall_seconds": 0.5, "cpu_seconds": 0.4, **outcomes.pop(0)}
+
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(diagnostics, "run_probe", side_effect=measured) as run, \
+             mock.patch.object(diagnostics.time, "monotonic",
+                               side_effect=[100, 100, 100, 101, 103.5, 111, 111]):
+            record, rendered = self.publish_report(Path(directory))
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual([call.args[1] for call in run.call_args_list], [3, 3, 3])
+        measurements = record["calibration"]["measurements"]
+        self.assertEqual(measurements["memory-random"]["stdout"], "Threads started!\n")
+        self.assertTrue(measurements["memory-random"]["timed_out"])
+        self.assertEqual(measurements["memory-sequential"]["stderr"], "measurement refused\n")
+        self.assertEqual(measurements["disk"], {"unavailable": "calibration wall budget exhausted"})
+        self.assertIn("| cpu | exit 0 |", rendered)
+        self.assertIn("| memory-sequential | exit 1 |", rendered)
+        self.assertIn("| memory-random | wall guard elapsed |", rendered)
+        self.assertIn("| disk | unavailable: calibration wall budget exhausted |", rendered)
+        self.assertIn("Threads started!\n", rendered)
+        self.assertIn("measurement refused\n", rendered)
+        self.assertNotIn("MiB/sec", rendered)
 
     def test_tool_timeout_keeps_completed_output_and_reaps_its_process(self) -> None:
         import sys

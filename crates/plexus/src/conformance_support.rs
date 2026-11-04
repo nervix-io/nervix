@@ -2,8 +2,9 @@
 //!
 //! Layer: test harness.
 //!
-//! - **Owns.** Parsing a generated statement through the composed statement grammar, and the
-//!   check that completion offers exactly the items a declaration lists.
+//! - **Owns.** Parsing a generated statement through the composed statement grammar, the check
+//!   that canonical Plexus writes a parsed statement back as itself, and the check that
+//!   completion offers exactly the items a declaration lists.
 //! - **Depends on.** The composed statement grammar and its completion.
 //! - **Must not know.** Any one connector, entity or grammar module.
 //!
@@ -30,6 +31,23 @@ pub(crate) fn created_model(statement: &str) -> Option<Model<RequestedResourceVe
 /// Whether the grammar refuses `statement`.
 pub(crate) fn refused(statement: &str) -> bool {
     parse_statement(statement).is_err()
+}
+
+/// Checks that canonical Plexus writes `statement` as text the composed grammar reads back as the
+/// same statement, so every operation a declaration generates renders as the operation it is.
+pub(crate) fn assert_reads_back_canonically(statement: &Statement) {
+    let canonical = match statement.to_canonical_plexus() {
+        Ok(canonical) => canonical,
+        Err(error) => panic!("{statement:?} must render as canonical Plexus: {error:?}"),
+    };
+    let reparsed = match parse_statement(&canonical) {
+        Ok(reparsed) => reparsed,
+        Err(error) => panic!("{canonical}\nmust parse again: {error:?}"),
+    };
+    assert_eq!(
+        &reparsed, statement,
+        "{canonical}\nchanged when it was parsed again"
+    );
 }
 
 /// Whether `unit` opens `text`: the whole text is the unit, or the text goes on after it with a

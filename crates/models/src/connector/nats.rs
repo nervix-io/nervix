@@ -238,6 +238,10 @@ impl IngestorEntityBody for NatsSubjectIngestor {
         IngestorReference::Client(&self.client)
     }
 
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
+    }
+
     fn quiesce(&self) -> &IngestQuiesceMode {
         &self.quiesce
     }
@@ -266,6 +270,50 @@ impl NatsIngestMode {
     }
 }
 
+/// One change an `ALTER NATS SUBJECT INGESTOR` writes to the body of the ingestor it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum NatsSubjectIngestorChange {
+    /// `SET SUBJECT '<subject>'`.
+    Subject(NatsSubjectName),
+    /// `SET QUEUE GROUP '<group>'`.
+    QueueGroup(NatsQueueGroupName),
+    /// `SET MODE <mode>`.
+    Mode(NatsIngestMode),
+}
+
+impl crate::IngestorEntityChange for NatsSubjectIngestorChange {
+    type Entity = NatsSubjectIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut NatsSubjectIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Subject(subject) => entity.subject = subject.clone(),
+            Self::QueueGroup(group) => entity.queue_group = group.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Subject(subject) => {
+                format!("SET SUBJECT {}", crate::string_literal(subject.as_str()))
+            }
+            Self::QueueGroup(group) => {
+                format!("SET QUEUE GROUP {}", crate::string_literal(group.as_str()))
+            }
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
+    }
+}
+
 connector_ingestors! {
     connector Nats = "NATS";
     /// What a NATS source reads.
@@ -274,7 +322,7 @@ connector_ingestors! {
     pub enum NatsSubjectIngestorAlteration;
     /// The entities a NATS source reads.
     pub enum NatsIngestorEntity {
-        Subject(NatsSubjectIngestor) = "SUBJECT", "NATS";
+        Subject(NatsSubjectIngestor => NatsSubjectIngestorChange) = "SUBJECT", "NATS";
     }
 }
 
@@ -326,15 +374,51 @@ impl EmitterEntityBody for NatsSubjectEmitter {
     }
 }
 
+/// One change an `ALTER NATS SUBJECT EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum NatsSubjectEmitterChange {
+    /// `SET SUBJECT '<name>'`.
+    Subject(NatsPublishSubjectName),
+    /// `SET MODE <mode>`.
+    Mode(NatsSubjectPublishingMode),
+}
+
+impl crate::EmitterEntityChange for NatsSubjectEmitterChange {
+    type Entity = NatsSubjectEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut NatsSubjectEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Subject(name) => entity.subject = name.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Subject(name) => format!("SET SUBJECT {}", crate::string_literal(name.as_str())),
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector Nats = "NATS";
     /// What a NATS emitter writes.
     pub enum NatsEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum NatsSubjectEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum NatsEmitterChange;
     /// The entities a NATS emitter writes.
     pub enum NatsEmitterEntity {
-        Subject(NatsSubjectEmitter, NatsSubjectPublishingMode) = "SUBJECT";
+        Subject(NatsSubjectEmitter, NatsSubjectPublishingMode, NatsSubjectEmitterChange) = "SUBJECT";
     }
 }
 

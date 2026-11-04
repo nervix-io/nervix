@@ -541,6 +541,10 @@ coverage-consensus output *args:
 coverage-client-core output *args:
     cargo llvm-cov --no-clean --package nervix-client-core --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
+# Measure selected console request-owner regressions without running unrelated browser tests.
+coverage-web-console output *args:
+    cargo llvm-cov --package nervix-web-console --bin nervix-web-console --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(args) }}
+
 # Measure one connector crate's unit tests, for a patch confined to it, through the configured
 # compiler cache.
 coverage-connector package output *args:
@@ -3207,6 +3211,10 @@ coverage-connector-matrix: connector-declarations
 # job's daemon, and the bounded publication of what the job built.
 test-kache-ci:
     uv run --locked python -m unittest scripts.tests.test_kache_ci scripts.tests.test_runner_diagnostics scripts.tests.test_record_runner_load
+
+# Exercise bounded runner report publication without the remote-cache fixtures.
+test-runner-diagnostics:
+    uv run --locked python -m unittest scripts.tests.test_runner_diagnostics
 
 # Retain the kache remote contract's own measured line coverage beside the other Python tooling.
 coverage-kache-ci:
