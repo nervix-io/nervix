@@ -12,116 +12,12 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
-use std::{convert::Infallible, time::Duration};
+use std::time::Duration;
 
+use arch_into::ArchInto as _;
 use error_stack::Report;
 use meticulous::ResultExt as _;
-use nervix_models::{ClusterParameters, Setting, SettingDefinition};
-
-/// How long an open transaction may wait for its next statement before the cluster abandons it.
-pub struct TransactionIdleTimeout;
-
-impl SettingDefinition for TransactionIdleTimeout {
-    type Class = ClusterParameters;
-    type Value = Duration;
-    type Context = ();
-    type Error = Infallible;
-
-    const NAME: &'static str = "transaction-idle-timeout";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &()) -> Duration {
-        Duration::from_secs(15 * 60)
-    }
-
-    fn validate(_: &Duration, _: &()) -> Result<(), Report<Infallible>> {
-        Ok(())
-    }
-}
-
-/// How long the cluster remembers how a finished transaction ended.
-pub struct TransactionTombstoneRetention;
-
-impl SettingDefinition for TransactionTombstoneRetention {
-    type Class = ClusterParameters;
-    type Value = Duration;
-    type Context = ();
-    type Error = Infallible;
-
-    const NAME: &'static str = "transaction-tombstone-retention";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &()) -> Duration {
-        Duration::from_secs(15 * 60)
-    }
-
-    fn validate(_: &Duration, _: &()) -> Result<(), Report<Infallible>> {
-        Ok(())
-    }
-}
-
-/// The most statements one transaction may queue.
-pub struct TransactionMaxStatements;
-
-impl SettingDefinition for TransactionMaxStatements {
-    type Class = ClusterParameters;
-    type Value = usize;
-    type Context = ();
-    type Error = Infallible;
-
-    const NAME: &'static str = "transaction-max-statements";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &()) -> usize {
-        256
-    }
-
-    fn validate(_: &usize, _: &()) -> Result<(), Report<Infallible>> {
-        Ok(())
-    }
-}
-
-/// The most statement source bytes one transaction may queue.
-pub struct TransactionMaxSourceBytes;
-
-impl SettingDefinition for TransactionMaxSourceBytes {
-    type Class = ClusterParameters;
-    type Value = u64;
-    type Context = ();
-    type Error = Infallible;
-
-    const NAME: &'static str = "transaction-max-source-bytes";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &()) -> u64 {
-        1024 * 1024
-    }
-
-    fn validate(_: &u64, _: &()) -> Result<(), Report<Infallible>> {
-        Ok(())
-    }
-}
-
-/// The most transactions the cluster keeps open at once.
-pub struct TransactionMaxOpen;
-
-impl SettingDefinition for TransactionMaxOpen {
-    type Class = ClusterParameters;
-    type Value = usize;
-    type Context = ();
-    type Error = Infallible;
-
-    const NAME: &'static str = "transaction-max-open";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &()) -> usize {
-        1024
-    }
-
-    fn validate(_: &usize, _: &()) -> Result<(), Report<Infallible>> {
-        Ok(())
-    }
-}
+use nervix_models::Setting;
 
 /// The bounds the cluster puts on transactions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,13 +41,18 @@ pub struct TransactionBounds {
 
 impl TransactionLimits {
     /// Resolves each bound that is not given through its definition's default.
-    pub fn resolve(bounds: TransactionBounds) -> Result<Self, Report<Infallible>> {
+    pub fn resolve(
+        bounds: TransactionBounds,
+    ) -> Result<Self, Report<nervix_models::ClusterParameterError>> {
         Ok(Self {
             idle_timeout: Setting::resolve(bounds.idle_timeout, &())?,
             tombstone_retention: Setting::resolve(bounds.tombstone_retention, &())?,
-            max_statements: Setting::resolve(bounds.max_statements, &())?,
+            max_statements: Setting::resolve(
+                bounds.max_statements.map(|value| value.arch_into()),
+                &(),
+            )?,
             max_source_bytes: Setting::resolve(bounds.max_source_bytes, &())?,
-            max_open: Setting::resolve(bounds.max_open, &())?,
+            max_open: Setting::resolve(bounds.max_open.map(|value| value.arch_into()), &())?,
         })
     }
 
@@ -164,7 +65,8 @@ impl TransactionLimits {
     }
 
     pub fn max_statements(&self) -> usize {
-        *self.max_statements.value()
+        usize::try_from(*self.max_statements.value())
+            .assured("the validated count fits a supported native target")
     }
 
     pub fn max_source_bytes(&self) -> u64 {
@@ -172,13 +74,20 @@ impl TransactionLimits {
     }
 
     pub fn max_open(&self) -> usize {
-        *self.max_open.value()
+        usize::try_from(*self.max_open.value())
+            .assured("the validated count fits a supported native target")
     }
 }
 
 impl Default for TransactionLimits {
     fn default() -> Self {
         Self::resolve(TransactionBounds::default())
-            .assured("the transaction defaults declare no validation")
+            .assured("the transaction defaults have valid bounds")
     }
 }
+
+// Cluster policy definitions have one vocabulary owner. These facades hold bootstrap inputs.
+pub use nervix_models::{
+    TransactionIdleTimeout, TransactionMaxOpen, TransactionMaxSourceBytes,
+    TransactionMaxStatements, TransactionTombstoneRetention,
+};

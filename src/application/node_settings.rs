@@ -13,6 +13,7 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
+use arch_into::ArchInto as _;
 use nervix_consensus::{RAFT_LOG_DURABILITY, RaftRetentionSettings, RaftTimings};
 use nervix_interconnect::JoinTerms;
 use nervix_models::PrerequisiteTimings;
@@ -31,6 +32,8 @@ use crate::{
 /// Its default resolves every definition's own default; nothing else writes one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NodeSettings {
+    /// Explicit first-bootstrap seeds, retained separately from resolved local defaults.
+    pub parameter_seeds: nervix_models::ClusterParameterSeedValues,
     pub raft: RaftTimings,
     pub raft_retention: RaftRetentionSettings,
     pub membership: MembershipSettings,
@@ -56,5 +59,33 @@ impl NodeSettings {
                 clock_skew_tolerance: self.membership.clock_skew_tolerance(),
             },
         }
+    }
+}
+
+impl NodeSettings {
+    /// Resolve a new cluster's values from its bootstrap inputs, never from another node's flags.
+    pub(crate) fn bootstrap_parameters(
+        &self,
+    ) -> error_stack::Result<
+        nervix_models::ClusterParameterValues,
+        nervix_models::ClusterParameterError,
+    > {
+        let seed = nervix_models::ClusterParameterSeedValues {
+            node_unavailability_timeout: Some(self.membership.node_unavailability_timeout()),
+            state_snapshot_interval: Some(self.runtime.state_snapshot_interval()),
+            transaction_idle_timeout: Some(self.transactions.idle_timeout()),
+            transaction_tombstone_retention: Some(self.transactions.tombstone_retention()),
+            transaction_max_statements: Some(self.transactions.max_statements().arch_into()),
+            transaction_max_source_bytes: Some(self.transactions.max_source_bytes()),
+            transaction_max_open: Some(self.transactions.max_open().arch_into()),
+            command_retry_validity: Some(self.commands.retry_validity()),
+            command_execution_capacity: Some(self.commands.capacity().arch_into()),
+            replica_count: Some(self.scheduling.replica_count().arch_into()),
+            resource_max_archive_bytes: Some(self.resources.limits().max_archive_bytes),
+            resource_max_extracted_bytes: Some(self.resources.limits().max_extracted_bytes),
+            resource_max_file_count: Some(self.resources.limits().max_file_count),
+            ..self.parameter_seeds
+        };
+        nervix_models::ClusterParameterValues::resolve(seed)
     }
 }

@@ -230,7 +230,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    RestoredLifecycle = 9,
+    ClusterState = 10,
 }
 
 #[derive(Debug)]
@@ -239,6 +239,7 @@ struct StateMetadata {
     last_applied_log_id: Option<LogIdOf>,
     last_membership: Arc<StoredMembershipOf>,
     runtime_revision: u64,
+    parameters: Option<nervix_models::ClusterParameterRecord>,
     command_retry_fence: Option<nervix_models::Timestamp>,
 }
 
@@ -248,6 +249,7 @@ struct StateMetadataRecord {
     last_applied_log_id: Option<LogIdRecord>,
     last_membership: StoredMembershipRecord,
     runtime_revision: u64,
+    parameters: Option<nervix_models::ClusterParameterRecord>,
     command_retry_fence: Option<nervix_models::Timestamp>,
 }
 
@@ -258,6 +260,7 @@ impl From<&StateMetadata> for StateMetadataRecord {
             last_applied_log_id: value.last_applied_log_id.clone().map(Into::into),
             last_membership: StoredMembershipRecord::from(value.last_membership.as_ref()),
             runtime_revision: value.runtime_revision,
+            parameters: value.parameters,
             command_retry_fence: value.command_retry_fence,
         }
     }
@@ -276,6 +279,7 @@ impl TryFrom<StateMetadataRecord> for StateMetadata {
                     .map_err(crate::durable_batch::storage_report_io)?,
             ),
             runtime_revision: value.runtime_revision,
+            parameters: value.parameters,
             command_retry_fence: value.command_retry_fence,
         })
     }
@@ -284,10 +288,11 @@ impl TryFrom<StateMetadataRecord> for StateMetadata {
 impl From<&StateMachineData> for StateMetadata {
     fn from(state: &StateMachineData) -> Self {
         Self {
-            encoding: StateEncoding::RestoredLifecycle,
+            encoding: StateEncoding::ClusterState,
             last_applied_log_id: state.last_applied_log_id.clone(),
             last_membership: state.last_membership.clone(),
             runtime_revision: state.runtime_revision,
+            parameters: state.parameters,
             command_retry_fence: state.command_executions.retry_fence(),
         }
     }
@@ -295,9 +300,11 @@ impl From<&StateMachineData> for StateMetadata {
 
 impl StateMetadata {
     fn read(sm: &Keyspace) -> io::Result<Option<Self>> {
-        let Some(record) = read_key::<StateMetadataRecord>(sm, KEY_METADATA)? else {
+        let Some(bytes) = sm.get(KEY_METADATA).map_err(io::Error::other)? else {
             return Ok(None);
         };
+        let record: StateMetadataRecord = storage_decode(bytes.as_ref())
+            .map_err(|error| io::Error::other(StorageFailure::StateMetadata(error)))?;
         record.try_into().map(Some)
     }
 
@@ -305,7 +312,8 @@ impl StateMetadata {
         let Some(bytes) = snapshot.get(sm, KEY_METADATA).map_err(io::Error::other)? else {
             return Ok(None);
         };
-        let record: StateMetadataRecord = storage_decode(bytes.as_ref())?;
+        let record: StateMetadataRecord = storage_decode(bytes.as_ref())
+            .map_err(|error| io::Error::other(StorageFailure::StateMetadata(error)))?;
         record.try_into().map(Some)
     }
 }
@@ -313,16 +321,18 @@ impl StateMetadata {
 impl StateMachineData {
     fn load(sm: &Keyspace, metadata: StateMetadata) -> io::Result<Self> {
         let StateMetadata {
-            encoding: StateEncoding::RestoredLifecycle,
+            encoding: StateEncoding::ClusterState,
             last_applied_log_id,
             last_membership,
             runtime_revision,
+            parameters,
             command_retry_fence,
         } = metadata;
         let state = Self {
             last_applied_log_id,
             last_membership,
             runtime_revision,
+            parameters,
             schedule: ScheduleRecords {
                 domains: Records::load(b's', sm)?,
             },

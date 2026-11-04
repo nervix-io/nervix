@@ -682,11 +682,18 @@ test-primitives-deloxide:
 # attribute refuses a crate path, that a product binary has the forms each mode builds, and that the
 # diagnostic mode's tracked locks refuse the operations they cannot track; and the portable
 # surface's browser build.
-test-primitives-compile:
+test-primitives-compile diagnostic_modes="deloxide deloxide-order deloxide-stress":
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo test --package nervix-primitives --features native --doc
-    cargo test --package nervix-primitives --features 'deloxide native' --doc
-    cargo test --package nervix-primitives --features 'deloxide-order native' --doc
-    cargo test --package nervix-primitives --features 'deloxide-stress native' --doc
+    read -r -a modes <<< {{ quote(diagnostic_modes) }}
+    for mode in "${modes[@]}"; do
+        case "$mode" in
+            deloxide|deloxide-order|deloxide-stress) ;;
+            *) echo "unknown diagnostic execution mode: $mode" >&2; exit 2 ;;
+        esac
+        cargo test --package nervix-primitives --features "$mode native" --doc
+    done
     cargo check --package nervix-primitives --lib --target wasm32-unknown-unknown
 
 # Run the Deloxide diagnostic lane in its active-only selection: every workload
@@ -1483,7 +1490,7 @@ coverage-full *inputs:
 
 # Exercise the union's selection, validation, attribution and CI contract.
 test-coverage-full:
-    python3 -m unittest scripts.tests.test_coverage_full
+    python3 -m unittest scripts.tests.test_coverage_full scripts.tests.test_ci_execution_policy
 
 # Retain the union's own measured line coverage beside the other Python tooling reports.
 coverage-full-runner:
@@ -1491,7 +1498,7 @@ coverage-full-runner:
     set -euo pipefail
     mkdir -p "{{ cargo_target_dir }}/coverage-full"
     coverage=(uvx --from coverage==7.11.0 coverage)
-    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/coverage-full/python.coverage" --branch --source=scripts.coverage_full,scripts.tests.test_coverage_full -m unittest scripts.tests.test_coverage_full
+    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/coverage-full/python.coverage" --branch --source=scripts.coverage_full,scripts.tests.test_coverage_full,scripts.tests.test_ci_execution_policy -m unittest scripts.tests.test_coverage_full scripts.tests.test_ci_execution_policy
     "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/coverage-full/python.coverage" -o "{{ cargo_target_dir }}/coverage-full/python.lcov"
 
 # Report CRAP over the merged ordinary workspace report as the coverage job does: the pinned cargo-crap
@@ -1896,7 +1903,7 @@ coverage-scenarios output *args: tests-deps
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
     install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-plexus-format") }} \
         {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-plexus-format") }}
-    cargo llvm-cov --package nervix-scenarios --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+    cargo llvm-cov --package nervix-scenarios --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(args) }}
 
 # Add selected scenarios to the current coverage profiles without rebuilding unchanged artifacts.
 coverage-scenarios-append output *args: tests-deps
@@ -1912,7 +1919,7 @@ coverage-scenarios-append output *args: tests-deps
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
     install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-plexus-format") }} \
         {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-plexus-format") }}
-    cargo llvm-cov --no-clean --package nervix-scenarios --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+    cargo llvm-cov --no-clean --package nervix-scenarios --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ quote(args) }}
 
 # Measure both published paced drivers through their public scenarios, including Python threads
 # and Rust unit tests. The Python report is written beside `output` with a `.python.lcov` suffix.
@@ -2157,7 +2164,10 @@ coverage-model-runner:
     mkdir -p target/model-coverage
     coverage=(uvx --from coverage==7.11.0 coverage)
     export COVERAGE_FILE="{{ cargo_target_dir }}/model-coverage/python.coverage"
-    NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required "${coverage[@]}" run --branch --source=scripts.native_coverage,scripts.coverage_workspace_wrapper,scripts.model_evidence,scripts.shuttle_checks,scripts.loom_models,scripts.deloxide_lane -m unittest scripts.tests.test_native_coverage scripts.tests.test_model_coverage scripts.tests.test_turmoil_coverage scripts.tests.test_shuttle_checks scripts.tests.test_loom_models scripts.tests.test_deloxide_lane
+    NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required "${coverage[@]}" run --branch --source=scripts.native_coverage,scripts.coverage_workspace_wrapper,scripts.model_evidence,scripts.shuttle_checks,scripts.loom_models,scripts.deloxide_lane -m unittest scripts.tests.test_native_coverage scripts.tests.test_model_coverage scripts.tests.test_turmoil_coverage scripts.tests.test_shuttle_checks scripts.tests.test_loom_models
+    # The supervisor reaps its interpreter's adopted children. Give its real-process fixtures
+    # their own interpreter so another fixture's helper cannot become a reported leftover.
+    "${coverage[@]}" run --append --branch --source=scripts.native_coverage,scripts.coverage_workspace_wrapper,scripts.model_evidence,scripts.shuttle_checks,scripts.loom_models,scripts.deloxide_lane -m unittest scripts.tests.test_deloxide_lane
     "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/model-coverage/python.lcov"
     "${coverage[@]}" report
 

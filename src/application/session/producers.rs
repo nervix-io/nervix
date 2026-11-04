@@ -39,9 +39,9 @@ use nervix_client_wire::{
     ProducerOpened, ReplyBody, RequestId, SubmissionOutcome, SubmitBatchRequest,
 };
 use nervix_models::{
-    CLIENT_PRODUCER_SESSION_BYTES, ClientOutcomeUncertainty, ClientProducerEndReason,
-    ClientProducerGrant, ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
-    DomainStatus, IngestorInput, MAX_CLIENT_PRODUCERS_PER_SESSION,
+    ClientOutcomeUncertainty, ClientProducerEndReason, ClientProducerGrant, ClientProducerRefusal,
+    ClientSubmissionOutcome, ClientSubmissionRefusal, DomainStatus, IngestorInput,
+    MAX_CLIENT_PRODUCERS_PER_SESSION,
 };
 use nervix_primitives::sync::{Arc, blocking::Mutex, mpsc};
 use nervix_recovery::Discarded as _;
@@ -155,7 +155,7 @@ enum SubmissionRouting {
 
 impl SessionProducers {
     /// Reserves room for one more producer of `bytes`, or the refusal the session's limits give.
-    fn reserve(&self, bytes: u64) -> Result<(), ClientProducerRefusal> {
+    fn reserve(&self, bytes: u64, maximum_bytes: u64) -> Result<(), ClientProducerRefusal> {
         let mut state = self.state.lock();
         if state.held_producers >= MAX_CLIENT_PRODUCERS_PER_SESSION {
             return Err(ClientProducerRefusal::TooManyProducers);
@@ -163,7 +163,7 @@ impl SessionProducers {
         let Some(held_bytes) = state.held_bytes.checked_add(bytes) else {
             return Err(ClientProducerRefusal::SessionCapacityExhausted);
         };
-        if held_bytes > CLIENT_PRODUCER_SESSION_BYTES {
+        if held_bytes > maximum_bytes {
             return Err(ClientProducerRefusal::SessionCapacityExhausted);
         }
         state.held_producers = state
@@ -379,19 +379,26 @@ impl SessionProducers {
                     .to_string(),
             ));
         }
-        if !limits.is_within_bounds() {
+        let service = &shared.service;
+        let parameters = service.available_cluster_parameters().map_err(|error| {
+            OpenRefusal::new(
+                ClientProducerRefusal::EndpointUnavailable,
+                format!("{error:#}"),
+            )
+        })?;
+        let maximum_bytes = parameters.client_producer_session_bytes();
+        if !limits.is_within_bounds() || limits.bytes.get() > maximum_bytes {
             return Err(OpenRefusal::new(
                 ClientProducerRefusal::InvalidLimits,
                 format!(
                     "a producer may ask for at most {} batches and {} bytes, not {} and {}",
                     nervix_models::MAX_CLIENT_PRODUCER_BATCHES,
-                    CLIENT_PRODUCER_SESSION_BYTES,
+                    maximum_bytes,
                     limits.batches,
                     limits.bytes
                 ),
             ));
         }
-        let service = &shared.service;
         if !service.inner.runtime_admission.is_admitted() {
             return Err(OpenRefusal::new(
                 ClientProducerRefusal::EndpointUnavailable,
@@ -449,14 +456,14 @@ impl SessionProducers {
             ));
         };
         let bytes = limits.bytes.get();
-        if let Err(refusal) = self.reserve(bytes) {
+        if let Err(refusal) = self.reserve(bytes, maximum_bytes) {
             let message = match refusal {
                 ClientProducerRefusal::TooManyProducers => format!(
                     "this session already holds {MAX_CLIENT_PRODUCERS_PER_SESSION} producers"
                 ),
                 _ => format!(
-                    "the session's {CLIENT_PRODUCER_SESSION_BYTES} byte producer budget cannot \
-                     hold {bytes} more bytes"
+                    "the session's {maximum_bytes} byte producer budget cannot hold {bytes} more \
+                     bytes"
                 ),
             };
             return Err(OpenRefusal::new(refusal, message));

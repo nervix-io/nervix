@@ -810,7 +810,7 @@ impl Runtime {
         let mut local_gate_hold = self.engage_entity_gates(
             domain,
             &relays,
-            Instant::now() + self.inner.entity_gate_deadline,
+            Instant::now() + self.entity_gate_deadline(),
             "local scheduled node swap",
         );
         if let Some(local_node_id) = local_node_id {
@@ -1842,16 +1842,6 @@ impl Runtime {
         }
 
         Ok(placement)
-    }
-
-    /// Installs the graph a domain's registry state holds when the node starts, before the cluster
-    /// schedules it.
-    pub(crate) async fn apply_changes(
-        &self,
-        domain: &DomainName,
-        revision: Option<Arc<ExecutionRevision>>,
-    ) -> error_stack::Result<(), RuntimeError> {
-        self.rebuild_domain_execution(domain, revision).await
     }
 
     pub(super) fn scheduled_node_executes_locally(

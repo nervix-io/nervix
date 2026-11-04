@@ -44,6 +44,13 @@ separately from the VM's typed compile cause. The registry associates that cause
 with the lowered mapping before reporting the refusal; a null-only mapping is refused at admission.
 [Errors And Diagnostics](errors-and-diagnostics.md#registry-validation-and-planning) owns the report.
 
+MQTT publish properties cross two validation boundaries. The vocabulary declaration and expression
+compiler establish each property's exact non-null scalar type. The connector then checks the
+evaluated MQTT string and binary field bounds and constructs a validated response-topic value
+before driver admission. An absent property stays absent; an empty correlation value and a zero
+expiry interval remain present values. The retained payload owns the evaluated envelope, so retry
+does not evaluate a new property value.
+
 The MongoDB engine resolves a required nonempty database from its explicit key or the URL path
 into one private configuration value. It consumes the driver's optional default rather than
 carrying a second database identity. Collection names are validated vocabulary values that retain
@@ -676,6 +683,21 @@ interconnect's wire fingerprint fences it between nodes. Unrecognized stored sta
 and must be recreated. Complete equality properties exercise the production representations at
 their range boundaries; see [Property Testing And Fuzzing](./property-testing-and-fuzzing.md).
 
+## Parameter Authority and Installation
+
+`ClusterParameterValues` holds validated class-typed settings with a single definition for each
+default and bound. `ClusterParameterRecord` pairs them with a positive revision. The state machine
+has no record until first bootstrap; it never fills missing persisted fields from defaults.
+A node's gossip publication keeps committed and optional running records together and validates
+their revision/value relationship. A live construction record distinguishes pending catch-up from
+ready installation and rejects equal revisions with unequal values.
+
+The application shares one `NodeInitialization` publication between session admission, configured
+HTTP intake and readiness. Its private `OnceLock<()>` distinguishes initialization pending from
+completed and can publish completion once. This state is separate from the live construction
+record and quorum-confirmed runtime admission: policy can be caught up while initialization is
+still registering owners, and observation is available throughout.
+
 ## Atomic States On The Data Plane
 
 The bounded executor's worker has `Selected`, `Executing` and `Idle` states. `Selected` owns its
@@ -882,6 +904,12 @@ default. [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadloc
 current representation, qualification policy and coverage limits.
 
 ## Validation And Failure Boundaries
+
+Parameter sizing projects only what a candidate already knows. A polling header contributes its
+name and any available literal or client-secret value; unresolved client or secret bindings and
+templates keep the value unknown. Graph validation owns binding validity and can retain an
+incomplete transaction candidate until later statements complete it. Publication requires the
+complete graph, and connector opening checks every resolved value against captured policy.
 
 Configuration-backup round-trip validation names an unpinned resource binding with its own typed
 refusal, rather than using a resource name itself as the error. Its exact outcome classification
@@ -1200,7 +1228,6 @@ OTEL field rules carry their exact type with the constraint that requires it: a 
 cannot be declared with a floating-point descriptor. Required, optional and required-for-DELTA
 presence are distinct vocabulary states. Opening an OTEL client validates its required positive
 deadline before constructing settings; the installed settings hold a duration with no absent state.
-
 
 RabbitMQ emitter envelopes distinguish an absent timestamp from the Unix epoch: `None` omits the
 AMQP timestamp and `Some` of the epoch writes zero. Conversion accepts only nonnegative whole
