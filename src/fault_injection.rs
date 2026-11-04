@@ -75,6 +75,7 @@ mod resource_publication_tests;
 mod resource_upload_reply;
 #[cfg(test)]
 mod resource_upload_reply_tests;
+mod resource_upload_start;
 mod restarted_voter;
 mod restore_publication;
 #[cfg(test)]
@@ -108,6 +109,7 @@ use relay_memory::RelayMemoryFill;
 use relocation_commit::RelocationCommitRefusal;
 use resource_publication::ResourcePublicationRefusal;
 use resource_upload_reply::ResourceUploadReplyLoss;
+use resource_upload_start::ResourceUploadStartRefusal;
 use restarted_voter::{StartupObservationEnd, StartupVoterGossip};
 use restore_publication::RestorePublicationFailure;
 pub use restore_staging::RestoreStagingKind;
@@ -236,6 +238,10 @@ struct FaultInjectionState {
     /// Losses of the reply to a node's next upload call that installs a version, each keeping
     /// whether an installing call met it.
     lost_resource_upload_replies: DashMap<ClusterNodeName, ResourceUploadReplyLoss, RandomState>,
+    /// Refusals of a node's next resource upload start, each keeping whether an upload start met
+    /// it.
+    refused_resource_upload_starts:
+        DashMap<ClusterNodeName, ResourceUploadStartRefusal, RandomState>,
     /// Failures of every staging of one kind of a restored domain's checkpoints until cleared,
     /// each keeping whether a staging met it.
     failed_restore_checkpoint_stagings:
@@ -557,6 +563,7 @@ impl Default for FaultInjection {
                 failed_resource_installations: DashMap::default(),
                 refused_resource_publications: DashMap::default(),
                 lost_resource_upload_replies: DashMap::default(),
+                refused_resource_upload_starts: DashMap::default(),
                 failed_restore_checkpoint_stagings: DashMap::default(),
                 failed_restore_state_publications: DashMap::default(),
                 native_metadata_interruptions: DashMap::default(),

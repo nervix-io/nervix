@@ -930,6 +930,21 @@ impl SessionServiceImpl {
                 received_checksum: root_checksum,
             }));
         }
+        #[cfg(feature = "testing")]
+        if self
+            .inner
+            .runtime
+            .fault_injection()
+            .refuses_resource_upload_start(self.inner.consensus.local_node_id())
+        {
+            return Err(
+                Report::new(self.inner.consensus.lapsed_lease_refusal()).change_context(
+                    ResourceUploadError::BeginUpload {
+                        identifier: identifier.clone(),
+                    },
+                ),
+            );
+        }
         let upload = self
             .inner
             .consensus
