@@ -1068,7 +1068,6 @@ impl SessionRequests {
             .next_request_id
             .checked_add(1)
             .assured("a console connection cannot send 2^64 requests");
-        self.supersede_lookup(&issued.request);
         self.remember_lookup(&issued.request, LookupPosition::Sent(request_id));
         if let ConsoleRequest::AttachTransaction(_) = &issued.request {
             self.attaching = Some(issued.order);
