@@ -30,6 +30,10 @@ resumes at its configured rate. Responses go promptly. A scenario-owned task set
 connections. Cancellation or fixture drop closes the listener and aborts all its connections; the
 fixture cannot survive its node specification.
 
+A scenario can release the byte cadence once. That wakes every delayed chunk and leaves existing
+sockets, buffered bytes and the reserved listener intact; future connections also run without
+pacing. A release does not parse the stream, fabricate a product response or replace a connection.
+
 The rate-limited case transfers leadership to node-2 while the stopped follower has only its
 initial log, making the new leader recover an unconfirmed previous-log boundary. The scenario
 starts the follower without the harness's catch-up retries, records append-stream
@@ -52,6 +56,30 @@ A focused startup scenario occupies the observability port to force the first la
 before runtime initialization.
 The harness joins that attempt and retries on a fresh observability port within the same readiness
 budget. The pacer's advertised endpoint, private target and retained connections stay in place.
+
+## Wide Subscription Row Input
+
+The native client's near-frame-limit outline establishes its input through an acknowledged HTTP
+endpoint. Its exact 3,000,000-byte note, one- and three-node topologies, ordinary placement and
+30-second subscription receive bound stay fixed. HTTP intake alone does not establish that the
+relay received the row: a forwarding failure can follow an unacknowledged endpoint's intake
+response, before the subscription encoder sees any data.
+
+The fixture uses `MODE ACK MAX 1 ACK TIMEOUT 30s` and `ON QUIESCE REJECT RETRY AFTER 1s`. The
+existing acknowledged publisher requires the exact HTTP 200 `completed` outcome, and retries
+only an explicit HTTP 503 refusal using its `Retry-After` delay. One 30-second publication bound
+covers the complete request and these retries on an owned runtime task, independently of runner
+polling. A timeout is a failed input assertion. The publisher does not reconnect the subscription,
+repeat a scenario or change product delivery deadlines. A repeated input can have duplicate
+effects under this endpoint's existing acknowledgement contract.
+
+The controlled three-node case pins the relay to node-3 and paces that node's inbound opaque bytes
+at 262,144 bytes per second. It positively observes the first input's forwarding error, releases
+the cadence, requires acknowledged input completion, then requires the exact subscription row
+within the same 30-second receive bound and an active subscription. The production scheduler is
+selected only to establish this fault's target; the ordinary outline retains randomized placement.
+The receive step records the subscription name and encoded frame length without logging row
+contents.
 
 The Cucumber scenario suite runs Nervix the way an operator does. It starts clusters, drives them
 through the session API, brokers, and HTTP endpoints, and asserts on what they do. Many scenarios

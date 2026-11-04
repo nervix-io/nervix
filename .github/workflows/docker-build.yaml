@@ -498,10 +498,10 @@ jobs:
               core.setFailed('successful benchmark job did not publish a comparison');
             }
 
-  # The external chaos runner against the images built above, through the same `just chaos suite`
-  # command a developer runs: the release image and the Deloxide diagnostic image of the same
-  # revision, each refused by the suite unless its labels name that kind and revision. A pull
-  # request runs the smoke suite with the `chaos` label and the soak suite with `chaos-soak`.
+  # The external chaos runner uses the release image through the same `just chaos suite` command
+  # a developer runs. Image labels must name the requested kind and revision. A pull request runs
+  # smoke with `chaos` and soak with `chaos-soak`; diagnostic builds and callers stay disabled
+  # under the temporary CI policy.
   chaos-smoke:
     name: chaos-smoke
     needs: [meta, build-arch]

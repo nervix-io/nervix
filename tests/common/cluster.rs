@@ -5381,6 +5381,19 @@ pub(crate) struct AcknowledgedHttpPublisher {
 }
 
 impl AcknowledgedHttpPublisher {
+    /// Bounds the complete request and its explicit refusal retries, including a stalled request
+    /// or response body. Run this on an owned runtime task when the scenario runner can stall.
+    pub(crate) async fn publish_bounded(&self, payload: &str) -> io::Result<()> {
+        nervix_primitives::time::timeout(self.wait, self.publish(payload))
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("HTTP payload was not acknowledged within {:?}", self.wait),
+                )
+            })?
+    }
+
     /// Posts `payload` until the endpoint answers 200 with a completed outcome.
     ///
     /// The sender owns the retry of a 503: a full ACK window, a downstream refusal, an expired ACK
