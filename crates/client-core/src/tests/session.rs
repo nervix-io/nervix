@@ -26,7 +26,7 @@ use nervix_primitives::{
     net::TcpListener,
     stream::wrappers::{ReceiverStream, TcpListenerStream},
     sync::{
-        Arc, Mutex,
+        Arc, CancellationToken, Mutex,
         atomic::{AtomicU64, Ordering},
         mpsc, oneshot,
     },
@@ -202,6 +202,8 @@ enum UploadReplyMode {
     WrongRequestId,
     Redirect(Url),
     Reject,
+    /// The server receives the whole archive and never answers it.
+    Withheld,
 }
 
 impl NamedService for SessionService {
@@ -352,6 +354,7 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for InstallUpload {
             };
             let mode = upload_reply_mode.lock().await.take();
             let reject = matches!(mode.as_ref(), Some(UploadReplyMode::Reject));
+            let withheld = matches!(mode.as_ref(), Some(UploadReplyMode::Withheld));
             match mode {
                 Some(UploadReplyMode::WrongIdentity) => {
                     if let UploadDisposition::Installed {
@@ -376,7 +379,7 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for InstallUpload {
                         }),
                     });
                 }
-                Some(UploadReplyMode::Reject) | None => {}
+                Some(UploadReplyMode::Reject | UploadReplyMode::Withheld) | None => {}
             }
             let reply = reply
                 .encode(&limits())
@@ -387,6 +390,9 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for InstallUpload {
                 .is_err()
             {
                 return Err(Status::unavailable("the test takes no more uploads"));
+            }
+            if withheld {
+                std::future::pending::<()>().await;
             }
             if reject {
                 return Err(Status::permission_denied("the upload is not authorized"));
@@ -2324,6 +2330,50 @@ async fn a_prepared_upload_uses_its_captured_domain() {
     assert!(outcome.succeeded());
     assert_eq!(received.start.domain, domain("tenant"));
     assert_eq!(received.start.upload_identity, *prepared.upload_identity());
+}
+
+#[nervix_primitives::test]
+async fn a_cancelled_upload_the_server_received_is_uncertain_under_its_identity() {
+    let mut server = TestServer::start().await;
+    *server.upload_reply_mode.lock().await = Some(UploadReplyMode::Withheld);
+    let client = server.connect().await;
+    let _exchange = server.next_exchange().await;
+    let directory = tempfile::tempdir().assured("a temporary directory is available");
+    write_file(&directory.path().join("payload.bin"), &[7_u8; 1000]);
+    let query = format!(
+        "UPLOAD RESOURCE model VERSION '{}';",
+        directory.path().display()
+    );
+    let prepared = client.prepare_execution(query).await;
+    let cancellation = CancellationToken::new();
+    let uploading = {
+        let client = client.clone();
+        let prepared = prepared.clone();
+        let cancellation = cancellation.clone();
+        nervix_primitives::task::spawn(async move {
+            client
+                .execute_prepared_with_cancellation(&prepared, &cancellation)
+                .await
+        })
+    };
+    let received = within_deadline(server.uploads.recv())
+        .await
+        .assured("the server received the whole archive");
+    cancellation.cancel();
+
+    let error = within_deadline(uploading)
+        .await
+        .assured("the upload task runs to its end")
+        .expect_err("an upload cancelled after the server received it may have been installed");
+    let ClientError::UncertainUpload { identity } = error.current_context() else {
+        panic!("a cancelled upload the server may have installed is uncertain: {error:?}");
+    };
+    assert_eq!(identity, prepared.upload_identity());
+    assert_eq!(&received.start.upload_identity, prepared.upload_identity());
+    assert!(
+        matches!(cause_beneath(&error), Some(ClientError::CallCancelled)),
+        "the caller's cancellation stays beneath the uncertainty: {error:?}"
+    );
 }
 
 #[nervix_primitives::test]

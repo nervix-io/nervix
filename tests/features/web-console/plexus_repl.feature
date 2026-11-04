@@ -1,4 +1,33 @@
 Feature: Web console Plexus REPL
+  @client_wire67
+  Scenario Outline: Web console recovers an uncertain command on its existing session
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA source_event ( value I64 );
+      CREATE RELAY events SCHEMA source_event UNBRANCHED;
+      START;
+      """
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".prompt-row" contains "{{domain}}"
+    And selector ".domain-clock" contains "UNPACED"
+    When selector ".prompt-row input" is filled with "CREATE SUBSCRIPTION live_events TO events;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".subscription-tab[data-subscription-state='active']" contains "EVENTS"
+    When selector ".repl-toolbar button:has-text('Plexus REPL')" is clicked
+    Given the next three successful replies to console command "CREATE SCHEMA recovered_once ( value I64 );" are uncertain
+    When selector ".prompt-row input" is filled with "CREATE SCHEMA recovered_once ( value I64 );"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then the uncertain console command kept its connection and existing attachments
+    And selector ".terminal" contains "quiesce level: DYNAMIC; planned relocations: 0" exactly 1 times
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @connector_completion
   Scenario Outline: Web console completes connector expressions from their declared scope
     Given a <cluster_size> node nervix cluster is started

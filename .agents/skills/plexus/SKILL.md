@@ -108,6 +108,11 @@ retry boundary when explaining source recovery.
 
 Run the control plane with `nervix-server` and submit configuration through the separate
 `nervix-cli` client. Format saved `.plexus` files with `nervix-plexus-format`.
+A script driving `nervix-cli --command` branches on its exit status, never on printed text: `0`
+completed, `1` failed, `3` outcome not known, `130` cancelled before admission. After `3`, send the
+same command again with the `--execution-reference` or `--upload-identity` the CLI printed, which
+recovers the outcome; a fresh submission could apply it twice. The CLI guide's Exit Status section
+defines each status.
 For a native CLI or Rust-client session addressed by hostname, Hickory resolves the selected
 server, seeds, and redirects on connection. Keep the hostname in the `http://` or `https://` server
 URL so HTTPS verifies that name. The CLI normally reads the system resolver and hosts files; use

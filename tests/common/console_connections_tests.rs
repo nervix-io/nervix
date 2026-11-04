@@ -136,6 +136,13 @@ fn the_initial_serving_node_comes_from_the_session_that_connected_after_redirect
             .assured("the record contains valid wire frames"),
         Some(ClusterNodeName::parse("initial-leader").assured("a literal node name")),
     );
+    let setup = record
+        .setup_observation()
+        .assured("the session frames decode under the public codec");
+    assert_eq!(setup.connections, vec![1, 11, 16]);
+    assert_eq!(setup.domain_selections, 0);
+    assert_eq!(setup.clock_attachments, 0);
+    assert_eq!(setup.subscriptions, 0);
 }
 
 #[test]
