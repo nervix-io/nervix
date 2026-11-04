@@ -369,10 +369,12 @@ For representation properties and sanitizer fuzzing, see
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md). The focused entry points are
 `just test-bolero [filter]`, `just fuzz-list` and
 `just fuzz <target> [duration]`. These commands and the dedicated Bolero workflow own target
-discovery; repository validation does not run Bolero checks. In CI, that workflow runs the
-sanitizer campaigns, the preferred Bolero evidence, for a pull request labeled `fuzz`, and the
-randomized properties for one labeled `bolero-random`, which a pull request carries only when its
-task requires that run. `just help` lists the recipes.
+discovery; repository validation does not run Bolero checks. The temporary CI execution policy
+disables Deloxide and sanitizer fuzz targets for every trigger, including labels and manual runs.
+Re-enabling either requires an explicit user decision. Local targeted checks remain available when
+a concrete risk needs them. CI runs randomized properties for a pull request labeled `bolero-random`
+only when its task requires that run. Ordinary diagnostics, coverage integrity and complexity checks
+remain required; see [Coverage Reports](./coverage-reports.md). `just help` lists the recipes.
 
 Native CI builds for validation, unit tests, scenarios, client conformance, Turmoil, Shuttle,
 Loom, Bolero and extra checks use Clang 23 with Wild. Cargo's `x86_64-unknown-linux-gnu` linker
@@ -508,21 +510,19 @@ compares it with the workflows.
 | `shuttle` | Check | The Shuttle checks and their replay check |
 | `loom` | Check | The Loom models and their weakening qualification |
 | `turmoil` | Check | The Turmoil simulation suite and its replay check |
-| `deloxide` | Check | The four Deloxide lanes and each selection's supervision qualification |
 | `client-conformance` | Check | The cross-language client probes against one- and three-node clusters |
 | `bolero-random` | Check, through Bolero | Bolero's randomized properties and corpus replay, which a manual run of the Bolero workflow always runs |
-| `fuzz` | Check, through Bolero | The Bolero sanitizer campaigns and the combined record of their shards |
 | `extra-doctests` | Check | Capability doctests |
 | `extra-miri` | Check | Miri over the expiry map |
 | `extra-mutation` | Check | Mutation tests of the expiry map |
 | `extra-runners` | Check | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the native collector and the primitive source validator |
 | `extra-compiler` | Check | Source contracts, compiler diagnostics, paired API doctests, compiler cache qualification and the Python coverage of the ratchet's runners |
 | `extra-bench-smoke` | Check | Benchmark smoke tests |
-| `extra-primitives` | Check | Primitive boundary conformance in every mode, and its compile and browser checks. `coverage-full` then requires those collections |
+| `extra-primitives` | Check | Primitive boundary conformance in ordinary, Shuttle, Loom and Turmoil modes, plus ordinary documentation and browser checks. `coverage-full` then requires those collections |
 | `extra-completion-walk` | Check | The Plexus completion walk |
 | `extra-connector-matrix` | Check | The Plexus connector declaration export |
-| `chaos` | Docker Build | The chaos smoke suite against the release image and the diagnostic image |
-| `chaos-soak` | Docker Build | The chaos soak suite against both images |
+| `chaos` | Docker Build | The chaos smoke suite against the release image |
+| `chaos-soak` | Docker Build | The chaos soak suite against the release image |
 | `benchmark` | Docker Build | The product comparison against the pull request's image and the ordinary primitive probe, with the comparison commented on the pull request |
 | `book` | Docker Build | A published preview of the book, its PDF and the Plexus agent index, with its links commented on the pull request |
 | `no-docker` | Docker Build | Nothing: it stops the image builds and every job that needs an image, which are `benchmark`, `chaos`, `chaos-soak` and the deployment checks. `book` and every Check job still run |
@@ -540,12 +540,13 @@ a primitive `extra-primitives`. A pull request carries `benchmark` only when its
 measured comparison, such as a change that claims a performance effect, and `no-docker` only when
 nothing in it needs an image. `no-docker` never authorizes a test exclusion.
 
-`fuzz`, `chaos`, `chaos-soak` and `deloxide` are expensive in CI, so they stay off by default and
-their checks run locally first. A pull request carries one only for a strong, task-specific need
+`deloxide` and `fuzz` do not enable CI execution under the temporary policy; re-enabling either
+requires an explicit user decision. Diagnostic Chaos execution is disabled too.
+`chaos` and `chaos-soak` are expensive in CI, so they stay off by default and their checks run locally first. A pull request carries one only for a strong, task-specific need
 that local verification cannot reasonably satisfy, not because it touches related code. It enables
 the fewest lanes that need CI, says why in its description, and records the local commands,
-revision, seeds or scenarios and results there. A release qualification still needs them, because
-`just release-evidence` requires their checks. Once a label has enabled a check, the check's result
+revision, seeds or scenarios and results there. A complete release qualification remains unavailable while its diagnostic and sanitizer evidence
+is prohibited; a policy skip supplies no such evidence. Once a label has enabled a check, the check's result
 stands: removing the label never hides a failure.
 
 Which runner a job uses, its size, its provider and the cache bucket that follows them change only
@@ -906,10 +907,9 @@ identity, the invariant it owns, its selections and the coverage it declares; a 
 renamed there in the same change. A source file that starts acquiring tracked blocking locks needs
 an `[[owner]]` record naming the workloads that reach them or the path the lane does not reach and
 why: `just validate-deloxide-applicability`, part of `just validate`, holds the records to the
-compiler's acquisition catalog. For a pull request labeled `deloxide`, CI's `deloxide` job runs
-every selection through the native coverage collector, as `just coverage-native-extras test-deloxide test-deloxide-order
-test-deloxide-stress test-deloxide-stress-restore` does locally,
-and keeps their attempts, completion records and diagnostic coverage reports as artifacts. The
+compiler's acquisition catalog. CI execution of every Deloxide selection is temporarily disabled. Locally,
+`just coverage-native-extras test-deloxide test-deloxide-order test-deloxide-stress test-deloxide-stress-restore`
+retains each attempt, completion record and diagnostic coverage report. The
 ordinary report tool also exports selected artifacts, records explicit proofs in reviewed copies and
 qualifies whole-process evidence. `just coverage-deadlock` measures the diagnostic implementation
 and the ordinary report command in separate instrumented builds through the native collector.
@@ -920,8 +920,7 @@ owner. For async-only or otherwise untracked changes, name the other checks that
 path; for documentation-only work, record why no diagnostic execution applies. Use the toolchain
 files' declared `llvm-tools` for the compiler that produced each coverage profile, retaining the
 configured kache wrapper. Registered product Bolero properties run as ordinary tests in the
-ordinary suites, and the compiler-tooling ones in `just test-typed-ratchet`; sanitizer CI, the
-preferred Bolero evidence, runs only with `fuzz`, the randomized Bolero job only with
+ordinary suites, and the compiler-tooling ones in `just test-typed-ratchet`; sanitizer CI is temporarily disabled, and the randomized Bolero job runs only with
 `bolero-random`, and a skipped run supplies no execution evidence. API rejections use paired
 current `compile_fail` and compiling doctests, which `just test` runs and CI runs for a pull request
 labeled `extra-doctests`.
@@ -987,9 +986,9 @@ Run the suite locally for a change to the chaos runner, or to the membership, fa
 delivery behavior its scenarios verify. The `chaos` label stays off by default, as
 [CI labels](#ci-labels) says.
 
-Each suite runs twice on CI: against the release image and against the Deloxide diagnostic image
-of the same revision, which `just docker-build-diagnostic` builds and whose label makes every run
-judge the deadlock evidence of its nodes. Locally, `just build-chaos-diagnostic-image` overlays a
+CI runs each selected suite against the release image. The temporary policy disables diagnostic
+image builds and diagnostic Chaos execution, including reusable and manual calls. Locally,
+`just build-chaos-diagnostic-image` overlays a
 release-mode diagnostic server of this checkout on an available image:
 
 ```bash
@@ -1037,8 +1036,7 @@ and build-target matrix, result guarantees, and recorded performance evidence. N
 generated-instruction inspection, complete scalar/level differential checks including forced
 fallback, and a measured caller. Use its [qualification recipes](./simd-kernels.md#qualification)
 and [measurement recipes](./simd-kernels.md#measurement-and-recorded-evidence), retaining kache.
-Registered product Bolero properties run as ordinary tests in the ordinary suites; sanitizer CI,
-the preferred Bolero evidence, requires the `fuzz` label, the randomized Bolero job the
+Registered product Bolero properties run as ordinary tests in the ordinary suites; sanitizer CI is temporarily disabled, and the randomized Bolero job requires the
 `bolero-random` label, and a skip supplies no execution or coverage evidence. API-rejection checks use paired
 current `compile_fail` and compiling doctests. Publish new benchmark and validation artifacts on
 the corresponding ClickUp task; keep durable architectural conclusions in the chapter.

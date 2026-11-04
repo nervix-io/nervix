@@ -35,6 +35,8 @@ use super::{
     },
     TransactionAttachment, TransactionLimits,
 };
+#[cfg(feature = "testing")]
+use crate::captured_logs::CapturedLogs;
 
 #[test]
 fn planning_error_message_includes_attached_validation_detail() {
@@ -245,6 +247,84 @@ async fn empty_transaction_commit_storage_failure_is_reported() {
             .map(|tx| tx.state),
         Some(TransactionState::Committing(_))
     ));
+
+    drop(service);
+    drop(registry);
+    let _ = std::fs::remove_dir_all(path);
+}
+
+/// A clean close whose revert the leader fails to record reports the revert's whole cause chain,
+/// so an operator can tell a refused proposal from a storage failure, and leaves the transaction
+/// open for a later attach.
+#[cfg(feature = "testing")]
+#[nervix_primitives::test]
+async fn a_clean_close_revert_that_fails_reports_its_cause_and_leaves_the_transaction_open() {
+    let probe = ConsensusTestProbe::default();
+    let TestService {
+        service,
+        registry,
+        path,
+    } = build_test_service_with_probe(true, probe.clone()).await;
+    let id = "clean-close-revert-failure".to_string();
+    let mut subscriptions = SessionSubscriptions::new();
+    let activity = service.transaction_activity();
+    let transaction = ReplicatedTransaction::open(
+        id.clone(),
+        DomainName::parse("default").assured("the test domain name is valid"),
+        subscriptions.user.clone(),
+        activity,
+    );
+    service
+        .inner
+        .consensus
+        .open_transaction(transaction, TransactionLimits::default().max_open())
+        .await
+        .assured("the test transaction opens below the admission limit");
+    let attachment = service
+        .attach_transaction(id.clone(), &mut subscriptions)
+        .await;
+    assert!(
+        matches!(attachment, TransactionAttachment::Attached { .. }),
+        "the owner's session attaches its open transaction: {attachment:?}"
+    );
+    probe.storage_fault().fail_next(
+        format!("revert-transaction:{id}"),
+        StorageBoundary::BeforeCommit,
+    );
+
+    let logs = CapturedLogs::default();
+    // `#[nervix_primitives::test]` runs the whole future on the calling thread, so the thread-local
+    // default the guard installs stays in force across the await.
+    let guard = tracing::subscriber::set_default(logs.subscriber());
+    service.clean_close_transaction(&mut subscriptions).await;
+    drop(guard);
+    let logs = logs.contents();
+
+    assert!(
+        logs.contains("failed to revert transaction during clean session close"),
+        "the failed revert must be reported: {logs}"
+    );
+    assert!(
+        logs.contains("consensus proposal failed: consensus storage failed"),
+        "the report must carry the revert's cause, not only its outermost context: {logs}"
+    );
+    assert!(
+        matches!(
+            service
+                .inner
+                .consensus
+                .current_transaction(&id)
+                .await
+                .map(|transaction| transaction.state),
+            Some(TransactionState::Open(_))
+        ),
+        "a revert that was not recorded leaves the transaction open"
+    );
+    assert_eq!(
+        subscriptions.transaction_id(),
+        None,
+        "the closed session releases its binding"
+    );
 
     drop(service);
     drop(registry);

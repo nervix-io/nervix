@@ -121,8 +121,8 @@ class TestSelection:
 
     @property
     def bolero_required(self) -> bool:
-        """A label that requests a Bolero mode calls Bolero even for verified prose."""
-        return not self.documentation_only or "bolero-random" in self.labels or "fuzz" in self.labels
+        """Permitted Bolero execution may be requested even for verified prose."""
+        return not self.documentation_only or "bolero-random" in self.labels
 
     def record(self) -> dict:
         return {

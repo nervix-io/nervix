@@ -67,6 +67,9 @@ env:
 jobs:
   plan:
     name: plan
+    # Diagnostic images execute Deloxide even without a diagnostic PR label.
+    # Temporary CI policy: re-enabling execution requires an explicit user decision.
+    if: inputs.image-kind == 'ordinary'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
