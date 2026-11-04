@@ -579,7 +579,9 @@ The `name` argument can be any expression that returns `STRING`. Both functions 
 - `NATS STREAM` exposes the headers each message was published with
 - `PULSAR TOPIC` exposes message properties
 - `RABBITMQ QUEUE` exposes AMQP message headers, converting typed AMQP values to strings
-- `SQS QUEUE` exposes message attributes, converting string, number, and binary values to strings
+- `SQS QUEUE` exposes message attributes as text: a `String` or `Number` attribute's value as SQS
+  carries it, and a `Binary` attribute's bytes read as UTF-8, each invalid sequence replaced by
+  U+FFFD
 
 Each of these sources declares a [header model](./connector-contract.md#header-models), which
 `DESCRIBE INGESTOR` shows as its `headers:` line. The model decides what the two functions find:
@@ -650,13 +652,17 @@ Transport-specific schemes and keys:
   CLIENT` refuses all three with it; see [`WEBSOCKETS CONNECTION`](#websockets-connection).
 - `MQTT`: use `mqtts://...` in `addr`. Nervix requires `tls_ca_file` for server trust and also supports `tls_cert_file` plus `tls_key_file` for mTLS. A plaintext `mqtt://` address reads no TLS file, so `CREATE MQTT CLIENT` refuses all three with it.
 - `NATS`: use `tls://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
-- `PULSAR`: use `pulsar+ssl://...` in `addr`. Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
+- `PULSAR`: use `pulsar+ssl://...` in `addr`. Nervix honors `tls_ca_file`, presents `tls_cert_file` with `tls_key_file` as its client certificate, and honors optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, all of which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address; see [Pulsar](#pulsar).
 - `RABBITMQ`: use `amqps://...` in `addr`. Nervix honors `tls_ca_file` and presents `tls_cert_file` with `tls_key_file` as its client certificate; see [RabbitMQ](#rabbitmq).
 - `REDIS`: use `rediss://...` in `addr`. Nervix trusts the host's trust store, or only
   `tls_ca_file` when it is set, and presents `tls_cert_file` with `tls_key_file` as its client
   certificate. A plaintext `redis://` address reads none of the three files; see
   [Redis Pub/Sub](#redis-pubsub).
-- `SQS`: use an `https://...` `endpoint`. Nervix honors `tls_ca_file`, which is primarily useful for SQS-compatible local/test endpoints, and `CREATE SQS CLIENT` refuses a file that holds no certificate it could trust. An SQS connection presents no client certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and `tls_key_file`.
+- `SQS`: use an `https://...` `endpoint`. Nervix trusts the platform's native roots, or only
+  `tls_ca_file` when it is set, so a CA file written for an SQS-compatible local or test endpoint
+  does not also trust AWS's certificates. `CREATE SQS CLIENT` refuses a file that holds no
+  certificate it could trust. An SQS connection presents no client certificate, so
+  `CREATE SQS CLIENT` refuses `tls_cert_file` and `tls_key_file`; see [SQS](#sqs).
 - `SYSLOG`: select `'protocol' = 'tls'`. An ingestor requires `tls_cert_file` and
   `tls_key_file`; optional `tls_ca_file` enables required client-certificate verification.
 
@@ -842,7 +848,7 @@ session, is served only by the leader.
 A batch is one canonical Arrow IPC stream: the schema message, exactly one record batch, and the
 end-of-stream marker. It is uncompressed and has no dictionary or extension encodings, and its
 Arrow schema is exactly the input schema in Nervix's Arrow representation of each type, with no
-field metadata. A batch carries at most 65,536 rows and at most the bytes one submission may carry,
+field metadata. A batch carries at most the rows in its producer grant (65,536 by default) and at most the bytes one submission may carry,
 which is the smaller of the producer's granted bytes and what one session frame holds. The node
 that executes the ingestor validates the whole batch, its structure, bounds, and every column,
 before any row is admitted; a batch that fails is refused whole and has no effect on the graph.
@@ -890,10 +896,10 @@ may ask for, the session or node has no room left, or the session holds a transa
 | Limit | Value |
 | --- | --- |
 | Producers per session | 32 |
-| Outstanding bytes per session | 32 MiB |
+| Outstanding bytes per session | Committed producer cap, 32 MiB by default |
 | Outstanding bytes per node, including batches retained for forwarded producers | 128 MiB |
 | Batches one producer may ask to have outstanding | 1,024 |
-| Rows per batch | 65,536 |
+| Rows per batch | Grant's committed client-row cap, 65,536 by default |
 
 A batch holds its share of the credit from the moment it is sent until its outcome is observed. A
 batch sent beyond the credit is refused as `credit exceeded` without reaching the graph, and the
@@ -1491,6 +1497,7 @@ absent. Quiescing does not change the auto-commit loss windows of `MODE NO ACK`.
 CREATE PULSAR TOPIC INGESTOR <name>
   FROM <client> TOPIC 'orders'
   (SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST | SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST | SUBSCRIPTION 'readers' PROVISIONED)
+  (TYPE SHARED | TYPE KEY_SHARED | TYPE FAILOVER | TYPE EXCLUSIVE)
   [INSTANCES 2]
   MODE <mode>
   ON QUIESCE <quiesce>
@@ -1506,7 +1513,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | PULSAR client |
 | Locator and validation rule | TOPIC 'orders' (pulsar_topic) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`INSTANCES 2` (positive count); optional; default 1 |
+| Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`TYPE SHARED` (keyword choice); `TYPE KEY_SHARED` (keyword choice); `TYPE FAILOVER` (keyword choice); `TYPE EXCLUSIVE` (keyword choice); required<br>`INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | Metadata | metadata.topic: STRING OPTIONAL<br>metadata.message_id: STRING OPTIONAL<br>metadata.publish_time: DATETIME OPTIONAL<br>metadata.event_time: DATETIME OPTIONAL<br>metadata.key: STRING OPTIONAL<br>metadata.ordering_key: BYTES OPTIONAL<br>metadata.producer_name: STRING OPTIONAL<br>metadata.sequence_id: I64 OPTIONAL<br>metadata.redelivery_count: I64 OPTIONAL |
@@ -1514,7 +1521,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Position class | replayable |
 | Acknowledgement confirmation | answered |
 | Buffers | messages each partition consumer receives ahead of the host: driver default, a receiver queue of 1000 messages; when full, holds back what fills it |
-| Network waits | name resolution: unbounded<br>connection: TCP, TLS and CONNECT: driver default, 10 s per address, 12 retries<br>topic lookup and subscribe: driver default, 30 s per attempt, retried without limit<br>an acknowledgement under ACK: driver default, 30 s operation timeout<br>close: unbounded |
+| Network waits | name resolution: unbounded<br>connection: TCP, TLS and CONNECT: driver default, 10 s per address, one attempt<br>topic lookup and subscribe: driver default, 30 s, one attempt<br>an acknowledgement under ACK: driver default, 30 s operation timeout<br>close: unbounded |
 | Driver limits | Inbound frames have no size limit. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
@@ -1553,9 +1560,9 @@ and field. A valid prefix already gathered is delivered before that error. Pulsa
 an omitted redelivery count as zero, so the first delivery reports zero and a broker redelivery can
 report one. Every protocol `u32` count fits the declared `I64`.
 
-Pulsar ingestors read through a shared, durable subscription. The subscription name is required by
-Pulsar, but the subscription type is not exposed in Plexus. Every statement also declares who owns
-the subscription, because the broker cannot say later who created one:
+Pulsar ingestors read through a durable subscription. Every statement declares who owns the
+subscription, because the broker cannot say later who created one, and the type the ingestor reads
+it as:
 
 - `OWNED BY INGESTOR START AT EARLIEST` or `OWNED BY INGESTOR START AT LATEST`: the ingestor owns
   the subscription and declares where a newly created cursor begins. `EARLIEST` reads the topic's
@@ -1575,6 +1582,35 @@ seeking the existing cursor or discarding its backlog. The alteration is refused
 subscription and leaves its definition unchanged. `SHOW CREATE` and `DESCRIBE INGESTOR` expose the
 declared position; it is a creation policy, not a report of the current broker position.
 
+`TYPE` decides how the broker shares the topic among the consumers of the subscription. It is
+required, and a statement writes it after the subscription's owner:
+
+| `TYPE` | What the broker delivers | Instances |
+| --- | --- | --- |
+| `SHARED` | Every consumer takes messages, with no order across them. | Any number |
+| `KEY_SHARED` | Every consumer takes messages, and one consumer takes all of a key's, so a key keeps its publication order. Messages without a key all reach one consumer. | Any number |
+| `FAILOVER` | One consumer takes messages while the others stand by. When it leaves, a standby continues from what it has not acknowledged. | One |
+| `EXCLUSIVE` | The broker admits one consumer and refuses any other. | One |
+
+`FAILOVER` and `EXCLUSIVE` read through one consumer, so a statement that declares more instances
+is refused at `CREATE` and `ALTER`, as in `PULSAR subscription TYPE EXCLUSIVE reads through one
+consumer, so it refuses INSTANCES 2`. A `FAILOVER` standby is another ingestor or application that
+joins the same subscription.
+
+The broker holds one type per subscription while any consumer is connected. It refuses a consumer
+of another type, and a second consumer of an `EXCLUSIVE` subscription. The refusal is the ingestor's
+transient error, as in `the PULSAR broker refused a consumer of subscription 'readers' of topic
+'persistent://public/default/orders' with ConsumerBusy: Exclusive consumer is already connected`,
+and the instance joins again after its retry policy's backoff, or on the host's reconnect cadence
+in `MODE NO ACK`, until the broker admits it. A refusal for a subscription another consumer holds,
+or for a topic the broker has not yet loaded, does not keep the ingestor or its domain from starting.
+
+`ALTER PULSAR TOPIC INGESTOR <name> SET TYPE SHARED|KEY_SHARED|FAILOVER|EXCLUSIVE` changes the type
+the ingestor's next join reads as. The subscription keeps its cursor and its backlog, and the
+instance rule above applies to the alteration, which leaves the definition unchanged when refused.
+On a running ingestor the consumers leave and join again as the new type, and any other consumer
+of the subscription still connected under the old type is refused the same way.
+
 The check subscribes once with a non-durable cursor of the same name: the broker refuses that while
 the durable subscription exists, and otherwise opens a cursor that the check closes again. The
 driver logs the expected refusal at `ERROR`. Like a subscribe, the check of a topic the broker does
@@ -1587,7 +1623,7 @@ by the join.
 Each instance's consumer registers under `<domain>~<ingestor>-<instance>`, with zero-based instance
 indices, so ingestors of the same name in different domains are told apart in the broker's
 statistics. A consumer name does not separate what ingestors read: ingestors that name the same
-subscription of the same topic share it, and each message reaches one of them.
+subscription of the same topic share it as its type allows, and each message reaches one of them.
 
 `DROP INGESTOR` of an ingestor that owns its subscription removes the subscription, including after
 `STOP`, and so does dropping its domain. Once the ingestor's consumers have closed, the node that
@@ -1602,35 +1638,62 @@ the operator removes it or the broker expires it. `STOP`, a node restart, a relo
 keep the subscription. Replacing the source with `ALTER PULSAR TOPIC INGESTOR ... SET FROM ...`
 removes the preceding owned subscription after its consumers stop and before the replacement
 starts, unless the replacement reads the same subscription of the same qualified topic at the
-same resolved broker address. Client names, route, codec, delivery-mode and instance-count changes
-do not change that identity. Short topics use their client's namespace, so a short name and its
+same resolved broker address. Client names, route, codec, delivery-mode, subscription type and
+instance-count changes do not change that identity. Short topics use their client's namespace, so a
+short name and its
 fully qualified spelling identify the same topic. Broker addresses compare their URL scheme,
 host and effective port; an omitted port means 6650 for `pulsar` and 6651 for `pulsar+ssl`.
 Different configured host names are distinct addresses even if DNS resolves them alike.
 Declaring the retained subscription `PROVISIONED` hands its ownership to the operator and keeps
 its backlog. Removal on replacement has the same timeout and best-effort reporting as removal
 on drop; a failure does not prevent starting the replacement. `DESCRIBE INGESTOR`
-shows the subscription name, its ownership and declared start position, and `INSTANCES` together
-in the declared `options:` row.
+shows the subscription name, its ownership and declared start position, `TYPE` and `INSTANCES`
+together in the declared `options:` row.
 
 Client config currently supports:
 
 - `'addr'`: broker address such as `'pulsar://127.0.0.1:6650'`
+- optional `'auth_token'`: the token the client authenticates with. `DESCRIBE CLIENT` and
+  `SHOW CREATE CLIENT` show it redacted.
 - optional `'namespace'`: the tenant and namespace, written `'tenant/namespace'`, that a short
   topic name is placed in, so `TOPIC 'orders'` reads `persistent://<namespace>/orders`; defaults to
   `public/default`, which `DESCRIBE CLIENT` shows as a default. Fully qualified topic names are sent
   as written.
-- optional `'tls_ca_file'`: PEM-encoded CA bundle for `pulsar+ssl://...` connections
-- optional `'tls_allow_insecure_connection'`: `true` or `false`; defaults to `false`
-- optional `'tls_hostname_verification_enabled'`: `true` or `false`; defaults to `true`
+- optional `'tls_ca_file'`: PEM-encoded CA bundle a `pulsar+ssl://...` connection trusts beside the
+  bundled public roots and the host's trust store
+- optional `'tls_cert_file'` and `'tls_key_file'`: the PEM-encoded client certificate the client
+  presents and its private key. `CREATE PULSAR CLIENT` refuses one without the other.
+- optional `'tls_allow_insecure_connection'`: `true` accepts any certificate a broker presents,
+  whoever signed it and whatever it names, so the connection is encrypted but says nothing about
+  who holds it; defaults to `false`
+- optional `'tls_hostname_verification_enabled'`: `false` accepts a certificate from a trusted
+  authority whatever address it names; defaults to `true`
 
-The three TLS keys apply only to a `pulsar+ssl://...` address. A plaintext `pulsar://...`
+The five TLS keys apply only to a `pulsar+ssl://...` address. A plaintext `pulsar://...`
 connection uses none of them, so `CREATE PULSAR CLIENT` refuses them there. It also refuses a
 `namespace` that is not exactly a tenant and a namespace, each nonempty and without whitespace or
 control characters, such as `'tenant-a'` or `'tenant-a/orders/eu'`, because no topic qualified
 with it is a valid Pulsar topic.
 
-Pulsar TLS currently supports server trust configuration only. Nervix does not yet expose Pulsar client certificate authentication.
+A client authenticates with what its keys hold, and both directions connect the same way. With
+`'auth_token'` the broker takes the client's role from the token. With `'tls_cert_file'` and
+`'tls_key_file'` alone it takes the role from the certificate, which the client presents in the TLS
+handshake. With both, the token names the role and the certificate satisfies a broker that requires
+one on connect. A client with neither presents no credential.
+
+The Pulsar driver makes one attempt at a connection or an operation, and the host owns every retry.
+An ingestor that loses its broker shows the failure as its transient error and reconnects on its
+`RETRY POLICY`, or on the reconnect policy under `MODE NO ACK`. A consumer of one partition of a
+partitioned topic that cannot reconnect at once rejoins within 30 seconds instead, while the
+partitions it did not lose keep flowing.
+
+An ingestor whose client cannot connect when its domain starts does not start on the node that runs
+it, and that node keeps trying until the client connects, so the ingestor comes up once the broker
+can be reached. A failure that `START` reports names its cause: a broker that refuses the
+connection, such as for a missing or rejected credential, shows
+`failed to connect PULSAR client: the PULSAR broker refused the connection with AuthenticationError: ...`,
+and a connection that never opened, such as a TLS handshake the broker or the client refused, shows
+`no connection to the PULSAR broker opened` with the driver's error beneath it.
 
 In an `ACK` mode the ingestor acknowledges the messages a batch read from each topic in one
 acknowledgement and waits for the broker's answer, within the client's 30-second operation
@@ -1643,6 +1706,11 @@ broker does not answer it; a request the consumer cannot send, such as while it 
 broker it cannot reach, shows `the Pulsar consumer did not confirm sending a redelivery request`,
 and the broker redelivers the messages once the consumer reconnects. `MODE NO ACK` acknowledges
 each message without waiting for the broker's answer.
+
+Under `FAILOVER` and `EXCLUSIVE` the broker does not take one message back: a rejection rewinds the
+consumer to everything it has not acknowledged. The messages behind a rejected one arrive again,
+after those the consumer already received, so delivery stays at least once and neither a single
+delivery nor the topic's order holds across a rejection.
 
 Suspension disconnects the consumer. The durable subscription retains its backlog and redelivers
 unacknowledged in-flight messages. Broker message TTL, backlog quota policy, and inactive-subscription
@@ -2182,6 +2250,19 @@ subject are not exposed as typed metadata; programs read its payload and headers
 `NATS SUBJECT` ingestors use Core NATS queue subscriptions. `QUEUE GROUP` and `INSTANCES`
 are mandatory; use `INSTANCES 1` for a single queue member.
 
+The NATS client accepts one optional authentication key: `token`, `nkey_seed` for a user NKey
+seed, or `credentials_file` for a NATS user credentials file containing its JWT and signing seed.
+These three keys are mutually exclusive; `CREATE NATS CLIENT` refuses any pair before connecting.
+Mount a resource containing a credentials file and write its resolved path, such as
+`'credentials_file' = '{{identity}}/user.creds'`. All three keys are confidential in public
+inspection. URL user information remains delegated to the NATS driver.
+
+Ingestors and emitters use the same authentication and TLS options. A `tls://` address requires
+TLS on both sides, with the configured CA and optional paired client certificate and key.
+An unreadable or malformed credentials file is a configuration failure; a broker refusing the
+identity is a connection failure reported by the boundary's existing general error policy and
+retry cadence. Nervix does not create accounts or users on the broker.
+
 Core NATS retains no backlog, so `SUSPEND` is unavailable to `NATS SUBJECT`. A quiesced instance remains a member of
 its queue group and keeps receiving its share; that share is buffered or discarded rather than
 shifted to other members.
@@ -2442,10 +2523,12 @@ See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sq
 `QUEUE` takes a string literal that SQS accepts as a queue name: 1 to 80 ASCII letters, digits,
 `-` and `_`, where a FIFO queue's name ends in `.fifo` and the suffix counts toward the 80. Nervix
 preserves its case in both directions, so `QUEUE 'Orders-EU_1.fifo'` reads exactly that queue. The
-ingestor reads a message's attributes through `read_header` and `read_headers`. It names
-`MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX <n> ...`, and `ON QUIESCE SUSPEND`, the delivery
-and quiesce modes it declares: the queue keeps each message until the source deletes it, so
-suspending loses nothing. An `ACK PARALLEL` window holds 1 to 10 messages, the most one SQS receive
+ingestor reads a message's attributes through `read_header` and `read_headers`, each value as text:
+a `String` or `Number` attribute's value exactly as SQS carries it, and a `Binary` attribute's bytes
+as UTF-8, with each invalid sequence replaced by U+FFFD, so binary data that is not UTF-8 text does
+not survive the read. It names `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX <n> ...`, and
+`ON QUIESCE SUSPEND`, the delivery and quiesce modes it declares: the queue keeps each message until
+the source deletes it, so suspending loses nothing. An `ACK PARALLEL` window holds 1 to 10 messages, the most one SQS receive
 returns, and `CREATE` refuses a larger one, as in `SQS ACK PARALLEL MAX must be between 1 and 10,
 found 11`.
 
@@ -2455,13 +2538,14 @@ The `SQS CLIENT` an ingestor or emitter names declares `endpoint`, `region`, `ac
 Every request is signed for `region` with `access_key_id` and `secret_access_key`, and carries
 `session_token` when those are temporary credentials. `SHOW CREATE CLIENT` and `DESCRIBE` print the
 three credentials as `********`. `timeout_ms` bounds every request of both directions, name
-resolution, connection setup, TLS and the answer included: an ingestor's queue lookup, each batch
-deletion and each batch visibility change, and each receive once its long poll of at most one
-second has passed, because a service with no message holds a receive for its long poll before it
-answers. Without `timeout_ms` those waits are unbounded. `CREATE SQS CLIENT` reads `tls_ca_file`
-before it commits the client, and refuses a file holding a section that is not a certificate, or no
-certificate at all, as `invalid client config key 'tls_ca_file'`: a client that trusted it alone
-could reach no service.
+resolution, connection setup, TLS and the answer included: the queue lookup of an ingestor or an
+emitter, each deletion, batch deletion and batch visibility change, each send, and each receive
+once its long poll of at most one second has passed, because a service with no message holds a
+receive for its long poll before it answers. Without `timeout_ms` those waits are unbounded, though
+connecting, its lookup included, still ends at the SDK's 3.1-second connect timeout.
+`CREATE SQS CLIENT` reads `tls_ca_file` before it commits the client, and refuses a file holding a
+section that is not a certificate, or no certificate at all, as
+`invalid client config key 'tls_ca_file'`: a client that trusted it alone could reach no service.
 
 Each receive requests SQS system attributes separately from the message attributes that
 `read_header` and `read_headers` read. Routes can read the following optional, non-sensitive
@@ -2497,9 +2581,9 @@ CA alone. Either way it connects directly: an SQS client takes no proxy, and ign
 name, a silent name server, an unreachable answer or a service that does not answer within
 `timeout_ms` fails the queue lookup, a poll, or a deletion. The AWS SDK makes each request once, so
 a failed lookup or poll is at once a transient source failure that `DESCRIBE INGESTOR` shows, such as
-`the SQS queue lookup did not finish within timeout_ms 5s`, and the source retries it on its
-`RETRY POLICY` alone, so an ingestor started while the service is unreachable consumes once the
-service answers. A queue that does not exist fails the
+`the SQS queue lookup did not finish within timeout_ms 5s`. The source host schedules retries
+using the ingestor's `RETRY POLICY`, so an ingestor started while the service is unreachable
+consumes once the service answers. A queue that does not exist fails the
 lookup with its name, such as `SQS queue 'orders' does not exist`, and is retried the same way;
 Nervix never creates it.
 
@@ -3043,9 +3127,12 @@ This opens an outbound WebSocket connection through a `WEBSOCKETS CLIENT` and de
 binary frames. Its optional `HEADERS { 'authorization' = 'Bearer token' }` clause follows `FROM
 <client>` and takes literal string names and values. Names are case-insensitive; repeated names,
 protocol-owned fields (`Host`, hop-by-hop framing fields and every `Sec-WebSocket-*` field except
-`Sec-WebSocket-Protocol`), malformed values, more than 128 fields, or more than 32 KiB of field
-name/value bytes are refused before activation. Each value, a credential included, is visible in
-`DESCRIBE INGESTOR` and `SHOW CREATE INGESTOR`.
+`Sec-WebSocket-Protocol`) and malformed values are refused before activation. The committed
+`http-header-fields` and `http-header-bytes` parameters bound the field count and the total field
+name/value bytes; their defaults are 128 fields and 32 KiB. Admission and parameter changes check
+these requirements, so lowering a cap cannot invalidate an existing ingestor. Raising a cap
+permits new declarations above those defaults, within the HTTP representation's bounds. Each
+value, a credential included, is visible in `DESCRIBE INGESTOR` and `SHOW CREATE INGESTOR`.
 
 `HEADERS { 'sec-websocket-protocol' = 'v2.events, v1.events' }` offers subprotocols in the order
 of preference written. The value lists one or more subprotocol tokens (RFC 6455): elements

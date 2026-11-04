@@ -127,8 +127,8 @@ See [Domains And Time](domains-and-time.md) for the full clock split. The
 [Plexus Overview](plexus-overview.md) defines the `FLUSH IMMEDIATE` 100 µs minimum batching window.
 For most emitters the collected batch is encoded and published on the flush boundary. Iceberg
 additionally requires `COMMIT EACH <duration> MAX SIZE <bytes>` as part of its emitter clause: flush
-writes local Arrow IPC staging files, and commit writes their rows into Parquet data files and
-appends those files to the table in one catalog commit. `ON MESSAGE ERROR SEND TO`
+appends the batch's rows to a local Arrow IPC staging file, and commit writes their rows into
+Parquet data files and appends those files to the table in one catalog commit. `ON MESSAGE ERROR SEND TO`
 buffers failed-message error records separately and delivers them using the emitter's same `FLUSH`
 interval or maximum batch-size boundary. Which emitters gain from larger flush batches, and which
 publish per record regardless of batch size, is covered by the
@@ -246,7 +246,7 @@ connector `CLIENT` object, codec, header operations, or direct `VALUES` form. Th
 uses its ordinary `FROM` predicates, optional collection, materialized dependencies, ordered
 `INHERIT` and `SET`, route `WHERE`, error policies, placement, and `ATTACHED` or `DETACHED`
 boundary. A client emitter requires `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX <n>`, an explicit
-`ACK TIMEOUT` and `RETRY POLICY`, `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>`, and its
+`ACK TIMEOUT` and `RETRY POLICY`, `BATCH MAX MESSAGES <n> MAX SIZE <bytes>`, and its
 ordinary required `FLUSH` policy. `SHOW CREATE EMITTER` preserves this full contract.
 
 The declared output schema is exact. Construction starts empty; only explicitly inherited or set
@@ -353,8 +353,8 @@ whitespace or control character; normalization must keep it on that origin and m
 leading `//`. The normalized target is limited to 8 KiB. `write_header` accepts valid HTTP field
 names and UTF-8 values without control characters or leading/trailing whitespace in a nonempty
 value. The request carries those values as their exact UTF-8 bytes, including non-ASCII characters.
-Transport-owned headers cannot be written. After case-insensitive replacement, at most 128
-application headers and 32 KiB of name/value bytes are allowed.
+Transport-owned headers cannot be written. After case-insensitive replacement, application headers
+use the committed field-count and byte caps, 128 fields and 32 KiB by default.
 
 `ENCODE USING` permits the ordinary transforming construction clauses. `WITHOUT BODY` selects an
 absent request body and permits `WHERE` and `INVOKE` but no `INHERIT`, `SET` or `VALUES`. HTTP
@@ -428,7 +428,7 @@ an empty string is sent as an empty value. Two writes whose names are string lit
 same field, such as `write_header('X-Tenant', …)` and `write_header('x-tenant', …)`, are refused when
 the statement is validated, because the earlier one could never be sent; a name an expression
 computes is replaced at run time. An invalid or reserved write rejects its record even when a later
-write would replace it, and the 128-header and 32 KiB bounds apply after every replacement. The body is exactly the bytes the codec produced, with no wrapper, array,
+write would replace it, and the publication's captured committed field-count and byte caps apply after every replacement. The body is exactly the bytes the codec produced, with no wrapper, array,
 newline, form encoding or compression added; Nervix adds no `Content-Type`, and a declared
 `Content-Encoding` does not transform the bytes. `WITHOUT BODY` sends zero content bytes.
 
@@ -654,7 +654,8 @@ clause and its route construction, and before the flush policy:
 BATCH MAX MESSAGES <n> MAX SIZE <bytes>
 ```
 
-`MAX MESSAGES` is the most source records one batch carries, from 1 to 65,536. `MAX SIZE` is the
+`MAX MESSAGES` is the most source records one batch carries, from 1 through the committed
+`MAX_BATCH_MESSAGES` cap (65,536 by default), within the unsigned 32-bit representation. `MAX SIZE` is the
 most bytes its encoded payload may occupy: a positive whole number followed by `B`, `KB`, `KiB`,
 `MB`, `MiB`, `GB`, `GiB`, `TB` or `TiB`. Neither limit has a default, neither may be omitted, and
 neither is derived from the other or from `FLUSH ... MAX BATCH SIZE`, which measures Arrow memory
@@ -681,7 +682,7 @@ CREATE KAFKA TOPIC EMITTER kafka_notifications
 
 A statement is rejected, naming the offending value, when:
 
-- `MAX MESSAGES` is zero or above 65,536;
+- `MAX MESSAGES` is zero, exceeds its representation, or exceeds the committed batch-count cap;
 - `MAX SIZE` is zero, fractional, written without a unit, or past the 64-bit byte range;
 - `MAX SIZE` is above 1 MiB on an SQS emitter, the largest SQS message Nervix sends;
 - the clause is absent on a ClickHouse, Postgres, MySQL or MongoDB emitter;
@@ -821,7 +822,7 @@ counting what it writes around the payload:
 | Emitter | Limit checked before a message is written | Counted around the payload |
 | --- | --- | --- |
 | Kafka | The producer's `message.max.bytes` client setting | The record key, headers and record overhead |
-| MQTT | The Maximum Packet Size the broker declared in its latest `CONNACK`, and the largest packet the protocol can express | The fixed header, topic, packet identifier and property length |
+| MQTT | The Maximum Packet Size the broker declared in its latest `CONNACK`, and the largest packet the protocol can express | The fixed header, topic, packet identifier, every property and both variable-length prefixes |
 | NATS | The `max_payload` the server announced | The message headers |
 | Pulsar | The `maxMessageSize` the broker announced when the producer's connection opened | The message metadata: the properties, the partition key and the producer's own fields |
 | SQS | 1 MiB | Message attribute names, types and values, and the FIFO message group |
@@ -1060,10 +1061,11 @@ Each emitter that writes transport headers declares a
 | `PULSAR TOPIC` | `last_wins`, exact names | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | `RABBITMQ QUEUE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `RABBITMQ EXCHANGE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
+| `MQTT TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `NATS SUBJECT` | `repeats_by_name`, exact names | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | `SQS QUEUE` | `last_wins`, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included; a value's exact type decides the type it travels as |
 
-`CLIENT CONSUMER`, `REDIS PUBSUB`, `MQTT TOPIC`, `ZEROMQ PUSH`, `SENTRY EVENT`, `SYSLOG COLLECTOR`, `OTEL LOGS`, `OTEL TRACES`, `OTEL METRICS`, `CLICKHOUSE TABLE`, `POSTGRES TABLE`, `MYSQL TABLE`, `MONGODB COLLECTION`, `ICEBERG TABLE` write no transport headers and refuse `write_header`.
+`CLIENT CONSUMER`, `REDIS PUBSUB`, `ZEROMQ PUSH`, `SENTRY EVENT`, `SYSLOG COLLECTOR`, `OTEL LOGS`, `OTEL TRACES`, `OTEL METRICS`, `CLICKHOUSE TABLE`, `POSTGRES TABLE`, `MYSQL TABLE`, `MONGODB COLLECTION`, `ICEBERG TABLE` write no transport headers and refuse `write_header`.
 <!-- connector-matrix:emit-headers:end -->
 
 Where an emitter keeps one value per name, a second `write_header` whose name is a string literal equal,
@@ -1198,11 +1200,11 @@ Transport-specific expectations:
   [Redis Pub/Sub](#redis-pubsub).
 - `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`. A plaintext `mqtt://` address reads no TLS file, so `CREATE MQTT CLIENT` refuses all three with it.
 - `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
-- `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
-- `SQS`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file` and optional `timeout_ms`,
-  and `CREATE SQS CLIENT` refuses a `tls_ca_file` that holds no certificate it could trust. An SQS
-  connection presents no client certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and
-  `tls_key_file`.
+- `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file`, presents `tls_cert_file` with `tls_key_file` as its client certificate, and honors optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, all of which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address; see [Pulsar](./ingestors.md#pulsar).
+- `SQS`: use an `https://...` `endpoint`; Nervix trusts the platform's native roots, or only
+  `tls_ca_file` when it is set, and honors optional `timeout_ms`. `CREATE SQS CLIENT` refuses a
+  `tls_ca_file` that holds no certificate it could trust. An SQS connection presents no client
+  certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and `tls_key_file`.
 - `SENTRY`: the referenced `SENTRY CLIENT` carries an `https://...` `dsn`; its `tls_ca_file` adds
   trust roots beside Nervix's bundled Mozilla roots and the host's native roots, and
   `tls_cert_file` with `tls_key_file` presents
@@ -1474,9 +1476,10 @@ writes the times the first attempt wrote.
 The broker holds a delayed message back, and what it holds depends on the broker and on who reads
 the topic:
 
-- Only a shared subscription is held back, which is how every `PULSAR TOPIC` ingestor reads. A
-  message reaches an exclusive or failover subscription as soon as it is stored, and every
-  subscription of a broker with `delayedDeliveryEnabled=false`.
+- Only a `SHARED` or `KEY_SHARED` subscription is held back, so the `TYPE` a `PULSAR TOPIC`
+  ingestor declares decides whether it waits for a delayed message. A message reaches a `FAILOVER`
+  or `EXCLUSIVE` subscription as soon as it is stored, and every subscription of a broker with
+  `delayedDeliveryEnabled=false`.
 - A broker may hand a message over up to `delayedDeliveryTickTimeMillis` before its delivery time,
   one second by default, unless `isDelayedDeliveryDeliverAtTimeStrict` is set, so a delay no longer
   than that tick may not hold a message back at all.
@@ -1495,15 +1498,24 @@ Pulsar emitters use the same client config surface as Pulsar ingestors:
 - optional `'namespace'`: the tenant and namespace, written `'tenant/namespace'`, that a short
   topic name is placed in, so `TOPIC 'orders'` writes `persistent://<namespace>/orders`; defaults
   to `public/default`. Fully qualified topic names are sent as written.
-- optional `'tls_ca_file'`: PEM-encoded CA bundle for `pulsar+ssl://...` connections
-- optional `'tls_allow_insecure_connection'`: `true` or `false`; defaults to `false`
-- optional `'tls_hostname_verification_enabled'`: `true` or `false`; defaults to `true`
+- optional `'auth_token'`: the token the client authenticates with
+- optional `'tls_ca_file'`: PEM-encoded CA bundle a `pulsar+ssl://...` connection trusts beside the
+  bundled public roots and the host's trust store
+- optional `'tls_cert_file'` and `'tls_key_file'`: the PEM-encoded client certificate the client
+  presents and its private key, written together
+- optional `'tls_allow_insecure_connection'`: `true` accepts any certificate a broker presents;
+  defaults to `false`
+- optional `'tls_hostname_verification_enabled'`: `false` accepts a certificate from a trusted
+  authority whatever address it names; defaults to `true`
 
-As the [ingestor manual](ingestors.md#pulsar) states, `CREATE PULSAR CLIENT` refuses the three TLS
-keys with a plaintext `pulsar://...` address and a `namespace` that is not exactly a tenant and a
-namespace.
+The [ingestor manual](ingestors.md#pulsar) states what each credential authenticates as and what
+each TLS key relaxes, and `CREATE PULSAR CLIENT` refuses the five TLS keys with a plaintext
+`pulsar://...` address and a `namespace` that is not exactly a tenant and a namespace.
 
-Pulsar TLS currently supports server trust configuration only. Nervix does not yet expose Pulsar client certificate authentication.
+The Pulsar driver makes one attempt at a connection or an operation, and the host owns every retry
+on the emitter's `RETRY POLICY`. An emitter whose client cannot connect shows why as its transient
+error, as in `the PULSAR broker refused the connection with AuthenticationError: ...`, and opens
+again on that policy.
 
 ### RabbitMQ
 
@@ -1517,6 +1529,7 @@ CREATE RABBITMQ QUEUE EMITTER <name>
     [PERSISTENT]
     [MANDATORY]
     [TIMESTAMP occurred_at]
+    [PROPERTIES { '<key>' = <expression>, ... }]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
@@ -1558,6 +1571,7 @@ CREATE RABBITMQ EXCHANGE EMITTER <name>
     [PERSISTENT]
     [MANDATORY]
     [TIMESTAMP occurred_at]
+    [PROPERTIES { '<key>' = <expression>, ... }]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
@@ -1839,6 +1853,8 @@ CREATE MQTT TOPIC EMITTER <name>
   (QOS 0 | QOS 1 | QOS 2)
     MODE <mode>
     ENCODE USING <codec>
+    [RETAIN]
+    [PROPERTIES { '<key>' = <expression>, ... }]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
@@ -1854,13 +1870,13 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | TOPIC 'devices/Orders' (mqtt_topic) |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 0)<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 1 or 2) |
 | Options in statement order | `QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |
-| Headers | Not offered: A publication carries its topic, payload and quality of service; this implementation writes no MQTT 5 user property on it. |
+| Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
 | Batch transformation required | no |
-| Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
-| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Envelope | RETAIN |
+| PROPERTIES keys and exact types | content_type: STRING<br>message_expiry: U32<br>response_topic: STRING<br>correlation_data: BYTES |
 | Buffers | publishes queued for the driver: set by 1 under NO ACK and ACK SEQUENTIAL, ACK PARALLEL MAX under ACK PARALLEL; when full, fails the publish for the host to retry |
 | Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>answers to QOS 1 and 2 publishes: `ACK TIMEOUT`<br>writes to the connection: unbounded<br>a silent connection: client key `keep_alive_ms`; two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 s when omitted |
 | Driver limits | Packets above the broker's maximum packet size are rejected.<br>QOS 0 connects a clean session; QOS 1 and 2 connect a persistent one with the maximum Session Expiry Interval, and SESSION is not an emitter option: a publisher without acknowledgement needs no session, and an acknowledged one always keeps it.<br>The client resumes its own session across reconnects, and a new client is refused while the broker keeps a session under its identity, since it holds no state to resume it with. |
@@ -1873,6 +1889,30 @@ See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#m
 the [ingestion topic filter rule](ingestors.md#external-names) without the `+` and `#` wildcards,
 so `TOPIC 'devices/+'` is refused when the emitter is created. The client's `addr` names the broker
 by its scheme, host and port alone, as [MQTT ingestion](ingestors.md#mqtt) describes.
+
+Write `RETAIN` after `ENCODE USING <codec>` to ask the broker to retain each publication for later
+subscribers. Optional `PROPERTIES { '<key>' = <expression>, ... }` follows `RETAIN`, or the codec
+when the flag is omitted. Each key may occur once, and every value must have its exact, required,
+non-sensitive type (use explicit sensitive-value leakage where intended):
+
+| Property | Exact type | Meaning |
+| --- | --- | --- |
+| `content_type` | `STRING` | The content type of the encoded payload. |
+| `message_expiry` | `U32` | Message lifetime in seconds, including zero; this is not a duration literal. |
+| `response_topic` | `STRING` | A nonempty MQTT publication topic, without subscription wildcards or NUL. |
+| `correlation_data` | `BYTES` | Opaque correlation bytes, including an empty value. |
+
+`INVOKE write_header(name, value)` writes MQTT 5 user properties. Both arguments are strings;
+names compare exactly, repeated names remain repeated and writes keep their order. MQTT string
+and binary property fields are limited to 65,535 bytes, and strings contain no NUL. A record that
+violates a field limit follows `ON MESSAGE ERROR` before it reaches the client. Packet admission
+counts every property and both variable-length prefixes, in addition to the topic, payload and
+packet identifier. A rejected record does not prevent its valid neighbours from being sent.
+
+Nervix evaluates this envelope once with its payload. Every retry carries identical flags,
+properties and user properties, including the original expiry interval. A broker may reduce
+that interval while storing or forwarding the message. Retention is broker state; it does not
+change the completion point of the emitter's QoS or make Nervix's in-memory attempts durable.
 
 CREATE refuses an unsupported QoS number with its value and accepted levels, such as
 `MQTT QOS must be 0, 1 or 2, found 3`, underlining the supplied number. Completion after `MODE`
@@ -1990,6 +2030,10 @@ The client connects again on its own after it loses its server, on the emitter's
 waits `BACKOFF` before its first attempt and doubles the wait for each further attempt up to `MAX`.
 When the emitter stops, its finish flushes what the client still holds by the finish deadline; see
 [Finishing an emitter](./connector-contract.md#finishing-an-emitter).
+
+NATS emitters use the same optional token, user NKey or mounted credentials-file authentication
+as ingestors. The [NATS client authentication rules](ingestors.md#nats) define mutual exclusion,
+confidential inspection and TLS configuration for both directions.
 
 `JETSTREAM` waits for one `PubAck` per record. The stream must already exist and capture the
 subject; a missing stream is an infrastructure error that remains under backpressure until an
@@ -2181,13 +2225,17 @@ See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sq
 `-` and `_`, a FIFO queue's `.fifo` suffix included, preserved exactly as written. The
 `SQS CLIENT` it names declares the keys the [SQS ingestion section](ingestors.md#sqs) lists.
 
-`SEND` is the request shape, and every statement writes it. `SEND SINGLE` issues one `SendMessage`
-request per message. `SEND BATCH` groups messages into `SendMessageBatch` requests within SQS's
-fixed limit of ten entries and 1 MiB per request. Both shapes publish in `MODE ACK`, the mode every
-request/response emitter uses: requests are issued sequentially, and a record is acknowledged once
-the service accepts it. Per-entry transient failures retry only those entries, while invalid
-entries and a message larger than 1 MiB, counting its attributes and FIFO message group, follow
-`ON MESSAGE ERROR` individually. Nervix checks what SQS refuses before sending: a body that is not
+`SEND` is the request shape, and every statement writes it. It belongs to emission alone, as the
+parallel receive belongs to ingestion, and it is independent of the [batching clause](#batching),
+as [Broker and message emitters](#broker-and-message-emitters) describes. `SEND SINGLE` issues one
+`SendMessage` request per message. `SEND BATCH` groups messages into `SendMessageBatch` requests
+within SQS's fixed limit of ten entries and 1 MiB per request. Both shapes publish in `MODE ACK`,
+the mode every request/response emitter uses: requests are issued sequentially, and a record is
+acknowledged once the service accepts it. A record whose contents the service refuses, and a
+message larger than 1 MiB, counting its attributes and FIFO message group, follow
+`ON MESSAGE ERROR` individually. A request or a batch entry that fails for any other reason ends
+the write: the retry resends that record and every record the write had not yet sent, never one
+the service accepted or refused. Nervix checks what SQS refuses before sending: a body that is not
 UTF-8, a body or attribute value holding a character SQS forbids, more than ten attributes, an
 attribute name SQS does not allow, an empty attribute value, and an invalid FIFO message group. A
 later `write_header` of a name replaces the earlier value, so the ten are counted after repeated
@@ -2226,8 +2274,9 @@ Set the SQS client's optional `timeout_ms` CONFIG key to bound each request, the
 start and every send, as both the complete service operation and its single SDK attempt. Nervix
 disables the AWS SDK's internal retries in both directions, so a request that runs out of
 `timeout_ms` returns to the emitter, which `DESCRIBE EMITTER` shows as
-`an SQS send did not finish within timeout_ms 5s`, and the mode's declared `RETRY POLICY` owns all
-retry pacing.
+`an SQS send did not finish within timeout_ms 5s`, or under `SEND BATCH` as
+`an SQS batch send did not finish within timeout_ms 5s`, and the mode's declared `RETRY POLICY`
+owns all retry pacing.
 
 The client resolves the host of its `endpoint` through the node's asynchronous resolver each time it
 opens a connection, and tries the answers in order; a literal IPv4 or IPv6 address is dialled as
@@ -3726,13 +3775,17 @@ altered.
 
 #### Iceberg staging and commits
 
-Iceberg uses two explicit boundaries. `FLUSH` collects typed in-memory batches and writes them to
-local Arrow IPC files under the runtime temporary-file root. `COMMIT EACH <duration> MAX SIZE
-<bytes>` reads the staged Arrow IPC files back, writes their rows into Parquet data files, and
-appends every one of those data files to the Iceberg table in one catalog commit. The commit
+Iceberg uses two explicit boundaries. `FLUSH` collects typed in-memory batches and appends each
+batch's mapped rows to a local Arrow IPC staging file under the runtime temporary-file root.
+Every flush appends to the same staging file until a commit begins, so the root holds one staging
+file for each commit, however many batches, source relays and branches its flushes carried; rows
+staged while a commit is in progress, such as during its retry backoff, start a staging file of
+their own, which the commit after it publishes. `COMMIT EACH <duration> MAX SIZE <bytes>` reads the
+staged rows back, writes them into Parquet data files, and appends every one of those data files
+to the Iceberg table in one catalog commit. The commit
 duration starts when a flush stages rows while none are staged, and rows later flushes stage join
 that commit without moving it, so a row waits at most `FLUSH EACH` in memory and then at most
-`COMMIT EACH` after it is staged. Staged files that reach `MAX SIZE` are committed at once. Both
+`COMMIT EACH` after it is staged. Staged rows that reach `MAX SIZE` are committed at once. Both
 durations are domain-logical, so a paced domain's `TIME RATE` moves the flush and commit boundaries
 together; the maximum batch and commit sizes, the commit retry backoff, and a drain remain
 independent of domain pace. The temporary-file root defaults to `/tmp` and can be changed with
@@ -3747,8 +3800,8 @@ continue to staging. The file's actual size and row count are checked before the
 If the table schema changes between staging and commit so that a staged segment no longer fits,
 the commit fails and retains its staged rows for retry rather than appending an over-limit file.
 Without `BATCH`, the Parquet writer uses its 512 MiB rollover target; `DESCRIBE EMITTER` prints
-`data file target: 512MiB` alongside `batch: none`. The commit's `MAX SIZE` continues to count
-the sum of local staged Arrow IPC file bytes, independently of each Parquet file's bound.
+`data file target: 512MiB` alongside `batch: none`. The commit's `MAX SIZE` counts the Arrow IPC
+bytes of the staged batches, independently of each Parquet file's bound.
 
 The emitter completion point for `MODE ACK` is the successful catalog commit. Local staging is not an
 ACK boundary. Record-level expression and construction errors, and a row too large for its own
@@ -3756,29 +3809,29 @@ Parquet file, are attributed through `ON MESSAGE ERROR` before staging. See [ACK
 Delivery](#ack-semantics-and-effective-delivery) for attachment and fan-out behavior.
 
 A commit holds the rows it reads back in memory until it has written them into data files, so it
-charges them to the node's bulk memory class, which holds 32 MiB. It reads the staged files in
-groups, each the run of consecutive files the class can hold together. Before it reads a group it
-charges every byte of the group's files, and once their rows are in data files it returns the
-charge before it reads the next group; the data files of every group are appended in the one
-catalog commit. It takes a charge only when the class has room for it now rather than waiting in
+charges them to the node's bulk memory class, which holds 32 MiB. It reads the staged batches back
+in groups, each the run of consecutive staged batches the class can hold together, whichever
+staging files hold them. Before it reads a group it charges every Arrow IPC byte of the group's
+staged batches, and once their rows are in data files it returns the charge before it reads the
+next group; the data files of every group are appended in the one catalog commit. It takes a charge only when the class has room for it now rather than waiting in
 the class's queue, where a commit's charge would take every byte the class frees and hold the
-node's other bulk work behind it. When the class has no room, the commit keeps its staged files and
+node's other bulk work behind it. When the class has no room, the commit keeps its staged rows and
 their acknowledgements, `DESCRIBE EMITTER` shows `Iceberg commit waits for room in the bulk memory
 class for <bytes> staged bytes` as the emitter's transient error, and the emitter retries the
-commit on its declared retry policy. A single staged file holds one input carrier's mapped rows,
-or one bounded segment of them when `BATCH` is declared. Without `BATCH` it can be larger than the
-class when a route on the same node flushes batches above 32 MiB.
-Such a file is read alone once the whole class is free, charged with the whole class: that is every
+commit on its declared retry policy. A staged batch holds one input carrier's mapped rows, or one
+bounded segment of them when `BATCH` is declared. Without `BATCH` it can be larger than the class
+when a route on the same node flushes batches above 32 MiB.
+Such a batch is read alone once the whole class is free, charged with the whole class: that is every
 byte of it the class can account for, and it leaves no room for other bulk work beside the read.
 Until then `DESCRIBE EMITTER` shows `Iceberg commit waits for the whole bulk memory class of
-<capacity> bytes for a staged file of <bytes> bytes`, and the emitter retries the commit as before.
+<capacity> bytes for a staged batch of <bytes> bytes`, and the emitter retries the commit as before.
 
 #### Iceberg data files
 
 Every commit writes Parquet data files, whatever the table's `write.format.default` property says,
 with the Parquet library's default writer properties: uncompressed pages, dictionary encoding,
 page-level statistics and row groups of at most 1,048,576 rows. The table's `write.parquet.*`
-properties do not apply. Without `BATCH`, a commit writes each group of staged files it reads back
+properties do not apply. Without `BATCH`, a commit writes each group of staged batches it reads back
 together into data files of their own, rolling to a new file once the current one reaches 512 MiB
 whatever the table's `write.target-file-size-bytes` property says. With `BATCH`, each staged
 segment becomes one data file, as [Iceberg staging and commits](#iceberg-staging-and-commits)
@@ -3812,7 +3865,7 @@ The emitter writes nothing else:
   client, and through no other catalog implementation.
 
 A commit writes its data files to object storage before it appends them, and a retry reuses the
-files an earlier attempt finished writing for a whole group of staged files. Files no snapshot comes
+files an earlier attempt finished writing for a whole group of staged batches. Files no snapshot comes
 to reference stay in object storage until an orphan-file cleanup of the table removes them: those
 of a group whose writing failed partway, which the retry writes again, and those of a commit that
 never succeeds because the emitter ends before a retry does.
@@ -3876,15 +3929,16 @@ declared policy and backpressure. While a failed
 commit waits for its retry, the emitter takes no new input from its relays: a row that reaches a
 relay during the backoff waits upstream, unless a stop drains the relays. The rows a flush stages
 before the retry are therefore input the emitter's `COLLECT FOR` policy held, which comes due
-during the backoff, and the relay input a stop drains. A commit publishes the staged files it found
-when it began, so those rows are not in its data files: the retry first appends what the commit
-began with and then commits the newer rows in a commit of their own. A retry still publishes
+during the backoff, and the relay input a stop drains. A commit publishes the rows staged when it
+began, so those rows are not in its data files: they start a staging file of their own, and the
+retry first appends what the commit began with and then commits the newer rows in a commit of
+their own. A retry still publishes
 everything staged, and acknowledges only rows a catalog commit holds.
 
 Each commit names its append with an identity it records in the snapshot it adds. A commit whose
 catalog answer fails or is lost reloads the table, and the commit and every retry of it look for
 that identity in the current snapshot's history before appending, so a retry never appends the
-same staged files twice. Rows are still appended again when their source redelivers them: after a
+same staged rows twice. Rows are still appended again when their source redelivers them: after a
 lost upstream ACK, after an attached sibling emitter fails, or after the emitter ends before a
 retry learns whether the catalog applied its commit, because it ended without acknowledging the
 rows it still held staged. Iceberg appends are not idempotent.
@@ -3965,7 +4019,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | Pulsar | `ACK` retry after an ambiguous broker receipt; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` does not expose broker failures after producer acceptance; retention and durability remain broker policy | None |
 | NATS | JetStream retry after an ambiguous `PubAck`; Core `NO ACK` retry after a timed-out write or a connection change, including records the server may already have received; either mode after a lost upstream ACK or attached sibling failure | Core NATS `NO ACK` confirms a local drain and flush on the write's connection, without durable stream acknowledgement; a connection failure after that completion can lose what the server has not read | None |
 | RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; `NO ACK` retry after its channel or connection is lost before a write's round trip completes; either mode after a lost upstream ACK or attached sibling failure | Without `MANDATORY`, a message no binding routes is dropped by the broker and its record reported delivered; `NO ACK` can lose a record after the broker's channel has taken it; persistence requires PERSISTENT and a provisioned durable queue | None |
-| SQS | Retry after an ambiguous `SendMessage` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; SQS retains its own at-least-once behavior | None |
+| SQS | Retry after an ambiguous `SendMessage` or `SendMessageBatch` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; SQS retains its own at-least-once behavior | On a FIFO queue, `DEDUPLICATION ID` or the queue's content-based deduplication: SQS does not deliver again a message whose id, or body, it accepted within the previous five minutes. A retry carries the id and body its first attempt carried, and an id computed from the record's own fields also covers its redelivery within that interval |
 | MQTT | QoS 1 or 2 retry after an ambiguous handshake; any mode after a lost upstream ACK or attached sibling failure | QoS 0 can lose a record after client acceptance; later delivery follows the configured broker and session guarantees | None |
 | Redis Pub/Sub | Retry after a `PUBLISH` whose answer missed the driver's 500 ms or was lost with its connection, which Redis may already have delivered; retry after Redis accepts `PUBLISH` but the Nervix ACK is lost, or after attached sibling failure | Any failure after detached relay acceptance; subscribers that are absent or disconnected miss the message | None |
 | ZeroMQ | Retry after socket send acceptance followed by lost ACK or attached sibling failure | Any failure after detached relay acceptance; socket send does not establish durable receiver storage | None |

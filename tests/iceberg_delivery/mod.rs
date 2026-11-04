@@ -24,13 +24,19 @@ use nervix_primitives::time::{Instant, timeout};
 
 use super::{
     DescribedEmitterRetry, ICEBERG_REST_ADDR, IcebergCatalogGate, ScenarioWorld,
-    common::iceberg_catalog_gate::HeldCommitArrival, current_leader_node, docstring,
-    expand_placeholders, iceberg_row_matches_expected, iceberg_table_rows, parse_duration_text,
-    run_plexus_commands_on_node, rustfs_iceberg_table, staged_iceberg_arrow_ipc_batches,
+    append_cucumber_log_line, common::iceberg_catalog_gate::HeldCommitArrival, current_leader_node,
+    docstring, expand_placeholders, iceberg_row_matches_expected, iceberg_staging_files,
+    iceberg_table_rows, parse_duration_text, run_plexus_commands_on_node, rustfs_iceberg_table,
 };
 
 /// The snapshot summary property that counts every row the table holds at that snapshot.
 const TOTAL_RECORDS_PROPERTY: &str = "total-records";
+
+/// The snapshot summary property that counts the data files the commit that wrote it appended.
+const ADDED_DATA_FILES_PROPERTY: &str = "added-data-files";
+
+/// The snapshot summary property that counts the rows the commit that wrote it appended.
+const ADDED_RECORDS_PROPERTY: &str = "added-records";
 
 /// How often a step that waits for the table or DESCRIBE looks again.
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -130,19 +136,19 @@ fn when_the_catalog_gate_passes_every_commit(world: &mut ScenarioWorld) {
     catalog_gate(world).pass_commits();
 }
 
-/// What the staging directory holds now. A commit stages what it publishes before it sends the
-/// commit, so while the gate holds the commit the count cannot move.
-#[then(expr = "the temp directory holds {int} Iceberg Arrow IPC staged batches")]
-fn then_the_temp_directory_holds_staged_batches(world: &mut ScenarioWorld, expected: usize) {
+/// How many Iceberg staging files the staging directory holds now. A commit stages what it
+/// publishes before it sends the commit, so while the gate holds the commit the count cannot move.
+#[then(expr = "the temp directory holds {int} Iceberg staging files")]
+fn then_the_temp_directory_holds_staging_files(world: &mut ScenarioWorld, expected: usize) {
     let temp_root = world
         .temp_root
         .as_ref()
         .verified("the scenario configured its temp directory before the cluster started");
-    let staged = staged_iceberg_arrow_ipc_batches(temp_root.path());
+    let staged = iceberg_staging_files(temp_root.path());
     assert_eq!(
         staged,
         expected,
-        "the temp directory {} holds {staged} staged Iceberg batches",
+        "the temp directory {} holds {staged} Iceberg staging files",
         temp_root.path().display()
     );
 }
@@ -297,6 +303,12 @@ async fn then_iceberg_data_files_obey_batch_bounds(
                     "Iceberg table {table} has a file beyond {max_rows} rows or {max_bytes} \
                      bytes: {files:?}"
                 );
+                // The rows and Parquet bytes of every data file, retained as evidence of what
+                // the bounds produced.
+                append_cucumber_log_line(&format!(
+                    "Iceberg table {table} holds {rows} rows in data files of (rows, bytes) \
+                     {files:?}"
+                ));
                 return;
             }
         }
@@ -307,6 +319,65 @@ async fn then_iceberg_data_files_obey_batch_bounds(
         );
         nervix_primitives::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+/// What one commit appended to a table, from the summary of the snapshot it wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CommitAppend {
+    data_files: u64,
+    rows: u64,
+}
+
+/// One count the summary of `snapshot` reports, such as the data files its commit appended.
+fn summary_count(
+    snapshot: &iceberg::spec::Snapshot,
+    property: &str,
+    table: &str,
+) -> Result<u64, String> {
+    let Some(value) = snapshot.summary().additional_properties.get(property) else {
+        return Err(format!(
+            "snapshot {} of Iceberg table {table} does not report {property}",
+            snapshot.snapshot_id()
+        ));
+    };
+    value
+        .parse::<u64>()
+        .map_err(|error| format!("Iceberg table {table} reports {property} as '{value}': {error}"))
+}
+
+/// What the commit that wrote the table's current snapshot appended, so a step tells one commit of
+/// several data files apart from several commits of one data file each.
+async fn latest_commit_append(world: &ScenarioWorld, table: &str) -> Result<CommitAppend, String> {
+    let loaded = rustfs_iceberg_table(world.dependencies.endpoints(), &world.domain, table).await?;
+    let Some(snapshot) = loaded.metadata().current_snapshot() else {
+        return Err(format!("no commit has appended to Iceberg table {table}"));
+    };
+    let data_files = summary_count(snapshot, ADDED_DATA_FILES_PROPERTY, table)?;
+    let rows = summary_count(snapshot, ADDED_RECORDS_PROPERTY, table)?;
+    Ok(CommitAppend { data_files, rows })
+}
+
+#[then(
+    expr = "the latest commit to the Iceberg table {string} appended {int} data files holding \
+            {int} rows"
+)]
+async fn then_the_latest_commit_appended(
+    world: &mut ScenarioWorld,
+    table: String,
+    data_files: u64,
+    rows: u64,
+) {
+    let table = expand_placeholders(world, &table);
+    let appended = latest_commit_append(world, &table)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("could not read the latest commit to Iceberg table {table}: {error}")
+        });
+    assert_eq!(
+        appended,
+        CommitAppend { data_files, rows },
+        "the latest commit to Iceberg table {table} appended {appended:?}"
+    );
 }
 
 /// How many rows the table holds while a commit it would hold is still to come: a gate hold or a
@@ -349,11 +420,11 @@ async fn then_within_the_iceberg_table_holds_rows(
 }
 
 /// What DESCRIBE EMITTER reports while an Iceberg commit waits for the whole bulk memory class to
-/// read one staged file larger than it.
+/// read one staged batch larger than it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WholeClassWait {
     capacity: u64,
-    file_bytes: u64,
+    batch_bytes: u64,
 }
 
 impl WholeClassWait {
@@ -361,24 +432,24 @@ impl WholeClassWait {
         let error = DescribedEmitterRetry::from_describe_output(output).transient_error?;
         let wait =
             error.strip_prefix("Iceberg commit waits for the whole bulk memory class of ")?;
-        let (capacity, file) = wait.split_once(" bytes for a staged file of ")?;
-        let file_bytes = file.strip_suffix(" bytes")?;
-        let (Ok(capacity), Ok(file_bytes)) = (capacity.parse::<u64>(), file_bytes.parse::<u64>())
+        let (capacity, batch) = wait.split_once(" bytes for a staged batch of ")?;
+        let batch_bytes = batch.strip_suffix(" bytes")?;
+        let (Ok(capacity), Ok(batch_bytes)) = (capacity.parse::<u64>(), batch_bytes.parse::<u64>())
         else {
             panic!("DESCRIBE EMITTER reports the whole-class wait in byte counts, got '{error}'");
         };
         Some(Self {
             capacity,
-            file_bytes,
+            batch_bytes,
         })
     }
 }
 
 /// Waits until DESCRIBE EMITTER reports an Iceberg commit waiting for the whole bulk memory class,
-/// requires the staged file it reads to be larger than the class, and saves the file's bytes.
+/// requires the staged batch it reads to be larger than the class, and saves the batch's bytes.
 #[then(
     expr = "within {string} DESCRIBE EMITTER {string} on the leader node reports an Iceberg \
-            commit waiting for the whole bulk memory class, whose staged file bytes are saved as \
+            commit waiting for the whole bulk memory class, whose staged batch bytes are saved as \
             placeholder {string}"
 )]
 async fn then_describe_emitter_reports_a_whole_class_wait(
@@ -400,13 +471,13 @@ async fn then_describe_emitter_reports_a_whole_class_wait(
         world.last_command_output = Some(output.clone());
         if let Some(wait) = WholeClassWait::from_describe_output(&output) {
             assert!(
-                wait.file_bytes > wait.capacity,
-                "a commit waits for the whole bulk memory class only for a staged file larger \
+                wait.batch_bytes > wait.capacity,
+                "a commit waits for the whole bulk memory class only for a staged batch larger \
                  than it, got {wait:?}"
             );
             world
                 .placeholders
-                .insert(placeholder, wait.file_bytes.to_string());
+                .insert(placeholder, wait.batch_bytes.to_string());
             return;
         }
         assert!(

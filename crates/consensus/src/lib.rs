@@ -45,11 +45,12 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_interconnect::{HandlerRegistrationError, Transport};
 use nervix_models::{
     AdmissionVerdict, AdmissionVerdicts, ClusterNodeIdentity, ClusterNodeIncarnation,
-    ClusterNodeName, ClusterSchedule, CoordinationIdentity, DomainClockAuthority, DomainClockState,
-    DomainName, DomainSchedule, DomainStartPoint, DomainState, DomainStatus, NodeEndpoint,
-    NodePrerequisites, NodeServiceUrl, PrerequisiteMismatch, ResourceId, ResourceName,
-    ResourceNodeStatus, ResourceUpload, ResourceUploadKey, ResourceVersion, ResourceVersionStatus,
-    Statement, TransactionImpactReport, UserName,
+    ClusterNodeName, ClusterParameterRecord, ClusterParameterValues, ClusterSchedule,
+    CoordinationIdentity, DomainClockAuthority, DomainClockState, DomainName, DomainSchedule,
+    DomainStartPoint, DomainState, DomainStatus, NodeEndpoint, NodePrerequisites, NodeServiceUrl,
+    PrerequisiteMismatch, ResourceId, ResourceName, ResourceNodeStatus, ResourceUpload,
+    ResourceUploadKey, ResourceVersion, ResourceVersionStatus, Statement, TransactionImpactReport,
+    UserName,
 };
 use nervix_primitives::{
     sync::{
@@ -95,12 +96,16 @@ use tracing::{debug, error, info, warn};
 
 #[cfg(test)]
 mod archive_count_tests;
+mod cluster_parameters;
 mod command_execution;
+pub use cluster_parameters::ClusterParameterPlanningInputs;
 mod connectivity_fault;
 mod domain_mutation;
 mod durable_batch;
 mod leadership;
 mod lease_refusal;
+#[cfg(test)]
+mod planning_parameter_fence_tests;
 mod raft_record;
 mod records;
 mod replication;
@@ -111,11 +116,12 @@ mod snapshot;
 pub use command_execution::{
     CommandExecution, CommandExecutionAdmissionError, CommandExecutionAdmissionPolicy,
     CommandExecutionDiagnostic, CommandExecutionDisposition, CommandExecutionEffect,
-    CommandExecutionPreviewStale, CommandExecutionReconciliation, CommandExecutionRequestConflict,
-    CommandExecutionResult, CommandExecutionState, CommandExecutionStatementDisposition,
-    CommandExecutionStatementResult, CommandExecutionTransactionOperation,
-    CommandExecutionTransactionRequest, CommandExecutionTransactionStatus,
-    CommandExecutionTransactionTarget, DiagnosticSpan, RecordedBackupArchive,
+    CommandExecutionHistory, CommandExecutionPreviewStale, CommandExecutionReconciliation,
+    CommandExecutionRequestConflict, CommandExecutionResult, CommandExecutionState,
+    CommandExecutionStatementDisposition, CommandExecutionStatementResult,
+    CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
+    CommandExecutionTransactionStatus, CommandExecutionTransactionTarget, DiagnosticSpan,
+    RecordedBackupArchive,
 };
 pub use domain_mutation::{DomainMutationLease, DomainMutationOwner, DomainMutationRecoveryFence};
 pub use leadership::LeadershipObservation;
@@ -308,6 +314,7 @@ impl ScheduleTopologyInputs {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct DomainPlanningInputs {
+    parameters: Option<ClusterParameterRecord>,
     domain: DomainName,
     state: Option<Box<DomainState>>,
     resources: DomainResourcePlanningInputs,
@@ -316,6 +323,9 @@ pub struct DomainPlanningInputs {
 }
 
 impl DomainPlanningInputs {
+    pub fn parameters(&self) -> Option<&ClusterParameterRecord> {
+        self.parameters.as_ref()
+    }
     pub fn domain(&self) -> &DomainName {
         &self.domain
     }
@@ -382,6 +392,13 @@ pub struct TransactionControlSnapshot {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum ConsensusCommand {
+    SeedClusterParameters {
+        values: ClusterParameterValues,
+    },
+    AlterClusterParameters {
+        reference: nervix_models::CommandExecutionReference,
+        inputs: Box<ClusterParameterPlanningInputs>,
+    },
     AdmitCommandExecution {
         execution: Box<CommandExecution>,
         mutation_domains: BTreeSet<DomainName>,
@@ -609,11 +626,22 @@ pub enum ConsensusResponse {
     Error,
 )]
 pub enum ConsensusConflict {
+    #[error("cluster parameters or models changed while planning ALTER CLUSTER SET")]
+    ClusterParameterInputsChanged,
+    #[error("cluster parameters have not been seeded")]
+    ClusterParametersUnseeded,
+    #[error("the admitted ALTER CLUSTER SET execution is unavailable")]
+    ClusterParameterExecutionMissing,
+    #[error("{issue}")]
+    InvalidClusterParameter {
+        issue: nervix_models::ClusterParameterError,
+    },
     #[error("{0}")]
     Reason(String),
-    #[error("command execution reference '{reference}' has expired")]
-    ExecutionReferenceExpired {
+    #[error("command execution reference '{reference}' {refusal}")]
+    ExecutionReferenceAdmissionRefused {
         reference: nervix_models::CommandExecutionReference,
+        refusal: CommandExecutionAdmissionError,
     },
     #[error("command execution reference '{reference}' conflicts by {kind}")]
     ExecutionReferenceConflict {
@@ -659,6 +687,10 @@ pub struct AppliedLogPosition {
 impl std::fmt::Display for ConsensusCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::SeedClusterParameters { .. } => f.write_str("seed-cluster-parameters"),
+            Self::AlterClusterParameters { reference, .. } => {
+                write!(f, "alter-cluster-parameters:{reference}")
+            }
             Self::AdmitCommandExecution { execution, .. } => {
                 write!(f, "admit-command-execution:{}", execution.reference)
             }
@@ -894,6 +926,7 @@ pub struct ConsensusSettings {
 /// whose interconnect endpoint is still unavailable is never a membership admission candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GossipNode {
+    pub parameters: Option<nervix_models::ClusterParameterPublication>,
     pub node_id: ClusterNodeName,
     pub incarnation: ClusterNodeIncarnation,
     pub terminating: bool,
@@ -1011,6 +1044,7 @@ pub struct RaftLogRetention {
 
 #[derive(Debug, Clone)]
 pub struct ConsensusRuntimeState {
+    pub parameters: Option<ClusterParameterRecord>,
     pub revision: u64,
     pub schedule: ClusterSchedule,
     pub domains: BTreeMap<DomainName, DomainState>,
@@ -1370,6 +1404,7 @@ impl ReportedAdmissionRefusals {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct StateMachineData {
+    parameters: Option<ClusterParameterRecord>,
     last_applied_log_id: Option<LogIdOf>,
     // Independently retained revisions share unchanged membership.
     last_membership: Arc<StoredMembershipOf>,
@@ -1431,6 +1466,7 @@ impl StateMachineData {
 
     fn domain_planning_inputs(&self, domain: &DomainName) -> DomainPlanningInputs {
         DomainPlanningInputs {
+            parameters: self.parameters,
             domain: domain.clone(),
             state: self.domains.get(domain).cloned().map(Box::new),
             resources: self.domain_resource_planning_inputs(domain),
@@ -2345,6 +2381,16 @@ impl Consensus {
             .map_err(io::Error::other)?
     }
 
+    #[tracing::instrument(
+        name = "consensus_node",
+        level = "info",
+        skip_all,
+        fields(
+            cluster = %settings.cluster_name,
+            node = %settings.node_id,
+            local_addr = %settings.interconnect.local_addr(),
+        ),
+    )]
     async fn from_store<Recorder>(
         store: FjallStore,
         settings: ConsensusSettings,
@@ -2936,6 +2982,12 @@ impl Observer {
             .inner
             .with_restore_state_reclamation(reclaim)
     }
+    /// Levels and retry fence of this node's applied command history, read without a record scan.
+    pub fn command_execution_history(&self) -> CommandExecutionHistory {
+        let state = self.inner.store.inner.state();
+        state.command_executions.observation()
+    }
+
     pub async fn current_command_execution(
         &self,
         reference: &nervix_models::CommandExecutionReference,
@@ -2963,6 +3015,7 @@ impl Observer {
     pub async fn current_runtime_state(&self) -> ConsensusRuntimeState {
         let state = self.inner.store.inner.state();
         ConsensusRuntimeState {
+            parameters: state.parameters,
             revision: state.runtime_revision,
             schedule: (&state.schedule).into(),
             domains: (&state.domains).into(),
@@ -3484,6 +3537,7 @@ impl Proposer {
         let topology = state.schedule_topology_inputs();
         Ok(AutomaticScheduleInput {
             runtime_state: ConsensusRuntimeState {
+                parameters: state.parameters,
                 revision: state.runtime_revision,
                 schedule: (&state.schedule).into(),
                 domains,
@@ -4489,6 +4543,12 @@ impl ProtocolReceiver {
             .await
     }
 
+    #[tracing::instrument(
+        name = "receive_raft_append",
+        level = "trace",
+        skip_all,
+        fields(node = %self.inner.local_node_id, local_addr = %self.inner.interconnect.local_addr()),
+    )]
     pub async fn append_entries(
         &self,
         req: AppendEntriesRequest<TypeConfig>,
@@ -4496,6 +4556,12 @@ impl ProtocolReceiver {
         self.inner.raft.append_entries(req).await
     }
 
+    #[tracing::instrument(
+        name = "receive_raft_vote",
+        level = "trace",
+        skip_all,
+        fields(node = %self.inner.local_node_id, local_addr = %self.inner.interconnect.local_addr()),
+    )]
     pub async fn vote(
         &self,
         req: VoteRequest<TypeConfig>,
@@ -4503,6 +4569,12 @@ impl ProtocolReceiver {
         self.inner.raft.vote(req).await
     }
 
+    #[tracing::instrument(
+        name = "receive_raft_pre_vote",
+        level = "trace",
+        skip_all,
+        fields(node = %self.inner.local_node_id, local_addr = %self.inner.interconnect.local_addr()),
+    )]
     pub async fn pre_vote(
         &self,
         req: VoteRequest<TypeConfig>,
@@ -4849,6 +4921,15 @@ where
     ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
         self.connectivity.check().map_err(unreachable_err)?;
         let rpc_timeout = option.hard_ttl();
+        let started = Instant::now();
+        tracing::trace!(
+            node = %self.local_node_id,
+            local_addr = %self.interconnect.local_addr(),
+            peer = %self.target,
+            vote = %rpc.vote,
+            deadline = ?rpc_timeout,
+            "sending Raft vote request",
+        );
         let response = {
             let mapping_input = self
                 .interconnect
@@ -4857,8 +4938,16 @@ where
                     wire::RequestVote(wire::VoteRequestRecord::from_request(rpc)),
                     rpc_timeout,
                 )
-                .await
-                .map_err(io_error);
+                .await;
+            tracing::trace!(
+                node = %self.local_node_id,
+                local_addr = %self.interconnect.local_addr(),
+                peer = %self.target,
+                elapsed = ?started.elapsed(),
+                result = ?mapping_input,
+                "Raft vote request completed",
+            );
+            let mapping_input = mapping_input.map_err(io_error);
             match mapping_input {
                 Ok(mapped_value) => Ok(mapped_value),
                 Err(mapping_error) => Err((unreachable_err)(mapping_error)),
@@ -4881,6 +4970,15 @@ where
     ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
         self.connectivity.check().map_err(unreachable_err)?;
         let rpc_timeout = option.hard_ttl();
+        let started = Instant::now();
+        tracing::trace!(
+            node = %self.local_node_id,
+            local_addr = %self.interconnect.local_addr(),
+            peer = %self.target,
+            vote = %rpc.vote,
+            deadline = ?rpc_timeout,
+            "sending Raft pre-vote request",
+        );
         let response = {
             let mapping_input = self
                 .interconnect
@@ -4889,8 +4987,16 @@ where
                     wire::RequestPreVote(wire::VoteRequestRecord::from_request(rpc)),
                     rpc_timeout,
                 )
-                .await
-                .map_err(io_error);
+                .await;
+            tracing::trace!(
+                node = %self.local_node_id,
+                local_addr = %self.interconnect.local_addr(),
+                peer = %self.target,
+                elapsed = ?started.elapsed(),
+                result = ?mapping_input,
+                "Raft pre-vote request completed",
+            );
+            let mapping_input = mapping_input.map_err(io_error);
             match mapping_input {
                 Ok(mapped_value) => Ok(mapped_value),
                 Err(mapping_error) => Err((unreachable_err)(mapping_error)),
@@ -5260,6 +5366,8 @@ enum DomainPlanningInputConflict {
     Voters(DomainName),
     #[error("domain '{}' node eligibility changed", .0.as_str())]
     Eligibility(DomainName),
+    #[error("domain '{}' cluster parameters changed", .0.as_str())]
+    Parameters(DomainName),
 }
 
 fn validate_domain_planning_inputs(
@@ -5288,6 +5396,9 @@ fn validate_domain_planning_inputs(
             domain,
         )));
     }
+    if current.parameters != expected.parameters {
+        return Err(Report::new(DomainPlanningInputConflict::Parameters(domain)));
+    }
     Ok(())
 }
 
@@ -5308,6 +5419,12 @@ fn apply_consensus_command_at(
 ) -> AppliedConsensusCommand {
     let mut changes = StateMachineChanges::default();
     match command {
+        ConsensusCommand::SeedClusterParameters { values } => {
+            return cluster_parameters::seed(state, *values);
+        }
+        ConsensusCommand::AlterClusterParameters { reference, inputs } => {
+            return cluster_parameters::apply(state, reference, inputs);
+        }
         ConsensusCommand::AdmitCommandExecution {
             execution,
             mutation_domains,
@@ -5316,8 +5433,9 @@ fn apply_consensus_command_at(
             if let Some(existing) = state.command_executions.get(&execution.reference) {
                 if existing.is_expired() {
                     return AppliedConsensusCommand::conflict(
-                        ConsensusConflict::ExecutionReferenceExpired {
+                        ConsensusConflict::ExecutionReferenceAdmissionRefused {
                             reference: execution.reference.clone(),
+                            refusal: CommandExecutionAdmissionError::Expired,
                         },
                     );
                 }
@@ -5346,17 +5464,12 @@ fn apply_consensus_command_at(
                     .command_executions
                     .validate_admission(&execution.reference, policy)
                 {
-                    if let CommandExecutionAdmissionError::Expired = reason.current_context() {
-                        return AppliedConsensusCommand::conflict(
-                            ConsensusConflict::ExecutionReferenceExpired {
-                                reference: execution.reference.clone(),
-                            },
-                        );
-                    }
-                    return AppliedConsensusCommand::conflict(format!(
-                        "command execution reference '{}' {reason}",
-                        execution.reference,
-                    ));
+                    return AppliedConsensusCommand::conflict(
+                        ConsensusConflict::ExecutionReferenceAdmissionRefused {
+                            reference: execution.reference.clone(),
+                            refusal: *reason.current_context(),
+                        },
+                    );
                 }
                 let owner = DomainMutationOwner::command(execution.reference.clone());
                 let admitted = match admit_domain_mutations(state, mutation_domains, &owner) {
@@ -7286,6 +7399,7 @@ mod tests {
     /// every test node shares.
     fn undiscovered_node(name: &str, incarnation: u64) -> GossipNode {
         GossipNode {
+            parameters: None,
             node_id: ClusterNodeName::parse(name).assured("the test node name is valid"),
             incarnation: ClusterNodeIncarnation::new(incarnation),
             terminating: false,
@@ -8862,8 +8976,9 @@ mod tests {
         );
         assert_eq!(
             retained_retry.response,
-            ConsensusResponse::Conflict(ConsensusConflict::ExecutionReferenceExpired {
+            ConsensusResponse::Conflict(ConsensusConflict::ExecutionReferenceAdmissionRefused {
                 reference: reference.clone(),
+                refusal: crate::CommandExecutionAdmissionError::Expired,
             })
         );
 
@@ -8886,8 +9001,9 @@ mod tests {
         );
         assert_eq!(
             response.response,
-            ConsensusResponse::Conflict(ConsensusConflict::ExecutionReferenceExpired {
+            ConsensusResponse::Conflict(ConsensusConflict::ExecutionReferenceAdmissionRefused {
                 reference: reference.clone(),
+                refusal: crate::CommandExecutionAdmissionError::Expired,
             })
         );
         assert!(state.command_executions.get(&reference).is_none());

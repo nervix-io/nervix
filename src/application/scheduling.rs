@@ -21,7 +21,7 @@ use std::{collections::BTreeSet, num::NonZeroU64, time::Duration};
 
 use ahash::{HashMap, HashSet};
 use error_stack::{Report, ResultExt as _};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector_kafka::TopicPartitionInspector;
 use nervix_consensus::{
     CommandExecution, ConsensusError, DomainMutationLease, DomainPlanningInputs, GossipState,
@@ -351,7 +351,7 @@ impl ShutdownDrainAnswer {
                 warn!(
                     node_id = %local_node_id,
                     leader = %leader,
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     "the leader did not answer the graceful shutdown drain of the local node"
                 );
                 ShutdownPhaseOutcome::Abandoned
@@ -385,7 +385,7 @@ impl ShutdownDrainAnswer {
                 warn!(
                     node_id = %local_node_id,
                     leader = %leader,
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     "the leader did not answer the release of the shutdown drain cordon"
                 );
                 ShutdownPhaseOutcome::Abandoned
@@ -490,15 +490,20 @@ impl SessionServiceImpl {
 
     pub(in crate::application) async fn prepare_domain_schedule(
         &self,
-        domain: &DomainName,
+        inputs: DomainPlanningInputs,
         graph: Option<ActiveGraph>,
         placement: PlacementPolicy,
     ) -> PreparedDomainSchedule {
-        let inputs = self.inner.consensus.domain_planning_inputs(domain).await;
         let snapshot = self
             .capture_domain_schedule_planning_snapshot(&inputs)
             .await;
-        snapshot.prepare(&inputs, domain, graph, placement, inputs.schedule())
+        snapshot.prepare(
+            &inputs,
+            inputs.domain(),
+            graph,
+            placement,
+            inputs.schedule(),
+        )
     }
 
     pub(in crate::application) async fn drop_node(
@@ -580,7 +585,8 @@ impl SessionServiceImpl {
             let mut schedule = graph.schedule_for_domain_with_mode(
                 &domain,
                 cluster_nodes,
-                self.inner.replica_count,
+                usize::try_from(self.cluster_parameters().replica_count())
+                    .assured("the committed count fits a supported target"),
                 domain_state.config.placement,
                 self.inner.runtime.scheduler_mode(),
             );
@@ -588,7 +594,8 @@ impl SessionServiceImpl {
             let mut schedule = graph.schedule_for_domain(
                 &domain,
                 cluster_nodes,
-                self.inner.replica_count,
+                usize::try_from(self.cluster_parameters().replica_count())
+                    .assured("the committed count fits a supported target"),
                 domain_state.config.placement,
             );
             Self::merge_existing_schedule_data(&mut schedule, inputs.schedule(), preservable_nodes);
@@ -832,7 +839,8 @@ impl SessionServiceImpl {
                 let desired = graph.schedule_for_domain_with_mode(
                     &domain,
                     &replacement_nodes,
-                    self.inner.replica_count,
+                    usize::try_from(self.cluster_parameters().replica_count())
+                        .assured("the committed count fits a supported target"),
                     domain_state.config.placement,
                     self.inner.runtime.scheduler_mode(),
                 );
@@ -840,7 +848,8 @@ impl SessionServiceImpl {
                 let desired = graph.schedule_for_domain(
                     &domain,
                     &replacement_nodes,
-                    self.inner.replica_count,
+                    usize::try_from(self.cluster_parameters().replica_count())
+                        .assured("the committed count fits a supported target"),
                     domain_state.config.placement,
                 );
                 let Some(current_domain) = inputs.schedule() else {

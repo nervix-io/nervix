@@ -21,14 +21,14 @@ use nervix_models::{
     Assignment, AssignmentTarget, ClientConfigEntry, ClientDeadline, ClientIngestMode,
     CodecBatchContainer, CreateClientHttp, CreateCodec, CreateEmitter, CreateIngestor,
     CreateSchema, CreateSignalingProtocol, DomainName, EmitterEntity, EmitterEntityModel,
-    EmitterEnvelope, EndpointName, EnvelopeClauseForm, Expression, FieldName,
-    HttpApplicationHeaders, HttpBodyMode, HttpEmitter, HttpHeaderName, HttpHeaderValue, HttpMethod,
-    HttpOrigin, HttpRequestEmitter, IcebergCatalogProperties, IcebergStorageBackend,
-    IcebergTableEmitter, IngestTimestampSource, IngestorInput, IngestorMetadataType,
-    LiteralHeaderWrite, Model, ModelIndex, ModelKind, ModelName, NodeRef, OtelEmitter,
-    OtelMappings, OtelMetricKind, OtelMetricsEmitter, ParseAsType, ProcessorOutput, RelayName,
-    RouteConstruction, SQS_DELAY_MAXIMUM, SchemaField, SchemaName, SignalingWireFormat, SqsEmitter,
-    SqsFifoGroup, SqsQueueEmitter, SqsQueueName, VhostName, parse_duration_text,
+    EmitterEnvelope, EndpointName, EnvelopeClauseForm, Expression, FieldName, HttpBodyMode,
+    HttpEmitter, HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin, HttpRequestEmitter,
+    IcebergCatalogProperties, IcebergStorageBackend, IcebergTableEmitter, IngestTimestampSource,
+    IngestorInput, IngestorMetadataType, LiteralHeaderWrite, Model, ModelIndex, ModelKind,
+    ModelName, NodeRef, OtelEmitter, OtelMappings, OtelMetricKind, OtelMetricsEmitter, ParseAsType,
+    ProcessorOutput, RelayName, RouteConstruction, SQS_DELAY_MAXIMUM, SchemaField, SchemaName,
+    SignalingWireFormat, SqsEmitter, SqsFifoGroup, SqsQueueEmitter, SqsQueueName, VhostName,
+    parse_duration_text,
 };
 use nervix_primitives::sync::StdArc;
 use nervix_vm::{
@@ -98,6 +98,22 @@ pub(in crate::registry) fn validate_ingestor_source(
                 ingestor: identifier.clone(),
             }
         })?;
+    }
+    if let Some(nervix_models::IngestorEntity::Pulsar(nervix_models::PulsarIngestor::Topic(source))) =
+        ingestor.input.transport_entity()
+        && !source.instances_fit_subscription()
+    {
+        return Err(Report::new(RegistryError::InvalidConnectorDeclaration {
+            domain: domain.clone(),
+            node: nervix_models::NodeRef::new(
+                nervix_models::ModelKind::Ingestor,
+                identifier.clone(),
+            ),
+            issue: ConnectorDeclarationIssue::PulsarSingleConsumerType {
+                kind: source.subscription.kind,
+                instances: source.instances,
+            },
+        }));
     }
     if let Some(unmet) = ingestor.input.unmet_delivery() {
         return Err(Report::new(RegistryError::InvalidConnectorDeclaration {
@@ -1245,12 +1261,6 @@ pub(in crate::registry) fn validate_http_literal_request_fields(
     origin: &HttpOrigin,
     emitter: &CreateEmitter,
 ) -> Result<(), Report<RegistryError>> {
-    struct KnownHeader {
-        invocation: usize,
-        name: HttpHeaderName,
-        value: HttpHeaderValue,
-    }
-
     let EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter { method, path, .. })) =
         emitter.connector.as_ref()
     else {
@@ -1298,8 +1308,6 @@ pub(in crate::registry) fn validate_http_literal_request_fields(
         })?;
     }
 
-    let mut known_headers = Vec::new();
-    let mut all_headers_known = true;
     for (index, invocation) in emitter.construction.invocations.iter().enumerate() {
         let invocation_index = index
             .checked_add(1)
@@ -1307,8 +1315,8 @@ pub(in crate::registry) fn validate_http_literal_request_fields(
         let [name, value] = invocation.arguments.as_slice() else {
             continue;
         };
-        let name = if let Expression::Literal(nervix_models::Literal::String(name)) = name {
-            Some(HttpHeaderName::parse(name).map_err(|cause| {
+        if let Expression::Literal(nervix_models::Literal::String(name)) = name {
+            HttpHeaderName::parse(name).map_err(|cause| {
                 cause.change_context(RegistryError::InvalidModel {
                     domain: domain.as_str().to_string(),
                     identifier: identifier.as_str().to_string(),
@@ -1316,66 +1324,16 @@ pub(in crate::registry) fn validate_http_literal_request_fields(
                         "HTTP invoke #{invocation_index} header name is invalid or reserved"
                     ),
                 })
-            })?)
-        } else {
-            all_headers_known = false;
-            None
-        };
-        let value = if let Expression::Literal(nervix_models::Literal::String(value)) = value {
-            Some(HttpHeaderValue::parse(value).map_err(|cause| {
+            })?;
+        }
+        if let Expression::Literal(nervix_models::Literal::String(value)) = value {
+            HttpHeaderValue::parse(value).map_err(|cause| {
                 cause.change_context(RegistryError::InvalidModel {
                     domain: domain.as_str().to_string(),
                     identifier: identifier.as_str().to_string(),
                     reason: format!("HTTP invoke #{invocation_index} header value is invalid"),
                 })
-            })?)
-        } else {
-            all_headers_known = false;
-            None
-        };
-        if let (Some(name), Some(value)) = (name, value) {
-            let size = name
-                .as_str()
-                .len()
-                .checked_add(value.as_str().len())
-                .ok_or_else(|| {
-                    invalid(format!(
-                        "HTTP invoke #{invocation_index} header exceeds 32 KiB"
-                    ))
-                })?;
-            if size > 32 * 1024 {
-                return Err(invalid(format!(
-                    "HTTP invoke #{invocation_index} header exceeds 32 KiB"
-                )));
-            }
-            known_headers.push(KnownHeader {
-                invocation: invocation_index,
-                name,
-                value,
-            });
-        }
-    }
-    if all_headers_known {
-        let mut headers = HttpApplicationHeaders::default();
-        let final_invocation = known_headers.last().map(|header| header.invocation);
-        for known in known_headers {
-            headers.insert(known.name, known.value).map_err(|cause| {
-                cause.change_context(RegistryError::InvalidModel {
-                    domain: domain.as_str().to_string(),
-                    identifier: identifier.as_str().to_string(),
-                    reason: format!(
-                        "HTTP invoke #{} application headers exceed the count or 32 KiB limit",
-                        known.invocation
-                    ),
-                })
             })?;
-        }
-        if headers.validate_total().is_err() {
-            let invocation = final_invocation
-                .assured("a nonzero total requires at least one literal header invocation");
-            return Err(invalid(format!(
-                "HTTP invoke #{invocation} application headers exceed the 32 KiB limit"
-            )));
         }
     }
     Ok(())
@@ -2010,3 +1968,7 @@ pub(in crate::registry) fn validate_iceberg_client_pairing(
 #[cfg(test)]
 #[path = "connector_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "connector_pulsar_tests.rs"]
+mod pulsar_tests;

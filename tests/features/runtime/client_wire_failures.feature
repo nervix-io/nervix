@@ -27,6 +27,33 @@ Feature: Client wire failure regressions
       );
       """
 
+  # The forwarder stays stopped for twice the client's retry budget while the backup holds its
+  # cut, so the client reaches its server again only after that budget has passed. The backup's
+  # own wait covers every reconnect it makes, and the cut's budget covers the outage the cut waits
+  # through at its gate on a loaded runner.
+  @client_wire_backup_outage @deloxide_stress_restore
+  Scenario Outline: A native backup waits through an outage longer than its retry budget on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the gRPC endpoint of node "{{leader}}" is forwarded from fixture address "127.0.0.1"
+    And the backup cut for domain "{{domain}}" will pause before its capture
+    When a native client with a 20 second retry budget and a 300 second backup wait begins backing up the cluster with a 240 second cut budget through "{{forwarded_grpc}}" into "outage.nvxb"
+    Then the backup cut for domain "{{domain}}" has reached its pause
+    When the TCP forwarder at "127.0.0.1" stays stopped for 40 seconds and then restarts
+    And the backup cut pause for domain "{{domain}}" is released
+    Then the native backup completes under its original execution reference
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @client_wire_durable_admission
   Scenario: A command lost after durable admission is recovered by its request identity
     Given a 1 node nervix cluster is started
@@ -1210,8 +1237,8 @@ Feature: Client wire failure regressions
       CREATE VHOST edge wide-rows-{{test_id}}.example.com;
       CREATE ENDPOINT wide_ingress ON edge PATH '/records' TYPE HTTP;
       CREATE HTTP ENDPOINT INGESTOR wide_source
-        FROM wide_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 32MiB DECODE USING wide_record_codec
+        FROM wide_ingress MODE ACK MAX 1 ACK TIMEOUT 30s
+        ON QUIESCE REJECT RETRY AFTER 1s DECODE USING wide_record_codec
         TO wide_records
         SET sequence = message.sequence, note = message.note
         UNBRANCHED
@@ -1223,7 +1250,7 @@ Feature: Client wire failure regressions
       """
       CREATE SUBSCRIPTION wide_seen TO wide_records;
       """
-    And http payload is posted to node "node-1" with host "wide-rows-{{test_id}}.example.com" path "/records"
+    And http payload is acknowledged within "30s" by node "node-1" with host "wide-rows-{{test_id}}.example.com" path "/records"
       """
       {"sequence":1,"note":"{{wide_note}}"}
       """

@@ -471,6 +471,7 @@ impl IngestorPresentationModel for PulsarTopicIngestor {
                 self.subscription.ownership.keywords()
             ),
         );
+        presentation.written_option("TYPE", self.subscription.kind.to_string());
         presentation.defaulted_option("INSTANCES", self.instances.to_string());
         presentation
     }

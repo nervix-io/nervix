@@ -74,7 +74,7 @@ the work that submitted it reports the refusal as its own failure. The one excep
 node already accepted and keeps: the unfolding of a payload a quiesce buffer retained waits for a
 place instead, while its payload stays counted in the buffer. So does the unfolding of a poll a
 paced ingestor handed over, and of a payload a NATS, ZeroMQ or Syslog source read without an
-acknowledgement, and an Iceberg commit's read of the staged files its emitter already accepted.
+acknowledgement, and an Iceberg commit's read of the staged rows its emitter already accepted.
 Holding one of those source loops pushes back into its transport, so a node whose
 extension workers stay full delays polls and lets those transports buffer or drop at their own
 bounds; see [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
@@ -88,10 +88,10 @@ window for as long as it is open, so sixteen bulk streams run at once and a seve
 a window within its own request deadline. One relay operation may hold at most 32 MiB of encoded
 body, 32 MiB of decoded data and 16 MiB of conversion scratch, and the relay budget is sized to hold
 two such operations at once so one blocked channel cannot exhaust the capacity another needs.
-An Iceberg commit charges the bulk budget for the staged files it reads back, only when the budget
-has room for them now, so a commit whose staged files exceed the budget reads them in groups, a
-single staged file larger than the budget waits until the whole budget is free and is charged all
-of it, and a commit refused for room is retried by its emitter.
+An Iceberg commit charges the bulk budget for the staged batches it reads back, only when the
+budget has room for them now, so a commit whose staged batches exceed the budget reads them in
+groups, a single staged batch larger than the budget waits until the whole budget is free and is
+charged all of it, and a commit refused for room is retried by its emitter.
 The relay budget also carries the acknowledgement watches a relay owner keeps for rows another node
 delivered with acknowledgements: 1 KiB per row until the owner reports that row's outcome, and
 4 KiB per delivery. A delivery of 8 MiB of 164-byte rows therefore needs about 51 MiB of watches
@@ -156,8 +156,10 @@ cannot hold it:
   `--resource-max-archive-bytes` and `--resource-max-extracted-bytes`, keep their 4 GiB and 16 GiB
   defaults whatever the volume, so a node on a smaller volume needs them set below its size: a
   5 GiB volume might take `NERVIX_RESOURCE_MAX_ARCHIVE_BYTES=1GiB` and
-  `NERVIX_RESOURCE_MAX_EXTRACTED_BYTES=2GiB`. They are cluster parameters, so give every node the
-  same values. Each quota is compared with the volume's total size on its own, and what the volume
+  `NERVIX_RESOURCE_MAX_EXTRACTED_BYTES=2GiB` as seeds on the new cluster's bootstrapping node.
+  Later node starts omit those seed variables and use the committed values. Change an existing
+  cluster's quotas through `ALTER CLUSTER SET` before joining a node with a smaller volume;
+  [Node Settings](node-settings.md#committed-parameter-changes) defines that contract. Each quota is compared with the volume's total size on its own, and what the volume
   already holds is not subtracted, so size the volume for the log, snapshots and state the node
   keeps beside them.
 

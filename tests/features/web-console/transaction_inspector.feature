@@ -282,7 +282,8 @@ Feature: Web console transaction inspector
     Given a 3 node nervix cluster is started
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    When the web console is opened on node "{{old_leader}}"
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
+    And the web console is opened on node "{{old_leader}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".prompt-row input" is filled with "CREATE DOMAIN {{domain}};"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -306,7 +307,8 @@ Feature: Web console transaction inspector
     When selector ".transaction-inspector button[aria-label='Close transaction inspector']" is pressed with "Enter"
     And selector ".prompt-row input" is filled with "COMMIT;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".transaction-indicator" eventually disappears
+    Then selector ".terminal" contains "quiesce level: DYNAMIC" exactly 2 times
+    And selector ".transaction-indicator" eventually disappears
     When selector ".prompt-row input" is filled with "SHOW CREATE SCHEMA retained_after_reconnect;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "CREATE SCHEMA retained_after_reconnect"

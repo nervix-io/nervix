@@ -1270,12 +1270,16 @@ impl SessionServiceImpl {
             match parse_subscription_batch_sample_rate(subscription.batch_sample_rate.as_deref()) {
                 Ok(rate) => rate,
                 Err(err) => {
-                    let diagnostic = CommandDiagnostic::unlocated(err.to_string());
+                    let cause = format!("{err:#}");
+                    let diagnostic = CommandDiagnostic::unlocated(cause.clone());
                     return Err(Box::new(CommandResult {
                         diagnostics: vec![diagnostic],
                         ..CommandResult::new(
                             CommandDisposition::Failed,
-                            format!("failed to subscribe session '{}': {err}", subscription.name),
+                            format!(
+                                "failed to subscribe session '{}': {cause}",
+                                subscription.name
+                            ),
                         )
                     }));
                 }
@@ -1305,7 +1309,7 @@ impl SessionServiceImpl {
             }
             Err(err) => {
                 return Err(Box::new(command_error(format!(
-                    "failed to resolve relay for subscription: {err}"
+                    "failed to resolve relay for subscription: {err:#}"
                 ))));
             }
         };
@@ -1355,7 +1359,7 @@ impl SessionServiceImpl {
             Ok(schema) => schema,
             Err(error) => {
                 return Err(Box::new(command_error(format!(
-                    "failed to describe the rows of relay '{}': {error}",
+                    "failed to describe the rows of relay '{}': {error:#}",
                     subscription.relay.as_str(),
                 ))));
             }
@@ -1371,7 +1375,7 @@ impl SessionServiceImpl {
             Ok(opening) => opening,
             Err(error) => {
                 return Err(Box::new(command_error(format!(
-                    "failed to describe the rows of relay '{}': {error}",
+                    "failed to describe the rows of relay '{}': {error:#}",
                     subscription.relay.as_str(),
                 ))));
             }
@@ -1381,7 +1385,7 @@ impl SessionServiceImpl {
         let runtime_revision = self.inner.consensus.current_runtime_state().await.revision;
         if let Err(err) = self.wait_for_runtime_revision(runtime_revision).await {
             return Err(Box::new(command_error(format!(
-                "failed to subscribe to relay '{}': {err}",
+                "failed to subscribe to relay '{}': {err:#}",
                 relay.as_str()
             ))));
         }
@@ -1397,7 +1401,7 @@ impl SessionServiceImpl {
         {
             lease.release().await;
             return Err(Box::new(command_error(format!(
-                "failed to register subscription interest for relay '{}' in domain '{}': {error}",
+                "failed to register subscription interest for relay '{}' in domain '{}': {error:#}",
                 relay.as_str(),
                 domain.as_str(),
             ))));
@@ -1632,7 +1636,13 @@ impl SessionServiceImpl {
                             match self
                                 .inner
                                 .consensus
-                                .open_transaction(transaction, self.inner.transaction_max_open)
+                                .open_transaction(
+                                    transaction,
+                                    usize::try_from(
+                                        self.cluster_parameters().transaction_max_open(),
+                                    )
+                                    .assured("the committed count fits a supported target"),
+                                )
                                 .await
                             {
                                 Ok(transaction) => {

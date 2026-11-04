@@ -138,6 +138,7 @@ struct PreparedTransactionCommit {
 
 #[derive(Serialize)]
 struct TransactionPlanningBasisInput<'a> {
+    parameters: Option<&'a nervix_models::ClusterParameterRecord>,
     domain: &'a DomainState,
     models: Vec<&'a Model>,
     resources: Vec<&'a ResourceName>,
@@ -181,6 +182,7 @@ fn transaction_planning_basis(
     ordered_models.sort_by_key(|model| model.node_ref());
     let resources = resources.iter().collect();
     let input = TransactionPlanningBasisInput {
+        parameters: authoritative_inputs.parameters(),
         domain,
         models: ordered_models,
         resources,
@@ -700,7 +702,10 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
 
 impl SessionServiceImpl {
     pub(in crate::application) fn transaction_activity(&self) -> TransactionActivity {
-        TransactionActivity::from_timeout(current_timestamp(), self.inner.transaction_idle_timeout)
+        TransactionActivity::from_timeout(
+            current_timestamp(),
+            self.cluster_parameters().transaction_idle_timeout(),
+        )
     }
 
     /// The configuration this session's bound transaction has queued for `domain`. Queued
@@ -878,7 +883,7 @@ impl SessionServiceImpl {
         {
             warn!(
                 transaction_id = id,
-                error = %error,
+                error = %format_args!("{error:#}"),
                 "failed to revert transaction during clean session close"
             );
         }
@@ -911,6 +916,14 @@ impl SessionServiceImpl {
             ))));
         }
         if let Some(attachment) = finished_transaction_attachment(&transaction) {
+            // An attach that reports a finished transaction grants no binding. A session that
+            // still named the transaction, as after its binding was lost, therefore no longer
+            // holds it: the commands it repeats under their own references are planned without
+            // it, and receive their recorded outcomes or a definitive failure instead of being
+            // refused as detached again.
+            if subscriptions.transaction_id() == Some(transaction_id.as_str()) {
+                self.release_session_transaction_binding(subscriptions);
+            }
             return attachment;
         }
 
@@ -1037,12 +1050,19 @@ impl SessionServiceImpl {
                 },
             ));
         }
-        let models = self.inner.registry.transaction_planning_models(domain);
         let control = self
             .inner
             .consensus
             .transaction_control_snapshot(domain)
             .await;
+        let models = match control.planning_inputs.schedule() {
+            Some(schedule) => schedule
+                .nodes
+                .values()
+                .map(|node| node.config.as_ref().clone())
+                .collect(),
+            None => Default::default(),
+        };
         if let Some(execution) = &control.restore_installation
             && statements
                 .iter()
@@ -1079,6 +1099,11 @@ impl SessionServiceImpl {
             schedule_inputs: &schedule_inputs,
         })?;
         let snapshot = TransactionPlanningSnapshot {
+            parameters: control
+                .planning_inputs
+                .parameters()
+                .ok_or_else(|| Report::new(TransactionPlanningError::ClusterParametersUnseeded))?
+                .values,
             domain: domain_state.clone(),
             models,
             resources,
@@ -2494,7 +2519,7 @@ impl SessionServiceImpl {
                 {
                     warn!(
                         transaction_id = id,
-                        error = %error,
+                        error = %format_args!("{error:#}"),
                         "failed to resume replicated Plexus commit"
                     );
                 }
@@ -2509,10 +2534,12 @@ impl SessionServiceImpl {
             return;
         }
         let now = current_timestamp();
-        let finished_before =
-            subtract_timestamp_duration(now, self.inner.transaction_tombstone_retention);
+        let finished_before = subtract_timestamp_duration(
+            now,
+            self.cluster_parameters().transaction_tombstone_retention(),
+        );
         let command_retry_fence =
-            subtract_timestamp_duration(now, self.inner.command_execution_policy.retry_validity());
+            subtract_timestamp_duration(now, self.command_execution_policy().retry_validity());
         self.reconcile_persistent_commands(command_retry_fence, command_retry_fence)
             .await;
         let transactions = self.inner.consensus.current_transactions().await;
@@ -2546,15 +2573,18 @@ impl SessionServiceImpl {
                         Err(error) => {
                             warn!(
                                 transaction_id = transaction.id,
-                                error = %error,
+                                error = %format_args!("{error:#}"),
                                 "failed to expire inactive Plexus transaction"
                             );
                         }
                     }
                 }
                 TransactionState::Committing(_) => {}
+                // A finished transaction keeps the binding of the session that holds it. That
+                // session's next transaction request is answered from the recorded outcome and
+                // releases the binding, as a commit another reference finished is reported to a
+                // session that attached before it finished.
                 TransactionState::Finished(_) => {
-                    self.inner.transaction_bindings.remove(&transaction.id);
                     #[cfg(feature = "testing")]
                     self.inner
                         .runtime
@@ -2579,7 +2609,7 @@ impl SessionServiceImpl {
                 .remove_finished_transactions(finished_before)
                 .await
         {
-            warn!(error = %error, "failed to remove expired transaction tombstones");
+            warn!(error = %format_args!("{error:#}"), "failed to remove expired transaction tombstones");
         }
         self.schedule_transaction_recovery(&transactions);
     }
@@ -2627,3 +2657,7 @@ impl SessionServiceImpl {
 #[cfg(test)]
 #[path = "transaction/tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "testing"))]
+#[path = "transaction/maintenance_tests.rs"]
+mod maintenance_tests;

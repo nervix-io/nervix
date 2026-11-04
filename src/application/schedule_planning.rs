@@ -17,6 +17,7 @@
 use std::collections::BTreeSet;
 
 use error_stack::Report;
+use meticulous::ResultExt as _;
 use nervix_consensus::{DomainPlanningInputs, TransactionScheduleEligibility};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, DomainName, DomainSchedule, PlacementPolicy,
@@ -51,6 +52,8 @@ pub(in crate::application) enum SchedulePlanningStale {
     Topology { domain: DomainName },
     #[error("domain '{}' scheduling eligibility changed while the plan was pending", .domain.as_str())]
     Eligibility { domain: DomainName },
+    #[error("domain '{}' cluster parameters changed", .domain.as_str())]
+    Parameters { domain: DomainName },
 }
 
 #[derive(Clone, Copy)]
@@ -306,6 +309,11 @@ impl SessionServiceImpl {
                 domain: expected.domain().clone(),
             }));
         }
+        if current.parameters() != expected.parameters() {
+            return Err(Report::new(SchedulePlanningStale::Parameters {
+                domain: expected.domain().clone(),
+            }));
+        }
         Ok(())
     }
 
@@ -351,7 +359,8 @@ impl SessionServiceImpl {
             placement_candidate_identities,
             live_voters,
             cluster_nodes,
-            replica_count: self.inner.replica_count,
+            replica_count: usize::try_from(self.cluster_parameters().replica_count())
+                .assured("the committed count fits a supported target"),
             mode,
         }
     }
@@ -374,6 +383,7 @@ mod tests {
 
     fn gossip_node(name: &str, incarnation: u64, terminating: bool) -> GossipNode {
         GossipNode {
+            parameters: None,
             node_id: ClusterNodeName::parse(name).assured("the test node name is valid"),
             incarnation: ClusterNodeIncarnation::new(incarnation),
             terminating,
@@ -382,6 +392,111 @@ mod tests {
             interconnect_endpoint: None,
             prerequisites: None,
         }
+    }
+
+    #[nervix_primitives::test]
+    async fn planning_parameter_fence_preflight_tracks_the_complete_parameter_record() {
+        use std::time::Duration;
+
+        use nervix_consensus::{
+            CommandExecution, CommandExecutionAdmissionPolicy, CommandExecutionEffect,
+        };
+        use nervix_models::{ClusterParameterChange, ClusterParameterUpdates, Timestamp, UserName};
+
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(true).await;
+        let domain =
+            DomainName::parse("default").assured("default is an identifier-shaped literal");
+        let captured = service
+            .inner
+            .consensus
+            .domain_planning_inputs(&domain)
+            .await;
+        let captured_record = captured
+            .parameters()
+            .copied()
+            .assured("build_test_service seeds the cluster before returning");
+        for seconds in [20, 10] {
+            let inputs = service
+                .inner
+                .consensus
+                .cluster_parameter_planning_inputs()
+                .assured("the fixture only publishes changes to its seeded record");
+            let reference = nervix_models::CommandExecutionReference::parse(format!(
+                "018bcfe5-6800-7000-8000-{:012x}",
+                inputs.current.revision.get()
+            ))
+            .assured("the bounded fixture revision fills a valid UUIDv7 suffix");
+            let at = Timestamp::from_unix_nanos(1_700_000_010_000_000_000);
+            let changes = ClusterParameterUpdates::try_from(vec![
+                ClusterParameterChange::NodeUnavailabilityTimeout(Duration::from_secs(seconds)),
+            ])
+            .assured("one positive timeout assignment satisfies the update rules");
+            let execution = CommandExecution::applying(
+                reference.clone(),
+                UserName::parse("operator").assured("operator is an identifier-shaped literal"),
+                None,
+                [3; 32],
+                at,
+                CommandExecutionEffect::AlterCluster {
+                    changes,
+                    applied: None,
+                },
+            );
+            service
+                .inner
+                .consensus
+                .admit_command_execution(
+                    execution,
+                    BTreeSet::new(),
+                    CommandExecutionAdmissionPolicy::at(at, Duration::from_secs(60), 16),
+                )
+                .await
+                .assured(
+                    "the unique UUIDv7 reference is inside this fault-free fixture policy window",
+                );
+            service
+                .inner
+                .consensus
+                .alter_cluster_parameters(reference, inputs)
+                .await
+                .assured(
+                    "no competing policy, model, or resource publication changed the captured \
+                     inputs",
+                );
+            let error = service
+                .validate_domain_planning_inputs(&captured)
+                .await
+                .expect_err("a changed committed parameter record invalidates preflight");
+            assert!(matches!(
+                error.current_context(), SchedulePlanningStale::Parameters { domain: changed }
+                    if changed == &domain
+            ));
+            let current = service
+                .inner
+                .consensus
+                .domain_planning_inputs(&domain)
+                .await;
+            service
+                .validate_domain_planning_inputs(&current)
+                .await
+                .assured(
+                    "no fixture mutation occurs between the current capture and this validation",
+                );
+        }
+        let current = service
+            .inner
+            .consensus
+            .cluster_parameters()
+            .assured("build_test_service seeds the cluster before returning");
+        assert_eq!(current.values, captured_record.values);
+        assert!(current.revision > captured_record.revision);
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
     }
 
     #[test]

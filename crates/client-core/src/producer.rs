@@ -39,10 +39,9 @@ use nervix_client_wire::{
     SubmissionOutcome as WireSubmissionOutcome, SubmitBatchRequest,
 };
 use nervix_models::{
-    CLIENT_PRODUCER_SESSION_BYTES, ClientOutcomeUncertainty, ClientProcessingFailure,
-    ClientProducerAdmission, ClientProducerDescription, ClientProducerEndReason,
-    ClientProducerLimits, ClientSubmissionOutcome, ClientSubmissionRefusal, DomainName,
-    IngestorName, SchemaField,
+    ClientOutcomeUncertainty, ClientProcessingFailure, ClientProducerAdmission,
+    ClientProducerDescription, ClientProducerEndReason, ClientProducerLimits,
+    ClientSubmissionOutcome, ClientSubmissionRefusal, DomainName, IngestorName, SchemaField,
 };
 use nervix_primitives::sync::{Arc, StdArc, StdWeak, blocking::Mutex as SyncMutex, oneshot, watch};
 use nervix_recovery::Discarded as _;
@@ -50,7 +49,7 @@ use thiserror::Error;
 use tracing::debug;
 
 use crate::{
-    client::{Client, RecoveryMode, SessionRecovery},
+    client::{Client, RecoveryDeadline, RecoveryMode, SessionRecovery},
     error::{ClientError, RequestKind},
     exchange::{ExchangeRequests, PendingRequest, SESSION_LIMITS},
 };
@@ -539,7 +538,10 @@ impl Client {
                     if !report.current_context().retryable_session_failure() {
                         return Err(report);
                     }
-                    match self.recover_session(RecoveryMode::IfClosed).await? {
+                    match self
+                        .recover_session(RecoveryMode::IfClosed, RecoveryDeadline::RetryBudget)
+                        .await?
+                    {
                         SessionRecovery::Ready => {}
                         SessionRecovery::Unavailable => return Err(report),
                     }
@@ -993,7 +995,10 @@ impl ProducerInner {
             if let Some(end) = self.end() {
                 return Err(Report::new(ProducerError::Ended(end)));
             }
-            let recovered = self.client.recover_session(RecoveryMode::IfClosed).await;
+            let recovered = self
+                .client
+                .recover_session(RecoveryMode::IfClosed, RecoveryDeadline::RetryBudget)
+                .await;
             if !matches!(recovered, Ok(SessionRecovery::Ready)) {
                 return Err(Report::new(ProducerError::SessionUnavailable));
             }
@@ -1060,7 +1065,6 @@ impl ProducerAttachment {
         // before returning the protocol error, including when this was a cancelled initial open.
         if opened.domain != request.domain
             || opened.ingestor != request.ingestor
-            || attachment.description.grant.bytes.get() > CLIENT_PRODUCER_SESSION_BYTES
             || attachment.description.grant.batches > request.limits.batches
             || attachment.description.grant.bytes > request.limits.bytes
         {

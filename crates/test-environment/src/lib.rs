@@ -57,6 +57,7 @@ pub mod collector_output;
 pub mod dns_authority;
 mod http_readiness;
 mod postgres_clients;
+mod pulsar_auth;
 mod reaper;
 pub mod restartable_rabbitmq;
 
@@ -86,6 +87,9 @@ const DEPENDENCY_CONFIGURATION_FILES: &[&[u8]] = &[
     include_bytes!("../../../docker/mock-server/Dockerfile"),
     include_bytes!("../../../docker/mock-server/app.py"),
     include_bytes!("../../../docker/nats/nats-tls.conf"),
+    include_bytes!("../../../docker/nats/nats-token.conf"),
+    include_bytes!("../../../docker/nats/nats-nkey.conf"),
+    include_bytes!("../../../docker/nats/nats-jwt.conf"),
     OTEL_COLLECTOR_CONFIG,
     include_bytes!("../../../docker/prometheus/prometheus.yml"),
     include_bytes!("../../../docker/prometheus/web.yml"),
@@ -161,6 +165,19 @@ pub const KAFKA_DOCKER_NETWORK: &str = "kafka_docker_network";
 pub const PULSAR_ADDR: &str = "pulsar_addr";
 pub const PULSAR_TLS_ADDR: &str = "pulsar_tls_addr";
 pub const PULSAR_ADMIN_ADDR: &str = "pulsar_admin_addr";
+/// The TLS port of the Pulsar broker, dialled through a loopback address its certificate does not
+/// name.
+pub const PULSAR_TLS_UNNAMED_ADDR: &str = "pulsar_tls_unnamed_addr";
+/// The plaintext port of the broker that authenticates its clients, which refuses a client without
+/// [`PULSAR_AUTH_TOKEN`].
+pub const PULSAR_AUTH_ADDR: &str = "pulsar_auth_addr";
+/// The TLS port of the broker that authenticates its clients, which refuses a client that presents
+/// no certificate of the scenario certificate authority.
+pub const PULSAR_AUTH_TLS_ADDR: &str = "pulsar_auth_tls_addr";
+/// A token the broker at [`PULSAR_AUTH_ADDR`] accepts.
+pub const PULSAR_AUTH_TOKEN: &str = "pulsar_auth_token";
+/// A well-formed token signed by a key the broker at [`PULSAR_AUTH_ADDR`] does not hold.
+pub const PULSAR_AUTH_FORGED_TOKEN: &str = "pulsar_auth_forged_token";
 pub const RABBITMQ_ADDR: &str = "rabbitmq_addr";
 pub const RABBITMQ_MANAGEMENT_ADDR: &str = "rabbitmq_management_addr";
 pub const RABBITMQ_TLS_ADDR: &str = "rabbitmq_tls_addr";
@@ -200,6 +217,9 @@ const MQTT_AUTH_USERNAME_VALUE: &str = "nervix-mqtt-user";
 const MQTT_AUTH_PASSWORD_VALUE: &str = "nervix-mqtt-password";
 pub const NATS_ADDR: &str = "nats_addr";
 pub const NATS_TLS_ADDR: &str = "nats_tls_addr";
+pub const NATS_TOKEN_ADDR: &str = "nats_token_addr";
+pub const NATS_NKEY_ADDR: &str = "nats_nkey_addr";
+pub const NATS_CREDENTIALS_ADDR: &str = "nats_credentials_addr";
 pub const SQS_ENDPOINT: &str = "sqs_endpoint";
 pub const SQS_TLS_ENDPOINT: &str = "sqs_tls_endpoint";
 pub const CLICKHOUSE_ADDR: &str = "clickhouse_addr";
@@ -310,6 +330,8 @@ pub enum ContainerReadiness {
     Http {
         port: ContainerPort,
         path: &'static str,
+        /// The token a dependency that authenticates its HTTP API takes for this request.
+        bearer_token: Option<&'static str>,
     },
     Running,
 }
@@ -550,6 +572,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                 ContainerReadiness::Http {
                     port: 8080.tcp(),
                     path: namespace_path,
+                    bearer_token: None,
                 },
                 "Pulsar public/default namespace",
                 || {
@@ -587,6 +610,10 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         self.endpoints.insert(
             PULSAR_TLS_ADDR,
             format!("pulsar+ssl://127.0.0.1:{tls_port}"),
+        );
+        self.endpoints.insert(
+            PULSAR_TLS_UNNAMED_ADDR,
+            format!("pulsar+ssl://127.0.0.2:{tls_port}"),
         );
         self.endpoints
             .insert(PULSAR_ADMIN_ADDR, format!("http://127.0.0.1:{admin_port}"));
@@ -1130,6 +1157,56 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         self.endpoints
             .insert(NATS_ADDR, format!("nats://127.0.0.1:{port}"));
         self.containers.push(RunningContainer::Generic(container));
+        Ok(())
+    }
+
+    /// Independent servers enforce each public NATS authentication method.
+    pub async fn start_nats_auth(&mut self) -> io::Result<()> {
+        if !self.mark_starting("nats-auth").await? {
+            return Ok(());
+        }
+        struct AuthenticationServer {
+            role: &'static str,
+            endpoint: &'static str,
+            config: &'static [u8],
+        }
+        for AuthenticationServer {
+            role,
+            endpoint,
+            config,
+        } in [
+            AuthenticationServer {
+                role: "nats-token",
+                endpoint: NATS_TOKEN_ADDR,
+                config: include_bytes!("../../../docker/nats/nats-token.conf"),
+            },
+            AuthenticationServer {
+                role: "nats-nkey",
+                endpoint: NATS_NKEY_ADDR,
+                config: include_bytes!("../../../docker/nats/nats-nkey.conf"),
+            },
+            AuthenticationServer {
+                role: "nats-credentials",
+                endpoint: NATS_CREDENTIALS_ADDR,
+                config: include_bytes!("../../../docker/nats/nats-jwt.conf"),
+            },
+        ] {
+            nervix_primitives::task::consume_budget().await;
+            let container = self
+                .start_container(role, 4222.tcp(), "authenticated NATS", || {
+                    GenericImage::new("nats", "2.11-alpine")
+                        .with_wait_for(WaitFor::message_on_either_std("Server is ready"))
+                        .with_exposed_port(4222.tcp())
+                        .with_copy_to("/etc/nats/auth.conf", config.to_vec())
+                        .with_cmd(["-c", "/etc/nats/auth.conf"])
+                        .with_startup_timeout(STARTUP_TIMEOUT)
+                })
+                .await?;
+            let port = mapped_port(&container, 4222, "authenticated NATS").await?;
+            self.endpoints
+                .insert(endpoint, format!("nats://127.0.0.1:{port}"));
+            self.containers.push(RunningContainer::Generic(container));
+        }
         Ok(())
     }
 
@@ -2541,12 +2618,16 @@ async fn wait_for_container<I: Image>(
         ContainerReadiness::MappedTcp(port) => {
             wait_for_container_tcp(container, port, dependency).await
         }
-        ContainerReadiness::Http { port, path } => {
+        ContainerReadiness::Http {
+            port,
+            path,
+            bearer_token,
+        } => {
             let host_port = container
                 .get_host_port_ipv4(port)
                 .await
                 .map_err(testcontainers_error(dependency))?;
-            HttpReadiness::new(host_port, path)
+            HttpReadiness::new(host_port, path, bearer_token)
                 .wait(REUSABLE_READY_TIMEOUT)
                 .await
                 .map_err(|error| {

@@ -33,7 +33,7 @@ count: it rejects `Result<_, String>` in product code outright, and
 
 ## Rule Contracts
 
-The seventeen rule families below have one implementation each. The family name remains useful
+The eighteen rule families below have one implementation each. The family name remains useful
 for describing its purpose; a compiler family can emit more than one diagnostic where a missing
 contract and a violated contract require different corrections.
 
@@ -43,6 +43,7 @@ contract and a violated contract require different corrections.
 | `data_plane_lock_acquisitions` | Resolve synchronization APIs and the execution contract of their callers. [Concurrency](data-plane-concurrency.md#source-contracts) owns contexts, effects and bounds. | A task-local `HashMap::entry`; a registry acquisition with a lifecycle contract. | A recurring callback reaching a DashMap shard or a lifecycle-only helper. | Compiler `sync_acquisition`, `lifecycle_call`, `unknown_effect`; resolved receiver, helper, callback, trait, foreign item, macro and expectation fixtures. |
 | `bare_error_signatures` | A Nervix failure contract carries its complete contextual report. [Errors](errors-and-diagnostics.md) owns outcome, library and foreign-interface classifications. | `Result<T, Report<DomainError>>`; an exact reason-bearing outcome contract. | An owned failure in an alias, inferred future or stream without its report. | Compiler `bare_error_signature`; associated-output, alias, inference, metadata and report-carrier fixtures. |
 | `discarded_results` | Preserve a failure or classify recovery at its consuming operation; a replacement retains an informative cause. | A propagated failure, contextualized cause or the recovery owner's explicit `Discarded` operation. | A failed outcome discarded through a binding, projection or `drop`, or replaced with a fresh error that loses its cause. | Compiler `discarded_outcome` and `replaced_error`; complete and partial-discard, replacement, outcome, alias, macro and metadata fixtures. |
+| `partial_report_fields` | A report recorded as a tracing field renders its whole context chain. [Errors](errors-and-diagnostics.md#rendering) owns the rendering contract. | `error = %format_args!("{error:#}")`; a debug field; `%error` over an error that is not a report. | `%error`, `%self.error` or a written-out `display` field over a report, directly or through a borrow, box or shared owner. | Compiler `partial_report_field`; assigned, shorthand, owner-field, explicit and renamed `display`, alias, authored-macro, unrelated same-named type and function, and exact-expectation fixtures. |
 | `bare_unwrap_and_expect` | A canonical Option/Result panic needs a construction or checked guarantee, expressed through meticulous. | `verified` after checking the condition; an unrelated object's method named `expect`. | Canonical `unwrap` or `expect`, including aliases and UFCS. | Compiler `bare_panic`; canonical/custom methods, dereference and call-form fixtures. |
 | `model_matches_in_data_plane` | Configuration Models stay inside their owning boundary; data plane and connector engines consume plans. | A vocabulary Model or a typed connector plan. | A forbidden Model in a body, normalized interface or nested aggregate. | Compiler `model_in_data_plane`; source `layer`, `value` and `input` contracts, cross-crate and projection fixtures. |
 | `parser_imports_outside_edges` | Language dependencies belong to the language and its declared edges. | The session adapter consuming public parsing; a runtime consuming Models. | A language reference outside its authorized layer, including aliases. | Compiler `parser_dependency` plus disjoint inactive import/manifest provenance; qualified names, reexports, foreign items and dependency fixtures. |
@@ -54,7 +55,7 @@ contract and a violated contract require different corrections.
 | `as_casts` | Count actual Rust cast expressions, not words in imports, attributes or qualified paths. | `use Value as Alias`; `r#as`; `<Type as Trait>::item`; ordinary literals. | An expression using `as`, including a const expression nested in a qualified type. | Stable source parser; inactive cfg, raw identifiers, nested syntax, macro fragments and bounded source properties. Clippy independently denies conversions in its broader build scope. |
 | `testing_feature_struct_fields` | A product struct has one field shape rather than a shape selected by `testing`. | A test-only item, an API gate or a conditional documentation attribute. | A named or tuple struct field whose presence depends on `testing`, including a conditional `cfg` attribute. | Stable source parser; field ownership, tuple, inactive, compound-predicate and `cfg_attr` controls. Enum fields are outside this specific struct rule. |
 | `files_over_3000_lines` | Keep product and in-crate test files within a source-size bound. | At most 3,000 lines, counting a final line without a newline. | An eligible file with more than 3,000 lines. | Source discovery and physical line count; exact boundary and newly authored source tests. |
-| `non_aws_lc_crypto` | Nervix-authored cryptography comes from the AWS-LC boundary, and no change brings other cryptography into the product graph. [Cryptography](cryptography.md#the-count) owns what counts. | AWS-LC through the boundary; a classified non-security hash; a non-cryptographic checksum. | An authored use of a counted crate, `OsRng`, `getrandom` or a direct provider install, and a product dependency edge onto a crate implementing cryptography outside AWS-LC. | Stable source parser; import, rename, glob, `self`/`super`, inactive, macro, boundary and look-alike controls and the registered bounded `typed-non-aws-lc-crypto` property; the product graph through `cargo tree` for both release targets, with recorded-tree, malformed-graph and added-dependency gate tests. |
+| `non_aws_lc_crypto` | Nervix-authored cryptography comes from the AWS-LC boundary, and no change brings other cryptography into the product graph. [Cryptography](cryptography.md#the-count) owns what counts. | AWS-LC through the boundary; a classified non-security hash; a non-cryptographic checksum. | An authored use of a counted crate, `OsRng`, `getrandom` or a direct provider install, and a product dependency edge onto a crate implementing cryptography outside AWS-LC. A product graph linking a second AWS-LC module is refused outright rather than counted. | Stable source parser; import, rename, glob, `self`/`super`, inactive, macro, boundary and look-alike controls and the registered bounded `typed-non-aws-lc-crypto` property; the product graph through `cargo tree` for both release targets, with recorded-tree, malformed-graph, added-dependency and second-AWS-LC-module gate tests. |
 | `functions_over_complexity_30` | Keep each function's decisions within a cyclomatic complexity of 30. At full coverage a function's CRAP score equals its complexity, so a function above 30 exceeds a CRAP threshold of 30 at any coverage. [Function complexity](#function-complexity) owns the analyzer and its limits. | A function the pinned analyzer scores at most 30; an existing function above 30 that grows, which keeps the count. | A function newly scored above 30, including one in an inactive configuration or an in-crate test file. | Pinned cargo-crap analysis over source discovery; exact 30/31 boundary, inactive configuration, macro, trait and nesting limits, eligibility, and missing, failing, other-version, skipped-source, empty, configured, undiscovered and unreadable-file fixtures. |
 
 The Option/Result adapter catalog covers `and_then`, `filter`, `map`, `map_err`, `map_or`,
@@ -229,10 +230,8 @@ representations and every generated location in ordinary and sanitizer execution
 ## Host Memory Admission
 
 An analysis compilation needs about the memory of rustc's own check of its target, and the server
-library's dwarfs every other. It peaks at about 12.3 GiB in the ordinary configuration and between
-about 11.7 and 15.5 GiB across the ten declared configurations that compile it, highest in the
-testing configuration and the six Deloxide ones, while no other analysis compilation reaches 2 GiB.
-Its 16 GiB reservation therefore leaves about half a GiB above the largest measured peak. Every
+library's dwarfs every other. Its diagnostic analysis peaks at about 16 GiB, while no other analysis
+compilation reaches 2 GiB. Its 17 GiB reservation covers that measured peak. Every
 configuration builds in a directory of its own, and up to four configurations analyze at once, a
 bound `--jobs` or `NERVIX_TYPED_RATCHET_JOBS` sets otherwise; the evidence keeps the declared order
 whatever order they end in, and once one analysis fails no configuration starts another.
@@ -379,8 +378,10 @@ The sanitizer compiler adapter preserves the source parser's span contract as de
 The [concurrency](data-plane-concurrency.md), [error](errors-and-diagnostics.md) and
 [state](typed-states.md) chapters retain those operational owners.
 
-CI runs the complete gate for every pull request: the `checks` job runs `just validate-ci 4`, which
-runs the source and lint checks four recipes at a time and `just ratchet` after them, through kache.
+CI runs the complete gate for every pull request: the `checks` job's two shards run
+`just validate-ci 4 1/2` and `just validate-ci 4 2/2` on runners of their own, four recipes at a
+time through kache. The second lints the Shuttle and Loom modes and the compiler tooling and runs
+`just ratchet` after its lints, and the first runs every other source and lint check.
 The tooling's own qualification is selected by labels in the `extra-tests` job. A pull request
 labeled `extra-compiler` runs `just coverage-native-extras test-typed-ratchet`, which runs
 `just test-typed-ratchet` with its ordinary part under native coverage and its product doctests and

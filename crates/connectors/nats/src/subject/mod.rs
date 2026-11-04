@@ -8,7 +8,7 @@
 //!   JetStream answer each record's `PubAck` gives the confirmation window, header mapping in both
 //!   directions, and per-record rejection classification.
 //! - **Depends on.** The connector contract and its confirmation window, vocabulary values,
-//!   `error-stack`, Tokio and `async-nats`.
+//!   the node executor, `error-stack`, Tokio and `async-nats`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
@@ -57,9 +57,9 @@ use nervix_connector::{
     AckConfirmation, BrokerAnswer, BrokerVerdict, ConfiguredDeadline, ConfirmationWindow,
     EmitterFinish, EmitterFinishError, EmitterFinishResult, EmitterHost, EmitterLifecycle,
     EmitterOpenError, EmitterRecord, EmitterRecordId, EmitterStartResult, EmitterWriteError,
-    ParsedRetryPolicy, PerRecordOutcome, RecordEmitter, RejectedEmitterMember, client_config_value,
-    client_tls_paths,
+    ParsedRetryPolicy, PerRecordOutcome, RecordEmitter, RejectedEmitterMember,
 };
+use nervix_execution::Executor;
 use nervix_models::{ClientConfigEntry, NatsPublishSubjectName};
 use nervix_primitives::{
     sync::{
@@ -68,6 +68,8 @@ use nervix_primitives::{
     },
     time::Instant,
 };
+
+use crate::client::{NatsClientOptions, NatsClientOptionsError};
 
 const NATS: &str = "nats";
 
@@ -398,12 +400,13 @@ impl CoreWrites {
 impl NatsSubjectEmitter {
     pub async fn new(
         config: NatsSubjectEmitterConfig,
-        _host: EmitterHost,
+        host: EmitterHost,
     ) -> EmitterStartResult<Self> {
         // Read before the client connects, so a value that breaks the deadline rule fails the
         // start as configuration whether or not the server answers.
         let write_timeout = Self::write_timeout(&config.config)?;
-        let client = Self::client_from_config(&config.config, config.retry_policy).await?;
+        let client =
+            Self::client_from_config(&host.executor(), &config.config, config.retry_policy).await?;
         let delivery = match config.mode {
             NatsPublishingMode::Core => NatsDelivery::Core(CoreWrites::new(write_timeout)),
             NatsPublishingMode::JetStream(confirmation) => {
@@ -427,14 +430,28 @@ impl NatsSubjectEmitter {
     }
 
     async fn client_from_config(
+        executor: &Executor,
         config: &[ClientConfigEntry],
         retry_policy: ParsedRetryPolicy,
     ) -> EmitterStartResult<NatsClient> {
-        let addr = Self::config_value(config, "addr")?;
+        let prepared = match NatsClientOptions::from_config(executor, config).await {
+            Ok(prepared) => prepared,
+            Err(report) => {
+                let description = *report.current_context();
+                let context = match description {
+                    NatsClientOptionsError::CredentialsPreparation => {
+                        EmitterOpenError::Initialize { connector: NATS }
+                    }
+                    _ => EmitterOpenError::InvalidConfiguration { connector: NATS },
+                };
+                return Err(report.change_context(context).attach_printable(description));
+            }
+        };
         let connected_once = StdArc::new(AtomicBool::new(false));
         let event_connected_once = connected_once.clone();
         let delay_connected_once = connected_once;
-        let mut options = async_nats::ConnectOptions::new()
+        let options = prepared
+            .options
             .event_callback(move |event| {
                 let connected_once = event_connected_once.clone();
                 async move {
@@ -450,23 +467,17 @@ impl NatsSubjectEmitter {
                     delay_connected_once.load(Ordering::Relaxed),
                 )
             });
-        let tls = client_tls_paths(config);
-        if let Some(ca_file) = tls.ca_file.as_ref() {
-            options = options.add_root_certificates(ca_file.clone());
+        match options.connect(prepared.address).await {
+            Ok(client) => Ok(client),
+            Err(source) => Err(Self::connection_failure(source)),
         }
-        match (&tls.cert_file, &tls.key_file) {
-            (Some(cert_file), Some(key_file)) => {
-                options = options.add_client_certificate(cert_file.clone(), key_file.clone());
-            }
-            (None, None) => {}
-            _ => {
-                return Err(Self::config_error(
-                    "NATS TLS client authentication requires both 'tls_cert_file' and \
-                     'tls_key_file'",
-                ));
-            }
-        }
-        options.connect(addr).await.map_err(Self::start_error)
+    }
+
+    fn connection_failure(source: async_nats::ConnectError) -> Report<EmitterOpenError> {
+        let description = source.to_string();
+        Report::new(source)
+            .change_context(EmitterOpenError::Initialize { connector: NATS })
+            .attach_printable(description)
     }
 
     fn connection_delay(
@@ -606,31 +617,6 @@ impl NatsSubjectEmitter {
         matches!(error.kind(), PublishErrorKind::StreamNotFound)
     }
 
-    fn config_value(config: &[ClientConfigEntry], key: &str) -> EmitterStartResult<String> {
-        {
-            let mapping_input = client_config_value(config, key, "NATS");
-            match mapping_input {
-                Ok(mapped_value) => Ok(mapped_value),
-                Err(error) => Err({
-                    let message = error.current_context().to_string();
-                    error
-                        .change_context(EmitterOpenError::InvalidConfiguration { connector: NATS })
-                        .attach_printable(message)
-                }),
-            }
-        }
-    }
-
-    fn config_error(error: impl std::fmt::Display) -> Report<EmitterOpenError> {
-        Report::new(EmitterOpenError::InvalidConfiguration { connector: NATS })
-            .attach_printable(error.to_string())
-    }
-
-    fn start_error(error: impl std::fmt::Display) -> Report<EmitterOpenError> {
-        Report::new(EmitterOpenError::Initialize { connector: NATS })
-            .attach_printable(error.to_string())
-    }
-
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
@@ -704,6 +690,58 @@ mod tests {
     use super::*;
     use crate::subject::scripted_server::{DownServer, ScriptedServer};
 
+    #[nervix_primitives::test]
+    async fn credentials_admission_refusal_is_an_emitter_initialization_failure() {
+        use nervix_execution::{AdmissionError, Executor, MemoryClass};
+
+        let executor = Executor::default();
+        let held = executor
+            .try_reserve(
+                MemoryClass::Credentials,
+                executor.memory(MemoryClass::Credentials).capacity_bytes,
+            )
+            .expect("the fixture occupies the credentials class without allocating its capacity");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../docker/nats/auth-user.creds"
+        );
+        let policy = ParsedRetryPolicy {
+            backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_secs(1),
+        };
+        let error = NatsSubjectEmitter::client_from_config(
+            &executor,
+            &[
+                ClientConfigEntry {
+                    key: "addr".into(),
+                    value: "nats://127.0.0.1:1".into(),
+                },
+                ClientConfigEntry {
+                    key: "credentials_file".into(),
+                    value: path.into(),
+                },
+            ],
+            policy,
+        )
+        .await
+        .expect_err("no bytes can be read without admission");
+        assert_eq!(
+            error.current_context(),
+            &EmitterOpenError::Initialize { connector: NATS }
+        );
+        assert!(matches!(
+            error.downcast_ref::<AdmissionError>(),
+            Some(AdmissionError::BudgetExhausted {
+                class: "credentials",
+                ..
+            })
+        ));
+        assert!(!format!("{error:#}").contains(path));
+        assert_eq!(executor.snapshot().filesystem_storage.admitted, 1);
+        drop(held);
+        assert_eq!(executor.memory(MemoryClass::Credentials).reserved_bytes, 0);
+    }
+
     /// How long a check waits for what the client or the scripted server must do. Generous,
     /// because each wait ends as soon as what it waits for has happened.
     const CHECK_BOUND: Duration = Duration::from_secs(30);
@@ -744,9 +782,13 @@ mod tests {
         }
         let write_timeout = NatsSubjectEmitter::write_timeout(&entries)
             .expect("the checks configure a valid timeout_ms");
-        let client = NatsSubjectEmitter::client_from_config(&entries, policy)
-            .await
-            .expect("the emitter connects to the scripted server");
+        let client = NatsSubjectEmitter::client_from_config(
+            &nervix_execution::Executor::default(),
+            &entries,
+            policy,
+        )
+        .await
+        .expect("the emitter connects to the scripted server");
         NatsSubjectEmitter {
             delivery: NatsDelivery::Core(CoreWrites::new(write_timeout)),
             client,
@@ -803,9 +845,13 @@ mod tests {
             key: "addr".to_string(),
             value: addr.to_string(),
         }];
-        let client = NatsSubjectEmitter::client_from_config(&config, policy)
-            .await
-            .expect("the emitter connects to the scripted server");
+        let client = NatsSubjectEmitter::client_from_config(
+            &nervix_execution::Executor::default(),
+            &config,
+            policy,
+        )
+        .await
+        .expect("the emitter connects to the scripted server");
         let confirmation = AckConfirmation {
             max_in_flight: NonZeroUsize::new(max_in_flight).expect("a window holds a record"),
             timeout: Duration::from_secs(30),
@@ -832,6 +878,26 @@ mod tests {
     }
 
     const CONFIRMED: &str = r#"{"stream":"events","seq":1}"#;
+
+    #[test]
+    fn a_connection_failure_status_keeps_the_cause_and_typed_driver_error() {
+        let source = async_nats::ConnectError::with_source(
+            async_nats::ConnectErrorKind::Io,
+            std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "broker transport refused",
+            ),
+        );
+        let report = NatsSubjectEmitter::connection_failure(source);
+        let description = report
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<String>());
+        assert_eq!(
+            description.map(String::as_str),
+            Some("IO error: broker transport refused")
+        );
+        assert!(report.downcast_ref::<async_nats::ConnectError>().is_some());
+    }
 
     #[nervix_primitives::test]
     async fn jetstream_confirms_each_record_and_refuses_one_above_max_payload() {

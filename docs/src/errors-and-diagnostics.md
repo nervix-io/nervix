@@ -2,6 +2,14 @@
 
 *Plexus, the Nervix graph definition language.*
 
+Native session TLS provisioning fails before a node opens its stores or listeners. Missing
+certificate/key paths and TLS files supplied in HTTP mode are distinct application errors. File
+reads retain their `io::Error` beneath `TlsMaterialError::ReadFile`, including the certificate or
+private-key role; malformed PEM and key mismatch retain the material owner's typed cause beneath
+`AppError::LoadGrpcTls`. Reporting renders the full chain without including certificate or key
+contents. The [Client Session Protocol](client-session-protocol.md#native-grpc) owns the TLS
+listener's startup and rotation contract.
+
 Client CONFIG validation keeps vocabulary `ClientConfigSchemaError` beneath the registry's
 client/domain context. The server's changed-model binding validation runs connector-owned offline
 checks before standalone mutation or transaction commit. `OfflineClientConfigError` retains typed
@@ -295,7 +303,7 @@ attempt, so reporting an immediate local refusal does not create an unpaced retr
 | Consensus append stream and its initial prefix check | The stream's wire records and the management append answer | A matching, conflicting or higher-vote answer, or the request error | A rejected or incomplete prefix is returned as the typed Raft outcome before data admission; a failed management request crosses the foreign-error hook with its complete report before becoming an unreachable-peer error |
 | Interconnect remote operation | The failure's class and subject, with the answering node's description for an executed failure only | The classified result; the local chain is not serialized | The requester keeps the class beside its own target and placement context |
 | Interconnect connection handshake | The answer's refusal | The `PrerequisiteMismatch` the accepting node judged, seen from that node | The dialing node creates `TransportError::RefusedByPeer` from the mismatch, reversed to its own side |
-| Remote relay payload refused before admission | The refusal's reason text | The rendered chain | The forwarding node receives the reason as text |
+| Remote relay payload refused before admission | The refusal's reason text | The rendered chain | The forwarding node resumes it as `TransportError::RelayRejected` beneath its target context; reconciliation also retains the original send report |
 | WASM guest ABI | An integer result code, and the reason on the global-error channel | The code of the guest error's current context, or the rendered chain as the reason of a guest failure | The host creates a guest-call report that holds the code or the reason |
 | Structured message error | The record's reference, code, operation, affected fields, time and message | The typed reason that selects the code and a non-sensitive message | The error route receives the record, never the report |
 | Session command | The command's disposition, message and diagnostics | The disposition from typed data, and the rendered chain as the message | The client receives a value; the Rust client reports its own failures |
@@ -323,6 +331,15 @@ lookup 'zips': ...`. Runtime reporting renders every context in the report it re
 alternate `Display` (`{error:#}`), including report-bearing tracing fields. A failed command's
 message, a runtime event, a negative acknowledgement's reason, a domain's instantiation error, the
 CLI's text and JSON reports and the C binding's error message are that chain.
+
+A tracing field records a report as `error = %format_args!("{error:#}")`. The `%error` sigil, and a
+`display` field written out, record the report's plain `Display`, which is its outermost context
+alone: a warning that a maintenance proposal failed would then say only that a consensus proposal
+failed, and not whether the leader could not confirm its lease, lost its leadership, found its log
+saturated or could not store the entry. The compiler architecture gate refuses such a field, as
+[The Reported-Error Guard](#the-reported-error-guard) describes. The transaction maintenance pass
+and the command-history reclamation report a failed commit resume, inactive-transaction expiry,
+tombstone removal or history reclamation with that whole chain.
 
 Reports remain typed until these reporting decisions; sensitivity rules continue to apply to every
 context. A boundary renders a failure once and reuses the text: a failed dead-letter dispatch
@@ -431,7 +448,11 @@ requested names when an alteration targets another Model. An ingestor alteration
 another connector and entity than the stored ingestor reads is refused with both typed kinds, which
 its message renders as their phrases, such as `the stored ingestor reads HTTP ENDPOINT, so ALTER
 KAFKA TOPIC INGESTOR cannot alter it`. A Pulsar `SET START AT` on a provisioned subscription is a
-typed vocabulary alteration refusal; the existing definition and broker cursor are unchanged.
+typed vocabulary alteration refusal; the existing definition and broker cursor are unchanged. A
+Pulsar subscription `TYPE` that reads through one consumer with more than one instance is the
+registry's typed `ConnectorDeclarationIssue::PulsarSingleConsumerType`, which `CREATE` and every
+alteration reach through the same source validation, so `SET TYPE` and `SET FROM` also leave the
+stored definition unchanged.
 An input, route, or dependency operation
 that junctions, deduplicators, reorderers, and reingestors share is reported in the altered
 processor's own error where it is detected, so the report begins at the failure rather than at a
@@ -1033,7 +1054,11 @@ from any failure to start the replacement. A provisioned
 subscription that does not exist is `PulsarTopicIngestorError::MissingSubscription` beneath the source's
 resume context, which the ingestor's transient status shows by its subscription and topic; a check
 that could not learn whether the subscription exists is `VerifySubscription` above the driver's
-error.
+error. A join the broker refuses is `SubscriptionRefused`, which holds the subscription, the topic
+and the typed `PulsarRefusal` with no driver error beneath it, so the ingestor's transient status
+shows the broker's server error and reason. `ConsumerBusy` and `ServiceNotReady` hold only for now,
+so at open they leave the instance to its first resume, which reports them; any other refusal fails
+the open. A join that fails without a refusal is `Subscribe` above the driver's error.
 
 A Kafka emitter keeps librdkafka's `KafkaError` beneath `EmitterWriteError::Publish` when a producer
 failure ends admission or a delivery report leaves a confirmed publish's record unresolved.
@@ -1206,6 +1231,34 @@ closed or the consumer stopped first, because the broker may or may not have app
 client failure the source does not classify keeps the driver's error as the typed cause beneath
 `Acknowledge` or `NegativelyAcknowledge`. The innermost context is the reason `DESCRIBE INGESTOR`
 shows.
+
+Both Pulsar directions connect through one builder, whose `PulsarClientError` says why a client did
+not connect. `Configuration` keeps the client configuration or TLS cause beneath it. `Refused`
+carries the `PulsarRefusal` a broker answered the connection with, such as an `AuthenticationError`
+for a missing or rejected credential. `NotOpened` keeps the driver's `pulsar::Error` beneath it for
+a connection that never opened, including a TLS handshake that failed. A source reports it beneath
+`PulsarTopicIngestorError::Connect`. An emitter reports `Configuration` beneath
+`EmitterOpenError::InvalidConfiguration` and the others beneath `EmitterOpenError::Initialize`, and
+attaches the failure's whole chain, so its transient status reads
+`the PULSAR broker refused the connection with AuthenticationError: ...` or
+`no connection to the PULSAR broker opened: Connection error: ...`.
+
+NATS client option preparation keeps schema, address and user-seed refusals and credentials-file
+I/O or parsing failures beneath their owning typed contexts. Base32 and AWS-LC key preparation
+retain their typed causes; seed length, kind, checksum and incomplete credential sections have
+value-free typed failures. A credentials-file I/O failure is an opaque typed attachment so no
+confidential path is rendered. Executor admission, execution or cancellation failures retain their
+typed causes under `NatsClientOptionsError::CredentialsPreparation`; they judge no credential and
+map to `NatsSubjectIngestorError::ClientPreparation` or emitter `Initialize`, rather than invalid
+configuration. The async-nats callback requires its `AuthError`
+and is the library projection boundary for an AWS-LC nonce-signing failure. Schema
+exclusion errors name the two authentication keys without their values. Ingestor and emitter
+configuration failures preserve those reports, and a broker authentication refusal retains the
+driver's typed connection failure. Emitter status preserves the driver's connection description,
+including its cause, while the report retains the typed driver error for inspection. Authentication
+preparation already projects credentials-file and seed failures through value-free contexts before
+the driver connects. Public client-validation outcomes continue to expose only reviewed, value-free
+contexts.
 
 A NATS source whose client loses its connection to the server reports
 `NatsSubjectIngestorError::ConnectionLost` beneath `IngestorError::Read` once it has handed over what the client
@@ -1402,11 +1455,18 @@ message names only the key, and a file it cannot read as `InvalidKey` above the 
 its value; shared HTTP name, value and limit causes remain beneath it. Planning retains that typed
 cause if a ingestor cannot produce its validated header collection. Rendered client values are
 validated again by the connector before opening transport.
+Canonical upgrade fields that exceed committed HTTP caps produce the registry's typed
+`ClusterParameterLimit` at model admission or parameter transition, naming the parameter and
+ingestor. The subprotocol offer contributes its canonical field bytes to that check.
 `HttpRequestHeadersError` is the frame beneath the registry's `InvalidHttpRequestHeaders` context,
 which names only the ingestor and its domain. It names the offending header of a polling
 ingestor's `HEADERS`, and the client key of a `CLIENT SECRET` it cannot read, with the client where
 the key is undeclared. It never quotes the key's value, and neither does the connector's
 `InvalidHeader` when a rendered secret cannot be a header at open.
+A polling header whose known name and literal or resolved client-secret value exceed committed
+policy produces `ClusterParameterLimit` at admission or parameter transition. Complete rendered
+headers are checked against the host-captured caps at connector open; an over-limit value keeps
+`InvalidHeader` and its typed HTTP limit cause without exposing the secret.
 A polling ingestor's `METHOD` that HTTP cannot send is refused at `CREATE` and `ALTER` in the same
 shape: `HttpRequestFieldError` is the frame beneath the registry's `InvalidHttpRequestMethod`
 context, which names only the ingestor and its domain, as in `ingestor 'polled' in domain 'shop'
@@ -1634,16 +1694,20 @@ the declared `MAX SIZE` is instead a definitive per-row `validation` message err
 operation; `ON MESSAGE ERROR` routes it before the other rows are staged. A data file whose
 physical count or byte length violates a bound after a table schema change is a commit failure:
 the emitter does not append it and keeps the staged rows and acknowledgements for retry.
-Cleanup failures for incomplete staged files or a rejected data file are logged with their paths
-without replacing the original publish or commit failure.
+A failed staging append keeps the typed `StagingError` of the staging file beneath
+`EmitterWriteError::Publish`, and a failed read beneath `EmitterWriteError::Commit`, with the
+filesystem's, Arrow's or the cancellation's failure beneath it; the description the emitter shows
+names the staging file and that failure. Cleanup failures for a new staging file whose first append
+failed, for an append that could not be cut back off, or for a rejected data file are logged with
+their paths or noted on the report without replacing the original publish or commit failure.
 
-An Iceberg commit charges the bulk memory class for the staged files it reads back with
+An Iceberg commit charges the bulk memory class for the staged batches it reads back with
 `Executor::try_reserve`, so a charge the class has no room for is refused rather than queued. The
 refusal keeps the typed `AdmissionError` beneath `EmitterWriteError::Commit` and attaches the
 description the emitter shows as its transient error: `Iceberg commit waits for room in the bulk
 memory class for <bytes> staged bytes` when the class has no room now, and `Iceberg commit waits
-for the whole bulk memory class of <capacity> bytes for a staged file of <bytes> bytes` when one
-staged file is larger than the class, which charges the whole class and so waits until all of it
+for the whole bulk memory class of <capacity> bytes for a staged batch of <bytes> bytes` when one
+staged batch is larger than the class, which charges the whole class and so waits until all of it
 is free. The emitter retries either with its policy, and neither releases a staged record's
 acknowledgement.
 
@@ -1744,8 +1808,10 @@ A node that is refused as it joins stops with `AppError::JoinRefused` above a `J
 `Prerequisite` holds the `JoinRefusal` that names the peer and the `PrerequisiteMismatch` from this
 node's side, and `ClockSkew` names the peer whose clock was judged, the skew one probe proved and
 this node's tolerance. The refusal is logged at `error` as
-`this node was refused at join and stops` when the node requests its own stop, and returned once
-its shutdown phases have run, so the exit renders the whole chain.
+`this node was refused at join and stops` when the node requests its own stop. Before live policy
+discovery completes, startup cleans up the subsystems it started and returns that typed refusal.
+After startup, it returns the refusal once the shutdown phases have run. The exit renders the
+whole chain in either case.
 
 Memory-pressure watermarks are validated the same way. A watermark set without its pair, a low
 watermark that is not below the high one, or a zero check interval while the watermarks are set is
@@ -1764,6 +1830,34 @@ an execution revision as `AppError::PlanStartupRuntime`, and a revision the runt
 as `AppError::ApplyStartupRuntime`; the last two name the domain. Each keeps the registry's or the
 runtime's report beneath it, so the node's exit renders the whole chain rather than the top context
 of the failure.
+
+## Cluster Parameter Refusals
+
+Parameter definitions own positive duration and numeric range errors, and structured assignments
+own empty or duplicate-key refusals. The registry names the exact parameter, domain/model or
+resource, actual requirement and candidate maximum when a lowered cap cannot hold committed
+state. Application preflight reports `SchedulePlanningStale::Parameters` when the captured parameter
+record differs, and consensus reports a typed parameter-input conflict before publication. Both
+compare the complete record and revision, after the existing domain, resource, schedule and topology
+checks. An identified transaction preview includes that record in its fingerprint; a parameter
+publication therefore produces the ordinary `PreviewStale` refusal with the transaction still open
+and no effects. Bootstrap seed refusal names the parameter and `ALTER CLUSTER SET`. A failed seed
+append is logged with its complete consensus report, including the typed causes beneath it.
+HTTP polling's literal header requirements use the same model-limit refusal as emitter headers;
+the header-count definition also refuses values beyond the native request map's capacity.
+
+A live publication that disagrees with an equal applied revision is a typed installation failure,
+not a default or retry interpretation. Invalid current consensus metadata preserves its decoder
+cause beneath a typed node-state recreation error.
+
+`ClusterParameterAdmissionError` distinguishes awaiting a live publication, awaiting local catch-up,
+and completing initialization. These are ordinary request refusals before policy-dependent work
+begins. A durable command projects this temporary absence into
+`OutcomeUnknown(NotYetAuthoritative)` because its reference may already name a committed execution;
+a read-only request can be refused definitively. An inconsistent equal-revision publication
+preserves its typed publication error. Public
+cluster inspection remains available while these refusals apply; transfer boundaries project the
+refusal into their existing installation, staging or read failure with its full message.
 
 ## Runtime Message Errors
 
@@ -2258,6 +2352,14 @@ and a move never as an unconfirmed lease: the context's text says which, so an o
 rendered report or log line tells lease trouble from an election without a separate counter. The
 Raft or I/O error stays beneath the context as the report's cause.
 
+Trace-level vote and pre-vote transport completion events record the existing nested result before
+its foreign-error conversion, beside the local listener, peer and elapsed time. A transport error
+and a peer's typed refusal therefore remain distinguishable in the diagnostic. Cancellation by
+OpenRaft can end the exchange before that event; its own timeout then records the outcome. These
+events do not classify a late reply as leadership loss or change the error returned to OpenRaft.
+The [consensus observability contract](consensus-storage-and-replication.md#observability) describes
+the receive and core contexts used to locate a delay.
+
 The session edge reads the current context of a proposal's report. `LeadershipLost` becomes a
 `NotLeader` disposition with a redirect to the observed leader when nothing of the command was
 admitted, and `OutcomeUnknown` with leadership loss as its cause when leadership moved, or the
@@ -2270,8 +2372,11 @@ error beneath it for a storage or write failure.
 
 A refusal of the replicated state machine is data every voter must agree on, so it is a typed value
 in the Raft response and never a report. `ConsensusConflict` distinguishes an expired execution
-reference and a conflicting one, with the kind of the conflict, from a refusal described by its
-reason. `TransactionMutationError` is the refusal of a transaction mutation, such as an unknown or
+reference and a conflicting one, with the kind of the conflict, and preserves future-time,
+missing-timestamp and capacity admission refusals as `CommandExecutionAdmissionError` values.
+Admission metrics classify those typed values; rendered messages never select their reason.
+Other refusals retain their owning reason. `TransactionMutationError` is the refusal of a
+transaction mutation, such as an unknown or
 finished transaction, an owner or position that does not match, a stale preview, or a lost domain
 mutation fence. The state machine evaluates a mutation with reports and clones the report's current
 context into the response where the response is built; the report's frames stay on the node that
@@ -2883,12 +2988,22 @@ subscriber's maximum level stays the filter's, and an event the filter refuses c
 without the rule. The scenario run's subscriber, which writes
 `tests/logs/scenarios.log`, applies the same rule to its own default.
 
-The node drops one such event: Lapin's report of a message its broker returned. Lapin logs every
+The node drops Lapin's report of a message its broker returned. Lapin logs every
 returned message at `warn` under the target `lapin::returned_messages`, with the whole message, its
 body and properties included. The node drops that target's `info`, `warn` and `error` events; its
 `debug` and `trace` events carry no message and stay with the filter. What the log carries about a
 return is the RabbitMQ emitter's own report of it, which names the broker's reply code and text and
-never the record. A change that makes another payload-bearing dependency event reachable, through a
+never the record.
+
+The MQTT driver also logs its complete outbound request at `warn` when the broker does not support
+retained publications. The node suppresses that specific warning under `rumqttc::eventloop` while
+retaining the target's connection warnings. The filter recognizes the warning's fixed message
+prefix without formatting the request that follows it; operator directives cannot re-enable it.
+The emitter reports the typed refusal through its record outcome. MQTT field-length and NUL
+refusals name the field and its bound without carrying the field's content; a response-topic
+refusal retains the vocabulary's typed cause.
+
+A change that makes another payload-bearing dependency event reachable, through a
 dependency upgrade or a driver option a connector starts to use, adds it to the dropped events in
 the same change. Several drivers log messages, requests or frames at `debug` and `trace`; an
 operator who selects those levels for a driver's target chooses to see them.
@@ -2976,7 +3091,7 @@ records each failed implementation with its chain.
 
 `just validate-typed-errors`, run by `just validate`, rejects textual
 `Result<_, String>` in product code without a baseline. It remains a separate source rule,
-including inactive source. The compiler architecture gate, run by `just ratchet`, owns four
+including inactive source. The compiler architecture gate, run by `just ratchet`, owns five
 resolved Rust diagnostics:
 
 | Diagnostic | Contract it checks |
@@ -2985,6 +3100,7 @@ resolved Rust diagnostics:
 | `nervix::discarded_outcome` | A `let` wildcard, unused statement or resolved `drop` consuming a `Result`, report, owning collection or transparent wrapper states its handling or recovery class. |
 | `nervix::bare_panic` | A resolved inherent `Option` or `Result` `unwrap`/`expect` uses `meticulous` to state its guarantee. |
 | `nervix::replaced_error` | A resolved failure replacement retains its informative cause or declares an exact ordinary-outcome boundary. |
+| `nervix::partial_report_field` | A tracing field that records an `error_stack::Report`, directly or through a borrow, box or shared owner, renders its whole context chain instead of the report's plain `Display`. |
 
 The same driver emits the source-owned layer, Model, language, awaited cluster, identity and
 installation-state diagnostics described in
@@ -3065,6 +3181,12 @@ resolution; current API doctests pair supported calls with `compile_fail` exampl
 fallible site, a reviewer identifies the deciding layer, ordinary outcome or failure class,
 actionable fields, context across boundaries and the public diagnostic or recovery that ends the
 path. That classification preserves branch and sensitivity rules.
+
+The tracing field check resolves the `display` constructor that the `%` sigil names and the type
+of the value it records. A shorthand field, `%error` or `%self.error`, is named at the tokens it
+was written with, and a value an authored macro receives or owns is named where it was written. A
+debug field, a field that records a report's current context, and a value that only shares the
+report's name are not reports rendered by their plain `Display`.
 
 A recovered operation with no other witness uses `nervix_recovery::Reported::reported` at the
 decision that continues without its result. That record renders the complete context chain at
@@ -3343,7 +3465,6 @@ Connector terminology follows entity ownership: `IngestorError` and `EmitterOpen
 record. Renaming and grouping entity owners changes neither retry classification nor what is
 rendered at the boundary. The ingestor planner's input identity/kind errors cover client, endpoint
 and native schema references before composition.
-
 
 RabbitMQ emitter property preparation preserves a typed refusal until the per-record reporting
 boundary. A short-string failure keeps the driver's typed cause below the property name and byte

@@ -171,7 +171,7 @@ impl SessionServiceImpl {
         let frames = match self.serve_backup_download(user, &request, limits).await {
             Ok(frames) => frames.into_stream(),
             Err(error) => {
-                debug!(error = %error, "a console download's answer does not fit a frame");
+                debug!(error = %format_args!("{error:#}"), "a console download's answer does not fit a frame");
                 let violation = Violation {
                     code: CLOSE_INTERNAL_ERROR,
                     reason: "the download's answer does not fit a frame".to_string(),
@@ -291,7 +291,7 @@ impl SessionServiceImpl {
         let frame = match reply.encode(&limits) {
             Ok(frame) => frame,
             Err(error) => {
-                debug!(error = %error, "a console restore's reply does not fit a frame");
+                debug!(error = %format_args!("{error:#}"), "a console restore's reply does not fit a frame");
                 let violation = Violation {
                     code: CLOSE_INTERNAL_ERROR,
                     reason: "the restore's reply does not fit a frame".to_string(),

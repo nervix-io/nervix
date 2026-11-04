@@ -20,7 +20,7 @@ The observability listener exposes:
 
 - `/livez`: process liveness
 - `/readyz`: readiness once a leader is known
-- `/metrics`: Prometheus text output for graph, interconnection, and allocator metrics
+- `/metrics`: Prometheus text output for graph, command history, interconnection, and allocator metrics
 
 Use the node's observability address, not the data-plane HTTP listener:
 
@@ -179,6 +179,38 @@ exports them: the subscriptions its sessions hold and the rows those sessions lo
 of its own losses directly, as described in [Sessions](sessions.md). The server exports no other
 session metrics; [Client Session Protocol](./client-session-protocol.md#observability) describes
 what clients and operators observe instead.
+
+## Command Execution History
+
+Every node exposes its applied command history through these bounded metric families:
+
+| Family | Kind and labels | Meaning |
+| --- | --- | --- |
+| `nervix_command_execution_records` | Gauge, `state` is `applying`, `finished` or `expired` | Retained executions in each state, including compact expiry tombstones. |
+| `nervix_command_execution_retry_fence_timestamp_seconds` | Gauge, no labels | The durable retry fence as Unix seconds, absent until a fence has been committed. |
+| `nervix_command_execution_admission_refusals_total` | Counter, `reason` is `expired`, `future`, `missing_timestamp` or `capacity` | Definitive admission refusals handled by this node process. |
+
+The record counts and fence come from one applied revision at scrape time. Reading the three
+existing history indexes takes constant time and does not scan executions or advance the fence.
+Followers expose their own applied revision, so they may briefly trail the leader. These gauges
+describe replicated state: use the leader's values for a cluster total rather than summing copies
+across nodes. A restart restores them from the recovered history and fence. `time() -
+nervix_command_execution_retry_fence_timestamp_seconds` shows the fence's age against the scraper's
+clock, including an unexpectedly advanced fence.
+
+Refusal counters are process-local and start at zero for all four reasons. They count refused
+attempts, including a retry whose compact tombstone is still retained, rather than unique execution
+references. `future` means the UUIDv7 creation time exceeds the accepted five-minute clock skew or
+the timestamp range; `missing_timestamp` means the reference carries no UUIDv7 creation time.
+Follower application of a refused proposal adds no event, and a leadership change neither copies
+nor resets counters on either live process. Sum their rates across nodes to follow refusals as
+leadership moves; a process restart resets its counters. Completion and background recovery add no
+admission event, including when history maintenance has expired the completed outcome. Recovered
+successful outcomes, reference content conflicts, redirects and uncertain admission outcomes add
+no refusal event to these four reasons. No execution identity, domain or user appears in their labels.
+
+See [Bounded History And Expired Identities](./client-session-protocol.md#bounded-history-and-expired-identities)
+for retention and admission semantics.
 
 ## Client Ingestors
 
@@ -397,7 +429,9 @@ Restore](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics) def
 ## DESCRIBE Metrics
 
 `DESCRIBE` commands include metric summaries for the described target when metrics exist. For a
-scheduled target, the request is answered from its owner. Node traffic is grouped under
+scheduled target, the request is answered from its owner. An ingestor that runs on every live node,
+such as an `HTTP ENDPOINT` ingestor, has no single owner, so the node that receives
+`DESCRIBE INGESTOR` answers for its own instance. Node traffic is grouped under
 `incoming_edges` and `outgoing_edges`; relay descriptions keep owner-buffer utilization under
 `relay_buffers` rather than mixing relay traffic into the relay node:
 
@@ -413,7 +447,10 @@ DESCRIBE HASH MAP user_profiles;
 DESCRIBE DOMAIN;
 ```
 
-`DESCRIBE DOMAIN` summarizes active-domain traffic from per-node metric state. Its
+`DESCRIBE DOMAIN` is answered by the node that receives it and summarizes active-domain traffic
+from that node's own metric state. Traffic is counted on the node that observed it, under that
+node's `physical_node`, so the traffic another node observed is in that node's answer: run
+`DESCRIBE DOMAIN` on each node to see the whole cluster. Its
 `input_output` section aggregates ingestor and emitter metrics. Its `processed`
 section aggregates metrics for all runtime nodes in the domain, including
 processing nodes.

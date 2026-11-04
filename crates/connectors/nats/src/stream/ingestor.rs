@@ -39,6 +39,7 @@ use nervix_connector::{
     IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
     IngestorReadCancellation, IngestorResult, IngestorResume, IngestorSettlement,
 };
+use nervix_execution::Executor;
 use nervix_models::{ClientConfigEntry, ConnectorKind, NatsConsumerName, NatsStreamName};
 use nervix_primitives::sync::mpsc;
 use thiserror::Error;
@@ -155,9 +156,11 @@ pub enum NatsStreamIngestorError {
 pub(super) type NatsStreamIngestorResult<T> = Result<T, Report<NatsStreamIngestorError>>;
 
 /// What one NATS STREAM ingestor reads: its resolved client entries, the stream, and the durable
-/// pull consumer of that stream an operator provisioned.
+/// pull consumer of that stream an operator provisioned, with the executor its client's
+/// credential work runs on.
 #[derive(Clone)]
 pub struct NatsStreamIngestorPlan {
+    executor: Executor,
     config: Vec<ClientConfigEntry>,
     stream: NatsStreamName,
     consumer: NatsConsumerName,
@@ -165,11 +168,13 @@ pub struct NatsStreamIngestorPlan {
 
 impl NatsStreamIngestorPlan {
     pub fn new(
+        executor: Executor,
         config: Vec<ClientConfigEntry>,
         stream: NatsStreamName,
         consumer: NatsConsumerName,
     ) -> Self {
         Self {
+            executor,
             config,
             stream,
             consumer,
@@ -182,9 +187,10 @@ impl NatsStreamIngestorPlan {
     /// until an operator provisions it.
     async fn pull(&self) -> NatsStreamIngestorResult<NatsStreamPull> {
         let (lost, connection_lost) = mpsc::channel(PENDING_LOSS_SIGNALS);
-        let client = NatsSubjectIngestorPlan::client_from_config(&self.config, lost)
-            .await
-            .change_context(NatsStreamIngestorError::Connect)?;
+        let client =
+            NatsSubjectIngestorPlan::client_from_config(&self.executor, &self.config, lost)
+                .await
+                .change_context(NatsStreamIngestorError::Connect)?;
         let context = async_nats::jetstream::new(client.clone());
         let stream = context
             .get_stream_no_info(self.stream.as_str())
@@ -466,6 +472,7 @@ mod tests {
 
     fn plan(addr: &str) -> NatsStreamIngestorPlan {
         NatsStreamIngestorPlan::new(
+            Executor::default(),
             vec![ClientConfigEntry {
                 key: "addr".to_string(),
                 value: addr.to_string(),

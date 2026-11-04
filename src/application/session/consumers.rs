@@ -20,8 +20,8 @@ use nervix_client_wire::{
     SettleEmitterBatchOutcome, SettleEmitterBatchRequest,
 };
 use nervix_models::{
-    CLIENT_CONSUMER_SESSION_BYTES, ClientEndpointContract, CreateEmitter, DomainStatus,
-    EmitterEntity, FlushPolicy, MAX_CLIENT_CONSUMERS_PER_SESSION, SchemaField,
+    ClientEndpointContract, CreateEmitter, DomainStatus, EmitterEntity, FlushPolicy,
+    MAX_CLIENT_CONSUMERS_PER_SESSION, SchemaField,
 };
 use nervix_primitives::sync::{
     Arc, Mutex as AsyncMutex, StdArc, StdWeak,
@@ -108,7 +108,11 @@ impl SessionConsumers {
         ))
     }
 
-    fn reserve(&self, bytes: u64) -> Result<ConsumerCapacityReservation, EmitterOpenRefusal> {
+    fn reserve(
+        &self,
+        bytes: u64,
+        maximum_bytes: u64,
+    ) -> Result<ConsumerCapacityReservation, EmitterOpenRefusal> {
         let mut state = self.state.lock();
         if state.held_count >= MAX_CLIENT_CONSUMERS_PER_SESSION {
             return Err(EmitterOpenRefusal::TooManyConsumers);
@@ -116,7 +120,7 @@ impl SessionConsumers {
         if state
             .held_bytes
             .checked_add(bytes)
-            .is_none_or(|total| total > CLIENT_CONSUMER_SESSION_BYTES)
+            .is_none_or(|total| total > maximum_bytes)
         {
             return Err(EmitterOpenRefusal::SessionCapacityExhausted);
         }
@@ -187,13 +191,20 @@ impl SessionConsumers {
                 "consumers are session scoped and cannot open in a transaction",
             ));
         }
-        if !open.limits.is_within_bounds() {
+        let service = &shared.service;
+        let parameters = service.available_cluster_parameters().map_err(|error| {
+            (
+                EmitterOpenRefusal::EndpointUnavailable,
+                format!("{error:#}"),
+            )
+        })?;
+        let maximum_bytes = parameters.client_consumer_session_bytes();
+        if !open.limits.is_within_bounds() || open.limits.bytes.get() > maximum_bytes {
             return Err(refuse(
                 EmitterOpenRefusal::InvalidLimits,
                 "consumer limits exceed the session maximum",
             ));
         }
-        let service = &shared.service;
         if !service.inner.runtime_admission.is_admitted() {
             return Err(refuse(
                 EmitterOpenRefusal::EndpointUnavailable,
@@ -241,7 +252,7 @@ impl SessionConsumers {
         };
         let contract = self.endpoint_contract(model, &open.expected_fields)?;
         let capacity = self
-            .reserve(open.limits.bytes.get())
+            .reserve(open.limits.bytes.get(), maximum_bytes)
             .map_err(|why| (why, "session consumer budget is full".to_string()))?;
         let Some(grant) = service
             .inner

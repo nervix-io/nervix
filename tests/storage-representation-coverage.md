@@ -33,8 +33,9 @@ preserve the complete stream source, and the advanced archive signature and keys
 fence the archived union that holds it.
 
 Pulsar subscription generators draw both required owned creation positions, `EARLIEST` and
-`LATEST`, and provisioned subscriptions without a position. Statement generators mix typed
-`SET START AT` with shared ingestor operations. The Model, registry and consensus properties
+`LATEST`, provisioned subscriptions without a position, and all four subscription types, with one
+instance for a type that reads through one consumer. Statement generators mix typed `SET START AT`
+and `SET TYPE` with shared ingestor operations. The Model, registry and consensus properties
 preserve those complete values.
 
 KAFKA TOPIC ingestor generators draw domain-owned offsets, with no position, and a consumer group
@@ -62,9 +63,10 @@ contain synthetic data and describe the current shapes.
 
 | Stored representation | Target | Complete oracle |
 | --- | --- | --- |
+| Committed cluster parameters | `cluster-parameters` | All 22 class-typed parameter values, duration nanoseconds, byte limits, counts and revision identities survive validated archive and JSON round trips with complete equality |
 | Domain schedule units in control-plane storage | `scheduled-units` | The complete schedule, including each unit kind, ordinal, primary, assigned nodes and ownership state, survives archive encoding unchanged |
 | Execution revision built from a scheduled domain | `execution-revision-units` | Every scheduled unit retains its placement and the handoff fingerprint changes with it; moving one unit names that exact unit in the reassignment |
-| Consensus state records: unit-keyed schedules, domains with their clock mappings and authorities, users, resource versions, node statuses and uploads, cordons, admission fences, mutation leases, restore installations, transactions, commit plans, impact reports, command executions and the metadata with its retry fence | `consensus-state-records` | The recovered `StateMachineData` equals the stored one, records, derived indexes and metadata alike, for a revision written into an empty keyspace and for a second revision written as the changes from it, with records replaced and removed |
+| Consensus state records: unit-keyed schedules, domains with their clock mappings and authorities, users, resource versions, node statuses and uploads, cordons, admission fences, mutation leases, restore installations, transactions, commit plans, impact reports, command executions and the metadata with its retry fence and required cluster parameters | `consensus-state-records` | The recovered `StateMachineData` equals the stored one, records, derived indexes and metadata alike, for a revision written into an empty keyspace and for a second revision written as the changes from it, with records replaced and removed |
 | Damaged consensus state | `consensus-state-corruption` | Recovery fails with `StorageFailure::InvalidState`, or recovers a state in which every record that names its key is stored under it, each resource version has at most one upload, and every transaction counts its pending and completed operations and numbers a failing one within those it accepted, and which stores and recovers again unchanged |
 | Raft votes, log positions, log entries of every command, current state metadata, snapshot manifests, log keys, section keys and sections | `consensus-raft-records` | Complete equality through the storage codec and its conversions; a log key names its entry's index and a section key its section |
 | Malformed Raft records | `consensus-raft-records-malformed` | Arbitrary bytes fail with the typed storage failure, or decode to a value that stores back to the same record |
@@ -179,8 +181,8 @@ defaulted acquire/maintenance intervals, and complete authored-value preservatio
 `client-config-schema` includes omitted ClickHouse connection defaults, Redis command-pool
 lifetimes, Postgres pool and statement-deadline keys and MQTT keep-alive and publish admission
 bounds, explicit typed TCP and pool intervals, lifetimes, checkout deadlines and borrow tests,
-and MQTT credentials whose
-password public inspection redacts. `mqtt-client-config` separately converts every valid MQTT
+MQTT credentials whose password public inspection redacts, and a Pulsar token, which public
+inspection also redacts, beside its paired client certificate and key files. `mqtt-client-config` separately converts every valid MQTT
 client configuration into its typed broker, transport, identity, credentials, keep-alive and
 admission bound. JSON and archive equality preserve the authored entries; the effective-default
 projection preserves those entries and is idempotent, and public inspection remains idempotent.

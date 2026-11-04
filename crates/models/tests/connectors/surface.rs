@@ -22,11 +22,12 @@ use nervix_models::{
     MqttIngestorEntity, MqttTopicFilter, MySqlEmitterEntity, NatsConsumerName, NatsEmitterEntity,
     NatsIngestorEntity, NatsQueueGroupName, NatsStreamName, NatsSubjectName, OptionDeclaration,
     OptionForm, OptionPresence, OtelEmitterEntity, PostgresEmitterEntity, PrometheusIngestorEntity,
-    PulsarEmitterEntity, PulsarIngestorEntity, PulsarSubscriptionName, PulsarTopicName,
-    RabbitMqEmitterEntity, RabbitMqExchangeName, RabbitMqIngestorEntity, RabbitMqQueueName,
-    RedisChannelName, RedisEmitterEntity, RedisIngestorEntity, RuntimeCapability,
-    SentryEmitterEntity, SqsEmitterEntity, SqsIngestorEntity, SqsQueueName, SyslogEmitterEntity,
-    SyslogIngestorEntity, WebsocketsIngestorEntity, ZeroMqEmitterEntity, ZeroMqIngestorEntity,
+    PropertyType, PulsarEmitterEntity, PulsarIngestorEntity, PulsarSubscriptionName,
+    PulsarTopicName, RabbitMqEmitterEntity, RabbitMqExchangeName, RabbitMqIngestorEntity,
+    RabbitMqQueueName, RedisChannelName, RedisEmitterEntity, RedisIngestorEntity,
+    RuntimeCapability, SentryEmitterEntity, SqsEmitterEntity, SqsIngestorEntity, SqsQueueName,
+    SyslogEmitterEntity, SyslogIngestorEntity, WebsocketsIngestorEntity, ZeroMqEmitterEntity,
+    ZeroMqIngestorEntity,
 };
 use strum::IntoEnumIterator as _;
 
@@ -111,7 +112,7 @@ fn source_surface(kind: IngestorEntityKind) -> IngestorSurface {
             delivery: EVERY_DELIVERY,
             quiesce: SUSPEND,
             locator: Some(("TOPIC", "pulsar_topic")),
-            options: &[("SUBSCRIPTION", true), ("INSTANCES", false)],
+            options: &[("SUBSCRIPTION", true), ("TYPE", true), ("INSTANCES", false)],
         },
         IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => IngestorSurface {
             delivery: &[
@@ -274,9 +275,10 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
             ],
             ..located(ConnectorKind::Pulsar, "TOPIC", "pulsar_topic", &[])
         },
-        EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => {
-            located(ConnectorKind::Mqtt, "TOPIC", "mqtt_topic", &[("QOS", true)])
-        }
+        EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => EmitterSurface {
+            envelope: &[EnvelopeClauseKind::Retain],
+            ..located(ConnectorKind::Mqtt, "TOPIC", "mqtt_topic", &[("QOS", true)])
+        },
         EmitterEntityKind::RabbitMq(RabbitMqEmitterEntity::Queue) => EmitterSurface {
             envelope: rabbitmq,
             ..located(ConnectorKind::RabbitMq, "QUEUE", "rabbitmq_queue", &[])
@@ -373,7 +375,13 @@ fn every_emitter_pair_declares_its_reference_locator_options_and_envelope_clause
         assert_eq!(locator_shape(declared.locator), expected.locator, "{kind}");
         assert_eq!(option_shapes(declared.options), expected.options, "{kind}");
         assert_eq!(declared.envelope, expected.envelope, "{kind}");
-        let properties: &[(&str, nervix_models::PropertyType)] = match kind {
+        let properties: &[(&str, PropertyType)] = match kind {
+            EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => &[
+                ("content_type", PropertyType::String),
+                ("message_expiry", PropertyType::U32),
+                ("response_topic", PropertyType::String),
+                ("correlation_data", PropertyType::Bytes),
+            ],
             EmitterEntityKind::RabbitMq(_) => &[
                 ("content_type", String),
                 ("content_encoding", String),

@@ -15,6 +15,9 @@
 #[path = "../runtime/native_restore_inspection.rs"]
 mod native_restore_inspection;
 
+#[path = "../cluster_parameters/restore_policy.rs"]
+mod restore_policy;
+
 use std::os::unix::fs::OpenOptionsExt as _;
 
 use bytes::Bytes;
