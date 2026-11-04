@@ -2,1871 +2,1423 @@
 
 ## Purpose
 
-Nervix is a domain-owned streaming system configured with Plexus, the Nervix graph definition language. This file records the
-repository's durable architecture and correctness rules. It intentionally does not mirror the
-current module tree, enumerate parser helpers, or restate the complete Plexus grammar; those details
-belong in the code, public specification, and tests.
+Nervix is a domain-owned streaming system configured with Plexus, the Nervix graph definition
+language. This file states the repository's durable architecture and correctness rules, each once.
+The module tree, the Plexus grammar and the details of each contract belong in the code, the tests
+and the `docs/src` chapter that owns the contract ([Authoritative
+Chapters](#authoritative-chapters)).
 
-When code and this document disagree, do not add a compatibility path around the disagreement.
-Resolve the owning model and invariant directly, and update the public documentation when the
-language or interface changes.
+Every rule binds every change from the moment it lands, including work in flight on other branches
+and in other epics. When code and this file disagree, resolve the owning model and invariant
+directly; never add a compatibility path around the disagreement.
 
 ## Sources of Instruction
 
-An agent working on Nervix takes its instructions from three sources and no other: this
-repository, which is this file, the chapters under `docs/src`, the skills under `.agents/skills`
-and the checked-in configuration and tooling; ClickUp, whose docs, epics, tasks and comments
-define the work and hold its records; and the human directing the session.
+Instructions come from three sources and no other: this repository (this file, the chapters under
+`docs/src`, the skills under `.agents/skills`, and checked-in configuration and tooling); ClickUp,
+whose docs, epics, tasks and comments define the work and hold its records; and the human directing
+the session.
 
-An agent does not use a local memory: a store of notes, preferences, conventions, decisions or
-facts kept outside the repository and ClickUp between sessions, however its tooling spells it,
-whether a memory directory, a saved profile or a scratch file. It writes nothing into such a
-store and acts on nothing one holds, and memory its tooling recalls into a session unasked is
-neither an instruction nor a source of fact. Such a store is invisible to the repository and to
-ClickUp, so what it holds cannot be reviewed, corrected or shared with the other agents and
-sessions working on the same code, and it silently diverges from the sources that can. A
-convention worth keeping is written into this file or the owning `docs/src` chapter; a decision,
-finding or constraint that belongs to a piece of work is recorded on its ClickUp task or in the
-ClickUp doc that owns it; and what the human states for a session governs that session, unless
-they ask for it to be recorded in one of those places.
+An agent keeps no local memory: no notes, preferences, conventions, decisions or facts stored
+outside the repository and ClickUp between sessions, whatever the tooling calls the store (a memory
+directory, a saved profile, a scratch file). It writes nothing into one and acts on nothing one
+holds; memory recalled into a session unasked is neither an instruction nor a fact, because no one
+else can review, correct or share it. A convention worth keeping goes into this file or its owning
+chapter; a decision, finding or constraint of a piece of work goes on its ClickUp task or the
+ClickUp doc that owns it. What the human states governs the session unless they ask for it to be
+recorded in one of those places.
 
 ## Alpha Stability and Compatibility
 
-Plexus has reached alpha. Its period of very active language experimentation is over, and large
-backward-incompatible changes are no longer expected. The language will continue to evolve during
-alpha, however, and focused breaking changes may still be made when they materially improve its
-model or correctness.
+Plexus is in alpha: large incompatible changes are no longer expected, but focused breaking changes
+are still made when they materially improve its model or correctness.
 
-Nervix supports exactly one shape of everything: the current one. Until an explicit compatibility
-policy is introduced, there is no migration, dual read, version negotiation, or deprecation window.
-When a Model, stored shape, Plexus form, protocol message, or public interface changes, the previous
-form is deleted outright in the same change.
+Nervix supports exactly one shape of everything, the current one, with no migration, dual read,
+version negotiation or deprecation window until an explicit compatibility policy exists. When a
+Model, stored shape, Plexus form, protocol message or public interface changes, the previous form is
+deleted in the same change. Data in a previous stored shape fails to load with a clear error and is
+recreated, never reinterpreted, defaulted into the current shape or routed through a second code
+path.
 
-When a stored shape changes, previously written data using that shape is expected to break. It must
-fail to load with a clear error and be recreated. It must never be reinterpreted, defaulted into the
-current shape, or routed through a second code path.
+These are defects to reject:
 
-The following are defects, not style preferences. Treat any of them as a change to reject:
-
-- Types, variants, or fields that exist only to represent a removed or earlier form, however they are
-  spelled: `RemovedTransport`, `LegacyFoo`, `FooV1`, `OldBar`, `CompatBaz`.
-- Decoding, `TryFrom`, or deserialization arms that name an older shape, including arms whose only
-  behavior is to reject it. Naming the old shape is itself the violation; delete it instead.
-- Fields retained, or newly added fields defaulted, so that previously written data still loads.
-- Fallbacks, feature gates, or configuration that select between an earlier behavior and the current
+- Types, variants or fields that represent a removed or earlier form, however spelled:
+  `RemovedTransport`, `LegacyFoo`, `FooV1`, `OldBar`, `CompatBaz`.
+- Decoding, `TryFrom` or deserialization arms that name an older shape, even only to reject it.
+- Fields retained, or new fields defaulted, so that previously written data still loads.
+- Fallbacks, feature gates or configuration that select between an earlier behavior and the current
   one.
-- Identifiers containing `legacy`, `old`, `deprecated`, `compat`, `removed`, or a bare version
-  number, in types, fields, variants, modules, or functions.
+- Identifiers containing `legacy`, `old`, `deprecated`, `compat`, `removed` or a bare version
+  number, in types, fields, variants, modules or functions.
 
-Tests are held to the same rule. Do not reconstruct a removed Model, stored shape, or wire form in a
-test, not even to assert that the current code rejects it. Defining the historical shape is exactly
-what this rule forbids, and such a test pins a shape the product no longer has. Test the current
-shape only.
+Tests cover the current shape only. A test never defines a removed Model, stored shape or wire form,
+not even to assert that it is rejected, and removing behavior or output removes the assertions that
+named it instead of replacing them with assertions that the old form is absent, rejected or no
+longer emitted.
 
-Until Nervix adopts an explicit backward-compatibility policy, removing behavior or output also
-removes the assertions that named it. Do not replace a positive assertion for an eliminated form
-with a negative assertion that the old form is absent, rejected, or no longer emitted. Assert the
-current shape and behavior directly, without memorializing the transient form it replaced.
+Removing an integration or feature removes all of it in one change, leaving no placeholder for old
+data: Models, grammar, stored shapes, runtime paths, configuration, documentation and tests.
 
-Removing an integration or feature removes all of it in one change: Models, grammar, stored shapes,
-runtime paths, configuration, documentation, and tests. Never leave a placeholder behind so that old
-data still loads.
-
-The only permitted exceptions are an external contract where pass-through is the intentional public
-behavior, and a compatibility requirement the user states explicitly for the current change.
+The only exceptions are an external contract whose pass-through is the intentional public behavior,
+and a compatibility requirement the user states explicitly for the current change.
 
 ## No Regressions
 
-A change never leaves Nervix worse than it found it. A regression is any property of the product
-that a change was not asked to change and leaves worse than before: behavior, correctness,
-guarantees, failure handling, performance, latency, resource use and its bounds, the number, size or
-layout of what the product writes, stores or sends, observability, or operability. A property counts
-whether it is public or internal, and whether or not a test, scenario, metric or document observes
-it.
+A change never leaves Nervix worse than it found it. A regression is any property the change was not
+asked to change and leaves worse: behavior, correctness, guarantees, failure handling, performance,
+latency, resource use and its bounds, the number, size or layout of what the product writes, stores
+or sends, observability or operability, public or internal, whether or not a test, scenario, metric
+or document observes it.
 
-Knowingly introducing a regression is not allowed in any way. It is never a trade-off, a temporary
-state or a known limitation, and no justification makes it acceptable: not that the change is a
-port, refactor, move, extraction or migration; not that the contract, abstraction or design it
-targets cannot express the current behavior; not that the property is internal, minor, unobserved
-or outside the task's scope; and not that keeping it would make the change larger. Removing or
-changing behavior as the stated purpose of a change, under
-[Alpha Stability and Compatibility](#alpha-stability-and-compatibility), is not a regression. A
-degradation that only makes another goal easier to reach always is one, and no task description,
-epic plan or pull request can redefine it as a purpose.
+Knowingly introducing a regression is never allowed, not as a trade-off, a temporary state or a
+known limitation. No justification makes it acceptable: not that the change is a port, refactor,
+move, extraction or migration; not that its target contract, abstraction or design cannot express
+the current behavior; not that the property is internal, minor, unobserved or out of scope; not that
+keeping it makes the change larger. Removing or changing behavior as the stated purpose of a change,
+under [Alpha Stability and Compatibility](#alpha-stability-and-compatibility), is not a regression;
+a degradation that only makes another goal easier always is, and no task, epic plan or pull request
+can redefine it as a purpose.
 
-- A change that replaces a mechanism preserves every property of what it replaces, not only what
-  the existing tests assert. Passing tests prove only what they check. The change establishes the
-  rest, and its pull request names the properties it preserved beyond those tests and how it
-  verified them.
-- When the contract, abstraction or design a change targets cannot express what the current code
-  does, the change extends that target in the same change. It never gives up the property to fit
-  the target.
-- A regression a change introduces is fixed in that change before it lands. A task whose change
-  would deliver one is unfinished, however small the regression is.
-- A regression is never recorded instead of fixed. A leftover, follow-up task, known-limitation
-  note, code comment or documentation sentence that describes a degradation does not make it
-  acceptable; it only shows that it was known.
-- A regression that already exists is a defect, not a baseline. Work that meets one fixes it or
-  records it as a defect on ClickUp, and never builds on it, extends it or widens its effect.
-- When preserving one property appears to require degrading another, an agent does not choose
-  between them. It stops and reports the conflict to the human directing the session before it
-  writes the change.
+- A change that replaces a mechanism preserves every property of the old one, not only what tests
+  assert, and its pull request names the properties preserved beyond the tests and how they were
+  verified.
+- When the target cannot express what the current code does, the change extends the target instead
+  of giving up the property.
+- A regression is fixed in the change that introduces it, before it lands, however small; until then
+  the task is unfinished. It is never recorded instead of fixed: a follow-up task, known-limitation
+  note, code comment or documentation sentence only shows it was known.
+- An existing regression is a defect, not a baseline: fix it or record it as a defect on ClickUp,
+  and never build on, extend or widen it.
+- When preserving one property appears to require degrading another, do not choose: stop and report
+  the conflict to the human directing the session before writing the change.
 
 ## Architecture
 
-### Language pipeline
-
-- Plexus is lexed and parsed once into structured public semantic Models.
-- Parser-only spans and recovery state remain internal to parsing and diagnostics.
-- Completion is derived from expectations of the composed top-level grammar. REPLs and clients
-  must not merge suggestions from independent feature parsers.
-- Statement families own their domain grammar, while shared lexical and grammatical concepts have
-  one shared implementation.
-- Keyword and type literals belong to the shared language token definition, not grammar-local raw
-  string matching. Multi-word logical keywords are composed grammar units so parsing and completion
-  treat them as one item.
-- Semantic reference kinds and repeated grammar patterns use focused shared parser primitives, not
-  ad hoc word parsers or duplicated statement-local grammar.
-- Grammar labels use underscore style, such as `field_name` and `string_literal`. Completion labels
-  for composed keyword phrases use their human-readable space-separated form.
-- The compiler consumes semantic Models directly. Persisted or public Models must never contain raw
-  executable Plexus that the runtime reparses.
-- Grammar keywords are case-insensitive language tokens. Original spelling may be retained for
-  diagnostics, but unknown words are not a substitute for declaring language keywords.
-- Ingestor and emitter statement heads name the connector and entity, even when that connector
-  serves only one entity; client heads name the connector. An ingestor or emitter `ALTER` repeats
-  its stored connector and entity. The head selects the kind, while the body writes that entity's
-  declared reference, locator and options. Each pair owns its grammar body and semantic Model
-  variant; completion composes its head from the shared tokens and vocabulary declaration.
-- External connector configuration remains raw only where pass-through is the intentional public
-  contract.
-
-### Control plane and runtime
-
-- Models and execution-graph configuration are control-plane state and are strongly persisted.
-- The registry validates domains, references, schemas, branches, capabilities, and execution
-  contracts before a graph becomes active.
-- Runtime execution is materialized per concrete branch. Branch-local state, scheduling, buffering,
-  and materialized views must remain visibly branch-local in types and ownership.
-- Server endpoint definitions and bound intakes form one immutable host-and-path publication.
-  A request resolves that publication once, and a WebSocket connection retains its selected route
-  and signaling protocol. Source close or drop ends its exact intake lifetime before withdrawing
-  the binding, so retained routes reject further intake and cannot attach to a replacement source.
-  A request admitted before that ending may finish through the intake it already borrowed.
-- Every server-side runtime entity that binds a configured listening port executes on every live
-  Nervix node. Its listener is independent of leadership and placement and must remain present
-  across all cluster events, including leader changes, node joins, node restarts, and recovery.
-- Selected execution state may use node-owned snapshot or replication mechanisms.
-- A consensus append-stream adapter consumes the caller's first request before attempting
-  peer admission, so the caller's retry and cancellation gates also govern immediate failures.
-  Leading empty probes use management capacity. An unconfirmed first-data prefix is checked there
-  before data admission, under the same setup deadline as opening its ordered append stream.
-  A rejected or incomplete prefix ends that input with its exact result. Admitted requests are
-  submitted intact exactly once on their owning path; later empty commit updates share the data
-  stream. Ended input opens no transport.
-- Records, batches, payload attempts, handoff state, ACK guards, ACK tokens, and ACK maps are
-  in-memory hot-path state and are never persisted.
-- Connectors adapt external systems at explicit data-plane boundaries. They do not weaken internal
-  schema, branch, error, or sensitivity rules.
-- [Connector Crates And The Connector Contract](docs/src/connector-contract.md) is the authoritative
-  architecture reference for external integrations and the contract between connector crates and
-  their host. Any change to a connector crate, the shared connector contract, connector planning or
-  composition, or host ingestor and emitter execution must keep that chapter current in the same change.
-  Its scope includes layer and dependency ownership, ingestor and emitter plans and lifecycle, metadata
-  and header semantics, ACK and commit boundaries, host loops and cadence, special integrations,
-  failures, guarantees, limits, and observability.
-- [Cluster Interconnect](docs/src/interconnect.md) is the authoritative architecture reference for
-  node-to-node communication. Any change to interconnect code or to a node-to-node operation must
-  keep that chapter current in the same change. Its scope includes authentication and identity,
-  discovery and topology, wire contracts and exchange forms, pool and quota isolation, limits and
-  deadlines, relay delivery and acknowledgements, application health, consensus and bulk traffic,
-  connection lifecycle, failure semantics, and observability.
-- [Name Resolution](docs/src/name-resolution.md) is the authoritative architecture reference for how
-  Nervix turns host names into addresses. Any change to `nervix-dns`, to how a node or a native
-  client loads its resolver, to a path that resolves a host name or the hook, budget or dialling
-  policy it uses, to a dependency feature that selects a resolver, or to the DNS checks and fixtures
-  must keep that chapter current in the same change. Its scope includes resolver ownership and
-  lifetime, configuration and its failures, the resolution order of literal, hosts-file and DNS
-  names, IPv4 and IPv6 answers, cache and TTL bounds, lookup budgets, concurrency and cancellation,
-  lookup outcomes, the matrix of call sites and client-library hooks, dialling policy, connection
-  identity for TLS, HTTP authority, proxies and request signing, failure ownership, dependency
-  selection and its validation, residual driver, SDK and browser resolution, deployment limits,
-  build modes and the simulation boundary, evidence, operator diagnostics, and recovery.
-  Interconnect, connector, session, shutdown and test-harness details remain in their own
-  authoritative chapters.
-- [Client Session Protocol](docs/src/client-session-protocol.md) is the authoritative architecture
-  reference for client-to-node communication, and the
-  [Client Implementation Manual](docs/src/client-implementation-manual.md) is its normative
-  companion for client implementations. Any change to client protocol code or to a client-to-node
-  operation must keep that chapter current in the same change, and must keep the manual current
-  when it changes what a client implementation must do. Client protocol code is the session schema
-  and wire crate, the session service and its transports, the Row encoder, the Rust client, the
-  shared binding, and the session handling of the web console and the CLI. Its scope includes the
-  boundary with the interconnect and layer ownership, the FlatBuffers schema, its verification and
-  limits, gRPC and WebSocket framing, endpoints and authentication, request correlation, lanes and
-  cancellation, command dispositions, durable execution identity and exact recovery, domain
-  mutation ownership and plan fencing as clients observe them, transactions over the protocol,
-  discovery, leader redirect and reconnection, Row subscriptions and their gaps, domain clock
-  attachment, resource uploads, node stop and restart as clients observe them, the shared binding
-  and measured protocol costs, guarantees and non-guarantees, and observability.
-- [Errors And Diagnostics](docs/src/errors-and-diagnostics.md) is the authoritative architecture
-  reference for typed error ownership by layer, how a report is created, given context, inspected
-  and rendered, ordinary outcomes versus failures, row and record outcome channels, the fixed wire,
-  ABI, stored and public outcomes a report is projected into, foreign-trait boundaries, validation
-  and planning diagnostics, runtime message errors, cross-node failure classification, backup and
-  restore failures, public diagnostics, sensitivity and how a branch is named, recovery and panic
-  classes, enforcement and its evidence, and the checklist for adding a fallible operation. Any
-  change to error types, error or diagnostic propagation, failure classification, or reporting at
-  a layer or public boundary must keep that chapter current in the same change.
-- [Consensus Storage And Replication](docs/src/consensus-storage-and-replication.md) is the
-  authoritative architecture reference for Raft persistence and catch-up. Any change to consensus
-  durability, replication pacing, log reading or retention, snapshot storage or transfer, or the
-  dedicated consensus database must keep that chapter current in the same change. Its scope
-  includes durable append and apply boundaries, client acknowledgement, stream and memory bounds,
-  learner promotion, recovery, operator tuning, and observability.
-- [Transaction Quiescence And Impact Inspection](docs/src/transaction-quiescence.md) is the
-  authoritative architecture reference for transaction-impact planning, scoped quiescence,
-  execution reporting, inspection, and retention. Any change to transaction operation or step
-  impact, affected topology, preview identity or freshness, actual engagement, report persistence,
-  or inspection presentation must keep that chapter current in the same change. Transaction
-  lifecycle, command completion, domain time, interconnect, and client recovery retain their own
-  documentation owners.
-- [Domain Clock](docs/src/domain-clock.md) is the authoritative architecture reference for domain
-  time. Any change to the domain-clock architecture, to domain architecture that changes how time
-  is established, propagated, or consumed, or to how a client session attaches to and follows a
-  domain clock must keep that chapter current in the same change. Its scope includes mappings and
-  lifecycle generations, authority selection and fencing, local installation and reads, progress
-  delivery, session attachment with its observer, delivery order and what an attached client
-  observes, execution snapshots, admission, logical and physical deadline ownership, recovery, and
-  distributed-time guarantees.
-- [Execution Primitives](docs/src/execution-primitives.md) is the authoritative architecture
-  reference for the primitive boundary: governed families, backend selection, feature propagation,
-  target capabilities, authored-source scope, permissions, build contracts, and the distinction
-  between API, graph, compiler and execution evidence. Any change to those contracts keeps that
-  chapter current in the same change. Resolver, clock, executor and protocol policy stays with its
-  existing architecture owner.
-- [Coverage Reports And The Complexity Gate](docs/src/coverage-reports.md) is the authoritative
-  architecture reference for coverage producers and exports, source mapping and exclusions,
-  ordinary report ownership, merge records and integrity verdicts, patch coverage, the advisory
-  CRAP report, the full workspace union and the mandatory complexity count. Any change to those
-  contracts keeps that chapter current in the same change. Verification methods and scenario
-  supervision retain their own owners.
-- [Data-Plane Concurrency](docs/src/data-plane-concurrency.md) is the authoritative architecture
-  reference for synchronization on record, batch, remote-frame, and acknowledgement paths. Any
-  change to hot-path state publication, task or branch ownership, delivery or assignment fences,
-  the typed ratchet's synchronization rule and its execution contracts, or a Shuttle check or Loom
-  model must keep that chapter current in the same change. Its scope includes the contentionless
-  rule, published and pre-resolved state, mutable execution state, bounded synchronization, review
-  classification for new lock sites, deterministic checks of data-plane concurrency protocols,
-  memory-ordering models, and the diagnostic mode's deadlock detection with its evidence and the
-  locks it does not track. A change that adds a concurrent map, or changes how often one is
-  reached or what disposes of it, updates the concurrent map inventory in
-  `tests/concurrent-map-inventory-ledger.md` in the same change.
-- [VM Functions](docs/src/vm-functions.md) is the authoritative architecture reference for the
-  expression VM and its function catalog. Any change to expression lowering, the semantic catalog
-  and function registration, type or sensitivity checking, constant folding or expression sharing,
-  compiled programs and their prepared artifacts, the runtime bridge and execution context, scalar
-  operands, selected-row execution of conditional arms, row and batch errors, kernel selection and
-  SIMD use, function-family implementations, injected functions, or window aggregate and sketch
-  structures must keep that chapter current in the same change. Its scope includes ownership by
-  layer, where programs compile and how long they live, allocation and result bounds, scheduling
-  and execution bounds, branch-local accumulation, bounded sketch state, publication and recovery
-  of window state, measured performance evidence, and the checklist for adding a function.
-  [Expression Functions](docs/src/filter-map-functions.md) remains the owner of every public
-  function contract.
-- [SIMD Kernels](docs/src/simd-kernels.md) is the authoritative architecture reference for portable
-  buffer kernels and their callers. Any change to kernel ownership, dispatch or build targets,
-  arithmetic or bitmap contracts, byte scanning, typed run execution, scalar/level qualification,
-  or SIMD performance claims must keep that chapter current in the same change. Its scope includes
-  the admission rule for new kernels, the caller catalog, bounded tails and reductions, measured
-  scalar versus vector selection, evidence limits, and the checklist for adding a kernel. VM,
-  codec, connector, clock and concurrency chapters retain their respective semantic contracts.
-- [Resource Versions And Bindings](docs/src/resource-versions.md) is the authoritative architecture
-  reference for resource versions and the models that bind them. Any change to the resource
-  catalog, upload installation or replication, version resolution, how a binding is validated,
-  classified, pinned, or loaded, `REBIND RESOURCE`, or the HTTPS listener's certificate
-  installation must keep that chapter current in the same change. Its scope includes catalog and
-  store ownership, version assignment and the completion boundary, bindable versions and `LATEST`
-  resolution, the pinning invariant for every binding kind, rebinding atomicity and rollback, the
-  separation of uploads from bindings, the `DYNAMIC` TLS refresh, guarantees and limits, failure
-  semantics and recovery, and observability.
-- [WASM State And Recovery](docs/src/wasm-state.md) is the authoritative architecture reference for
-  WASM processor guest state. Any change to what a guest save holds, the checkpoint that completes a
-  guest callback and the acknowledgements it holds back, local or replica durability of guest state,
-  state generations and the events that advance them, ownership fencing or forced recovery of guest
-  state, coordinated, guest-requested, or rejected-state resets, the guest save, restore, and reset
-  ABI, or how rebinding affects guest state must keep that chapter current in the same change. Its
-  scope includes branch ownership and unbranched execution, durable versus volatile state,
-  placements and revisions, failure before and after each durability and authority boundary,
-  stale-node catch-up and why state does not resurrect, quiescence, shutdown and restart, replay and
-  duplicate windows, observability, and limits.
-- [Backup And Restore Architecture](docs/src/backup-and-restore-architecture.md) is the
-  authoritative architecture reference for backup and restore. Any change to the archive crate or
-  the archive format, to how a backup cuts a domain or captures, stages, transfers, assembles,
-  retains or serves state, to how a restore receives, prepares, plans, admits, records or resumes
-  its steps, or to how restored state is converted, staged, published, gated, reclaimed or resumed
-  must keep that chapter current in the same change. Its scope includes ownership by layer, the
-  archive contract and its compatibility rules, cut kinds, the quiesced cut protocol and its capture
-  fence, owner capture, the capture and installation interconnect operations, transfer, assembly
-  and retention, restore intake, preparation and planning, admission and durable step progress, the
-  installation authority, staging, complete-generation publication and the installation gate,
-  generation storage, restore staging maintenance and its quota, lifecycle resumption, state
-  placement identities, failure semantics at every boundary, guarantees and limits, observability,
-  and qualification evidence. [Backup And Restore](docs/src/backup-and-restore.md) remains the owner
-  of the statements, the command-line and console surfaces, the archive's section and record tables,
-  the operator limits and the reported failures; consensus storage, the interconnect, data-plane
-  concurrency, WASM state and shutdown keep their own contracts.
-- [Shutdown And Recovery](docs/src/shutdown.md) is the authoritative architecture reference for
-  stopping a node and recovering from a forced ending. Any change to shutdown phases, the shutdown
-  or drain deadline, termination signals, terminating placement eligibility, intake stop, graph
-  drain and force flush, terminal teardown, or startup recovery must keep that chapter current in
-  the same change. Its scope includes stop requests and phase outcomes, exit statuses, cordon
-  versus terminating exclusion, ownership handoff during drain, connector acknowledgement and
-  commit boundaries, durable versus volatile state, the former-owner startup fence, and
-  observability. It is the single canonical shutdown chapter: work that finishes with shutdown
-  documentation extends it rather than adding a competing page.
-- [Typed States And Validation Boundaries](docs/src/typed-states.md) is the authoritative
-  architecture reference for absence, distinct semantic states, owning validation boundaries,
-  state identity, private atomic representations, and external encodings. Any change to how a
-  missing value, state variant, required identity, conversion failure, or boundary representation
-  is modeled or validated must keep that chapter current in the same change. Interconnect,
-  domain-clock, and shutdown details remain in their own authoritative chapters.
-- [Node Settings](docs/src/node-settings.md) is the authoritative architecture reference for
-  prerequisites, cluster parameters and node capabilities. Changes to setting declarations,
-  defaults, derivations, fixed-value contracts, validation, carriers, change procedures,
-  capability sizing or settings enforcement keep that chapter current in the same change.
-  Interconnect, consensus, connector and lifecycle chapters retain their detailed contracts.
-- [Cryptography](docs/src/cryptography.md) is the authoritative architecture reference for
-  cryptography in Nervix. Any change to how Nervix obtains a TLS provider, a digest used for
-  security, a random value or a password or key derivation, to a non-approved hash or the purpose a
-  site records for it, to a dependency that brings cryptography into the `nervix-server` product
-  graph, or to the `non_aws_lc_crypto` count must keep that chapter current in the same change. Its
-  scope includes the `nervix-crypto` boundary and what it provides, the algorithm policy, the
-  classification register of non-security hashes, the inventory of cryptography outside AWS-LC in
-  the product graph with the path that uses each, the count and what the later FIPS migration will
-  refuse. Interconnect, client session, connector, credential and backup chapters retain their
-  own contracts.
-- [Execution Plans](docs/src/execution-plans.md) is the authoritative architecture reference for
-  converting a committed schedule into one typed execution revision and installing it as running
-  or passive runtime state. Any change to revision construction, typed node, resource, source,
-  emitter, processor or message-error plans, schedule-delta application, graph publication, or
-  plan-based recovery must keep that chapter current in the same change. The linked engine,
-  connector, concurrency, error, resource and state chapters retain their detailed contracts.
-
-## System Layers and Migration
-
 ### Layer order
 
-Nervix is layered. Innermost first, and each layer may name only the layers inside it:
+Nervix is layered. Innermost first, each layer may name only the layers inside it:
 
-1. **Primitives.** Self-contained data structures and conversions that name nothing in Nervix.
-   They sit beneath the vocabulary and are reusable outside it. `nervix-primitives` is the boundary
-   through which every other layer obtains execution-sensitive primitives; see
-   [Execution-sensitive primitives](#execution-sensitive-primitives).
-2. **Vocabulary.** Models, names, timestamps, branch keys, and node references: the words every
-   other layer speaks.
-3. **Language.** Plexus lexing, parsing, completion, and lowering into Models. The parser is an edge
-   dependency only. It is named by the language crate itself, the formatter, the client tools, and
-   the session adapter; every other layer consumes Models.
+1. **Primitives.** Self-contained data structures and conversions that name nothing in Nervix,
+   including `nervix-primitives`, the boundary for every [execution-sensitive
+   primitive](#execution-sensitive-primitives).
+2. **Vocabulary.** Models, names, timestamps, branch keys and node references: the words every other
+   layer speaks.
+3. **Language.** Plexus lexing, parsing, completion and lowering into Models. The parser is an edge
+   dependency named only by the language crate, the formatter, the client tools and the session
+   adapter; every other layer consumes Models.
 4. **Engines and infrastructure.** The expression VM and its frontend, the UDF and WASM hosts, wire
-   codecs, the connector contract and the connector crates, consensus, the interconnect, gossip,
-   the state store, and the resource store. An engine is driven by its caller and decides nothing
-   about the graph.
-5. **Decisions.** Registry validation, placement, scheduling, and planning. A decision is a
-   synchronous pure function from typed inputs to a typed outcome, with no Tokio types, locks, or
-   shared maps in its signature, and it is unit-tested directly from those inputs.
-6. **Data plane.** Per-node execution: relays, branch-local processor tasks, the host that drives
-   connectors, materialized state, and acknowledgement tracking. It applies decisions and executes
-   plans.
+   codecs, the connector contract and crates, consensus, the interconnect, gossip, the state store
+   and the resource store. An engine is driven by its caller and decides nothing about the graph.
+5. **Decisions.** Registry validation, placement, scheduling and planning: synchronous pure
+   functions from typed inputs to a typed outcome, with no Tokio types, locks or shared maps in
+   their signatures, unit-tested directly from those inputs.
+6. **Data plane.** Per-node execution: relays, branch-local processor tasks, the connector host,
+   materialized state and acknowledgement tracking. It applies decisions and executes plans.
 7. **Control plane.** Transactions, domain lifecycle, applying schedules, observation,
-   subscriptions, resources, and cluster coordination.
+   subscriptions, resources and cluster coordination.
 8. **Edges.** The session service, HTTP endpoints, the cluster API, metric exposition, the web
-   console, and the client tools.
+   console and the client tools.
 
 Dependencies point inward only. Test and benchmark harnesses sit outside the order, may name any
 layer, and are never named by product code.
 
-One representation per stage: text becomes a Model, a Model becomes a validated node, a validated
-node becomes an execution plan, and an execution plan becomes running tasks. Each stage converts
-once at its boundary and hands the next stage a type that already carries the guarantees the
-previous stage is responsible for. The data plane executes plans and never reads a `Model`.
+Each stage has one representation: text becomes a Model, a Model a validated node, a validated node
+an execution plan, and a plan running tasks. Each stage converts once at its boundary and hands on a
+type that carries the guarantees it is responsible for; the data plane executes plans and never
+reads a `Model`. Identities are typed once and shared: a second key type for an identity that has
+one is a duplicate to remove.
 
-Identities are typed once and shared. A second key type for an identity that already has one is a
-duplicate to remove, not a local convenience.
+Every crate and layer module opens with an ownership contract in its `//!` documentation: its layer,
+then three lines naming what it **owns**, what it may **depend on** and what it **must not know**,
+from which alone a reviewer decides whether a change belongs there. The contract states the target,
+not the present: where code contradicts it, the header names the contradiction and the layer it
+violates instead of softening the contract to match today's imports.
 
-### Boundaries
+### Language pipeline
 
-Every crate and every layer module opens with an ownership contract in its `//!` documentation:
-the layer it belongs to, then three lines naming what it **owns**, what it may **depend on**, and
-what it **must not know**. A reviewer decides whether a change belongs in that crate or module by
-reading those three lines and nothing else.
+- Plexus is lexed and parsed once into structured public semantic Models, which the compiler
+  consumes directly; spans and recovery state stay internal to parsing and diagnostics. There is no
+  second public parser AST, raw-expression field or runtime parser adapter, and no persisted or
+  public Model holds raw executable Plexus for the runtime to reparse. External connector
+  configuration stays raw only where pass-through is the intentional public contract.
+- Completion derives from the expectations of the composed top-level grammar; REPLs and clients
+  never merge suggestions from independent feature parsers.
+- Statement families own their domain grammar. Shared lexical and grammatical concepts have one
+  implementation, and semantic reference kinds and repeated patterns use focused shared parser
+  primitives, never ad hoc word parsers or duplicated statement-local grammar.
+- Keywords and type literals are case-insensitive tokens of the shared language token definition,
+  never grammar-local string matches or undeclared words; original spelling may be kept for
+  diagnostics. Multi-word logical keywords are composed grammar units that parsing and completion
+  treat as one item.
+- Grammar labels use underscore style (`field_name`, `string_literal`); completion labels of
+  composed keyword phrases use their space-separated human-readable form.
+- Ingestor and emitter statement heads name the connector and entity, even when the connector serves
+  one entity; client heads name the connector. An ingestor or emitter `ALTER` repeats its stored
+  connector and entity. The head selects the kind, and the body writes that entity's declared
+  reference, locator and options. Each pair owns its grammar body and Model variant, and completion
+  composes its head from the shared tokens and the vocabulary declaration.
 
-The contract states the target, not the present. Where the code contradicts its own contract, the
-header names the contradiction and the layer it violates; it never softens the contract to match
-the code. A contract rewritten to describe today's imports has stopped saying anything.
+### Control plane and runtime
+
+- Models and execution-graph configuration are strongly persisted control-plane state. Records,
+  batches, payload attempts, handoff state, ACK guards, ACK tokens and ACK maps are in-memory
+  hot-path state, never persisted. Selected execution state may use node-owned snapshot or
+  replication mechanisms.
+- The registry validates domains, references, schemas, branches, capabilities and execution
+  contracts before a graph becomes active.
+- Runtime execution is materialized per concrete branch; branch-local state, scheduling, buffering
+  and materialized views stay visibly branch-local in types and ownership.
+- Server endpoint definitions and bound intakes form one immutable host-and-path publication. A
+  request resolves it once, and a WebSocket connection keeps its selected route and signaling
+  protocol. A source's close or drop ends its exact intake lifetime before the binding is withdrawn,
+  so retained routes reject further intake and cannot attach to a replacement source; a request
+  admitted before that ending may finish through the intake it borrowed.
+- Every server-side runtime entity that binds a configured listening port runs on every live node,
+  with a listener independent of leadership and placement that stays present across every cluster
+  event: leader changes, node joins, node restarts and recovery.
+- A consensus append-stream adapter consumes the caller's first request before attempting peer
+  admission, so the caller's retry and cancellation gates also govern immediate failures. Leading
+  empty probes use management capacity, where an unconfirmed first-data prefix is checked before
+  data admission under the setup deadline of its ordered append stream; a rejected or incomplete
+  prefix ends that input with its exact result. Admitted requests are submitted intact exactly once
+  on their owning path, later empty commit updates share the data stream, and ended input opens no
+  transport.
+- Connectors adapt external systems at explicit data-plane boundaries and never weaken internal
+  schema, branch, error or sensitivity rules.
 
 ### Connector crates
 
-Every external integration belongs in its own crate under `crates/connectors/`, and implements the
-ingestor contract, the emitter contract, or both, from `nervix-connector` in `crates/connector`.
+Every external integration is its own crate under `crates/connectors/` implementing the ingestor
+contract, the emitter contract or both from `nervix-connector` in `crates/connector`. [Connector
+Crates And The Connector Contract](docs/src/connector-contract.md) owns the contract and its
+[hygiene](docs/src/connector-contract.md#connector-hygiene-standard) and
+[delivery](docs/src/connector-contract.md#connector-delivery-standard) standards with their review
+checklists.
 
-- A connector crate is an engine driven by the host. The host is the server's data plane, which owns
-  task lifecycle, branch routing, acknowledgement tracking, quiesce, retry and flush cadence,
-  buffering, metrics, and events. A connector owns its driver, its configuration interpretation, its
-  header semantics, and its per-record outcomes, and decides nothing about the graph.
-- The server is the composition root and the only crate that names every connector.
-- No connector crate reads a Model. The decision layer converts Models into a typed plan once, and
-  the connector receives that plan.
-- Models, plans and runtime composition nest connector then entity. Each entity has its own plan
-  variant and concrete connector type, including a connector's second entity; a mode flag does not
-  select between entities. The type declares its vocabulary kind through `IngestorConnector::KIND`
-  or the emitter's `KIND` and object-safe `EmitterLifecycle::kind()`, and the composition root
-  asserts the plan-to-implementation kind at compile time. Shared private encoding and intake
-  mechanisms do not replace these entity boundaries.
-- Capabilities the registry validates live in the vocabulary. The registry names no connector crate,
-  so a capability declared only inside one could never be validated. Each entity declares its
-  capabilities and body reference kind once there; grammar, validation, planning, completion and
-  presentation consume that declaration. [Connector and entity kinds](docs/src/connector-contract.md#connector-and-entity-kinds)
-  owns this contract and the checklist for adding an entity.
-- Connector names come from the vocabulary's `ConnectorKind` display and entity names from their
-  declarations. Derive labels and prefixes from those sources across configuration errors,
-  transports, metrics, logs, dataflow identifiers and `DESCRIBE`; do not maintain another spelling
-  or case table. External protocol and pass-through configuration names keep their contract.
-- Connector errors preserve typed causes with `thiserror` and `error-stack` until the reporting
-  boundary. Do not replace an available typed cause with driver `Display` text or a free-text
-  reason. Each `nervix::error_boundary(outcome|library, ...)` annotation names the actual behavior
-  at its exact error type or return contract; it never claims a record rejection the path does
-  not perform.
-- Each implemented publish, window or batch, header and metadata mapping, and acknowledgement
-  path has unit coverage through its production owner. Every connector-owned encoding or
-  encoded-size measure has a bounded Bolero property registered for ordinary and fuzz execution;
-  shared implementations keep their properties with their owner. Unit tests do not replace
-  required public scenarios or concurrency evidence.
-- Every buffer a connector holds between its transport and the host is declared in its entity's
-  `DeclaredBounds` with its capacity and overflow, and every network wait with what ends it,
-  unbounded ones included. A change adds no unbounded buffer and no wait that only the host's stop
-  ends; one that already exists stays declared unbounded until its connector bounds it. Each
-  client deadline key, such as `timeout_ms` or `connect_timeout_ms`, keeps the one meaning the
-  contract gives it and is read through `ConfiguredDeadline`; no driver call that parks its thread
-  runs on an asynchronous worker; and every deadline key an entity's waits name has its
-  `STALLED PEER` scenario in the capability inventory.
-  [Bounds and deadlines](docs/src/connector-contract.md#bounds-and-deadlines) owns the rule and
-  its review checklist.
-- A connector loses, duplicates or stalls nothing beyond what its declarations state. Every source
-  entity declares the position class and acknowledgement confirmation its transport actually
-  gives, and `acknowledge` returns only once that confirmation arrives, so progress, a drain and a
-  handoff wait for the transport. A read the host cancels returns every message it already took. A
-  payload its codec refuses is consumed as a decode rejection through the ingestor's general error
-  policy, never presented again. Every emitter implements `finish` for what its client still holds,
-  by the host's deadline, and a brokered emitter in `MODE ACK` awaits its broker through the shared
-  `ConfirmationWindow`, so a retry never resends a confirmed record. A connector delivery defect
-  is fixed red first, from a public scenario through the connector's real transport and, where the
-  defect is an interleaving, a Shuttle check over its production owner. The
-  [connector delivery standard](docs/src/connector-contract.md#connector-delivery-standard) owns
-  these rules and their review.
-- The [connector hygiene standard](docs/src/connector-contract.md#connector-hygiene-standard) and
-  the [connector delivery standard](docs/src/connector-contract.md#connector-delivery-standard)
-  own the detailed requirements. Before closing a connector epic, review landed parallel work
-  against both and record evidence and compliance tasks on ClickUp. Keep the contract chapter,
-  relevant manuals and the ratchet current in the same change.
-
-`just ratchet` and the clock-boundary check treat the connector crates as data plane, so code that
-moves into them keeps its counts and its clock rules.
-
-The compiler's architecture rules use source-owned `nervix::layer` contracts matching each
-documented layer boundary, gated with `cfg_attr(nervix_lint, ...)`. Keep that contract with a
-module when it moves. Connector engines and their contract also declare `nervix::input(plans,
-reason = "...")`; their layer does not grant permission to consume configuration Models.
-The public configuration union declares `nervix::value(model, ...)`, shared name types declare
-`nervix::value(name, ...)`, and the cluster observation capability declares
-`nervix::value(cluster_access, ...)`. These are reviewed semantic roles, not spelling conventions.
-Resolved references and normalized interface/body types enforce the Model and language
-boundaries; recurring data-plane call edges diagnose awaited cluster access. Language dependency
-and inactive import provenance remain a separate source/manifest check.
-
-Declare `nervix::identity(node, ...)` on the shared vocabulary identity types and on fields,
-parameters, aliases or return interfaces whose value is a node identity. A mixed aggregate does
-not become an identity merely because one member is typed. Declare `nervix::state(installed,
-...)` on installation-only fields; a resolved RwLock anywhere in their representation fails.
-`RwLock<Option<name or shared handle>>` without a lifetime contract requires an explicit review;
-it does not prove write-once behavior. Genuinely replaceable fields declare `state(mutable, ...)`
-with their actual lifetime reason. [Typed States](docs/src/typed-states.md#source-owned-identity-and-installation-contracts)
-and [Data-Plane Concurrency](docs/src/data-plane-concurrency.md#resolved-architecture-boundaries)
-own the exact scope and limitations. No owner catalog, count allowance or filename exception
-substitutes for these source contracts.
+- A connector is an engine the host drives. The host, the server's data plane, owns task lifecycle,
+  branch routing, acknowledgement tracking, quiesce, retry and flush cadence, buffering, metrics and
+  events; the connector owns its driver, configuration interpretation, header semantics and
+  per-record outcomes and decides nothing about the graph. It reads no Model, only the typed plan
+  the decision layer converts once, and only the server, the composition root, names every
+  connector.
+- Models, plans and runtime composition nest connector, then entity. Every entity, a second one
+  included, has its own plan variant and concrete connector type; no mode flag or shared private
+  mechanism replaces an entity boundary. The type declares its vocabulary kind
+  (`IngestorConnector::KIND`, or the emitter's `KIND` and object-safe `EmitterLifecycle::kind()`),
+  and the composition root asserts plan-to-implementation kinds at compile time.
+- Capabilities the registry validates live in the vocabulary, since the registry names no connector
+  crate: each entity declares its capabilities and body reference kind there once, for grammar,
+  validation, planning, completion and presentation to consume ([Connector and entity
+  kinds](docs/src/connector-contract.md#connector-and-entity-kinds) has the checklist for adding an
+  entity).
+- Connector names come from `ConnectorKind`'s display and entity names from their declarations, and
+  every label and prefix (configuration errors, transports, metrics, logs, dataflow identifiers,
+  `DESCRIBE`) derives from them, with no other spelling or case table; external protocol and
+  pass-through names keep their contract.
+- Errors keep typed causes (`thiserror`, `error-stack`) until the reporting boundary, never driver
+  `Display` text or free-text reasons, and no `nervix::error_boundary` claims a record rejection the
+  path does not perform.
+- Every publish, window or batch, header and metadata mapping and acknowledgement path has unit
+  coverage through its production owner, and every connector-owned encoding or encoded-size measure
+  a registered, bounded Bolero property (shared implementations keep theirs with their owner). Unit
+  tests never replace required scenarios or concurrency evidence.
+- Every buffer between transport and host is declared in the entity's `DeclaredBounds` with capacity
+  and overflow, and every network wait with what ends it, unbounded ones included. A change adds no
+  unbounded buffer and no wait only the host's stop ends, and an existing one stays declared
+  unbounded until bounded. Client deadline keys (`timeout_ms`, `connect_timeout_ms`) keep their one
+  contract meaning and are read through `ConfiguredDeadline`, no thread-parking driver call runs on
+  an async worker, and every deadline key an entity's waits name has its `STALLED PEER` scenario in
+  the capability inventory ([Bounds and
+  deadlines](docs/src/connector-contract.md#bounds-and-deadlines)).
+- A connector loses, duplicates or stalls nothing beyond its declarations. A source entity declares
+  the position class and acknowledgement confirmation its transport gives, and `acknowledge` returns
+  only once that confirmation arrives, so progress, drains and handoffs wait for the transport. A
+  cancelled read returns every message it took, and a payload the codec refuses is consumed as a
+  decode rejection through the ingestor's general error policy, never presented again. Every emitter
+  implements `finish` for what its client holds, by the host's deadline, and a brokered `MODE ACK`
+  emitter awaits its broker through the shared `ConfirmationWindow`, so a retry never resends a
+  confirmed record. A delivery defect is fixed red first: a public scenario through the real
+  transport and, for an interleaving, a Shuttle check over the production owner.
+- Before closing a connector epic, review landed parallel work against both standards and record
+  evidence and compliance tasks on ClickUp. A connector change keeps the contract chapter, the
+  relevant manuals and the ratchet current in the same change; `just ratchet` and the clock-boundary
+  check treat connector crates as data plane.
 
 ### Execution-sensitive primitives
 
 `nervix-primitives` in `crates/primitives` selects every execution-sensitive primitive for the
-build's execution mode: ordinary execution, one of the `shuttle`, `loom` and `turmoil` modes, or
-the `deloxide` diagnostic mode.
-It sits in the primitives layer, below the vocabulary, so vocabulary types, engines, connectors,
-the server and the clients share one boundary. Callers express the operation they need; they never
-choose a backend.
+build's mode: ordinary, `shuttle`, `loom`, `turmoil` or the `deloxide` diagnostic mode. It sits
+below the vocabulary so every layer shares it, and callers state the operation they need, never a
+backend. [Execution Primitives](docs/src/execution-primitives.md) owns the surface, what each mode
+observes and the permitted real primitives. `just validate-primitive-boundary`,
+`just validate-execution-mode-dependencies` and `just validate-execution-mode-conflicts`, in
+`just validate` and `just validate-ci`, enforce the rules below; Clippy resolves re-exports and
+cannot police import paths, so it keeps only genuinely forbidden types and operations.
 
-- Every atomic, `Ordering` and `fence` in Nervix-authored Rust comes from
-  `nervix_primitives::sync::atomic`. That covers libraries, binaries, connectors, clients, unit and
-  integration tests, harnesses, benchmarks, examples and authored macros. Paths to the standard
-  library's, `core`'s, Shuttle's or Loom's atomics, and local aliases that select between them, are
-  rejected however they are spelled: direct, renamed, grouped, qualified, globbed, through a
-  renamed `std`, `core` or `sync`, or inside a macro body or an inactive `cfg` branch.
-- Every other governed family comes from the boundary too, under the same rule: shared ownership
-  from `nervix_primitives::sync`, as `Arc` for Nervix-owned state and `StdArc` and `StdWeak` for a
-  weak reference or an external API that takes the standard type; async synchronization, waker
-  registration and cancellation tokens from `nervix_primitives::sync`; thread-blocking locks,
-  condition variables, barriers, one-time initialization and synchronous channels from
-  `nervix_primitives::sync::blocking`; tasks, the cooperative budget and task tracking from
-  `nervix_primitives::task`; timers and monotonic instants from `nervix_primitives::time`; TCP,
-  UDP and local sockets from `nervix_primitives::net`; the runtime from
-  `nervix_primitives::runtime`; async tests and mains through `#[nervix_primitives::test]` and
-  `#[nervix_primitives::main]`, and `nervix_primitives::select!`; streams over channels from
-  `nervix_primitives::stream`; atomic reference publication from `nervix_primitives::publication`;
-  concurrent maps and queues from `nervix_primitives::collections`; threads and thread-local
-  storage from `nervix_primitives::thread` and `nervix_primitives::thread_local!`. Tokio's `sync`,
-  `task`, `runtime`, `time` and `net` modules with their attributes and macros, Tokio Util's `sync`
-  and `task`, Tokio Stream, Turmoil's `net`, `parking_lot`, `dashmap`, `concurrent-queue`,
-  `arc-swap`, `triomphe`, the `futures` crates' channels, locks, executors, atomic waker, `select!`
-  and abort handles, `atomic-waker`, the standard library's threads, `sync` items including `Arc`
-  and `Weak`, `Instant` and sockets, Shuttle's and Loom's primitives, the Shuttle wrapper crates,
-  and Deloxide's locks and detector, which come from `nervix_primitives::sync::blocking` and
-  `nervix_primitives::deadlock`, are rejected however they are spelled, and only `nervix-primitives` depends on the libraries whose
-  families it selects. No manifest renames a governed crate, and every tracked or new manifest is
-  checked. The isolated analysis workspace under `tools/nervix-lint`, with its driver, fixtures
-  and fixture macros, is authored source under the same rules; what a build wrote into a Cargo
-  build directory is not. A duration is a value: it is the standard library's `Duration`. Tokio's
-  I/O traits, filesystem, process and signal modules, and the pure polling combinators of Tokio and
-  of the `futures` crates, are real in every mode and not governed.
-- The boundary supplies mechanisms, never policy. A node resolves names through its own resolver
-  in `nervix-dns`; `tokio::net::lookup_host` and the `ToSocketAddrs` traits are rejected, and the
-  boundary offers a lookup only in the Turmoil build, where it answers from the simulated host's
-  DNS table. The timers grant no clock permission: actual UTC and physical deadlines keep the owners
-  `scripts/check_clock_boundaries.py` declares, and a logical deadline stays in the domain clock's
-  coordinate. `nervix_primitives::task::spawn_cpu` runs a CPU job the bounded executor admitted,
-  as one task of the simulated host's scheduler under Turmoil; only the executor's worker pools may
-  name it. Pausing, advancing and resuming a runtime's clock needs the `test-util` capability,
-  which only tests of elapsed-time behavior enable.
-- Work a node runs off its async workers goes through the bounded executor in `nervix-execution`:
-  it takes the CPU or storage class of its work, charges the memory class it allocates in, and
-  checks its `Cancellation` between bounded units. Operator-supplied code the node cannot bound,
-  such as a UDF call or a JAQ transformation, takes the extension class, and password hashing
-  takes the credentials class. A refusal from the
-  executor is a typed error the caller maps to its own outcome, and a refusal that judged nothing
-  stays retryable rather than becoming a decode, encode or authentication failure. A class whose
-  wait queue is full refuses work that answers a request, because its sender can present it again.
-  Work the node already accepted and keeps, which nothing can present again, such as a payload a
-  quiesce buffer retained or a poll a paced ingestor moved past, states
-  `QueueAdmission::WaitForPlace` and waits for a place instead; its owner lets shutdown and a new
-  quiesce end that wait, and keeps the work where it was until then or decides on it again. A
-  payload a source hands over without an acknowledgement waits only when holding the source's loop
-  keeps its transport connected with bounded memory; otherwise its refusal is reported and counted.
-  `nervix_primitives::task::spawn_blocking` belongs to the executor's storage workers, and
-  `nervix_primitives::task::block_in_place`, which blocks the runtime worker thread that calls it,
-  belongs to no file by default. Any other file that names either needs a permission in
-  `crates/primitives/blocking-permissions.toml` listing the items it names and stating its owner,
-  why that owner stays outside the executor, and what bounds its work instead, such as a client
-  tool that is not a node or an external driver that waits on the network. A permission declares
-  its file for exactly the items it lists, so an item no permission lists for its file and a listed
-  item the file no longer names both fail.
-- Thread creation through `nervix_primitives::thread::{spawn, Builder, scope, spawn_detached}`
-  and `nervix_primitives::unmodeled::thread::Builder` needs the same exact-file, exact-item
-  declaration in `crates/primitives/blocking-permissions.toml`, with its owner, why it stays
-  outside the bounded executor, and what bounds its work, thread count and lifetime. There is
-  no built-in caller outside the primitive crate. Unit tests, Loom and Shuttle models, and
-  harnesses declare their files and items too: no directory, `cfg(test)` module, model-only
-  module, inactive branch or authored macro is exempt. An unlisted use and an unused declared
-  item fail. The real builder also needs its unmodeled permission and verification limit;
-  that permission alone does not authorize thread creation.
-  Reimported module aliases retain confinement; import boundary modules and items by name,
-  because a root glob hides confined and unmodeled paths and is rejected.
-- An execution mode is a feature, never a global cfg: a bare `loom`, `shuttle`, `turmoil` or
-  `deloxide` in a `cfg` predicate, and `--cfg` with any of those names in any recipe, Cargo
-  configuration, workflow or build script, are rejected, because every crate of a build, Tokio's
-  included, reads such a cfg. Tokio's unstable runtime controls belong to the Turmoil build: only a
-  Turmoil recipe in the `justfile` passes `--cfg tokio_unstable`, never Cargo configuration, a
-  workflow or a build script. Turmoil is also a runner: beside `nervix-primitives`, a package whose
-  harness drives a simulation may depend on it only as an optional dependency its own `turmoil`
-  feature enables.
-- The analysis cfg, `nervix_lint`, is tooling only and selects nothing. Only the synchronization
-  analysis driver sets it, and the analysis reads the code a product build compiles: `--cfg
-  nervix_lint` in any recipe, Cargo configuration, workflow or build script, a `cfg` or `cfg!`
-  predicate that names it, and a `cfg_attr` under it that holds anything but `nervix::` contracts
-  and lint levels are rejected. An annotation hides nothing from the boundary's other rules.
-- A real primitive that must stay outside every model comes from `nervix_primitives::unmodeled`, and
-  each use needs a permission in `crates/primitives/unmodeled-permissions.toml` naming the one Rust
-  file, the items by their paths below `unmodeled`, the owner, why a real primitive is required, and
-  what that leaves unverified. It may keep runner statistics across model executions, serve a thread
-  no model runs, process-wide state initialized once, or an external API that requires the library's
-  own type, or record what a check observes without adding a scheduling point. It never carries the
-  protocol under test, chooses its branches, supplies its wakeups, or establishes an ordering an
-  assertion relies on. The browser console, whose event loop no mode runs, takes the `futures`
-  crate's channel, `select!` and abort handles from `nervix_primitives::unmodeled::futures` this
-  way. A use without a permission, an unlisted item, a permission for a directory, a glob or a file
-  the boundary does not govern, an item the unmodeled path does not have, and a permission nothing
-  uses all fail.
-- A selected atomic belongs to the model execution that constructs it. It never lives in a
-  `static`, directly, through a wrapper, an array or a type alias, or in a `thread_local!`, and it
-  is never constructed in a const context, which Loom's atomics do not support. Process-wide state
-  moves onto the owner whose lifetime it has, such as a node's service or its Raft network; a count
-  a unit test reads is kept per thread; and state that must outlive every test and model is a real
-  atomic under a permission. The rule binds `nervix-primitives` too, which only the import rules
-  exempt: a `static` of the boundary, and the state it builds lazily for the process, hold real
-  atomics named through its `unmodeled` path or the standard library. The one shared mechanism such
-  state may reach, a queue whose own Shuttle check needs its atomics selected, is held that way only
-  by code a `deloxide` build alone compiles, where the selected atomics are the standard library's
-  and no model runs.
-- The primitive crate owns mode selection. At most one mode is enabled in a dependency graph, and
-  every pair of modes, including a pair that separate dependencies enable, fails to compile there
-  with a diagnostic naming both. Selection depends only on features, never on `cfg(test)`; there is
-  no fallback from a modeled primitive to a real one, and a modeled primitive used outside its
-  model is a test configuration failure. An operation a mode cannot provide is unavailable in that
-  mode and fails to compile. Loom models atomics, its threads and thread-local storage; in a Loom
-  build every other family is the ordinary library, outside every model, and Loom model code, an
-  inline module or a module file compiled only for Loom, may not name one; it may name shared
-  ownership and permitted unmodeled primitives, which say they are real. Shared ownership is real
-  in every mode: no model checker counts references, so no claim relies on the ordering a reference
-  count establishes. No model checker simulates a network: under Shuttle the sockets are Tokio's,
-  and a socket created inside a check panics and fails it.
-- Deloxide models nothing. A `deloxide` build replaces only the thread-blocking locks and their
-  condition variable, with adapters over Deloxide's tracked locks that keep the interface of the
-  locks they replace where Deloxide keeps its meaning, including a `Debug` that never waits and the
-  exact count of waiters a notification wakes; an operation outside that surface fails to compile
-  rather than running untracked. The detector is process-wide and installs once, through the
-  diagnostic run of `nervix-deadlock`, after the process registers the signals it must not lose
-  and before it constructs a tracked lock or starts a runtime worker; a tracked lock constructed
-  before then panics, because the detector would drop its cycle unreported, and nothing reinstalls
-  or reconfigures it for a node or a test. Every other family of the build stays ordinary.
-- A package that owns a `shuttle`, `loom`, `turmoil` or `deloxide` feature depends on
-  `nervix-primitives` directly and forwards the mode to it and to every workspace dependency that
-  owns the same mode. A package of test targets alone does so through its dev-dependencies, which
-  are what its builds link.
-  Cargo unifies features, so ordinary and modeled suites run in separate build invocations with
-  explicit features; a workspace-wide `--all-features` command excludes every package that owns a
-  mode.
-- Ordinary execution re-exports each library's items directly and adds no allocation, wrapper,
-  dispatch, lock, reference-count operation or scheduling point. An adapter exists only in a
-  modeled or diagnostic build, keeps the library's semantics, and states what its mode observes.
-- The atomic and shared-ownership surfaces are portable and build for the browser. Every other
-  family is the explicit `native` capability. Requesting a capability or a mode the target cannot
-  provide fails to compile with the boundary's own diagnostic as the first error, instead of
-  selecting another implementation: no library of a mode or of the native capability is compiled
-  for the browser's target. The vocabulary and the browser's graphs contain no async runtime or
-  network library.
-- A build that selects a modeled mode is a test artifact. Every binary the release image builds
-  declares itself with `nervix_primitives::product_binary!`, which fails to compile in a modeled
-  build. A `deloxide` build is a diagnostic artifact, which runs but is never released: it compiles
-  only a binary that declares a diagnostic form, `product_binary!("nervix-server", diagnostic)`,
-  and such a binary starts its diagnostic run at start-up.
+- **Import from the boundary**, in all Nervix-authored Rust: tests, harnesses, benchmarks, examples,
+  authored macros and the `tools/nervix-lint` workspace included, Cargo build output excluded.
+  Atomics, `Ordering` and `fence` come from `sync::atomic`; `Arc` (triomphe's, the default for
+  Nervix-owned state), `StdArc` and `StdWeak` (only for a weak reference or an external API that
+  needs the standard type, confined there), async synchronization, waker registration and
+  cancellation tokens from `sync`; thread-blocking locks with `parking_lot`'s interface, condition
+  variables, barriers, one-time initialization and synchronous channels from `sync::blocking`;
+  tasks, the cooperative budget and task tracking from `task`; timers and monotonic instants from
+  `time`; sockets from `net`; the runtime from `runtime`; channel streams from `stream`; atomic
+  reference publication from `publication`; concurrent maps and queues from `collections`; threads
+  and thread-local storage from `thread` and `thread_local!`; deadlock detection from `deadlock`;
+  async tests and mains from `#[nervix_primitives::test]`, `#[nervix_primitives::main]` and
+  `nervix_primitives::select!`.
+- **Never import the backends**, however spelled (renamed, grouped, qualified, globbed, through a
+  renamed `std`, `core` or `sync`, a selecting alias, a macro body or an inactive `cfg` branch): the
+  equivalent items of `std` (its `Arc`, `Weak`, locks, threads, `Instant` and sockets included),
+  `core`, Tokio's `sync`, `task`, `runtime`, `time` and `net` with their attributes and macros,
+  Tokio Util's `sync` and `task`, Tokio Stream, Turmoil's `net`, the `futures` crates' channels,
+  locks, executors, atomic waker, `select!` and abort handles, Shuttle's and Loom's primitives, the
+  Shuttle wrapper crates, Deloxide's locks and detector, and `parking_lot`, `dashmap`,
+  `concurrent-queue`, `arc-swap`, `triomphe` and `atomic-waker`. Only `nervix-primitives` depends on
+  the libraries whose families it selects, and no manifest, tracked or new, renames a governed
+  crate. Not governed, and real in every mode: `Duration`, Tokio's I/O traits and its filesystem,
+  process and signal modules, and the pure polling combinators of Tokio and `futures`. Import
+  boundary items by name: reimported aliases stay confined, and a root glob is rejected.
+- **Mechanisms, never policy.** Names resolve through the node's resolver in `nervix-dns`;
+  `tokio::net::lookup_host` and `ToSocketAddrs` are rejected, and the boundary's own lookup exists
+  only in the Turmoil build. Timers grant no clock permission: UTC and physical deadlines keep the
+  owners `scripts/check_clock_boundaries.py` declares, logical deadlines stay in the domain clock's
+  coordinate, and only tests of elapsed-time behavior enable the `test-util` paused clock.
+- **The bounded executor.** Work off the async workers goes through `nervix-execution` with its CPU
+  or storage class, a charged memory class and `Cancellation` checks between bounded units; operator
+  code the node cannot bound (UDF calls, JAQ transformations) takes the extension class and password
+  hashing the credentials class. A refusal is a typed error the caller maps to its own outcome, and
+  one that judged nothing stays retryable, never a decode, encode or authentication failure. A full
+  queue refuses work that answers a request; accepted work nothing can present again (a payload a
+  quiesce buffer retained, a poll a paced ingestor moved past) states
+  `QueueAdmission::WaitForPlace`, and its owner lets shutdown and a new quiesce end the wait and
+  keeps or re-decides the work. A payload handed over without an acknowledgement waits only when
+  holding the source's loop keeps its transport connected with bounded memory; otherwise its refusal
+  is reported and counted. `task::spawn_cpu` belongs to the executor's worker pools,
+  `spawn_blocking` to its storage workers, and `block_in_place` to no file by default.
+- **Exact permissions.** Any other file naming `spawn_blocking` or `block_in_place`, or creating a
+  thread through `thread::{spawn, Builder, scope, spawn_detached}` or `unmodeled::thread::Builder`,
+  lists exactly those items in `crates/primitives/blocking-permissions.toml` with its owner, why it
+  stays outside the executor and what bounds its work (for threads also their count and lifetime). A
+  real primitive kept outside every model comes from `nervix_primitives::unmodeled`, listed in
+  `crates/primitives/unmodeled-permissions.toml` with its one file, items, owner, why it must be
+  real and what that leaves unverified; the real thread builder needs both permissions. An unmodeled
+  primitive may keep runner statistics, serve a thread no model runs, hold once-initialized process
+  state, satisfy an external API's type or record observations without a scheduling point, and never
+  carries the protocol under test, chooses its branches, supplies its wakeups or orders what an
+  assertion relies on; the browser console takes its `futures` channel, `select!` and abort handles
+  from `unmodeled::futures` this way. Nothing is exempt, neither tests, models, harnesses,
+  `cfg(test)` modules, inactive branches nor authored macros, and unlisted uses, unused entries,
+  nonexistent items and directory, glob or ungoverned-file entries all fail.
+- **No ambient atomics.** A selected atomic belongs to the model execution that constructs it: never
+  in a `static`, directly or wrapped, or a `thread_local!`, and never built in a const context,
+  which Loom does not support. Process-wide state moves onto the owner whose lifetime it has, such
+  as a node's service or its Raft network, a count a unit test reads is kept per thread, and state
+  that outlives every test and model is a real atomic under a permission. The boundary's own statics
+  hold real atomics too, except a shared queue whose Shuttle check needs selected atomics, held so
+  only in code a `deloxide` build alone compiles.
+- **Modes are features, never global cfgs.** A bare `loom`, `shuttle`, `turmoil` or `deloxide` in a
+  `cfg` predicate, or `--cfg` with one in any recipe, Cargo configuration, workflow or build script,
+  is rejected; only a Turmoil recipe passes `--cfg tokio_unstable`. The analysis cfg `nervix_lint`
+  is set only by the synchronization analysis driver, selects nothing, and gates nothing but
+  `nervix::` contracts and lint levels. At most one mode is enabled per dependency graph, any pair
+  failing to compile with a diagnostic naming both; selection reads features only, never
+  `cfg(test)`, never falls back from a modeled primitive to a real one, and fails to compile an
+  operation the mode cannot provide. A modeled primitive used outside its model is a test
+  configuration failure. Loom models only atomics, its threads and thread-local storage, and
+  Loom-only model code names no other family but shared ownership and permitted unmodeled
+  primitives. Shared ownership is real in every mode, so no claim relies on reference-count
+  ordering, and no model checker simulates a network: under Shuttle the sockets are Tokio's, and a
+  socket created inside a check panics and fails it.
+- **Deloxide models nothing.** It replaces only the thread-blocking locks and their condition
+  variable, with tracked adapters keeping their interface where Deloxide keeps its meaning (a
+  `Debug` that never waits, the exact count of waiters a notification wakes); anything outside that
+  surface fails to compile. Its detector installs once per process, through `nervix-deadlock`'s
+  diagnostic run, after signal registration and before any tracked lock or runtime worker exists; an
+  earlier tracked lock panics, and nothing reinstalls or reconfigures it.
+- **Dependencies and builds.** A package owning a mode feature depends on `nervix-primitives`
+  directly and forwards the mode to it and every workspace dependency owning that mode, through
+  dev-dependencies when it has only test targets. Ordinary and modeled suites build in separate
+  invocations with explicit features, and a workspace-wide `--all-features` excludes mode-owning
+  packages. Only `nervix-primitives` selects Loom and only `nervix-model-harness` runs Loom models
+  and Shuttle checks, both taking the model checkers as optional dependencies, and no other package
+  depends on `loom`; only `nervix-primitives` depends on `deloxide`, and only optionally. A package
+  whose harness drives a simulation takes Turmoil only through its own optional `turmoil` feature;
+  ordinary graphs, with or without default features, contain no model checker, simulator, modeled
+  wrapper or detector and enable no mode or paused clock. Ordinary builds re-export library items
+  directly, adding no allocation, wrapper, dispatch, lock, reference count or scheduling point, and
+  adapters exist only in modeled or diagnostic builds, keeping library semantics and stating what
+  their mode observes. Atomics and shared ownership are portable to the browser and every other
+  family is the `native` capability; a capability or mode the target lacks fails with the boundary's
+  diagnostic first, and the vocabulary and browser graphs contain no async runtime or network
+  library. Release-image binaries declare `nervix_primitives::product_binary!`, which fails in a
+  modeled build; a `deloxide` build is a never-released diagnostic artifact whose only binary,
+  `product_binary!("nervix-server", diagnostic)`, starts its diagnostic run at start-up.
 - Guest code, the WASM guest SDK and the guests built on it, runs inside a user's WASM guest where
-  no mode exists, and is outside the source rules; a user's guest never takes Nervix's boundary.
-- Only `nervix-primitives` selects Loom and only `nervix-model-harness` runs Loom models and Shuttle
-  checks; both take the model checkers as optional dependencies, and no other package depends on
-  `loom`. Only `nervix-primitives` depends on `deloxide`, the diagnostic mode's detector, and only
-  optionally. The ordinary dependency graph of the workspace and of every package built on its own,
-  with default features or without them, contains no model checker, simulator, modeled wrapper or
-  deadlock detector, and enables no mode or paused-clock capability of the boundary.
-- A new execution-sensitive primitive joins the boundary before any caller introduces it, and no
-  change adds a new bypass. These rules bind every change from the moment they land, including work
-  in flight on other branches: a branch that merges after them takes its primitives from the
-  boundary, registers its checks in the model inventories, and passes the checks below.
-
-`just validate-primitive-boundary`, `just validate-execution-mode-dependencies` and
-`just validate-execution-mode-conflicts` enforce these rules in `just validate` and
-`just validate-ci`. Clippy's type lints resolve a re-export to its definition, so they cannot
-enforce where an item is imported from; the boundary check owns that, and Clippy keeps only
-genuinely forbidden types and operations. [Execution Primitives](docs/src/execution-primitives.md)
-documents the surface, what each mode observes of it, and the permitted real primitives.
+  no mode exists and is outside the source rules; a user's guest never takes Nervix's boundary. A
+  new execution-sensitive primitive joins the boundary before any caller uses it, and no change adds
+  a bypass.
 
 ### Migration discipline
 
-Architecture debt is counted and only decreases. `just ratchet` owns the counts and the checked-in
-baseline; see [Repository commands and documentation](#repository-commands-and-documentation).
+Mechanical moves and behavior changes never share a commit: a move-only commit changes no behavior
+and is verified by the build and the existing tests. A port or migration that changes how code works
+preserves every property of what it replaces ([No Regressions](#no-regressions)), and architecture
+debt only decreases ([the ratchet](#the-ratchet)).
 
-Mechanical moves and behavior changes never share a commit. A move-only commit is verified by the
-build and the existing tests, and nothing in it changes behavior. A port or migration that changes
-how code works preserves every property of what it replaces, including those no existing test
-observes; see [No Regressions](#no-regressions).
+## Authoritative Chapters
+
+Each chapter below is the authoritative reference for its area, and any change within that area
+keeps the chapter current in the same change. Where areas meet, each chapter keeps its own contract.
+
+- [Connector Crates And The Connector Contract](docs/src/connector-contract.md): a connector crate,
+  the shared connector contract, connector planning or composition, host ingestor and emitter
+  execution.
+- [Cluster Interconnect](docs/src/interconnect.md): interconnect code and every node-to-node
+  operation.
+- [Name Resolution](docs/src/name-resolution.md): `nervix-dns`; how a node or a native client loads
+  its resolver; a path that resolves a host name, or the hook, budget or dialling policy it uses; a
+  dependency feature that selects a resolver; the DNS checks and fixtures.
+- [Client Session Protocol](docs/src/client-session-protocol.md), and its normative companion the
+  [Client Implementation Manual](docs/src/client-implementation-manual.md) whenever what a client
+  implementation must do changes: client protocol code (the session schema and wire crate, the
+  session service and its transports, the Row encoder, the Rust client, the shared binding, and the
+  session handling of the web console and the CLI) and every client-to-node operation.
+- [Errors And Diagnostics](docs/src/errors-and-diagnostics.md): error types, error or diagnostic
+  propagation, failure classification, reporting at a layer or public boundary.
+- [Consensus Storage And Replication](docs/src/consensus-storage-and-replication.md): consensus
+  durability, replication pacing, log reading or retention, snapshot storage or transfer, the
+  dedicated consensus database.
+- [Transaction Quiescence And Impact Inspection](docs/src/transaction-quiescence.md): transaction
+  operation or step impact, affected topology, preview identity or freshness, actual engagement,
+  report persistence, inspection presentation.
+- [Domain Clock](docs/src/domain-clock.md): the domain-clock architecture, domain architecture that
+  changes how time is established, propagated or consumed, and how a client session attaches to and
+  follows a domain clock.
+- [Execution Primitives](docs/src/execution-primitives.md): the primitive boundary's governed
+  families, backend selection, feature propagation, target capabilities, authored-source scope,
+  permissions, build contracts, and the distinction between API, graph, compiler and execution
+  evidence.
+- [Data-Plane Concurrency](docs/src/data-plane-concurrency.md): hot-path state publication, task or
+  branch ownership, delivery or assignment fences, the typed ratchet's synchronization rule and its
+  execution contracts, a Shuttle check or Loom model, and the diagnostic mode's deadlock detection
+  and its evidence. A change that adds a concurrent map, or changes how often one is reached or what
+  disposes of it, also updates `tests/concurrent-map-inventory-ledger.md`.
+- [VM Functions](docs/src/vm-functions.md): expression lowering, the semantic catalog and function
+  registration, type or sensitivity checking, constant folding or expression sharing, compiled
+  programs and their prepared artifacts, the runtime bridge and execution context, scalar operands,
+  selected-row execution of conditional arms, row and batch errors, kernel selection and SIMD use,
+  function-family implementations, injected functions, window aggregate and sketch structures.
+  [Expression Functions](docs/src/filter-map-functions.md) owns every public function contract.
+- [SIMD Kernels](docs/src/simd-kernels.md): kernel ownership, dispatch or build targets, arithmetic
+  or bitmap contracts, byte scanning, typed run execution, scalar/level qualification, SIMD
+  performance claims.
+- [Resource Versions And Bindings](docs/src/resource-versions.md): the resource catalog, upload
+  installation or replication, version resolution, how a binding is validated, classified, pinned or
+  loaded, `REBIND RESOURCE`, the HTTPS listener's certificate installation.
+- [WASM State And Recovery](docs/src/wasm-state.md): what a guest save holds, the checkpoint that
+  completes a guest callback and the acknowledgements it holds back, local or replica durability of
+  guest state, state generations and the events that advance them, ownership fencing or forced
+  recovery of guest state, coordinated, guest-requested or rejected-state resets, the guest save,
+  restore and reset ABI, how rebinding affects guest state.
+- [Backup And Restore Architecture](docs/src/backup-and-restore-architecture.md): the archive crate
+  or format; how a backup cuts a domain or captures, stages, transfers, assembles, retains or serves
+  state; how a restore receives, prepares, plans, admits, records or resumes its steps; how restored
+  state is converted, staged, published, gated, reclaimed or resumed. [Backup And
+  Restore](docs/src/backup-and-restore.md) owns the statements, the command-line and console
+  surfaces, the archive's section and record tables, the operator limits and the reported failures.
+- [Shutdown And Recovery](docs/src/shutdown.md), the single canonical shutdown chapter, which
+  shutdown documentation extends rather than adding a competing page: shutdown phases, the shutdown
+  or drain deadline, termination signals, terminating placement eligibility, intake stop, graph
+  drain and force flush, terminal teardown, startup recovery.
+- [Typed States And Validation Boundaries](docs/src/typed-states.md): how a missing value, state
+  variant, required identity, conversion failure or boundary representation is modeled or validated.
+- [Node Settings](docs/src/node-settings.md): setting declarations, defaults, derivations,
+  fixed-value contracts, validation, carriers, change procedures, capability sizing, settings
+  enforcement.
+- [Cryptography](docs/src/cryptography.md): how Nervix obtains a TLS provider, a digest used for
+  security, a random value or a password or key derivation; a non-approved hash or the purpose a
+  site records for it; a dependency that brings cryptography into the `nervix-server` product graph;
+  the `non_aws_lc_crypto` count.
+- [Execution Plans](docs/src/execution-plans.md): revision construction; typed node, resource,
+  source, emitter, processor or message-error plans; schedule-delta application; graph publication;
+  plan-based recovery.
+- [Architecture Rules And The Debt Ratchet](docs/src/architecture-enforcement.md): the contract
+  matrix, source contracts, analysis toolchain, workaround audit and ratchet summarized in
+  [Architecture Rules and the Debt Ratchet](#architecture-rules-and-the-debt-ratchet).
+- [Coverage Reports And The Complexity Gate](docs/src/coverage-reports.md): coverage producers and
+  exports, source mapping and exclusions, ordinary report ownership, merge records and integrity
+  verdicts, patch coverage, the advisory CRAP report, the full workspace union, the mandatory
+  complexity count.
+- [Property Testing And Fuzzing](docs/src/property-testing-and-fuzzing.md): the Bolero target
+  register and documentation-only CI selection.
+- [Integration Test Lifecycle](docs/src/integration-test-lifecycle.md): how the harness starts,
+  observes, diagnoses or stops in-process nodes, server processes, scenarios or the whole run; a
+  harness budget or the measurement it is derived from; the CI job that runs the suite.
+- [Deterministic Interconnect Simulation](docs/src/interconnect-simulation.md): the `turmoil` build
+  mode or its dependency and scheduler-conflict checks; the socket, certificate-clock, entropy or
+  CPU-execution seams the simulation plugs into; the runner, the scenario driver, failure records
+  and replay; a simulation scenario or its committed seeds and bounds; the Turmoil recipes or the CI
+  job that runs them.
+- [External Cluster Chaos](docs/src/cluster-chaos.md): `scripts/chaos`, its Compose deployment,
+  fixtures, tool image pins, verifiers or self-tests; the chaos recipes in the `justfile`; the
+  `Chaos` workflow or the chaos and diagnostic-image jobs of the `Docker Build` workflow. The
+  product contracts its scenarios verify stay with their own chapters.
+- [Developing Nervix](docs/src/developing-nervix.md#ci-labels): every label that changes what CI
+  runs.
 
 ## Language and Model Invariants
 
 ### Structured semantics
 
-- Every executable expression is a structured Model: filters, assignments, inheritance,
-  `VALUES`, invocations, ordering, deduplication keys, correlations, window expressions,
-  inferencer mappings, and error mappings.
-- Models preserve every semantically significant order, including routes, assignments,
-  invocations, and materialized-state dependencies.
-- Do not introduce a second public parser AST, raw-expression compatibility fields, or runtime
-  parser adapters.
-- Persisted Models may break, and previously written data must fail clearly and be recreated. See
-  [Alpha Stability and Compatibility](#alpha-stability-and-compatibility) for what that forbids in
-  code and tests.
+- Every executable expression is a structured Model: filters, assignments, inheritance, `VALUES`,
+  invocations, ordering, deduplication keys, correlations, window expressions, inferencer mappings
+  and error mappings.
+- Models preserve every semantically significant order, including routes, assignments, invocations
+  and materialized-state dependencies.
 
 ### Types and sensitivity
 
 - All schemaful operations are exact-type operations. Implicit casts, parsing, stringification,
-  numeric widening or narrowing, datetime/string interchange, and wire/internal coercions are
+  numeric widening or narrowing, datetime/string interchange and wire/internal coercions are
   forbidden.
-- Nullability is part of the type contract. Required uninitialized fields are errors; optional
+- Nullability is part of the type contract: required uninitialized fields are errors, and optional
   uninitialized fields finalize as typed nulls.
-- Sensitivity may be promoted but never downgraded implicitly.
-- External emission of sensitive values requires explicit leakage, including codec payloads,
-  direct `VALUES`, inherited fields, and written headers.
-- Multiple ordinary inputs to one processor must reference the same declared schema Model. They
-  must also share the exact named branch, or all be unbranched. Correlators apply the same rule
-  independently to the left and right sides.
+- Sensitivity may be promoted but never downgraded implicitly. External emission of a sensitive
+  value requires explicit leakage, including codec payloads, direct `VALUES`, inherited fields and
+  written headers.
+- Multiple ordinary inputs to one processor reference the same declared schema Model, and they share
+  the exact named branch or are all unbranched. Correlators apply the same rule independently to the
+  left and right sides.
 
 ### Construction
 
-- Construction is route-local. There is no global `SET`, global `INHERIT`, or implicit input
-  identity transformation.
+- Construction is route-local: there is no global `SET`, global `INHERIT` or implicit input identity
+  transformation.
 - Transforming routes begin empty and may use `INHERIT` and ordered `SET`.
-- Generated and other set-only routes begin empty, do not support `INHERIT`, and must explicitly
+- Generated and other set-only routes begin empty, do not support `INHERIT`, and explicitly
   initialize required outputs. Generated state is immutable and independent for every route.
-- During normal set-only construction, inferencers and WASM processors do not expose `message` or
+- During normal set-only construction, inferencers and WASM processors expose neither `message` nor
   `input`; additional schema-backed data comes from declared materialized state.
 - Window output is set-only. Live `input` values are available only inside aggregate arguments,
-  although aggregate calls may participate in larger scalar expressions. Aggregates may not be
-  nested inside aggregates.
+  although aggregate calls may participate in larger scalar expressions; aggregates never nest
+  inside aggregates.
 - Correlators use explicit `left` and `right` scopes and never expose an ambiguous default input.
-- Relay names are graph references, never top-level field qualifiers. Materialized state is the
-  explicit exception through the `relay_state.<relay>.<field>` namespace.
+- Relay names are graph references, never top-level field qualifiers; materialized state is the
+  explicit exception, through the `relay_state.<relay>.<field>` namespace.
 
 ### Branches
 
-- Unbranched execution is represented by an absent branch key. A concrete branch key is non-empty
-  and typed. Never encode unbranched execution with an empty string, empty map, zero-field schema,
-  synthetic root branch, or reserved user identifier.
+- Unbranched execution is an absent branch key; a concrete branch key is non-empty and typed. Never
+  encode unbranched execution with an empty string, empty map, zero-field schema, synthetic root
+  branch or reserved user identifier.
 - Ingestors construct outgoing branches route by route.
 - Reingestors are branch-boundary nodes: each route may preserve the incoming branch, construct a
-  different branch, or become unbranched.
-- Junctions, deduplicators, reorderers, window processors, inferencers, WASM processors,
-  correlators, and generators preserve branch identity. Their branch declaration is node-wide and
-  every input and output must use that exact named branch.
+  different branch or become unbranched.
+- Junctions, deduplicators, reorderers, window processors, inferencers, WASM processors, correlators
+  and generators preserve branch identity. Their branch declaration is node-wide, and every input
+  and output uses that exact named branch.
 - Emitters collapse branch identity only at the successful external boundary. They consume every
   concrete source branch but do not expose branch fields as expression values.
-- Normal processors must never subscribe to a mixed logical relay, combine branch keys, share
-  mutable processing state across branches, or publish through a fallback that bypasses concrete
-  branch routing.
-- Error routes preserve the branch in which the failed operation executed. Their target relay must
-  have the same exact branch declaration; ingestor errors are unbranched.
+- Normal processors never subscribe to a mixed logical relay, combine branch keys, share mutable
+  processing state across branches, or publish through a fallback that bypasses concrete branch
+  routing.
+- Error routes preserve the branch in which the failed operation executed, and their target relay
+  has the same exact branch declaration; ingestor errors are unbranched.
 
 ### Materialized state
 
-- Materialized dependencies are explicit, node-wide, same-domain, and compatible with the node's
-  exact branch. State is never scanned across branches.
+- Materialized dependencies are explicit, node-wide, same-domain and compatible with the node's
+  exact branch; state is never scanned across branches.
 - Dependency declarations execute strictly in written order. Available state binds immediately;
   defaults bind typed constant records; `REQUIRED SKIP` skips the message; `REQUIRED WAIT` retains
-  it in memory and applies backpressure. Resolution restarts from the first declaration after a
-  wait wakes.
-- Duplicate dependencies are invalid. Defaults must initialize every required field; omitted
-  optional fields become typed nulls.
-- Individual materialized records may become ready and update independently, but eviction occurs
-  for the whole concrete branch and drops its suspended or buffered branch-local work.
+  it in memory and applies backpressure, and resolution restarts from the first declaration after
+  the wait wakes.
+- Duplicate dependencies are invalid. Defaults initialize every required field; omitted optional
+  fields become typed nulls.
+- Individual materialized records may become ready and update independently, but eviction removes
+  the whole concrete branch and drops its suspended or buffered branch-local work.
 - Ingestors cannot access materialized state. Reingestors resolve state in the incoming branch,
   never a partially constructed outgoing branch.
-- A generator declares exactly one materialized relay using the simplified dependency form. Branch
-  appearance starts a branch-local generator task; branch eviction drops the task and buffered
+- A generator declares exactly one materialized relay in the simplified dependency form. A branch's
+  appearance starts a branch-local generator task, and its eviction drops the task and its buffered
   output. Generators may have multiple routes, all preserving that source branch.
 
 ### Flush and route errors
 
-- `FLUSH` and `ON MESSAGE ERROR` are route-local contracts.
+- `FLUSH` and `ON MESSAGE ERROR` are route-local contracts; a general or global error policy is
+  node-wide.
 - Every flush-based route requires either `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or
-  `FLUSH IMMEDIATE`. Hidden defaults and optional fallback cadences are forbidden.
-- Emitters always require a flush policy. Iceberg also requires an explicit commit cadence and
-  maximum commit size.
-- Window processors use `WIDTH` and `STEP` instead of `FLUSH`.
-- WASM processors are not Nervix flush-based nodes; guest output and guest-requested timeouts own
-  their emission cadence.
-- General or global error policy is node-wide.
+  `FLUSH IMMEDIATE`; hidden defaults and optional fallback cadences are forbidden. Emitters always
+  require a flush policy, and Iceberg also requires an explicit commit cadence and maximum commit
+  size. Window processors use `WIDTH` and `STEP` instead of `FLUSH`. WASM processors are not
+  flush-based: guest output and guest-requested timeouts own their emission cadence.
 - Message errors are structured and carry a stable reference, code, operation, affected fields,
-  timestamp, and non-sensitive message. Error handlers may inspect the original eligible input,
-  the exact captured materialized-state snapshot, and an all-optional `partial_output` view.
-- Error handling must not recursively invoke the same policy when constructing the error record
-  fails.
+  timestamp and non-sensitive message. Error handlers may inspect the original eligible input, the
+  exact captured materialized-state snapshot and an all-optional `partial_output` view.
+- Error handling never recursively invokes the same policy when constructing the error record fails.
 
 ### Connector envelopes and subscriptions
 
-- Header capabilities are connector-owned. Preserve the existing `read_header`, `read_headers`,
-  and `write_header` semantics of each underlying system; do not introduce generic envelope
-  extraction or injection abstractions.
-- Header values do not propagate through relays unless copied into schema-backed fields.
+- Header capabilities are connector-owned: preserve each underlying system's `read_header`,
+  `read_headers` and `write_header` semantics, with no generic envelope extraction or injection
+  abstraction. Header values do not propagate through relays unless copied into schema-backed
+  fields.
 - Kafka ingestion metadata remains a typed integration-specific scope.
-- Session subscriptions retain their existing creation, deletion, delivery, sampling, and
-  backpressure semantics. They are read-only filtered views and do not support construction,
-  inheritance, values, or side effects.
-
-## Node Settings
-
-- A setting exists as a field of a class-typed group. Its `SettingDefinition` declares exactly
-  one sealed class (`Prerequisites`, `ClusterParameters` or `NodeCapabilities`), its semantic
-  value, name, single default, optional derivation and validation. Groups carry `Setting<D>`
-  fields; explicit values and defaults cross the same typed validation boundary.
-- A prerequisite is what a node must bring to reach the live cluster; it travels through gossip
-  and the handshake and is checked at join. [Node Settings](docs/src/node-settings.md) owns the
-  closed list and timing bounds. Nothing needed to reach the cluster depends on what it can
-  learn only after reaching it.
-- A cluster parameter is what the cluster accepts or promises. It has one Raft-committed value,
-  seeded only at first bootstrap and changed by an administrative Plexus statement. A value
-  the registry validates against is never an independent node flag.
-- A node capability is what one node can carry. It is detected or overridden locally and
-  announced through Raft; peers honour its bounds and placement uses its committed record.
-  It changes no cluster acceptance rule or guarantee.
-- Derived values are named methods on their owner, never flags. Defaults are written once in
-  the owning definition. Dependent defaults remain `Option` at the edge until resolved against
-  typed context. Validate operator-supplied relationships before I/O and transitions at commit.
-- A fixed constant declares `nervix::constant(fixed, reason = "...")`, gated with
-  `cfg_attr(nervix_lint, ...)`; the reason names the wire format, RFC, persisted layout, ABI or
-  invariant that fixes it. A convenient literal is not a fixed-value contract.
-- Values depending on the external system are clauses or declared client keys in that
-  connector's Plexus surface, owned by its connector epic; node settings own host policy.
-- Changes remain correct during a rolling restart in any order, take full effect when the
-  last node adopts them, and support the same rollback in reverse. Only prerequisites reject
-  incompatible peers. Mixed operational values within one current shape obey the alpha
-  one-shape rule; they introduce no alternate data representation.
-- Flags use `--<area>-<name>` and `NERVIX_<AREA>_<NAME>`. Resolved settings are observable with
-  secrets redacted, including per-node capabilities and committed-versus-running drift.
-- The temporary `hidden_tunables` source count only decreases while area owners adopt the
-  declarations. It counts governed numeric constants and literal policy calls outside class
-  defaults and reviewed fixed contracts. Its compiler-rule replacement removes the detector
-  and numeric baseline entry together.
-
-## Cryptography
-
-These rules bind every change from the moment they land, including work in flight on other
-branches and in other epics. [Cryptography](docs/src/cryptography.md) owns the boundary, the
-algorithm policy, the classification register and the inventory they refer to.
-
-- Nervix-authored cryptography comes only from the `nervix-crypto` boundary: the TLS provider,
-  digests used for security, secure randomness, and password and key derivation. Until that crate
-  exists, the boundary is the target and every authored use outside it is debt the
-  `non_aws_lc_crypto` count records.
-- Anything that protects confidentiality, integrity or authenticity uses an algorithm AWS-LC
-  provides and FIPS 140-3 approves.
-- A non-approved hash (BLAKE3, MD5, SHA-1, xxHash, CRC) is allowed only for a non-security
-  purpose. The site records that purpose, and the cryptography chapter lists it.
-- No change adds a dependency that brings a cryptography implementation other than AWS-LC into the
-  `nervix-server` product graph. A connector need that cannot be met is recorded on its connector
-  epic.
-- A second `aws-lc-*-sys` crate in the product, or a second version of one, is a defect, and
-  `just ratchet` refuses it. An upgrade of `aws-lc-rs` that moves to another `aws-lc-sys` moves
-  Nervix's `rust-rdkafka` fork to it in the same change.
-- The `non_aws_lc_crypto` count only decreases. It counts authored uses of cryptography outside
-  AWS-LC, found by the stable source parser in every configuration, and each dependency edge of the
-  `nervix-server` normal and build graph onto a crate implementing cryptography other than AWS-LC.
-  `just ratchet --show non_aws_lc_crypto` lists every site; the chapter defines what counts.
-
-## Maintained Implementations
-
-A protocol, format, encoding or algorithm that someone else specifies has exactly two acceptable
-implementations in Nervix: a maintained implementation of it, or a custom implementation that
-meets the bar below. This covers network protocols and their handshakes, message and file formats,
-text and binary encodings, escaping and quoting rules, compression, and standard algorithms: HTTP,
-WebSocket, TLS, DNS, URLs, MIME and multipart, JSON, CSV, base64, percent-encoding, RFC 3339 dates
-and their peers. What Nervix never carries is the third form: an ad hoc fragment written inline
-where it is needed. Such a fragment handles the cases its author tried, speaks one version or
-variant at best, and repeats the parsing, framing, escaping, smuggling and security defects a
-maintained or deliberately built implementation has already found and fixed. These rules bind
-every change from the moment they land, including work in flight on other branches.
-
-The following are defects, not style preferences. Treat any of them as a change to reject, however
-small the piece is, unless it is part of an approved custom implementation:
-
-- Producing the wire or text syntax of a specified contract inline, whether by string
-  concatenation, `format!`, `write!`, `push_str`, byte literals, `extend_from_slice` or joining
-  delimiters.
-- Parsing it inline: splitting on its delimiters, scanning for its terminators, matching its
-  keywords or reading it line by line in place of its parser.
-- Implementing the subset a caller needs today: one version, one variant, the common case, or no
-  escaping, continuation, extension, error or limit handling.
-- Re-implementing framing, escaping, checksums, handshakes or negotiation that the implementation
-  in use already performs, or post-processing its output to change what it produced.
-- Pinning a contract to one version or variant that its implementation could negotiate, without a
-  documented contract that requires it.
-
-No justification makes an ad hoc fragment acceptable: not that it is minimal, internal, used at
-one site, temporary, only a probe or faster; not that a maintained implementation is a heavier
-dependency or a larger change; not that the code beside it already does it. Use the maintained
-implementation the workspace already depends on; otherwise add a maintained crate, within the
-[Cryptography](#cryptography) dependency rules; where a maintained crate falls short, fix it
-upstream or in a fork the repository maintains.
-
-A custom implementation is legitimate when no maintained implementation can express the contract,
-or when one costs what a measurement shows the product cannot afford. It is a deliberate piece of
-engineering and receives the attention one deserves. It meets all four of these conditions before
-any caller uses it:
-
-1. **Isolated.** It lives in one owning crate or module whose ownership contract names the
-   specification it implements, and nothing else in Nervix produces or parses that syntax. Callers
-   reach it only through its API.
-2. **Tested.** It ships with Bolero properties for every encoding it owns, as
-   [Test-first changes](#test-first-changes) requires, with unit tests against the specification's
-   own examples and edge cases, malformed-input targets for every parser, and differential tests
-   against a reference implementation where one exists, even if that implementation is not used in
-   the product.
-3. **Properly abstracted.** Its API exposes the contract's typed concepts, such as messages,
-   fields, states and errors, never raw syntax. It states which version, variants and extensions it
-   supports and rejects everything else with a typed error instead of guessing. It owns its limits
-   and bounds every allocation and wait. Its scope is the complete contract it states, never the
-   subset one caller needs.
-4. **Approved by the human directing the session.** Before it is written, the agent stops and
-   reports the contract, why no maintained implementation fits, with evidence, and the scope the
-   implementation will state. The approval is recorded on the owning ClickUp task. Approval for one
-   contract or scope does not extend to another, and a later change that widens its scope needs its
-   own approval.
-
-A contract Nervix itself owns is not someone else's: Plexus, the client session protocol, the
-interconnect, stored and archive shapes. Each has one owning implementation built on maintained
-lower layers, such as FlatBuffers, rkyv and Arrow, and the owning chapter specifies it. Connector
-codecs that decode into Arrow builders, as [Columnar data plane](#columnar-data-plane) requires,
-take the syntax of the external format from a maintained parser or tokenizer, or from an approved
-custom one, and own only the mapping into columns.
-
-Only a test fixture may write or parse a specified contract's bytes inline, and only to exercise
-how the code under test handles exact or deliberately malformed input: a scripted HTTP, Redis or
-NATS peer, for example. A test fixture is code no product build compiles: a file under `tests/`,
-or a `#[cfg(test)]` module or file. Code a product build compiles is never a fixture, whatever it
-is named, and product code never calls one.
-
-An ad hoc fragment that already exists in product code is debt to replace, recorded as a defect on
-ClickUp. It is never extended, copied or cited as precedent. An existing custom implementation that
-does not meet all four conditions is debt in the same way until it does.
-
-### HTTP
-
-HTTP is the contract agents most often hand-write, and the rule above applies to it as follows.
-Nervix speaks HTTP through `reqwest`, or `hyper` where `reqwest` cannot express a contract, with
-`hyper-util` and `tower-http` for what they provide, and `tokio-tungstenite` for a WebSocket
-handshake. Nervix has no approved custom HTTP implementation, so nothing below `hyper` speaks HTTP;
-one would need all four conditions above, and `hyper` leaves little that could justify it. These
-are defects:
-
-- A request line, status line or header block assembled inline, or a head parsed inline by
-  splitting on `\r\n` or `:`, scanning for `\r\n\r\n`, reading lines until a blank one, or
-  calling `httparse` directly.
-- Inline body framing: counting `Content-Length`, encoding or decoding chunks, or reading to
-  connection close in place of the stack's body.
-- An inline `CONNECT` tunnel, proxy exchange, `Upgrade` handshake or `Sec-WebSocket-Accept`
-  derivation.
-- A client pinned to one protocol version without a documented contract that requires it. A client
-  negotiates every version its stack supports, HTTP/2 through ALPN included.
-- A redirect followed by rewriting the request or its connection in place. A redirect a contract
-  follows is a new request through the same stack.
-
-Establishing the connection a contract needs stays below the HTTP layer and is not HTTP: dialling
-through the node resolver within a budget, or TLS through `tokio-rustls`. It hands its stream to
-`hyper`, and `hyper` speaks every byte of HTTP on it. Only the `nervix-scenarios` package rooted
-at `tests/` depends on `httparse`; a product crate that adds it is a defect.
+- Session subscriptions keep their creation, deletion, delivery, sampling and backpressure
+  semantics. They are read-only filtered views without construction, inheritance, values or side
+  effects.
 
 ## Runtime and Infrastructure Invariants
 
 ### Columnar data plane
 
 - Arrow columnar batches are the only data-plane payload representation, end to end: ingest
-  decoding, relay carriage, VM input and output, stateful processor state, error handling,
-  emission, sessions, and interconnect. A batch with one row is still a batch.
-- Do not introduce, reintroduce, or extend row-oriented payload representations: no
-  `HashMap`-of-fields records, no per-row boxed value maps, no dual row-plus-column carriers kept
-  in sync. Where a single message must be addressed, use a row view over an Arc'd Arrow batch
-  (batch reference plus row index), never a materialized row copy.
+  decoding, relay carriage, VM input and output, stateful processor state, error handling, emission,
+  sessions and interconnect. A batch with one row is still a batch.
+- No row-oriented payload representation is introduced, reintroduced or extended: no
+  `HashMap`-of-fields records, per-row boxed value maps or dual row-plus-column carriers kept in
+  sync. A single message is addressed through a row view over an Arc'd Arrow batch (a batch
+  reference plus a row index), never a materialized row copy.
 - Scalar value enums are permitted only for genuinely scalar concerns: branch keys, literals,
-  configuration, and boundary key extraction. They are never a payload container.
-- Program inputs are built by projection: reuse the carrier batch's Arc'd columns and construct
-  only genuinely new columns (uninitialized outputs, broadcast state, computed lookups).
+  configuration and boundary key extraction. They are never a payload container.
+- Program inputs are built by projection: reuse the carrier batch's Arc'd columns and construct only
+  genuinely new columns, such as uninitialized outputs, broadcast state and computed lookups.
   Rebuilding a column from row data that already exists in columnar form is a defect.
 - Wire codecs decode directly into typed Arrow builders and encode directly from column values at
-  the external boundary. Decoded intermediate row maps are forbidden.
+  the external boundary, with no decoded intermediate row maps.
 
 ### Ownership and execution policy
 
-- The type or crate that owns a dangerous operation must expose one public API that enforces its
-  execution policy. Do not leave unsafe synchronous or reactor-blocking alternatives publicly
-  callable beside a safe wrapper.
-- Callers must not choose blocking, yielding, batching, throttling, or similar safety behavior
-  unless it is an explicit typed part of the operation's contract.
-- In async code, a loop whose body performs async work must call
-  `nervix_primitives::task::consume_budget().await` once per iteration near the top of the loop
-  body.
+- The type or crate that owns a dangerous operation exposes one public API enforcing its execution
+  policy, with no unsafe synchronous or reactor-blocking alternative publicly callable beside it.
+  Callers never choose blocking, yielding, batching, throttling or similar safety behavior unless it
+  is an explicit typed part of the operation's contract.
+- In async code, a loop whose body performs async work calls
+  `nervix_primitives::task::consume_budget().await` once per iteration, near the top of the body.
 - State that changes for every record, row, batch, remote frame or acknowledgement has exactly one
   mutable owner: a task, a concrete branch, a delivery channel or a source attempt. The owner keeps
   it in ordinary collections and uses their `entry` API freely; exclusive ownership does not pin the
-  task to an operating-system thread. When other tasks must observe that state, the owner publishes
-  an immutable value of it when it changes, and observers read the publication, never the owner's
-  collection.
-- A recurring record, batch, remote-frame, acknowledgement or steady-poll path does not reach a
-  shared concurrent map, whether through `entry` or through a borrowed `get`, `contains_key` or
-  iteration: a borrowed DashMap read takes a shard lock too. It retains the handle resolved when its
-  task, branch, channel or attempt was created. Registration, first installation, replacement,
-  teardown and observer reads are cold paths and are classified separately. Hot-path
-  synchronization that remains is an ordering fence or bounded protocol named in
-  [Data-Plane Concurrency](docs/src/data-plane-concurrency.md), with the key that scopes it and the
-  capacity or deadline that bounds its wait.
+  task to an operating-system thread. Other tasks observe it only through an immutable value the
+  owner publishes when it changes, never through the owner's collection.
+- A recurring record, batch, remote-frame, acknowledgement or steady-poll path never reaches a
+  shared concurrent map, through `entry` or a borrowed `get`, `contains_key` or iteration (a
+  borrowed DashMap read takes a shard lock too); it keeps the handle resolved when its task, branch,
+  channel or attempt was created. Registration, first installation, replacement, teardown and
+  observer reads are cold paths, classified separately. Hot-path synchronization that remains is an
+  ordering fence or bounded protocol named in [Data-Plane
+  Concurrency](docs/src/data-plane-concurrency.md), with the key that scopes it and the capacity or
+  deadline that bounds its wait.
+- Prefer `nervix_primitives::collections::DashMap` over `Arc<Mutex<HashMap<...>>>` for a map that is
+  justifiably shared, because several owners register into it or observers read it across owners,
+  and whose accesses stay off recurring data-plane paths. State one owner mutates stays in an
+  ordinary collection that owner holds.
 
 ### Domains and external systems
 
-- Domains are explicit and must already exist. There is no implicit, default, or auto-created
-  runtime domain.
-- All entities are domain-owned. A globally scoped legacy lookup is technical debt, not desired
-  behavior.
-- Nervix must not create broker topics, queues, streams, database objects, object-store objects,
-  catalogs, namespaces, tables, buckets, or collections as a side effect of node startup or data
-  processing.
-- External entities must be provisioned explicitly by test setup, deployment policy, or operator
-  action. Missing entities surface as initialization or publish errors.
+- Domains are explicit and must already exist: there is no implicit, default or auto-created runtime
+  domain. All entities are domain-owned; a globally scoped legacy lookup is technical debt, not
+  desired behavior.
+- Nervix never creates broker topics, queues, streams, database objects, object-store objects,
+  catalogs, namespaces, tables, buckets or collections as a side effect of node startup or data
+  processing. External entities are provisioned explicitly by test setup, deployment policy or
+  operator action, and a missing one surfaces as an initialization or publish error.
 
 ### Observability
 
-- `info` is reserved for lifecycle, topology, startup, shutdown, administration, and unusual state
-  transitions.
-- Per-message, per-record, per-batch, payload-bearing, duplicate-drop, and branch-churn details
-  belong at `debug` or `trace`.
-- Hot-path logs and structured errors must not expose sensitive payload values.
+- `info` is reserved for lifecycle, topology, startup, shutdown, administration and unusual state
+  transitions. Per-message, per-record, per-batch, payload-bearing, duplicate-drop and branch-churn
+  details belong at `debug` or `trace`.
+- Hot-path logs and structured errors never expose sensitive payload values.
+
+## Node Settings
+
+- A setting is a field of a class-typed group, declared by a `SettingDefinition` with exactly one
+  sealed class (`Prerequisites`, `ClusterParameters` or `NodeCapabilities`), its semantic value,
+  name, single default, optional derivation and validation. Groups carry `Setting<D>` fields, and
+  explicit values and defaults cross the same typed validation boundary.
+- A **prerequisite** is what a node must bring to reach the live cluster. It travels through gossip
+  and the handshake and is checked at join, and nothing needed to reach the cluster depends on what
+  a node learns only after reaching it. [Node Settings](docs/src/node-settings.md) owns the closed
+  list and timing bounds.
+- A **cluster parameter** is what the cluster accepts or promises: one Raft-committed value, seeded
+  only at first bootstrap and changed by an administrative Plexus statement. A value the registry
+  validates against is never an independent node flag.
+- A **node capability** is what one node can carry: detected or overridden locally and announced
+  through Raft, with its bounds honoured by peers and its committed record used by placement. It
+  changes no cluster acceptance rule or guarantee.
+- Derived values are named methods on their owner, never flags. Defaults are written once, in the
+  owning definition, and dependent defaults stay `Option` at the edge until resolved against typed
+  context. Operator-supplied relationships are validated before I/O, and transitions at commit.
+- A fixed constant declares `nervix::constant(fixed, reason = "...")` under
+  `cfg_attr(nervix_lint, ...)`, with a reason naming the wire format, RFC, persisted layout, ABI or
+  invariant that fixes it; a convenient literal is not a fixed-value contract.
+- A value that depends on the external system is a clause or declared client key of the connector's
+  Plexus surface, owned by its connector epic; node settings own host policy.
+- A settings change stays correct through a rolling restart in any order, takes full effect when the
+  last node adopts it, and rolls back the same way in reverse. Only prerequisites reject
+  incompatible peers, and mixed operational values within the current shape introduce no alternate
+  data representation.
+- Flags are `--<area>-<name>` and `NERVIX_<AREA>_<NAME>`. Resolved settings are observable with
+  secrets redacted, including per-node capabilities and committed-versus-running drift.
+- The temporary `hidden_tunables` count, of governed numeric constants and literal policy calls
+  outside class defaults and reviewed fixed contracts, only decreases as area owners adopt the
+  declarations; its compiler-rule replacement removes the detector and the baseline entry together.
+
+## Cryptography
+
+[Cryptography](docs/src/cryptography.md) owns the boundary, the algorithm policy, the classification
+register and the inventory these rules refer to.
+
+- Nervix-authored cryptography (the TLS provider, digests used for security, secure randomness,
+  password and key derivation) comes only from the `nervix-crypto` boundary. Until that crate exists
+  it is the target, and every authored use outside it is debt the `non_aws_lc_crypto` count records.
+- Anything that protects confidentiality, integrity or authenticity uses an algorithm AWS-LC
+  provides and FIPS 140-3 approves.
+- A non-approved hash (BLAKE3, MD5, SHA-1, xxHash, CRC) is allowed only for a non-security purpose,
+  which the site records and the chapter lists.
+- No change adds a dependency that brings a cryptography implementation other than AWS-LC into the
+  `nervix-server` product graph; a connector need that cannot be met is recorded on its connector
+  epic.
+- A second `aws-lc-*-sys` crate in the product, or a second version of one, is a defect that
+  `just ratchet` refuses. An `aws-lc-rs` upgrade that moves to another `aws-lc-sys` moves Nervix's
+  `rust-rdkafka` fork to it in the same change.
+- The `non_aws_lc_crypto` count only decreases. It counts authored uses of cryptography outside
+  AWS-LC, found by the stable source parser in every configuration, and each dependency edge of the
+  `nervix-server` normal and build graph onto a crate implementing other cryptography;
+  `just ratchet --show non_aws_lc_crypto` lists every site.
+
+## Maintained Implementations
+
+A protocol, format, encoding or algorithm someone else specifies, such as HTTP, WebSocket, TLS, DNS,
+URLs, MIME and multipart, JSON, CSV, base64, percent-encoding and RFC 3339 dates, with their
+handshakes, escaping and quoting rules and compression, has two acceptable implementations: a
+maintained one, or an approved custom one. It is never an ad hoc fragment written inline where it is
+needed. Outside an approved custom implementation, these are defects however small:
+
+- Producing its wire or text syntax inline: string concatenation, `format!`, `write!`, `push_str`,
+  byte literals, `extend_from_slice` or joined delimiters.
+- Parsing it inline: splitting on its delimiters, scanning for its terminators, matching its
+  keywords or reading it line by line in place of its parser.
+- Implementing the subset a caller needs today: one version or variant, the common case, or no
+  escaping, continuation, extension, error or limit handling.
+- Re-implementing framing, escaping, checksums, handshakes or negotiation the implementation in use
+  already performs, or post-processing its output to change what it produced.
+- Pinning one version or variant its implementation could negotiate, without a documented contract
+  that requires it.
+
+No justification makes a fragment acceptable: not that it is minimal, internal, single-site,
+temporary, a probe or faster; not that the maintained implementation is a heavier dependency or a
+larger change; not that nearby code already does it. Use the maintained implementation the workspace
+depends on, otherwise add a maintained crate within the [Cryptography](#cryptography) rules, and fix
+one that falls short upstream or in a fork the repository maintains.
+
+A custom implementation is legitimate only when no maintained one can express the contract, or a
+measurement shows one costs what the product cannot afford, and only once it is:
+
+1. **Isolated** in one owning crate or module whose ownership contract names the specification:
+   nothing else in Nervix produces or parses that syntax, and callers reach it only through its API.
+2. **Tested** with Bolero properties for every encoding it owns ([Property tests and
+   fuzzing](#property-tests-and-fuzzing)), unit tests from the specification's examples and edge
+   cases, malformed-input targets for every parser, and differential tests against a reference
+   implementation where one exists, used by the product or not.
+3. **Properly abstracted**: its API exposes typed concepts such as messages, fields, states and
+   errors, never raw syntax; it states its version, variants and extensions and rejects everything
+   else with a typed error; it owns its limits and bounds every allocation and wait; and its scope
+   is the complete contract it states, never one caller's subset.
+4. **Approved** by the human directing the session before it is written, on a report of the
+   contract, the evidence that no maintained implementation fits, and the scope. The approval is
+   recorded on the owning ClickUp task and covers only that contract and scope, so widening it needs
+   a new approval.
+
+Contracts Nervix owns (Plexus, the client session protocol, the interconnect, stored and archive
+shapes) each have one owning implementation on maintained lower layers such as FlatBuffers, rkyv and
+Arrow, specified by its chapter. Connector codecs that decode into Arrow builders, as the [columnar
+data plane](#columnar-data-plane) requires, take the external syntax from a maintained or approved
+parser or tokenizer and own only the mapping into columns.
+
+Only a test fixture, meaning code no product build compiles (a file under `tests/`, or a
+`#[cfg(test)]` module or file, whatever its name), may write or parse a specified contract's bytes
+inline, and only to give the code under test exact or deliberately malformed input, such as a
+scripted HTTP, Redis or NATS peer; product code never calls one. An existing ad hoc fragment in
+product code, or a custom implementation that misses a condition, is debt recorded as a defect on
+ClickUp, never extended, copied or cited as precedent.
+
+### HTTP
+
+Nervix speaks HTTP through `reqwest`, or `hyper` where `reqwest` cannot express a contract, with
+`hyper-util` and `tower-http` for what they provide and `tokio-tungstenite` for WebSocket
+handshakes. There is no approved custom HTTP implementation, so nothing below `hyper` speaks HTTP.
+Defects:
+
+- A request line, status line or header block assembled inline, or a head parsed inline by splitting
+  on `\r\n` or `:`, scanning for `\r\n\r\n`, reading lines to a blank one, or calling `httparse`
+  directly.
+- Inline body framing: counting `Content-Length`, encoding or decoding chunks, or reading to
+  connection close.
+- An inline `CONNECT` tunnel, proxy exchange, `Upgrade` handshake or `Sec-WebSocket-Accept`
+  derivation.
+- A client pinned to one protocol version without a documented contract requiring it, instead of
+  negotiating every version its stack supports, HTTP/2 through ALPN included.
+- A redirect followed by rewriting the request or its connection in place, instead of issuing a new
+  request through the same stack.
+
+Dialling through the node resolver within a budget and TLS through `tokio-rustls` sit below HTTP and
+hand their stream to `hyper`, which speaks every byte of HTTP on it. Only `nervix-scenarios`, rooted
+at `tests/`, depends on `httparse`.
 
 ## Failure Handling and Panics
 
 ### Typed error conversions
 
-- Converting a `Result<T, String>` signature means returning `error_stack::Result<T, E>`, where
-  `E` is a semantic `thiserror` enum owned by the module that decides what the failure means. A
-  bare `Result<T, E>` does not carry the contextual `Report` required by this contract.
-- Extend the owning module's existing error enum when one already represents the operation. A
-  second error enum for the same failure is a duplicate to remove. Propagation adds context with
-  `error-stack`; `anyhow` remains limited to boundaries where callers cannot make a semantic
-  choice.
-- Error variants carry the values a caller can act on as typed fields, not a preformatted `String`
-  reason. Validation failures identify the owning node, the route when the contract is
-  route-local, the operation, and the relevant fields. They never carry sensitive payload values.
-- Hot-path errors do not allocate a formatted message per row or per batch when the variant already
-  names the failure. Formatting belongs at the reporting boundary.
-- A report is created at the failure, and each layer that changes its meaning adds its own context
-  with `change_context` above the report it received. Never format a cause into a `String` field,
-  and never clone `current_context()` to satisfy a signature. A fixed wire, ABI, stored or public
-  outcome is projected from the report only where that outcome is constructed.
-- A context names its own operation and does not print its `#[source]`: `error-stack` records the
-  source as the frame beneath, so printing it repeats the cause in the rendered chain. A context
-  does not repeat a node or a domain that a context above it names.
-- A reporting boundary renders a report with `{error:#}`. Plain `Display`, `to_string` and a
-  `%error` tracing field show only the outermost context, and an attachment is not part of the
-  rendered chain. A tracing field records a report as `%format_args!("{error:#}")`; the resolved
-  `nervix::partial_report_field` compiler diagnostic in `just ratchet` rejects one that records a
-  report by its plain `Display`.
-- A decision reads typed data: the report's current context, a typed context beneath it, or a typed
-  field. It never reads rendered text.
-- A foreign trait that accepts only a standard error receives one that holds the whole report,
-  never a clone of the report's current context.
-- Text that names a concrete branch names it through the runtime's `BranchScope`, by the
-  fingerprint of its key, never by the key's field values.
-- `Result<_, String>` is rejected outright in product code. `just validate-typed-errors`, part of
-  `just validate`, fails on any occurrence and names the rule; there is no baseline to raise. The
-  resolved `nervix::bare_error_signature` compiler diagnostic in `just ratchet` rejects replacing
-  a `String` error with an unreported Nervix failure, including aliases, associated outputs,
-  generic calls and inferred future/stream or closure contracts.
+- Fallible operations return `error_stack::Result<T, E>`, with `E` a semantic `thiserror` enum owned
+  by the module that decides what the failure means; a bare `Result<T, E>` lacks the contextual
+  `Report`. Extend the owning module's enum when one already represents the operation; a second enum
+  for the same failure is a duplicate to remove. `anyhow` is only for boundaries where callers
+  cannot make a semantic choice, and `String` is never a domain error type:
+  `just validate-typed-errors`, in `just validate` with no baseline, rejects `Result<_, String>` in
+  product code, and the `nervix::bare_error_signature` diagnostic rejects replacing a `String` error
+  with an unreported failure, through aliases, associated outputs, generic calls or inferred future,
+  stream and closure contracts included.
+- Variants carry the values a caller can act on as typed fields, never preformatted reasons.
+  Validation failures identify the owning node, the route when the contract is route-local, the
+  operation and the relevant fields, never sensitive payload values. Hot-path errors format no
+  per-row or per-batch message when the variant names the failure; formatting happens at the
+  reporting boundary.
+- A report is created at the failure, and each layer that changes its meaning adds context with
+  `change_context`; never format a cause into a `String` field or clone `current_context()` to
+  satisfy a signature. A context names its own operation and neither prints its `#[source]`, which
+  the frame beneath records, nor repeats a node or domain named above it. Fixed wire, ABI, stored
+  and public outcomes are projected from the report only where they are constructed.
+- A reporting boundary renders `{error:#}`, since plain `Display`, `to_string` and `%error` show
+  only the outermost context and attachments are not part of the chain; a tracing field records a
+  report as `%format_args!("{error:#}")`, which the `nervix::partial_report_field` diagnostic
+  enforces.
+- A decision reads typed data (the current context, a typed context beneath it, a typed field),
+  never rendered text. A foreign trait that accepts only a standard error receives one holding the
+  whole report, never a clone of its current context.
+- Pure conversion refusals, cancellation signals, semantic row, record and wire outcomes and modeled
+  library error contracts carry a reason-bearing `nervix::error_boundary(outcome|library, ...)` at
+  the exact error type or return contract, naming the actual behavior and never inherited from an
+  enclosing callable, module or package; no numeric allowance replaces it ([Errors And
+  Diagnostics](docs/src/errors-and-diagnostics.md)).
+- Text naming a concrete branch uses the runtime's `BranchScope`, the key's fingerprint, never its
+  field values. Parse errors report precise expected and found tokens with renderable source spans,
+  and messages prefer semantic labels to generic ones.
 
 ### Panics and recovery
 
-- Use `meticulous`'s `ResultExt` and `OptionExt` instead of bare `unwrap` and `expect`, and pick the
-  method that states why the failure cannot happen: `assured` for a guarantee that holds by
-  construction or by target platform, `verified` for a condition already checked earlier in the same
-  code, `todo` for a path that is not implemented yet.
-- The reason is part of the call. Write the actual guarantee, not a restatement of the operation:
-  `verified("the has_errors branch above already returned")`, not `verified("parse must succeed")`.
-- Import the traits anonymously with `use meticulous::{OptionExt as _, ResultExt as _};` so they
-  never collide with the `ResultExt` that `error-stack` brings into the same module.
-- A site with no guarantee is a defect, not a renamed `unwrap`. Give it a typed error and propagate
-  it, or make the invariant hold in the type. Never invent a guarantee to retire a panic site.
-- A build script is the exception that stays a panic: a failed code generation is a real build
-  failure, so it panics with its cause rather than claiming a guarantee it does not have.
-- The recovery class has its own vocabulary, in `nervix-recovery`, and `let _ = …` is not part of
-  it. A dropped outcome states no class: it reads the same whether the failure was considered and
-  recovered from or never considered at all. Use `discarded` with the reason that makes dropping it
-  correct, or `reported` where this call is the only witness of the failure.
-- A channel send fails for one reason, that no receiver is left, and that fact means three
-  different things. `means_shutdown` says the receiver stopped with the node, domain, or task it
-  belonged to. `means_peer_left` says the requester, session, or observer withdrew. A receiver held
-  for as long as its sender is a guarantee, not a recovery, so its absence takes `assured` or
-  `verified` and panics.
-- A `watch::Sender` whose value must be current for a later subscriber uses `send_replace`, which
-  stores the value whether or not a receiver exists. `send` leaves the previous value in place when
-  it fails, so discarding its result publishes a stale value to whoever subscribes next.
-- Prefer checked arithmetic and handle the overflow case explicitly. `saturating_*` and
-  `wrapping_*` are correct only where saturation or wrapping is the meaning of the computation
-  itself, such as a clamped backpressure budget, a bounded retry delay, or a hash mixer, and the
-  site says which. They are never a way to avoid deciding what overflow means.
-- Everywhere else compute with `checked_*` and classify the overflow exactly as any other panic
-  site is classified: an operand bound that holds by construction takes `assured` or `verified`
-  with the bound as its reason, and an overflow that a caller, a payload, or a configured limit can
-  actually reach is a typed error.
-- Bare `+`, `-`, and `*` wrap silently in release builds, so they are checked arithmetic in debug
-  only. Sizes, offsets, counters, capacities, and timestamps derived from untrusted or unbounded
-  values use the checked form and say what bounds them.
-- Compile-time constants that participate in a relationship make that relationship executable.
-  Name the independent policy inputs, derive dependent constants with const arithmetic, and add
-  static `const` assertions for constraints the derivation cannot express. A capacity partition,
-  for example, asserts that every required reservation is nonzero, the reservations fit within the
-  owning capacity, and the complete partition equals that capacity. Never align independent magic
-  literals by hand and rely on review to preserve their relationship.
+- Replace bare `unwrap` and `expect` with `meticulous`'s `ResultExt` and `OptionExt`, imported as
+  `use meticulous::{OptionExt as _, ResultExt as _};` to avoid colliding with `error-stack`'s
+  `ResultExt`. The method says why failure cannot happen: `assured` (by construction or target
+  platform), `verified` (checked earlier in the same code) or `todo` (not implemented yet), and its
+  reason states the actual guarantee: `verified("the has_errors branch above already returned")`,
+  not `verified("parse must succeed")`.
+- A site with no guarantee is a defect, not a renamed `unwrap`: propagate a typed error or make the
+  invariant hold in the type, and never invent a guarantee. A build script is the exception and
+  panics with its cause.
+- `let _ = …` states no recovery class. Use `nervix-recovery`'s `discarded` with the reason dropping
+  is correct, or `reported` where the call is the failure's only witness.
+- A failed channel send means no receiver is left: `means_shutdown` when it stopped with its node,
+  domain or task, `means_peer_left` when the requester, session or observer withdrew. A receiver
+  held as long as its sender is a guarantee, so its absence takes `assured` or `verified` and
+  panics.
+- A `watch::Sender` whose value must be current for later subscribers uses `send_replace`; a failed
+  `send` keeps the old value, so discarding its result publishes a stale one.
+- Arithmetic is checked, because bare `+`, `-` and `*` wrap silently in release builds: sizes,
+  offsets, counters, capacities and timestamps from untrusted or unbounded values use `checked_*`
+  and say what bounds them. An overflow ruled out by construction takes `assured` or `verified` with
+  the bound as its reason, and one a caller, payload or configured limit can reach is a typed error.
+  `saturating_*` and `wrapping_*` serve only computations whose meaning is saturation or wrapping,
+  such as a clamped backpressure budget, a bounded retry delay or a hash mixer, and the site says
+  which.
+- Related compile-time constants make their relationship executable: name the independent policy
+  inputs, derive the rest with const arithmetic, and assert what derivation cannot express with
+  static `const` assertions, as a capacity partition asserts that each required reservation is
+  nonzero, that they fit the owning capacity and that they sum to it. Never align independent magic
+  literals by hand.
 
 ## Engineering Conventions
 
-- Keep Rust modules organized around coherent ownership boundaries, not broad technical categories.
-  Do not create grab-bag `clients`, `helpers`, `utils`, or `common` modules. Shared logic belongs in
-  a focused abstraction; concrete setup, configuration interpretation, state transitions, I/O,
-  encoding, decoding, and lifecycle behavior belong to the struct that owns them.
-- Behavior that naturally belongs to one model, AST, runtime object, or domain type must be an
-  inherent method using `&self`, `&mut self`, or `self`, including private helpers. Boolean
-  predicates over enum variants are methods on the enum.
-- Use free functions only for symmetric operations over independent types, parser-combinator
-  plumbing, or small lexical primitives without a natural owner. Do not use them as convenience
-  helpers for behavior owned by one domain object.
-- Prefer compact refactors that collapse duplicate logic into the owning parser, model, or runtime
-  path and remove obsolete layers. Add a wrapper, adapter, or helper layer only when it reduces
-  total complexity or isolates a real boundary.
-- Prefer explicitness to brevity. Collapsing duplicated logic into its owner is a simplification;
-  compressing a clear sequence of steps into a denser expression is not. When a shorter form and a
-  longer form differ only in density, write the longer one. Density is a decision or a sequence
-  buried inside an expression: a multi-stage iterator chain that selects, rejects, or classifies on
-  the way through, a closure nested inside another closure, an expression-position `match` written
-  to save a binding, a single line performing several unrelated steps. Name each step with a
-  binding and write the steps in the order they happen. This removes density only; the abstraction
-  that owns the shared logic stays exactly where the preceding rule put it.
-- Absence is `Option`, and distinct semantic states are enum variants with their own data. Do not
-  encode either with `0`, an empty string or collection, a numeric extremum, an all-zero hash, or
-  a reserved identifier. A named constant does not repair a type that cannot express its states.
-  Keep related state and data together so callers cannot construct contradictory combinations.
-- Model unavailable expression scopes and internal special cases with typed variants or
-  internal-only structures, never fabricated names that flow through user-name resolution.
-  Diagnostic labels and display strings describe a typed state; they must not select behavior.
-- A default must be a valid value with the intended meaning, never a substitute for missing
-  required state, failed conversion, or a type mismatch. Validate at the owning boundary and
-  propagate a typed error; do not make invalid input look like an ordinary value.
-- Genuine zero counts, empty content, documented scalar-function results, and format signatures
-  remain ordinary values. A required external encoding or packed atomic representation may use
-  raw tags only inside its owning boundary, behind an API that exposes typed states and enforces
-  valid transitions and bounds.
-  Document that encoding there; do not leak its sentinels into Models, plans, or callers, or add
-  locks merely to replace an atomic encoding with an enum.
-- A structure that can hold a value together with a contradicting description of it — a string
-  payload labeled as an integer, a wire schema paired with a format that reads another kind — is
-  structurally wrong. Fix the type so the contradiction cannot be represented: put the kind and its
-  payload in one enum variant, or let a type parameter drive the value's type. Then delete the
-  consistency checks and the unreachable mismatch errors the old shape required, rather than
-  keeping a validation step that rejects the state afterwards.
-- A hot path may carry a descriptor beside the value it describes only where deriving it per batch
-  or per row is a measured cost. Such a site is agreed with the user before it is written, and it
-  carries a comment naming the path and the cost that justifies it.
-- Avoid tuples beyond a trivial local pair, nested tuples, and tuples whose shape is whatever the
-  construction site happened to produce. Returns of three or more elements, map keys and values,
-  accumulators threaded through iterator chains, and channel payloads carrying several unrelated
-  values are named structs with named fields, declared inside the function when their use does not
-  leave that scope and at module level when it crosses functions. A type alias for a tuple is not
-  a name for its elements; declare the struct instead.
-- Use semantic typed errors. Domain error enums use `thiserror`, contextual propagation uses
-  `error-stack`, and `anyhow` is limited to boundaries where callers cannot make semantic choices.
-  Do not introduce `String` as a domain error type.
-- Prefer deriving declarative enum string conversions and metadata with `strum`, including
-  `AsRefStr`, `EnumString`, `EnumProperty`, and `FromRepr`, over manual match-based helpers.
-- Convert values through `From`, `Into`, `TryFrom`, and `TryInto`. A total conversion is `From` or
-  `Into`; a fallible one is `TryFrom` or `TryInto` and classifies its failure exactly as any other
-  panic site is classified. Two crates cover the pairs the standard library cannot express:
-  `arch-into` for pointer width, and `nervix-approx-into` for integer and floating point, where
-  `approx_into` says the conversion rounds to the nearest representable value and
-  `try_approx_into` says a float has no integer value unless it is finite and in range.
-- `as` is denied workspace-wide by `clippy::as_conversions`, so a cast has to be the operation
-  itself rather than a conversion written the short way: `cast_unsigned` for a two's complement
-  reinterpretation, `addr` for a pointer's address, and a typed binding or an annotated collection
-  for an unsizing coercion. The rounding and truncating casts live inside `nervix-approx-into`,
-  each behind an `#[expect(clippy::as_conversions, reason = "...")]` that states which operation it
-  is. Generated code that casts is admitted the same way, through a `reason`-carrying `#[expect]`
-  applied by its build script.
-- When sorted vectors or arrays are an invariant, use `sorted-vec`'s `SortedVec` or `SortedSet`
-  instead of a plain `Vec` with manual sorting and deduplication.
-- Do not scan a `Vec` to look a value up. Treat "`n` is small" as a claim that needs proof at the
-  call site and has to keep holding as domains, graphs, and clusters grow. Key the data instead:
-  `BTreeMap` for small keys where ordered comparison costs less than hashing, `HashMap` otherwise.
-  Sequence types are for data that is genuinely a sequence. Where a collection must keep its order
-  and still resolve by key, use `IndexMap` or a sorted sequence with a binary search rather than
-  scanning it, and never keep a map and a parallel order sequence in sync by hand. Any scan that
-  survives must state the bound that makes it correct.
-- Take synchronous locks from `nervix_primitives::sync::blocking`, which has `parking_lot`'s
-  interface; never `std::sync` lock types.
-- Prefer `nervix_primitives::collections::DashMap` over `Arc<Mutex<HashMap<...>>>` for a map that
-  is justifiably shared: several owners register into it, or observers read it across owners, and
-  its accesses stay off recurring data-plane paths. State one owner mutates stays in an ordinary
-  collection that owner holds.
-- `nervix_primitives::sync::Arc`, `triomphe`'s, is the default shared-ownership type for
-  Nervix-owned state. Use `nervix_primitives::sync::StdArc`, the standard library's, and its
-  `StdWeak` only when weak references or an external API require them, and confine them to that
-  boundary.
-- Do not take shared ownership one field at a time. Values that are shared together and live
-  together belong in one named struct behind a single `Arc`, and the cloneable type is a thin
-  handle over it. A type that accumulates independent `Arc` fields is a missing struct: every
-  clone of it pays one refcount per field, and on a hot path that cost is repeated per batch. A
-  field keeps an `Arc` of its own only when a second owner outlives the handle's borrow, and the
-  field says who that owner is. Never wrap a handle that is already one `Arc` in another `Arc`.
-- Take an `Option` or a `Result` apart with `match`, `if let`, `let ... else`, or `?`, and write
-  what follows as statements. Two adapters in a row are that branch spelled as a call — `map`
-  feeding `unwrap_or_default`, `and_then` feeding `ok_or_else` — and a closure whose body is a
-  block of statements is a sequence hidden inside one. `map_or` and `map_or_else` are a two-armed
-  match written as a single call, however short the arms are. Write the arms.
-- One adapter performing one transformation stays, because it decides nothing: a `map_err` or an
-  `ok_or_else` shaping a value on its way into `?`, an `unwrap_or` supplying a default. The rule
-  governs `Option` and `Result`, not sequences; `map`, `filter`, and `collect` projecting many
-  elements through one transformation are a pipeline and stay as they are. Sequences answer to the
-  explicitness rule instead: a projection whose closures only shape each element stays, and a chain
-  whose closures decide, branch, accumulate, or fail is expanded into named steps however short it
-  reads.
+### Structure and control flow
+
+- Organize modules around coherent ownership boundaries, never broad technical categories or
+  grab-bag `clients`, `helpers`, `utils` or `common` modules. Shared logic belongs in a focused
+  abstraction; setup, configuration interpretation, state transitions, I/O, encoding, decoding and
+  lifecycle belong to the struct that owns them.
+- Behavior that belongs to one model, AST, runtime object or domain type is an inherent method
+  (`&self`, `&mut self` or `self`), private helpers included, and boolean predicates over enum
+  variants are methods on the enum. Free functions are only for symmetric operations over
+  independent types, parser-combinator plumbing and small lexical primitives without a natural
+  owner.
+- Prefer compact refactors that collapse duplicate logic into the owning parser, model or runtime
+  path and remove obsolete layers; add a wrapper, adapter or helper only when it reduces total
+  complexity or isolates a real boundary.
+- Prefer explicitness to brevity. Collapsing duplicated logic into its owner simplifies; compressing
+  a clear sequence of steps into a denser expression does not, so when two forms differ only in
+  density, write the longer one. Density is a decision or sequence buried inside an expression: a
+  multi-stage iterator chain that selects, rejects or classifies on the way through, a closure
+  nested in a closure, an expression-position `match` written to save a binding, one line doing
+  several unrelated steps. Name each step with a binding and write the steps in the order they
+  happen.
+- Take an `Option` or `Result` apart with `match`, `if let`, `let ... else` or `?`, and write what
+  follows as statements. Two adapters in a row (`map` feeding `unwrap_or_default`, `and_then`
+  feeding `ok_or_else`), `map_or` and `map_or_else` however short their arms, and a closure whose
+  body is a block of statements hide a branch or sequence inside a call: write the arms. One adapter
+  doing one transformation stays, because it decides nothing, such as a `map_err` or `ok_or_else`
+  shaping a value into `?` or an `unwrap_or` supplying a default. Sequences follow the explicitness
+  rule instead: a `map`, `filter` and `collect` pipeline whose closures only shape each element
+  stays, and a chain whose closures decide, branch, accumulate or fail becomes named steps, however
+  short it reads.
 - In `if` conditions, prefer `if let` or `if let` chains over `matches!` when they express the same
-  logic cleanly. Use `matches!` when an `if let` form would be unclear or outside an `if`
+  logic cleanly; use `matches!` where an `if let` form would be unclear or outside an `if`
   condition.
-- Use semantic datetime or timestamp types for internal runtime, application, persistence, and
-  domain-clock state. Raw Unix integers are not internal time models.
-- Nanosecond Unix integers are boundary representations for serialization, public or cross-node
-  protocols, and Arrow timestamp arrays. Convert them to typed timestamps immediately after
-  decoding and back to integers only at the boundary.
-- Parse URLs and URL-like service addresses with the `url` crate. Do not manually split schemes,
-  authorities, hosts, ports, paths, or query strings unless the format is not URL-compatible.
-- Implement a protocol, format, encoding or algorithm someone else specifies through a maintained
-  implementation or an approved custom one, never an ad hoc fragment; see
-  [Maintained Implementations](#maintained-implementations), and [HTTP](#http) for HTTP.
+
+### State and types
+
+- Absence is `Option`, and distinct semantic states are enum variants with their own data, never
+  `0`, an empty string or collection, a numeric extremum, an all-zero hash or a reserved identifier,
+  which a named constant does not repair. Keep related state and data together so callers cannot
+  construct contradictory combinations. Genuine zero counts, empty content, documented
+  scalar-function results and format signatures remain ordinary values.
+- Unavailable expression scopes and internal special cases are typed variants or internal-only
+  structures, never fabricated names that flow through user-name resolution; diagnostic labels and
+  display strings describe a typed state and never select behavior.
+- A default is a valid value with the intended meaning, never a substitute for missing required
+  state, a failed conversion or a type mismatch: validate at the owning boundary and propagate a
+  typed error.
+- A required external encoding or packed atomic representation may use raw tags only inside its
+  owning boundary, documented there, behind an API that exposes typed states and enforces valid
+  transitions and bounds; its sentinels never leak into Models, plans or callers, and no lock is
+  added merely to replace an atomic encoding with an enum.
+- A structure that can hold a value with a contradicting description of it, such as a string payload
+  labeled as an integer or a wire schema paired with a format that reads another kind, is wrong: put
+  the kind and its payload in one variant or let a type parameter drive the value's type, then
+  delete the consistency checks and unreachable mismatch errors. A hot path may carry a descriptor
+  beside its value only where deriving it per batch or row is a measured cost; such a site is agreed
+  with the user before it is written and carries a comment naming the path and the cost.
+- Avoid tuples beyond a trivial local pair, nested tuples, and tuples shaped by whatever the
+  construction site produced. Returns of three or more elements, map keys and values, iterator
+  accumulators and channel payloads of several unrelated values are named structs with named fields,
+  declared inside the function when their use stays there and at module level otherwise; a type
+  alias for a tuple is not a name for its elements.
+- Internal runtime, application, persistence and domain-clock time uses semantic datetime or
+  timestamp types, never raw Unix integers. Nanosecond Unix integers are boundary representations
+  for serialization, public or cross-node protocols and Arrow timestamp arrays, converted to typed
+  timestamps immediately after decoding and back only at the boundary.
+
+### Collections, conversions and sharing
+
+- Do not scan a `Vec` to look a value up: "`n` is small" needs proof at the call site that keeps
+  holding as domains, graphs and clusters grow. Key the data: `BTreeMap` for small keys where
+  ordered comparison costs less than hashing, `HashMap` otherwise, and `IndexMap` or a sorted
+  sequence with binary search where order must be kept and keys resolved, never a map and a parallel
+  order sequence kept in sync by hand. Sequence types are for genuine sequences, a surviving scan
+  states the bound that makes it correct, and a sorted invariant uses `sorted-vec`'s `SortedVec` or
+  `SortedSet`.
+- Values shared and living together belong in one named struct behind a single `Arc`, with a thin
+  cloneable handle over it; a type accumulating independent `Arc` fields is a missing struct whose
+  every clone pays one refcount per field, per batch on a hot path. A field keeps its own `Arc` only
+  when a second owner outlives the handle's borrow, and says who that owner is. Never wrap a handle
+  that is already one `Arc` in another.
+- Convert through `From` and `Into` when total and `TryFrom` and `TryInto` when fallible,
+  classifying the failure like any panic site. `arch-into` covers pointer width and
+  `nervix-approx-into` integer and floating point: `approx_into` rounds to the nearest representable
+  value, and `try_approx_into` gives a float no integer value unless it is finite and in range.
+- `as` is denied workspace-wide by `clippy::as_conversions`, so a cast is written as its operation:
+  `cast_unsigned` for a two's complement reinterpretation, `addr` for a pointer's address, a typed
+  binding or annotated collection for an unsizing coercion. The rounding and truncating casts live
+  inside `nervix-approx-into`, each behind an `#[expect(clippy::as_conversions, reason = "...")]`
+  naming the operation, and generated code that casts carries a reason-bearing `#[expect]` its build
+  script applies.
+- Prefer deriving declarative enum string conversions and metadata with `strum` (`AsRefStr`,
+  `EnumString`, `EnumProperty`, `FromRepr`) over manual match-based helpers. Parse URLs and URL-like
+  service addresses with the `url` crate, never by splitting schemes, authorities, hosts, ports,
+  paths or query strings by hand, unless the format is not URL-compatible.
+
+### Hygiene
+
 - Do not add `#[allow(...)]` annotations without explicit approval.
-- Do not use `std::mem::forget`, `Closure::forget`, leaked boxes, or equivalent lifetime leaks to
-  keep browser callbacks alive. Use explicit ownership and cleanup or a crate-managed abstraction.
-- Do not preserve old syntax, implicit fallbacks, compatibility shims, migration shortcuts, or
-  parallel legacy paths. See
-  [Alpha Stability and Compatibility](#alpha-stability-and-compatibility).
+- Do not keep browser callbacks alive with `std::mem::forget`, `Closure::forget`, leaked boxes or an
+  equivalent lifetime leak; use explicit ownership and cleanup or a crate-managed abstraction.
 - Preserve unrelated user changes in dirty worktrees.
+
+## Architecture Rules and the Debt Ratchet
+
+[Architecture Rules And The Debt Ratchet](docs/src/architecture-enforcement.md) owns the complete
+eighteen-family contract matrix, the nine source-contract annotations, source and compiler scope,
+report identity and reuse, the analysis toolchain and its upgrade, qualification and its CI
+selection, what each form of evidence establishes, and the workaround audit and its review limits.
+
+### Source contracts
+
+Real Nervix compiler diagnostics, across the complete declared configuration matrix, check Model
+consumption, language dependencies, recurring cluster awaits, node identities, installation state,
+synchronization, failure signatures, discarded outcomes, canonical panic APIs, report-bearing
+tracing fields, integer and `Duration` clamped arithmetic and `Option` and `Result` adapter control
+flow. Finite API recognition is Rust code in the rules, and no policy is inferred from filenames,
+sharing traits or method names. Contracts and reviewed exceptions live beside their source owners
+under `cfg_attr(nervix_lint, ...)`, move with their module, and state the actual recurring,
+lifecycle, observer, outside or bounded execution with reasons and bounded identities; no owner
+catalog, count allowance or filename exception substitutes for one.
+
+- `nervix::layer` marks each documented layer boundary. Connector engines and their contract also
+  declare `nervix::input(plans, reason = "...")`, because their layer grants no permission to
+  consume configuration Models. `nervix::value(model, ...)` marks the public configuration union,
+  `nervix::value(name, ...)` shared name types and `nervix::value(cluster_access, ...)` the cluster
+  observation capability, as reviewed semantic roles rather than spellings. Resolved references and
+  normalized interface and body types enforce the Model and language boundaries, recurring
+  data-plane call edges diagnose awaited cluster access, and language dependency and inactive import
+  provenance stay a separate source and manifest check.
+- `nervix::identity(node, ...)` marks the shared vocabulary identity types and every field,
+  parameter, alias or return interface whose value is a node identity; a mixed aggregate is not one
+  because one member is typed.
+- `nervix::state(installed, ...)` marks installation-only fields and fails on a resolved `RwLock`
+  anywhere in their representation, and `state(mutable, ...)` marks genuinely replaceable fields
+  with their lifetime reason; `RwLock<Option<name or shared handle>>` without a lifetime contract
+  needs explicit review and proves no write-once behavior ([Typed
+  States](docs/src/typed-states.md#source-owned-identity-and-installation-contracts), [Data-Plane
+  Concurrency](docs/src/data-plane-concurrency.md#resolved-architecture-boundaries)).
+- Supported local helper and callback edges are re-evaluated, and callee and trait contracts cross
+  compiler metadata boundaries: a hot caller of a lifecycle-only helper is diagnosed, and unknown
+  dispatch needs a callable source contract or a diagnostic, never an inherited cold module
+  classification. Disjoint structural and primitive provenance checks still cover inactive cfg and
+  authored macros ([Data-Plane Concurrency](docs/src/data-plane-concurrency.md#source-contracts),
+  which claims no universal ownership proof).
+
+An exception is a reason-bearing expectation on one operation, `expect_lint!` included, and retained
+debt names its repair task; a blanket `allow` and a broad, undocumented, unfulfilled or widened
+expectation fail, and expectations never form a second allowance catalog. Generated reports are
+outputs under `target/`, never enforcement inputs. A new or changed semantic rule ships with allowed
+and rejected compiler fixtures distinguished by the resolved fact, false-positive and false-negative
+controls, precise diagnostic and span assertions, and invalid, unfulfilled and widened-expectation
+checks; source rules also qualify inactive configuration and authored macro fragments, and bounded
+Bolero properties qualify changed source parsing and lossless tooling representations. A replaced
+detector and its numeric entry go at the same cutover.
+
+### Analysis toolchain
+
+The synchronization driver, its isolated artifacts and Bolero's sanitizer campaigns use
+`nightly-2026-09-17`; product builds stay stable. An upgrade moves every declaration of that nightly
+in one change that keeps every compiler fixture's result. The driver's workspace wrapper composes
+beneath the configured kache. Analysis requires current source, annotations, rule, dependency and
+configuration inputs and complete declared target evidence, zero findings included, and missing
+evidence rebuilds only isolated authored artifacts in a supported cache namespace.
+`just test-typed-ratchet` and `just qualify-typed-ratchet-cache` qualify the diagnostics, the
+current paired API doctests and completion and cache behavior. Tooling Bolero targets use the shared
+inventory and CI policy, and native coverage uses matching LLVM tools.
+
+### The ratchet
+
+Architecture debt is counted and only decreases. `just ratchet` counts oversized files, actual Rust
+cast expressions, struct fields whose presence depends on `cfg(feature = "testing")`, functions
+whose cyclomatic complexity exceeds 30, [`hidden_tunables`](#node-settings) and
+[`non_aws_lc_crypto`](#cryptography), over tracked and newly authored Rust. Its stable source parser
+sees inactive branches and named or tuple fields; raw identifiers, import aliases, qualified paths
+and conditional documentation attributes are not those facts. CI fails when a structural count
+exceeds `debt-baseline.json`. A change may lower a count, never raise one; when a count falls, run
+`just ratchet --update` and commit the baseline. `just ratchet --show <count>` lists a count's
+sites.
+
+Complexity is measured by the cargo-crap version `scripts/cargo_crap.py` pins, which
+`just install-cargo-crap` builds through kache; another version is refused, and an analysis that
+misses a source never reads as zero. That count, which reads no coverage, is the mandatory
+complexity verdict: a new function above 30 fails `just validate` and the `checks` job, and
+decomposing it is the repair.
+
+A rule that misjudges code is repaired in the rule, or the misjudged operation carries a narrow
+reviewed exception; correct code is never reshaped only to satisfy it. Respelling an operation,
+splitting one lookup into two, moving code into a helper or another file, or defaulting a failure to
+lower a finding is a workaround, and the owner it degraded keeps the repair. `just lint-audit`
+reports resolved workaround candidates, attributed to the commits and counts that introduced them,
+as review input under `target/`; dispositions and measurements belong on the owning task. A claim
+that a workaround costs performance, or that its repair saves it, needs that provenance and a
+same-host measurement of the lookups, comparisons and allocations it changes over hit-heavy and
+miss-heavy keys; a lower count or a shorter function is not a speedup.
 
 ## Specifications
 
-- Specifications and proposals are product documents. They define externally observable
-  behavior: concepts, states, guarantees, interfaces, limits, failure semantics, and behavior
-  changes. Implementation material — code sketches, type definitions, file or module lists,
-  line references, and change-size estimates — does not belong in a spec.
-- A requested specification is one complete document. Do not split it into implementation
-  phases, milestones, or staged deliveries unless the user asks for phasing.
-- A specification must be correct and fully resolved. Verify its claims against the current
-  system, decide every design question in the document, and do not defer, postpone, or mark
-  anything as future work, a fast-follow, or an open question unless the user requested or
-  agreed to that deferral.
+- Specifications and proposals are product documents defining externally observable behavior:
+  concepts, states, guarantees, interfaces, limits, failure semantics and behavior changes.
+  Implementation material, such as code sketches, type definitions, file or module lists, line
+  references and change-size estimates, does not belong in them.
+- A requested specification is one complete document, not split into implementation phases,
+  milestones or staged deliveries unless the user asks for phasing.
+- A specification is correct and fully resolved: its claims are verified against the current system,
+  every design question is decided in the document, and nothing is deferred, postponed or marked as
+  future work, a fast-follow or an open question unless the user requested or agreed to that
+  deferral.
 
 ## Validation and Testing
 
 ### Test-first changes
 
-- Bolero is the default for lossless encode/decode and representation conversions. Every new or
-  changed pair ships in the same change with a property over bounded, valid current values that
-  asserts the decoded or converted-back value equals the complete original value. Preserve every
-  significant field, order, branch, identity, null, type and sensitivity. If ordinary equality is
-  insufficient, define an explicit complete oracle, such as float bit equality or Arrow schema
-  and logical values with validity. Never compare only selected fields or normalize away a failure.
-- Canonicalizing, lossy and one-way conversions state and test their actual contract; separately
-  test exact round trips on a lossless domain when one exists. Keep malformed-input rejection in
-  separate targets so a generator cannot pass by producing mostly invalid values. Generate bounded
-  current shapes with supported variants and deliberate boundaries; do not retain historical
-  fixtures. Model/reference, operation-sequence, scalar/SIMD differential and encoded-size
-  properties also use Bolero when appropriate.
-- Every Bolero property is an ordinary test and a registered custom fuzz target in
-  `tests/bolero-targets.toml`, with one stable ID, exact package and test identity, required
-  features, domain version, source-adjacent corpus, input/case budgets and invariant. Use the same
-  production path and complete assertion in ordinary randomized/corpus and coverage-guided
-  libFuzzer runs. Registration in both CI modes is mandatory even while other work is concurrent.
-  CI runs each mode only for a PR carrying its label: the sanitizer mode for `fuzz` and the
-  ordinary randomized/corpus mode for `bolero-random`. `fuzz` is the preferred Bolero evidence, run
-  locally by default under the expensive label rule below; a PR carries `bolero-random` only when
-  its task requires the randomized/corpus run itself, such as
-  a change to that run or a release qualification. Check may exclude the reusable Bolero workflow
-  only for a verified prose-only PR without either label.
-  A target addition or change also updates the target register in
-  `docs/src/property-testing-and-fuzzing.md` and any owning representation coverage map in the
-  same change; the registered domain version, case count and input bound must agree with the
-  inventory.
-  Keep generators in dev/test code, preserve inward dependencies, and keep modeled execution
-  features and model-checker dependencies out of ordinary and fuzz builds.
-- For a bug, first add or identify a focused test or cucumber scenario and confirm that it fails for
-  the expected reason. Implement only after the reproducer is red, rerun it until green, then run
-  the appropriate broader validation.
-- For new runtime, persistence, API, CLI, scheduling, cluster, metric, or domain behavior, first add
-  or update a cucumber scenario through the public interface and confirm the expected failure
-  before changing product code.
-- Parser-only work requires positive parse tests, negative parse tests, and completion-context tests
-  that guard against grammar-branch leakage. Composed language phrases require completion coverage.
-- Use Rustdoc `compile_fail` doctests beside the owning API for compile-time rejection checks.
-  Do not use `trybuild` or add its dependencies, harnesses, fixtures, or diagnostic snapshots.
-  Pair rejection examples with compiling examples of the current imports and supported signatures,
-  and run the doctests in the normal test commands, and in CI for a pull request labeled
-  `extra-doctests`, which a change to such an API carries.
+- For a bug, first add or identify a focused test or Cucumber scenario and confirm it fails for the
+  expected reason. Implement only after the reproducer is red, rerun it until green, then run the
+  appropriate broader validation.
+- For new runtime, persistence, API, CLI, scheduling, cluster, metric or domain behavior, first add
+  or update a Cucumber scenario through the public interface and confirm the expected failure before
+  changing product code.
+- Unit tests support but never replace Cucumber coverage for behavior observable through a Plexus
+  command, an HTTP or public API call, cluster state, runtime output or persisted state, unless the
+  user explicitly approves the exception for the current task. An executable statement with
+  application or runtime handling is not parser-only.
+- Parser-only work requires positive and negative parse tests and completion-context tests that
+  guard against grammar-branch leakage, kept near the grammar they protect; composed language
+  phrases require completion coverage.
+- Compile-time rejection is checked with Rustdoc `compile_fail` doctests beside the owning API,
+  paired with compiling examples of the current imports and supported signatures, never with
+  `trybuild` or its dependencies, harnesses, fixtures or snapshots. They run in the normal test
+  commands, and in CI for a pull request labeled `extra-doctests`, which a change to such an API
+  carries.
 - Keep verification claims with their evidence. Paired API doctests check one API in the build's
   selected configuration; Cargo graph, feature-conflict and target probes check the configurations
-  they actually build; compiler fixtures qualify resolved diagnostics; primitive conformance checks
-  compare backend semantics. None executes a production-owner concurrency model by itself, and
-  compiling under a mode is analysis, not execution evidence. A change confined to an exclusively
-  owned collection or to compiler analysis makes no concurrency claim and needs no invented model.
-  Record the invariant, selected inventory, completed exploration, weakening and replay evidence
-  when claiming model verification. Use the matching toolchain's declared `llvm-tools` for coverage
-  and preserve the configured kache wrapper in every build and probe.
-- Tests cover the current shape only. Never define a removed Model, stored shape, or wire form in a
-  test fixture, including to assert that loading it fails. See
-  [Alpha Stability and Compatibility](#alpha-stability-and-compatibility).
+  they build; compiler fixtures qualify resolved diagnostics; primitive conformance checks compare
+  backend semantics. None executes a production-owner concurrency model, and compiling under a mode
+  is analysis, not execution evidence. A change confined to an exclusively owned collection or to
+  compiler analysis makes no concurrency claim and needs no invented model.
 
-### Integration coverage
+### Property tests and fuzzing
 
-- A lock-free or wait-and-notify protocol on the data plane ships with a Shuttle check over its
-  production owner that names and asserts its invariant. It explores through the runner of
-  `nervix_model_harness::shuttle`, registers in `crates/model-harness/shuttle-inventory.toml`, runs
-  through `just test-shuttle`, and preserves a failing schedule for replay. Concurrency tests
-  have no wall-clock bounds or sleep polls; express deadline choices and progress with
-  scheduler-visible events. A publicly observable outcome still needs its Cucumber scenario. A
-  waiter registers for its notification before it reads the state it waits on; the boundary's
-  `Notify`, `watch` channel and atomic waker make each registration a scheduling point under
-  Shuttle, so a check reaches a publication between a read and a registration and holds that order
-  instead of review.
-- A claim that depends on memory ordering, such as cross-location publication or a fence
-  protocol, ships with a Loom model over its actual synchronous production owner. Shuttle's
-  sequentially consistent scheduler cannot establish such a claim. When the protocol is embedded
-  in async orchestration, make the synchronous protocol independently testable and have the runtime
-  use that same owner; a copied algorithm, a test-only reconstruction, a witness published by a
-  join or an extra lock, or a real atomic does not qualify. Name the invariant with an
-  `InvariantId`, explore it through `nervix_model_harness::loom::explore`, register it in
-  `crates/model-harness/loom-inventory.toml`, and register a `[[qualification]]` weakening that
-  must make the model fail. Successful qualifications retain their counterexample checkpoint,
-  replay checkpoint, both outputs and source, bounds and weakening metadata; CI uploads those
-  records on success as well as failure. A standalone relaxed counter carries no cross-location
-  claim, and an operation inside an opaque dependency is excluded from a claim rather than given
-  a fictional model. A store-load claim, in which each side writes one location and then reads
-  the other's, holds only under sequential consistency, which acquire and release do not give and Loom cannot
-  check, because it models `SeqCst` accesses as acquire and release. The side off the hot path
-  therefore reads the other side's location by read-modify-write, so acquire and release decide the
-  claim and Loom can check it.
+- Bolero is the default for lossless encode/decode pairs and representation conversions. Each new or
+  changed pair ships with a property over bounded, valid current values asserting that the round
+  trip equals the complete original, with every significant field, order, branch, identity, null,
+  type and sensitivity, using an explicit complete oracle where equality falls short (float bit
+  equality; Arrow schema and logical values with validity), never selected fields or a normalized
+  failure.
+- Canonicalizing, lossy and one-way conversions test their actual contract, with exact round trips
+  tested separately on a lossless domain where one exists. Malformed-input rejection gets separate
+  targets, so generators cannot pass on mostly invalid values. Generators produce bounded current
+  shapes with supported variants and deliberate boundaries, never historical fixtures.
+  Model/reference, operation-sequence, scalar/SIMD differential and encoded-size properties also use
+  Bolero when appropriate.
+- Every property is also a registered custom fuzz target in `tests/bolero-targets.toml` (stable ID,
+  exact package and test identity, required features, domain version, source-adjacent corpus, input
+  and case budgets, invariant), running the same production path and complete assertion in
+  randomized/corpus and libFuzzer runs; registration in both modes is mandatory, even while other
+  work is concurrent. Adding or changing a target updates the register in [Property Testing And
+  Fuzzing](docs/src/property-testing-and-fuzzing.md) and any owning representation coverage map,
+  with matching domain version, case count and input bound. Generators stay in dev and test code,
+  and modeled features and model checkers stay out of ordinary and fuzz builds.
+- `just test-bolero [filter]` runs bounded random cases and corpus replay, `just fuzz-list` lists
+  registered targets, `just fuzz <target> [duration]` and `just fuzz-all [duration] [shard]` run
+  sanitizer-backed libFuzzer, and `just fuzz-replay` and `just fuzz-reduce` handle saved exact
+  inputs; a sanitizer finding replays only through `just fuzz-replay-sanitizer`. These commands
+  enforce the inventory and scoped discovery, which `just validate-bolero` checks alone, and Bolero
+  checks never join `just validate`, `just validate-ci` or Check's validation job. A seed identifies
+  one case, not a campaign; keep failures, their minimization and their revision, toolchain and flag
+  metadata before cleanup.
+- Live campaigns collect source coverage with the pinned sanitizer toolchain through
+  `scripts/bolero_coverage.py` under `target/native-coverage/bolero-fuzz/`. Only a `complete` record
+  beside a report is evidence: discovery, probes, replay and failure qualification supply no
+  counters, stable and nightly profiles never mix, a failed campaign keeps its failure, and only
+  `just combine-bolero-fuzz`'s record of every whole-harness shard of one plan claims the inventory.
+  These reports stay out of ordinary coverage and CRAP.
+- Check calls the reusable Bolero workflow with its tested SHA, event and label snapshot, running
+  sanitizer mode for `fuzz` and randomized/corpus mode for `bolero-random` ([CI
+  labels](#ci-labels)), and skips it only for a verified prose-only pull request with neither label;
+  called runs stay mandatory even on single-job reruns, and a deliberate sanitizer skip publishes no
+  fuzz coverage. Check verifies its exact tested merge before skipping ordinary suites for
+  documentation-only changes, `test-selection` is not property evidence, and `no-docker` never
+  authorizes a test exclusion; [Documentation-only
+  selection](docs/src/property-testing-and-fuzzing.md#documentation-only-selection) owns this, and
+  `just test-ci-selection` tests it.
+
+### Concurrency evidence
+
 - The evidence forms are complementary and none replaces another: Shuttle for interleavings of
   production owners, Loom for memory-ordering claims of synchronous production owners, Turmoil for
-  network claims within the supported simulation, Deloxide for active deadlocks among the tracked
-  thread-blocking locks of real diagnostic processes, Cucumber for public behavior, and the
-  external Chaos suite against an immutable product image and its diagnostic image for real-process
-  recovery.
-- A change that adds or alters thread-blocking synchronization, a `sync::blocking` lock or
-  condition variable, the order in which tracked locks are acquired, or a shutdown, drain, restore,
-  cancellation, handoff or other lifecycle or ownership path that uses tracked locks runs
-  `just test-deloxide`, `just test-deloxide-order`, `just test-deloxide-stress` and
-  `just test-deloxide-stress-restore` locally. CI's `deloxide` job runs all four only for a pull
-  request labeled `deloxide`, and that label stays off by default under the expensive label rule
-  below. The two stress selections
-  compile one build with Deloxide's bounded scheduling disturbance and each keeps its own lane
-  budget: `deloxide-stress` runs the active-only probes, conformance checks and owner tests, the
-  lifecycle scenarios tagged `@deloxide_stress` and the paced-driver scenarios, and
-  `deloxide-stress-restore` the capture, restore and checkpoint-transfer scenarios tagged
-  `@deloxide_stress_restore`. Between them they run every scenario of the active-only selection but
-  the report tool's triage, so a scenario that joins the active-only selection joins the stress
-  selection of its family under a `stress.` identity, and a change to a lifecycle path those
-  scenarios do not reach tags one that does. A stressed workload that fails is a finding,
-  reproduced first as a focused failing test against its owner and fixed there, never hidden by a
-  passing rerun, a wider product deadline or a weaker assertion. Where the lane's
-  workloads do not yet reach the changed path, the change
-  extends its probes, owner tests or tagged scenarios and registers each in
-  `tests/deloxide-inventory.toml` with a stable identity, the invariant it owns, its selections and
-  the coverage it declares. A source file that starts acquiring tracked blocking locks gets an
-  `[[owner]]` record there naming the workloads that reach its locks, or the specific path the lane
-  does not reach and why; `just validate-deloxide-applicability` holds the records to the compiler's
-  acquisition catalog, and a recorded gap is a reviewed declaration, never a waiver of the other
-  evidence. The change records what the diagnostic run covered, what it cannot see, and the
-  evidence it retained: the lane's attempts under `target/deloxide/test-deloxide` and, when the
-  label enabled it, the CI job's artifacts. An active cycle it reports is fixed in the owner, never suppressed, retried away or
-  excluded from the run. A run that executed no check, lost a finding or could not record one is a
-  failed diagnostic execution, never a clean result. Every potential-order finding remains visible
-  until its owner fixes it or records a specific non-overlap, shared-reader or lifecycle proof
-  together with retained regression evidence. In the lane a potential cycle fails the run: the lane
-  keeps no ledger of approved cycles, so a correction removes the order from the exercised
-  workload, and a reviewed proof qualifies only the evidence it reviews. A
-  historical cycle alone does not declare an active outage or end an operator's workload. Missing
-  source context, truncated cycles, overload and unreviewed findings prevent qualification. Order
-  evidence preserves run-local lock instances and lifetimes, thread identities, acquisition modes
-  and multiplicity; repeated source lines never stand in for lock identity. A build with graph
-  instrumentation and runtime checking disabled remains instrumented, and its cost is reported
-  separately from an active-only diagnostic build and ordinary execution. Every
-  concurrency-related change states whether this applies: async-only or otherwise untracked work,
-  such as Tokio's locks, channels and `Notify`, DashMap, atomic protocols or network waits, records
-  that the detector does not see it and keeps its Shuttle, Loom, Turmoil, Chaos and Bolero
-  evidence, and documentation-only or unrelated work records that the rule does not apply. The rule
-  binds concurrent work from the moment it lands. An applicable task and pull request record the
-  tested revision and inventory digest, each selection's discovered, selected, executed and completed
-  counts, its retained attempt and evidence artifacts, and which registered workloads reached the
-  changed owner. A result from an earlier revision does not qualify a later change to that owner.
-  A clean diagnostic run never proves an untracked path, or an interleaving the run did not take,
-  free of deadlocks.
-- [Integration Test Lifecycle](docs/src/integration-test-lifecycle.md) is the authoritative
-  architecture reference for the lifecycle of the Cucumber scenario harness. Any change to how the
-  harness starts, observes, diagnoses, or stops in-process nodes, server processes, scenarios, or
-  the whole run, to a harness budget or the measurement it is derived from, or to the CI job that
-  runs the suite must keep that chapter current in the same change. Its scope includes the
-  separation of product deadlines from harness deadlines, phase deadlines and budget derivation,
-  status requests and waits, node task and readiness outcomes, node startup and retry
-  classification, cluster construction, scenario phases and the active-scenario registry, teardown
-  diagnostics, cluster teardown and forced cleanup, scenario-driven stops, the port pool, server
-  processes and test dependencies, the suite watchdog and its CI reserve, exit statuses, and how
-  failure reaches CI output.
-- [Deterministic Interconnect Simulation](docs/src/interconnect-simulation.md) is the authoritative
-  architecture reference for the Turmoil simulation of the interconnect. Any change to the `turmoil`
-  build mode or its dependency and scheduler-conflict checks, the socket, certificate-clock,
-  entropy, or CPU-execution seams the simulation plugs into, the runner, the scenario driver,
-  failure records and replay, a simulation scenario or its committed seeds and bounds, the Turmoil
-  recipes, or the CI job that runs them must keep that chapter current in the same change. Its scope
-  includes code ownership and the feature matrix, the simulated host and its time and entropy, host
-  supervision, the fault model, semantic traces and replay rules, seed selection, commands and
-  budgets, the scenario matrix, simulated restart versus real-process evidence, findings and
-  retained regressions, qualification evidence, and the prerequisites for whole-cluster simulation.
-- [External Cluster Chaos](docs/src/cluster-chaos.md) is the authoritative architecture reference
-  for the external chaos runner and its suites. Any change to `scripts/chaos`, its Compose
-  deployment, fixtures, tool image pins, verifiers or self-tests, the chaos recipes in the
-  `justfile`, the `Chaos` workflow or the chaos and diagnostic-image jobs of the `Docker Build`
-  workflow must keep that chapter current in the same change. Its scope includes the public
-  observation boundary, image and tool identity, host requirements, the deployment, how each fault
-  is injected and proven, every scenario with its verdicts and bounds, seeded plans and replay,
-  failure categories and exit statuses, controller budgets versus product deadlines, artifacts,
-  cleanup and signals, diagnostic images, the suites and their shards, CI triggers, labels and
-  cancellation, guarantees and limits, and qualification evidence. The product contracts its
-  scenarios verify stay with their own chapters.
-- Unit tests support but do not replace cucumber coverage for behavior observable through a Plexus
-  command, HTTP or public API call, cluster state, runtime output, or persisted state. Adding an
-  executable statement with application or runtime handling is not parser-only. Do not substitute
-  unit tests unless the user explicitly approves the exception for the current task.
-- Cucumber scenarios keep step semantics aligned: `Given` establishes preconditions, `When`
-  performs the action or event under test, and `Then` asserts the observable outcome.
-- Runtime cucumber behavior uses scenario outlines covering one-node and three-node clusters unless
-  the behavior is explicitly topology-specific. Every three-node Cucumber cluster uses the
-  conditionally compiled random test scheduler by default, independently assigning schedulable graph
-  nodes to exercise cross-node paths instead of locality-driven colocation. Random assignments must
-  remain stable for unchanged domain, model, and topology inputs so periodic reconciliation never
-  causes artificial ownership churn. Scenarios whose subject is production placement, cordon, drain,
-  scheduled-node failover, or full-cluster recovery from node-owned persisted state must explicitly
-  configure the production sticky scheduler before cluster startup. Scheduling, leader/follower
-  restrictions, and inter-node mechanics use dedicated scenarios or lower-level tests rather than
-  being folded into generic runtime scenarios.
-- Stateful processor scenarios must prove branch isolation and field preservation with interleaved
-  records from at least two branches.
-- Tests must explicitly provision required external entities.
-- Avoid blind sleeps. Wait for explicit conditions with bounded timeouts and useful failure
-  messages. Short polling intervals are acceptable only inside such a condition-based wait.
-- Scenarios run many at a time on one machine, so a loaded box delays every step. A bound that
-  only holds on an idle machine is a defect in the test, not a flake to retry. Waiting for
-  something to happen is therefore bounded generously: raising that bound costs nothing under
-  parallelism, because the wait ends when the condition holds.
-- Every scenario runs beside the rest of the suite. Do not add a tag, lock, or harness mode that
-  runs a scenario alone or stops other scenarios from starting while it runs, such as an @exclusive
-  tag. Run-slot reservations are limited to declared scenario weights and retry shares, as
-  [Integration Test Lifecycle](docs/src/integration-test-lifecycle.md) specifies. A scenario may
-  declare its measured load with `@slots_N` on its feature, rule, scenario or outline's
-  examples. The largest inherited declaration applies. Each attempt holds the larger of that
-  weight and its retry share, capped at a quarter of the pool and at least one slot, including in
-  small local pools. Choose weights from measured load per attempt and compare complete sharded
-  runs for stalls, retries, utilization and suite length. A weight shapes admission capacity.
-- Scenarios are timing sensitive, and under heavy contention on a host a scenario may not fit its
-  bounds even when nothing is wrong with it. Weights and retries exist to absorb that. They do not
-  explain a failure, and one they clear may be a masked bug, so reason out which it is before
-  calling it contention, and record why on the owning ClickUp task. Ask whether the failure follows
-  the host's load, such as CPU steal, stalls and retries across unrelated scenarios, whether it
-  repeats on a quiet host, and whether delay can produce it at all. A late wait can come from
-  contention. A lost effect, a duplicate or a wrong value cannot, and stays a defect however often
-  a retry passes. Repair a masked bug in its owner, and remove a timing assumption the scenario
-  does not need rather than weighing it away.
-- An assertion that something has **not** happened yet is the opposite, and no choice of window
-  makes it reliable. Its window opens when the step starts, while the cadence it races started at
-  the event before it, so the margin between them is consumed by whatever delayed the step
-  boundary — which under this suite's parallelism is seconds, not milliseconds. Measured on the
-  Kafka partial-batch scenario: a window two seconds inside the cadence still failed under load,
-  and the same scenario passed repeatedly once the assertion measured instead of gated. So assert
-  the delay, not the silence: record when the triggering event happened and require that the
-  output arrived at least the cadence later. Load moves the event and the arrival together, so a
-  measured delay only grows. Reserve a "does not arrive" window for output that must never arrive
-  at all, where a longer window strengthens the assertion.
-- An assertion on an exact batch count needs a flush window wider than the spread between the
-  messages it groups, not one comparable to it. Concurrently published messages arrive spread by
-  whatever the machine is doing.
-- A unit test that compares wall-clock instants anchors its bound to an instant observed after the
-  value under test was computed, so scheduling delay moves both sides. A fixed tolerance added to
-  an instant captured earlier only holds on an idle machine.
-- Browser behavior is tested through the standard web-console cucumber suite and Playwright-facing
-  steps, not by bypassing the public browser flow.
-- The scenario suite and the harness regressions are the `nervix-scenarios` package rooted at
-  `tests/`, which has test targets only and dev-dependencies only. Cargo builds a package's binaries
-  for that package's integration tests, so a test target added to `nervix-server` links the whole
-  server a second time, and a normal dependency would carry the server's `testing` feature into
-  ordinary builds.
-- Scenarios run nodes in-process, as Rust values. A test whose subject is a process, such as its
-  signals, exit status, command line, open-file limit or crash, runs its own executable again:
-  `tests/common/process_program.rs` starts `current_exe` with `arg0` set to `nervix-server`, and
-  `main` reads `arg0` before anything else and calls `run_server_process`, the entry point the
-  `nervix-server` executable's own `main` calls. A test never uses `CARGO_BIN_EXE_nervix-server`,
-  looks for a server binary in a target directory, or needs a recipe to build one. A new helper
-  process joins `ProcessProgram` the same way rather than becoming a binary. The one exception is a
-  test whose subject is one particular build, such as the client protocol's release baseline: the
-  recipe that runs it builds that server and names it to the test.
-- A test compiles nothing. It never runs Cargo, a compiler or a package manager. `just` builds every
-  tool a test starts before the test starts: a tool joins `tests-deps` and what
-  `scripts/scenario_shards.py` packs, because a shard has no toolchain. A failed build is then
-  reported as a build failure, a test's deadlines measure the test, and the suite runs from one
-  build wherever it is restored.
-- Testcontainers fully handles every dependency a test needs. `crates/test-environment` declares
-  each service, and testcontainers pulls or builds its image and starts it on first use. A recipe,
-  workflow or CI step never prepares, starts or stops a dependency, and running the tests needs no
-  step before them for it.
+  network claims within the supported simulation, Deloxide for active deadlocks among tracked
+  thread-blocking locks of real diagnostic processes, Cucumber for public behavior, and the external
+  Chaos suite, against an immutable product image and its diagnostic image, for real-process
+  recovery. A model-verification claim records its invariant, selected inventory, completed
+  exploration, and weakening and replay evidence.
+- **Shuttle.** A lock-free or wait-and-notify data-plane protocol ships with a Shuttle check over
+  its production owner that names and asserts its invariant, explores through
+  `nervix_model_harness::shuttle`, registers in `crates/model-harness/shuttle-inventory.toml`, runs
+  through `just test-shuttle` and keeps a failing schedule for replay. Concurrency tests express
+  deadlines and progress as scheduler-visible events, never wall-clock bounds or sleep polls. A
+  waiter registers for its notification before reading the state it waits on; the boundary's
+  `Notify`, `watch` and atomic waker make registration a Shuttle scheduling point, so the check, not
+  review, holds that order. A public outcome still needs its Cucumber scenario.
+- **Loom.** A memory-ordering claim, such as cross-location publication or a fence protocol, ships
+  with a Loom model over its actual synchronous production owner, because Shuttle's sequentially
+  consistent scheduler cannot establish it. When the protocol is embedded in async orchestration,
+  make the synchronous protocol independently testable and have the runtime use that same owner; a
+  copied algorithm, test-only reconstruction, witness published by a join or extra lock, or real
+  atomic does not qualify. The model names an `InvariantId`, explores through
+  `nervix_model_harness::loom::explore`, registers in `crates/model-harness/loom-inventory.toml`,
+  and registers a `[[qualification]]` weakening that must make it fail; qualifications retain
+  counterexample and replay checkpoints, outputs, source, bounds and weakening metadata, which CI
+  uploads on success and failure. A standalone relaxed counter carries no cross-location claim, and
+  an operation inside an opaque dependency is excluded from a claim rather than modeled fictionally.
+  A store-load claim holds only under sequential consistency, which Loom cannot check because it
+  models `SeqCst` as acquire and release, so the side off the hot path reads the other side's
+  location by read-modify-write.
+- **Deloxide.** A change to thread-blocking synchronization, a `sync::blocking` lock or condition
+  variable, tracked-lock acquisition order, or a shutdown, drain, restore, cancellation, handoff or
+  other lifecycle or ownership path using tracked locks runs `just test-deloxide`,
+  `just test-deloxide-order`, `just test-deloxide-stress` and `just test-deloxide-stress-restore`
+  locally, under the lane [Data-Plane Concurrency](docs/src/data-plane-concurrency.md) owns:
+  - The lane reaches the changed path, or the change extends its probes, owner tests or tagged
+    scenarios (`@deloxide_stress` for lifecycle scenarios, `@deloxide_stress_restore` for capture,
+    restore and checkpoint transfer) and registers each in `tests/deloxide-inventory.toml` with a
+    stable identity, invariant, selections and declared coverage; a scenario that joins the
+    active-only selection joins its family's stress selection under a `stress.` identity. A source
+    file that starts acquiring tracked locks gets an `[[owner]]` record naming the workloads that
+    reach them, or the unreached path and why, which `just validate-deloxide-applicability` checks
+    against the compiler's acquisition catalog; a recorded gap is a reviewed declaration, never a
+    waiver.
+  - Findings are fixed in their owner. A failing stressed workload is first reproduced as a focused
+    failing owner test, never hidden by a passing rerun, a wider product deadline or a weaker
+    assertion, and an active cycle is never suppressed, retried away or excluded. A potential-order
+    finding stays visible until its owner fixes it or records a specific non-overlap, shared-reader
+    or lifecycle proof with retained regression evidence. In the lane a potential cycle fails the
+    run: the lane keeps no ledger of approved cycles, so a correction removes the order from the
+    exercised workload, and a reviewed proof qualifies only the evidence it reviews. Missing source
+    context, truncated cycles, overload and unreviewed findings prevent qualification, and a run
+    that executed nothing, lost a finding or could not record one failed. A build with graph
+    instrumentation and runtime checking disabled remains instrumented, and its cost is reported
+    separately.
+  - The change records what the run covered and cannot see and the evidence kept: attempts under
+    `target/deloxide/test-deloxide`, and CI artifacts when the `deloxide` label ran it. The task and
+    pull request record the tested revision and inventory digest, each selection's discovered,
+    selected, executed and completed counts, the retained artifacts and which registered workloads
+    reached the changed owner. An earlier revision's result never qualifies a later change, and a
+    clean run never proves an untracked path or an untaken interleaving deadlock-free.
+  - Every concurrency-related change states whether the rule applies. Async-only or otherwise
+    untracked work, such as Tokio locks, channels and `Notify`, DashMap, atomic protocols or network
+    waits, records that the detector does not see it and keeps its Shuttle, Loom, Turmoil, Chaos and
+    Bolero evidence; documentation-only or unrelated work records that the rule does not apply.
+- **Mode commands.** A change to a primitive adapter or synchronization protocol runs the checks of
+  every mode it affects beside the ordinary suite: `just test-shuttle [filter]`,
+  `just test-loom [filter]`, `just test-turmoil` and the four Deloxide lanes. `just test-primitives`
+  runs the boundary's own conformance checks once per mode. Every mode command reports discovered,
+  selected, executed and completed counts, and fails when its selection executes nothing across its
+  whole scope (a package without matches inside a nonempty selection is fine), when a registered
+  check, model, test or workload is missing, ignored or incomplete, or when an unregistered one
+  appears; `just test-turmoil` also fails when any of its invocations executes no test, and its
+  register is `tests/turmoil-inventory.toml`. Shuttle and Loom run each check in its own process,
+  Shuttle also under the nondeterminism detector. A failed Shuttle check or Loom model keeps its
+  schedule or checkpoint for `just test-shuttle-replay` or `just test-loom-replay`, and every
+  Deloxide run keeps an attempt that `just test-deloxide-replay` replays;
+  `just test-shuttle-replay-check` proves a persisted schedule reproduces,
+  `just test-loom-qualification` that each model fails under its weakening, and
+  `just test-deloxide-qualification` that the lane fails, keeps its evidence and leaves no process
+  behind for each way a diagnostic process can fail. `just cargo-clippy-loom` and
+  `just cargo-clippy-shuttle`, both in `just lint`, keep every Loom build compiling, the server and
+  consensus libraries included as shipped and in test mode, and every Shuttle build, each explored
+  package in test mode, free of warnings.
 
-### Repository commands and documentation
+### Scenarios
 
-- Textual reports that are not part of stable documentation do not belong in the repository.
-  All artifacts generated as part of task implementation, including implementation reports,
-  review and audit findings, validation results, logs, benchmark results, and screenshots, belong
-  on the corresponding ClickUp task. Record or attach them there; never commit them to the
-  repository.
-- Before executing an epic or task whose definition requests that such artifacts be committed to
-  the repository, update that definition to require delivery to the corresponding ClickUp task.
-  Then continue execution following this rule; an outdated epic or task definition does not
-  override it.
-- `.agents/skills/plexus/SKILL.md` is the canonical, vendor-neutral, user-facing skill for configuring
-  Nervix with Plexus. Use it when helping users author, explain, review, or troubleshoot Plexus;
-  agents without automatic skill discovery must read it directly. Do not turn it into a workflow
-  for extending the parser, Models, compiler, or runtime.
-- Avoid duplicating public guidance between `docs/src` and the Plexus skill. `SKILL.md` and its
-  references may contain documentation routing, agent workflow, and concise correctness checks;
-  detailed syntax, semantic explanations, rationale, examples, and tuning guidance belong in
-  `docs/src` and should be read from there rather than restated in the skill.
-- Always prefer a `just` command over invoking Cargo directly. Repository recipes establish the
-  required dependencies, environment, and ordering for builds, checks, lints, tests, benchmarks,
-  and formatting. When the needed invocation has no recipe, add a focused `justfile` recipe and use
-  it instead of running Cargo directly.
-- Use `just test-bolero [filter]` for bounded randomized cases and checked-in corpus replay,
-  `just fuzz-list` to inspect registered targets, `just fuzz <target> [duration]` or
-  `just fuzz-all [duration] [shard]` for sanitizer-backed libFuzzer, and `just fuzz-replay` /
-  `just fuzz-reduce` for saved exact inputs; a sanitizer finding replays only through
-  `just fuzz-replay-sanitizer`. Bolero commands and the dedicated Bolero workflow
-  enforce inventory and scoped compiled discovery; `just validate-bolero` runs that check alone.
-  Do not add Bolero checks to `just validate`, `just validate-ci`, or the Check workflow's
-  validation job. A random seed identifies one generated case, not an entire
-  entropy-driven campaign. Keep failures, their minimization and revision/toolchain/flag metadata
-  before cleanup.
-- Live `just fuzz` / `just fuzz-all` campaigns collect Rust source coverage with the pinned
-  sanitizer toolchain. `scripts/bolero_coverage.py` reuses the native exporter for their exact
-  hashed executables and required objects. Each selected target and the aggregate retain
-  `completion.json`, `executions.jsonl`, `lcov.info` and `export.log` beneath
-  `target/native-coverage/bolero-fuzz/fuzz/<nightly>/<attempt>/`. Only a `complete` record
-  beside a report is successful evidence. Discovery, build probes, replay and deliberate failure
-  qualification supply no campaign counters; stable and nightly raw profiles never mix.
-  A failed or interrupted campaign retains its failure and cannot produce a complete aggregate.
-  Sanitizer CI runs the inventory in shards of whole harnesses, and only the combined record of
-  every shard of one plan, which `just combine-bolero-fuzz` checks, claims the whole inventory.
-  Check calls the reusable Bolero workflow with its tested SHA, event and label snapshot;
-  randomized checks are required exactly when `bolero-random` requests them, and a deliberate
-  sanitizer skip publishes no fuzz coverage.
-  Keep native fuzz reports and the Python runner report distinct from ordinary coverage and CRAP.
-- Check verifies its exact tested merge before excluding ordinary suites for documentation-only
-  changes. `test-selection` records the changed paths and requirements; its selection is not
-  property execution evidence. `no-docker` never authorizes a test exclusion. The reusable Bolero
-  call is excluded as a whole only for verified prose changes without `bolero-random` or `fuzz`;
-  once called, its requested randomized and sanitizer execution remain mandatory even on
-  single-job reruns. [Property Testing And Fuzzing](docs/src/property-testing-and-fuzzing.md#documentation-only-selection)
-  owns the allowed locations, evidence and failure semantics; `just test-ci-selection` tests them.
-- Use `just validate` for formatting and validation.
-- Every ordinary coverage consumer reads the one merged, repository-relative `lcov-workspace.info`.
-  A new ordinary producer registers its reports in the merge's inputs; a producer outside the
-  ordinary report states its scope and why. Mode, diagnostic and live fuzz reports remain separate.
-  A merge missing an input or workspace member, or an analysis whose inputs do not match the
-  sources or match nothing, fails. Missing analysis never becomes zero coverage or zero debt.
-  Coverage percentages and CRAP scores are advisory; report integrity is mandatory. The
-  deterministic complexity verdict is the `just ratchet` count of functions above cyclomatic
-  complexity 30, which reads no coverage.
-- Architecture debt is counted and only decreases. `just ratchet` counts oversized files, actual
-  Rust cast expressions, struct fields whose presence depends on `cfg(feature = "testing")`, and
-  functions whose cyclomatic complexity exceeds 30, `hidden_tunables`, numeric policy outside
-  class-typed settings and fixed-value contracts as specified in Node Settings, and
-  `non_aws_lc_crypto`, cryptography outside AWS-LC as specified in Cryptography.
-  The stable source parser sees inactive branches and named or tuple fields; raw identifiers,
-  import aliases, qualified paths and conditional documentation attributes are not those facts.
-  Complexity is measured by the cargo-crap version `scripts/cargo_crap.py` pins, which
-  `just install-cargo-crap` builds through kache; another version is refused, and an analysis that
-  misses a source never reads as zero. That count is the mandatory complexity verdict: a new
-  function above 30 fails `just validate` and the `checks` job, and decomposing it is the repair.
-  Source discovery includes tracked and newly authored Rust. CI fails when a structural count
-  exceeds `debt-baseline.json`.
-  A change may lower a count and never raise one. When a count falls, run `just ratchet --update`
-  and commit the baseline; `just ratchet --show <count>` lists its sites.
-- A rule that misjudges code is repaired in the rule, or the operation it misjudges carries a
-  narrow reviewed exception; correct code is never reshaped only to satisfy it. Respelling an
-  operation, splitting one lookup into two, moving code into a helper or another file, or
-  defaulting a failure to lower a finding is a workaround, and the owner it degraded keeps the
-  repair. `just lint-audit` reports resolved candidates for such workarounds, attributed to the
-  commits and counts that introduced them; its report is review input under `target/`, and review
-  dispositions and measurements belong on the owning task. A claim that a workaround costs
-  performance, or that its repair saves it, needs that provenance and a same-host measurement of
-  the lookups, comparisons and allocations it changes over hit-heavy and miss-heavy keys; a lower
-  count or a shorter function is not a speedup.
-- Model consumption, language dependencies, recurring cluster awaits, declared node identities,
-  installation state, synchronization, failure signatures, discarded outcomes, canonical panic APIs,
-  report-bearing tracing fields, integer/Duration clamped arithmetic and Option/Result adapter
-  control flow use real Nervix compiler diagnostics across the complete declared configuration
-  matrix. Finite API recognition is Rust code; execution contexts and reviewed exceptions belong
-  beside their source owners. Gate them with `cfg_attr(nervix_lint, ...)`. Contracts state actual
-  recurring, lifecycle, observer, outside or bounded execution, with reasons and bounded identities.
-  Use normal reason-bearing expectations on one operation, including `expect_lint!`; retained debt
-  names its owning repair task. Blanket allow, broad/undocumented/unfulfilled expectations and an
-  expectation widened to cover another operation fail. Generated reports are outputs under target,
-  never enforcement inputs. Do not infer policy from filenames, sharing traits or method names.
-- [Architecture Rules And The Debt Ratchet](docs/src/architecture-enforcement.md) owns the complete
-  eighteen-family contract matrix, the components and the nine source-contract annotations,
-  source/compiler scope, report identity and reuse, the pinned analysis toolchain and its upgrade,
-  qualification and its CI selection, what each form of evidence establishes, the workaround audit
-  and review limits. A new or changed semantic rule ships with allowed/rejected compiler fixtures
-  distinguished by the resolved fact, false-positive and false-negative controls, precise
-  diagnostic/span assertions, and invalid, unfulfilled and widened-expectation checks. Source rules
-  also qualify inactive configuration and authored macro fragments. Registered bounded Bolero
-  properties qualify changed source parsing and complete lossless tooling representations. Remove a
-  replaced detector and its numeric entry at the same cutover; a source expectation names one real
-  operation and cannot become a second allowance catalog.
-- Classify pure conversion refusals, cancellation signals, semantic row/record/wire outcomes and
-  modeled library error contracts with reason-bearing `nervix::error_boundary(outcome|library, ...)`
-  at the exact error type or return contract. Such classifications never inherit from an enclosing
-  callable, module or package. Foreign standard-error hooks retain a complete report carrier.
-  [Errors And Diagnostics](docs/src/errors-and-diagnostics.md) owns these contracts. The source
-  `Result<_, String>` rule remains distinct. No numeric allowance replaces these compiler rules.
-- Supported local helper/callback edges are re-evaluated, and callee/trait contracts cross compiler
-  metadata boundaries. A hot caller of a lifecycle-only helper is diagnosed. Unknown dispatch needs
-  a callable source contract or a diagnostic, not an inherited cold module classification. Preserve
-  disjoint structural and primitive provenance checks, including inactive cfg and authored macros.
-  [Data-Plane Concurrency](docs/src/data-plane-concurrency.md#source-contracts) owns the annotation,
-  inheritance, exception and supported-effect contract; no universal ownership proof is claimed.
-- The synchronization driver and isolated artifacts use `nightly-2026-09-17`; product builds stay
-  stable. Bolero's sanitizer campaigns share that nightly, and an upgrade moves every declaration of
-  it in one change that keeps every compiler fixture's result. Its workspace wrapper composes
-  beneath configured kache. Current source, annotations, rule/dependency/configuration inputs and
-  complete declared target evidence are required, including zero findings. Missing evidence rebuilds
-  only isolated authored artifacts in a supported cache namespace. `just test-typed-ratchet` and
-  `just qualify-typed-ratchet-cache` qualify diagnostics, current paired API doctests and
-  completion/cache behavior. Tooling Bolero targets use the shared inventory and current
-  ordinary/fuzz CI policy; native coverage uses matching LLVM tools.
-- Every Rust build, check, lint, and test invocation must run through kache, the compiler wrapper
-  the host configures with `RUSTC_WRAPPER` or Cargo's `build.rustc-wrapper`. The requirement has
-  no exceptions: diagnostics, benchmarks, cache troubleshooting, and retries run through it too.
-  Kache serves compiled artifacts from the host's shared cache. A build that bypasses it compiles
-  from source what the cache already holds, which puts extra CPU load on the host, and writes a
-  private full copy of every artifact, so its target directory consumes a lot of disk space.
-  Never unset, clear, or override `RUSTC_WRAPPER`, `CARGO_BUILD_RUSTC_WRAPPER`, or
-  `build.rustc-wrapper`, and never run Cargo with a `HOME` or `CARGO_HOME` that hides the host's
-  Cargo configuration: the host may set the wrapper there, and an empty `RUSTC_WRAPPER` switches
-  it off. When kache is unavailable or a build fails under it, stop and report that instead of
-  building without it.
-- Use `just validate-skill` to validate the public Plexus skill against the Agent Skills publication
-  checks. CI runs this validation but does not create GitHub releases; the public default branch is
-  the install source.
-- `docs/book.toml` owns the curated public Plexus chapter allowlist rendered into the versioned
-  `llms.txt` agent index. Keep that list focused on user-facing Plexus configuration and exclude
-  architecture, repository-development, and local-operation material.
-- `just book` renders the book after `just test-docs`, which runs every script test and the docs
-  worker's tests. CI's `build-book` job builds and publishes the book, its PDF and the Plexus agent
-  index and repoints the `snapshot` alias that docs.nervix.io serves, only for a manual run and for
-  a pull request labeled `book`; the `checks` job runs `just test-docs` for every pull request. A
-  pull request carries `book` only when its task requires the rendered book, such as a change to
-  the book's build, theme, structure, screenshots or generated chapters, or a preview a reviewer
-  needs.
-- After each development cycle, run `just validate` and any focused tests added or changed.
-- Use `just test` for the full suite so repository-required environment is configured.
-- Use `just test-scenarios --input <feature> ...` for targeted cucumber runs so the configured test
-  environment is applied. Add a focused `justfile` task when a needed invocation is not represented
-  instead of running the scenario test binary directly.
-- `just test-client-conformance [tags]` builds the cross-language client probes and runs them
-  against one- and three-node clusters. CI runs it only for a pull request labeled
-  `client-conformance`; a pull request that changes the client protocol, the shared binding or a
-  probe carries that label.
-- `just chaos suite smoke|soak --image IMAGE` runs the external chaos suites against an already
-  built image; [External Cluster Chaos](docs/src/cluster-chaos.md) documents them. CI runs the smoke
-  suite against a pull request's own images only for a pull request labeled `chaos`, and the soak
-  suite for one labeled `chaos-soak`; a pull request that changes the chaos runner, or the
-  membership, failover, recovery or delivery behavior its scenarios verify, runs the suite locally,
-  and those labels stay off by default under the expensive label rule below. Each suite runs against the release image and against the Deloxide diagnostic image of the
-  same revision, whose label makes every run fail unless the deadlock evidence of each process its
-  nodes started qualifies; a change to the diagnostic image, its evidence collection or a path its
-  scenarios exercise under tracked locks keeps both green.
-- Directed-link loss proof, for random, burst and combined loss, samples 400 packets at 10 ms
-  intervals within the same approximately four-second observation window and 30-second sample
-  bound; the probe helper's Docker launch has a separate bound. A loss floor judged over 40
-  packets fails a working fault too often: 20% independent loss misses a 5% floor about once in
-  700 samples. Other profiles and healthy observations use 40 packets at 100 ms intervals. Effect
-  limits retain their received and lost fractions at every sample size; an incomplete sample,
-  ineffective fault, excessive loss or missing consecutive burst fails qualification. Sampling
-  never extends a product deadline.
+- `Given` establishes preconditions, `When` performs the action or event under test, and `Then`
+  asserts the observable outcome.
+- Runtime behavior uses scenario outlines over one- and three-node clusters unless it is explicitly
+  topology-specific. Three-node clusters use the conditionally compiled random test scheduler by
+  default, which assigns schedulable graph nodes independently to exercise cross-node paths and
+  keeps assignments stable for unchanged domain, model and topology inputs, so reconciliation causes
+  no ownership churn. Scenarios about production placement, cordon, drain, scheduled-node failover
+  or full-cluster recovery from node-owned persisted state configure the production sticky scheduler
+  before cluster startup. Scheduling, leader/follower restrictions and inter-node mechanics get
+  dedicated scenarios or lower-level tests.
+- Stateful processor scenarios prove branch isolation and field preservation with interleaved
+  records from at least two branches. Browser behavior is tested through the web-console suite's
+  Playwright-facing steps, never by bypassing the public browser flow.
+- Avoid blind sleeps: wait for explicit conditions with bounded timeouts and useful failure
+  messages; short polling intervals are acceptable only inside such a condition-based wait.
+  Scenarios run many at a time, so a bound that holds only on an idle machine is a test defect, not
+  a flake to retry; bound waits generously, since they end when the condition holds.
+- Every scenario runs beside the rest; no tag, lock or harness mode, such as `@exclusive`, runs one
+  alone or holds others back. Slots come only from declared weights and retry shares ([Integration
+  Test Lifecycle](docs/src/integration-test-lifecycle.md)): `@slots_N` on a feature, rule, scenario
+  or examples block declares measured load, the largest inherited declaration applies, and each
+  attempt holds the larger of weight and retry share, capped at a quarter of the pool and at least
+  one slot. Choose weights from measured per-attempt load, judged on complete sharded runs for
+  stalls, retries, utilization and suite length.
+- Weights and retries absorb contention but explain no failure, and one they clear may be a masked
+  bug. Before calling a failure contention, ask whether it follows host load (CPU steal, stalls and
+  retries across unrelated scenarios), repeats on a quiet host and could come from delay at all, and
+  record why on the ClickUp task. Delay makes a wait late; it never loses an effect, duplicates one
+  or produces a wrong value, which stay defects however often a retry passes. Repair a masked bug in
+  its owner, and remove a timing assumption the scenario does not need instead of weighing it away.
+- Assert a delay, not a silence: a "not yet" window races a cadence that started at the previous
+  event, and load at the step boundary consumes the margin, so record when the triggering event
+  happened and require output at least the cadence later. A "never arrives" window is only for
+  output that must never arrive. An exact batch-count assertion needs a flush window much wider than
+  the spread of the messages it groups, and a unit test comparing wall-clock instants anchors its
+  bound to an instant observed after the value under test was computed.
+- The scenario suite and harness regressions are the `nervix-scenarios` package rooted at `tests/`,
+  with only test targets and dev-dependencies, so the server is never linked twice and its `testing`
+  feature stays out of ordinary builds.
+- Scenarios run nodes in-process. A test whose subject is a process (its signals, exit status,
+  command line, open-file limit or crash) re-runs its own executable through
+  `tests/common/process_program.rs`, which starts `current_exe` with `arg0` set to `nervix-server`
+  so that `main` calls `run_server_process`, the server executable's entry point; a new helper
+  process joins `ProcessProgram`. A test never uses `CARGO_BIN_EXE_nervix-server`, looks for a
+  server binary in a target directory or needs a recipe to build one, except a test of one
+  particular build, such as the client protocol's release baseline, whose recipe builds that server
+  and names it to the test.
+- A test compiles nothing and never runs Cargo, a compiler or a package manager: `just` builds every
+  tool a test starts beforehand, through `tests-deps` and what `scripts/scenario_shards.py` packs,
+  since a shard has no toolchain. Testcontainers provides every dependency:
+  `crates/test-environment` declares each service, started on first use, and no recipe, workflow or
+  CI step prepares, starts or stops one.
+
+### Coverage
+
+[Coverage Reports And The Complexity Gate](docs/src/coverage-reports.md) owns producers, reports and
+their verdicts. Coverage percentages and CRAP scores are advisory and never fail a build, and no
+text calls CRAP a gate; report integrity is mandatory, and the only complexity verdict is the
+[ratchet's](#the-ratchet) count.
+
+- Every ordinary consumer reads the one merged, repository-relative `lcov-workspace.info`. A new
+  ordinary producer registers as a merge input, and a producer outside it states its scope and why;
+  mode, diagnostic and live fuzz reports stay out of it and its CRAP report. A merge missing an
+  input or workspace member, or an analysis matching nothing or mismatching the sources, fails:
+  missing analysis is never zero coverage or zero debt.
+- `just coverage-native-extras [producer ...]` instruments the native extra checks inventoried in
+  `scripts/native_coverage.py` beneath kache, one build directory per mode, into a fresh
+  `target/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/`. Only a report beside a
+  `complete` completion record counts, for its tested revision and selection; incomplete collection
+  keeps its evidence and fails before export, and coverage bookkeeping stays outside model
+  processes. A check that starts executing Nervix code natively joins the inventory with a prepare,
+  instrumented and finish recipe, while existing tests, properties, models and scenarios keep their
+  canonical runners; a producer change updates its merge inputs or full-union requirement,
+  eligibility, workflow downloads and command and artifact tests together.
+- `just coverage-patch [base] [report]` writes advisory patch coverage under `target/`
+  (`--pr <number>` updates the marked comment after verifying the head; the Turmoil job uses
+  `--scope turmoil`). `just check-coverage [report] [record]` publishes the advisory CRAP report
+  under `target/crap-report/`, fails only on vacuous analysis, and lists functions in unrecorded
+  files as unmeasured, never uncovered. `just coverage-full [input ...]` merges the producers a CI
+  run selects (`just coverage-full-select`) into a line-coverage union in `target/coverage-full/`,
+  failing on any missing, stale, foreign, corrupt, failed, incomplete or unselected input, and a run
+  without `fuzz` requires the Bolero call's deliberate skip. Nothing ordinary reads the union, and a
+  change to a producer job, its producer or its artifact updates the requirement table in
+  `scripts/coverage_full.py`.
+- `just test-native-coverage`, `just test-patch-coverage`, `just test-crap-report` and
+  `just test-coverage-full` test these tools, and `just coverage-patch-runner`,
+  `just coverage-crap-report-runner` and `just coverage-full-runner` collect their Python coverage.
+
+## Repository Workflow
+
+### Commands and documentation
+
+- Always prefer a `just` recipe to invoking Cargo, or the scenario test binary, directly: recipes
+  establish the required dependencies, environment and ordering. When a needed invocation has no
+  recipe, add a focused one and use it. `just validate` formats and validates; run it after each
+  development cycle with any focused tests added or changed. `just test` runs the full suite and
+  `just test-scenarios --input <feature> ...` targeted scenarios.
+- Every Rust build, check, lint and test runs through kache, the compiler wrapper the host sets with
+  `RUSTC_WRAPPER` or Cargo's `build.rustc-wrapper`, without exception: bypassing it recompiles what
+  the shared cache holds and writes a private copy of every artifact. Never unset, clear or override
+  `RUSTC_WRAPPER`, `CARGO_BUILD_RUSTC_WRAPPER` or `build.rustc-wrapper` (an empty `RUSTC_WRAPPER`
+  disables it), or hide the host's Cargo configuration with another `HOME` or `CARGO_HOME`. If kache
+  is unavailable or a build fails under it, stop and report instead of building without it. Coverage
+  uses the matching toolchain's declared `llvm-tools`.
+- Textual reports that are not stable documentation never enter the repository. Every artifact
+  generated while implementing a task, including implementation reports, review and audit findings,
+  validation results, logs, benchmark results and screenshots, is recorded or attached on the
+  corresponding ClickUp task. Before executing an epic or task whose definition asks for such
+  artifacts to be committed, update the definition to require delivery to ClickUp; an outdated
+  definition does not override this rule.
+- A public interface or Plexus surface change updates the relevant `docs/src` pages and the Plexus
+  skill in the same change and regenerates `docs/book` with `just book`, which renders after
+  `just test-docs` passes.
+- `.agents/skills/plexus/SKILL.md` is the canonical, vendor-neutral, user-facing skill for
+  configuring Nervix with Plexus. Use it when helping users author, explain, review or troubleshoot
+  Plexus (agents without automatic skill discovery read it directly), and never turn it into a
+  workflow for extending the parser, Models, compiler or runtime. Public guidance is not duplicated
+  between `docs/src` and the skill: `SKILL.md` and its references may contain documentation routing,
+  agent workflow and concise correctness checks, while detailed syntax, semantic explanations,
+  rationale, examples and tuning guidance belong in `docs/src` and are read from there.
+  `just validate-skill` validates the skill against the Agent Skills publication checks; CI runs
+  that validation but creates no GitHub release, since the public default branch is the install
+  source.
+- `docs/book.toml` owns the allowlist of user-facing Plexus chapters rendered into the versioned
+  `llms.txt` agent index, with no architecture, repository-development or local-operation material.
+- `just plexus-completion-walk`, kept outside `just test`, fails on any completion branch that
+  accepting the parser's suggestions cannot complete; grammar changes keep it passing, and a new
+  finding is a defect, never a baseline entry. `just plexus-completion-walk-deep` relaxes
+  deduplication to reach branches the gating budget stops short of.
+- `just test-client-conformance [tags]` runs the cross-language client probes against one- and
+  three-node clusters.
+- `just chaos suite smoke|soak --image IMAGE` runs a chaos suite against the one already built image
+  it names. Each suite runs against the release image and against the same revision's Deloxide
+  diagnostic image, whose runs fail unless the deadlock evidence of every process its nodes started
+  qualifies. A change to the chaos runner, or to the membership, failover, recovery or delivery
+  behavior it verifies, runs the suite locally, and a change to the diagnostic image, its evidence
+  collection or a path its scenarios exercise under tracked locks keeps both green.
 - `just release-evidence <pull-request>` holds a pull request's head revision to
-  `tests/release-evidence.toml`: every label-gated method's label is on the pull request and the
-  latest run of every required check passed on that revision. Its register lists each gap a
-  tracked-lock owner declares, a reviewed declaration that does not refuse the revision. A
-  qualification task records its register on its ClickUp task. A change that renames a CI job the
-  inventory names, or adds a value to the matrix of one, updates the inventory in the same change;
-  `just test-release-evidence` reads the Deloxide lane and release image matrices from the
-  workflows and fails when the inventory lacks one of their jobs.
-- `just plexus-completion-walk` walks the Plexus completion graph and fails on any branch that cannot be
-  completed by accepting the suggestions the parser offers. It is deliberately outside `just test`
-  and runs in CI for a pull request labeled `extra-completion-walk`. Grammar changes that add a
-  label carry that label and must keep it passing; a new finding is a defect, not something to record
-  in its baseline. `just plexus-completion-walk-deep` relaxes deduplication to reach branches the
-  gating budget stops short of.
-- A change to a primitive adapter or a synchronization protocol runs the checks of every mode it
-  affects: `just test-shuttle [filter]` for interleavings, `just test-loom [filter]` for
-  memory-ordering claims, `just test-turmoil` for the simulated network, and `just test-deloxide`
-  for active deadlocks, `just test-deloxide-order` for potential acquisition-order cycles among
-  tracked locks, and `just test-deloxide-stress` and `just test-deloxide-stress-restore` for active
-  deadlocks under bounded scheduling disturbance, beside the ordinary suite. The four Deloxide
-  commands run the diagnostic lane over
-  the bounded inventory in `tests/deloxide-inventory.toml`: a registered workload that is missing,
-  ignored or incomplete fails it, so does a discovered probe, owner test or tagged scenario that is
-  not registered, and every run keeps an attempt that `just test-deloxide-replay` replays.
-  `just test-deloxide-qualification` proves the lane fails, keeps its evidence and leaves no
-  process behind for each way a diagnostic process can fail. `just test-primitives` runs the
-  boundary's own conformance checks once per mode. Every mode
-  command reports how many checks it discovered, selected, executed and saw complete; a selection
-  that executes nothing across its whole scope fails, though a package with no match inside a
-  nonempty selection is fine. `just test-shuttle` runs every registered check in its own process
-  under its exploration and under the nondeterminism detector, fails when a registered check is
-  missing, ignored or did not complete its exploration, or when a check is unregistered, and leaves
-  a failed check's schedule and metadata for `just test-shuttle-replay`;
-  `just test-shuttle-replay-check` proves a persisted schedule reproduces its failure.
-  `just test-loom` runs every registered Loom model in its own process, fails when a registered
-  invariant is missing, ignored or incomplete, when a model is unregistered, or when a filter
-  selects nothing, and leaves a failed model's checkpoint and metadata for `just test-loom-replay`.
-  `just test-loom-qualification` shows each model fails under its registered weakening.
-  `just test-turmoil` fails when one of its invocations executes no test, when a test
-  `tests/turmoil-inventory.toml` registers did not run or ran ignored, and when a simulation test
-  ran unregistered. CI runs Shuttle and its replay check, Loom and its qualification, and Turmoil
-  and its replay check in jobs of their own, only for a pull request labeled `shuttle`, `loom` or
-  `turmoil` respectively; a pull request that affects one of these modes carries that mode's
-  label. `just cargo-clippy-loom`, part of `just lint`, keeps every Loom build compiling,
-  including the server and consensus libraries as they ship and in test mode.
-  `just cargo-clippy-shuttle`, also part of `just lint`, lints every Shuttle build with warnings
-  denied, including each package `just test-shuttle` explores in test mode, so a warning in a check
-  fails validation.
-- CI's `extra-tests` job is optional: each `extra-*` label selects its own steps, and the job is
-  skipped without any. A pull request carries the label of what it affects: `extra-compiler` for a
-  compiler rule or fixture, `extra-primitives` for a primitive, `extra-completion-walk` for grammar,
-  `extra-connector-matrix` for a connector declaration, `extra-runners` for a CI reporter, gate or
-  collector, `extra-doctests` for an API with paired doctests, `extra-miri` and `extra-mutation` for
-  the expiry map, and `extra-bench-smoke` for a benchmark. A new step of that job takes a label, and
+  `tests/release-evidence.toml`: every label-gated method's label is present, and the latest run of
+  every required check passed on that revision. Its register lists each gap a tracked-lock owner
+  declares, a reviewed declaration that does not refuse the revision, and a qualification task
+  records its register on ClickUp. Renaming an inventoried CI job or adding a matrix value updates
+  the inventory, which `just test-release-evidence` checks against the workflows' Deloxide and
+  release-image matrices.
+
+### CI labels
+
+[Developing Nervix](docs/src/developing-nervix.md#ci-labels) lists every label that changes what CI
+runs, and adding, removing or renaming one updates that table. Adding or removing any label cancels
+and restarts a running Check, so set labels before the run you mean to keep.
+
+- Carry the label of each optional check a change affects: `shuttle`, `loom` or `turmoil` for that
+  mode, each running in its own job with its replay check or qualification; `client-conformance` for
+  the client protocol, the shared binding or a probe; and, for the optional `extra-tests` job, which
+  runs only the steps its labels select, `extra-compiler` for a compiler rule or fixture,
+  `extra-primitives` for a primitive, `extra-completion-walk` for grammar, `extra-connector-matrix`
+  for a connector declaration, `extra-runners` for a CI reporter, gate or collector,
+  `extra-doctests` for an API with paired doctests, `extra-miri` and `extra-mutation` for the expiry
+  map, and `extra-bench-smoke` for a benchmark. A new `extra-tests` step takes a label, and
   `tests/release-evidence.toml` requires every one.
-- [Developing Nervix](docs/src/developing-nervix.md#ci-labels) lists every label that changes what
-  CI runs, and a change that adds, removes or renames one keeps that table current in the same
-  change. A pull request carries `benchmark` only when its task requires a measured comparison, and
-  `no-docker` only when nothing in it needs an image. Adding or removing any label cancels a Check
-  in progress and starts it again, so a pull request sets its labels before the run it means to
-  keep.
-- `fuzz`, `chaos`, `chaos-soak` and `deloxide` are expensive in CI, so they stay off by default and
-  their checks run locally first. A pull request carries one only for a strong, task-specific need
-  that local verification cannot reasonably satisfy, not because it touches related code. It
-  enables the fewest lanes that need CI, says why in its description, and records the local
-  commands, revision, seeds or scenarios and results there. A release qualification still needs
-  them, because `just release-evidence` requires their checks. Once a label has enabled a check,
-  the check's result stands: removing the label never hides a failure.
-- An agent never changes which runner a job uses on its own: not a `runs-on` label, a runner's size
-  or provider, or the cache bucket that follows them, in any pull request. When CI malfunctions, the
-  agent stops, reports the evidence to the user and asks for approval. A runner change lands only
-  with the user's explicit approval for that change, and never inside a feature or a fix.
-- `just coverage-native-extras [producer ...]` runs eligible native extra checks under LLVM source
-  instrumentation: `test-typed-ratchet`, `bench-smoke`, `plexus-completion-walk`,
-  `validate-connector-matrix`, the canonical `test-shuttle` and `test-loom` runners, the canonical
-  `test-turmoil` suite,
-  each `test-primitives-<mode>` conformance recipe,
-  `test-deadlock-evidence-order`, `test-deadlock-report`, and the `test-deloxide`,
-  `test-deloxide-order`, `test-deloxide-stress` and `test-deloxide-stress-restore` lanes, which
-  export only from a complete `lane.json` and instrument only
-  workspace crates, through a workspace compiler wrapper beneath kache, so their nodes meet the
-  product's deadlines.
-  `test-primitives` selects every native conformance mode. CI runs these checks through collection;
-  product API doctests, primitive compile/browser checks, replay and Loom weakening qualification,
-  `just test-deloxide-qualification` and `just qualify-typed-ratchet-cache` retain independent
-  verdicts outside its instrumentation. Source-contract fixture doctests belong to the instrumented
-  compiler-fixture producer; its product API doctests finish separately. Each run writes
-  `lcov.info`, `completion.json`, `executions.jsonl` and `export.log` to a
-  fresh `target/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/`. A report counts only
-  beside a `complete` completion record; a failed, interrupted or incomplete collection never is
-  one, and it keeps its evidence. Prerequisites build outside the instrumentation, and the parts
-  of a check that compile or target the browser stay uninstrumented, as do
-  Miri, mutation testing and the Loom weakening qualification. An extra check that starts
-  executing Nervix code natively joins the producer inventory in `scripts/native_coverage.py`, with
-  its justfile recipe composed as prepare, instrumented and finish parts. `just test-native-coverage`
-  tests the collector.
-  An existing test, property, model or scenario stays with its canonical runner and inventory.
-  A producer change updates its ordinary merge inputs or full-union requirement table, event/label
-  eligibility, workflow downloads and command/artifact tests in the same change. Compile-only,
-  altered-source, replay and supervision checks declare their independent-verdict scope. A retained
-  complete report qualifies only its tested revision and selection, never targets added later.
-  Model producers also retain `models.json` with canonical discovery, selection, execution and
-  completion, including Shuttle's paired nondeterminism run and Loom's invariant, executions and
-  bounds. Missing or incomplete evidence fails collection before export. Each mode uses its own
-  instrumented build directory; model and diagnostic reports never enter ordinary coverage or its
-  CRAP report. Coverage bookkeeping stays outside model processes and supplies no synchronization
-  to the invariant.
-- `just coverage-patch [base] [report]` measures added executable lines from ordinary LCOV reports
-  and retains an advisory Markdown report under target. `--pr <number>` publishes or updates the
-  authenticated publisher's marked PR comment, after verifying the current PR head. CI uses the
-  same command with the tested merge commit's coordinates and a separate PR head fence. Coverage
-  percentages and reporting failures never fail a build; the complexity verdict is the
-  `just ratchet` count of functions above cyclomatic complexity 30, which reads no coverage.
-  The Turmoil job publishes its current-source report with `--scope turmoil` under a separate
-  comment marker; those counters remain outside ordinary coverage and its CRAP report.
-  `just test-patch-coverage` exercises accounting and publication, and
-  `just coverage-patch-runner` collects its Python line coverage.
-- `just check-coverage [report] [record]` publishes the advisory CRAP report of the merged ordinary
-  report as `target/crap-report/crap.json` and `crap.md`: the pinned cargo-crap scores the
-  repository's Rust sources, with each record bound to its own file, and the coverage comment
-  carries its section for the changed files. No CRAP score fails a build, and no text calls CRAP a
-  gate. The check fails only when its analysis is vacuous: a merge record that is missing,
-  incomplete or of another revision, a report source this checkout does not track, a report Rust
-  file the analysis did not read or bind, or no matched file. A function in a file the report holds
-  no record of is listed as unmeasured, never scored as uncovered. `just test-crap-report`
-  exercises it, and `just coverage-crap-report-runner` collects its Python line coverage.
-- `just coverage-full [input ...]` combines every coverage producer one CI run selects into the
-  full workspace line-coverage union in `target/coverage-full/`, after `just coverage-full-select`
-  records the run's event and pull request label snapshot, its suite and Bolero selection, its run
-  and attempt, the tested revision and each producer job's result. CI's `coverage-full` job runs it
-  after every producer job, including a skipped or failed one, from downloaded artifacts only. The
-  selection derives the required producers: the ordinary report, the diagnostic-evidence
-  collections, and the producers the `extra-primitives`, `shuttle`, `loom`, `turmoil`, `deloxide`
-  and `fuzz` labels enable. A run without `fuzz` requires the Bolero call's
-  recorded deliberate skip and refuses a fuzz report, and the call's record must show the
-  randomized run's success where `bolero-random` requested it and its deliberate skip elsewhere.
-  A missing, stale, foreign, corrupt, failed, incomplete or unselected input fails the union,
-  which then writes no report. The union is line coverage with per-mode attribution and carries
-  no function or branch records; the ordinary report, its patch coverage and its CRAP report
-  never read it. A change to a producer job, the
-  producer it collects or the artifact it uploads keeps the requirement table in
-  `scripts/coverage_full.py` current in the same change, which its workflow contract tests hold.
-  `just test-coverage-full` exercises the union, and `just coverage-full-runner` collects its Python
-  line coverage.
-- Every public interface or Plexus surface change must update the relevant `docs/src` pages and the
-  user-facing Plexus skill in the same change. Keep `.agents/skills/plexus/SKILL.md` and its references
-  accurate for users configuring Nervix, then regenerate `docs/book` with `just book`.
-- Keep parser tests near the grammar they protect.
-- Final implementation reports must name the cucumber scenario added or updated. If none was added,
-  state the explicit user-approved reason.
-- Final implementation reports of concurrency-related work state whether the Deloxide rule applies.
-  When it applies, they name the lane runs of every selection, whether the registered workloads
-  reach the changed path, and the inventory and owner records the change added. When the work is
-  async-only or otherwise untracked, they record that the detector does not see it and name the
+- Carry `book` only when the task requires the rendered book (its build, theme, structure,
+  screenshots or generated chapters, or a reviewer's preview); `build-book` then publishes the book,
+  its PDF and the Plexus agent index and repoints the `snapshot` alias docs.nervix.io serves, as on
+  a manual run, while `checks` runs `just test-docs` for every pull request. Carry `bolero-random`
+  only when the task requires the randomized/corpus run itself, such as a change to it or a release
+  qualification, `benchmark` only for a required measured comparison, and `no-docker` only when
+  nothing needs an image.
+- `fuzz`, `chaos`, `chaos-soak` and `deloxide` are expensive, so they stay off by default and their
+  checks run locally first; `fuzz` is the preferred Bolero evidence. A pull request carries one only
+  for a strong, task-specific need local verification cannot reasonably meet, not for touching
+  related code; it enables the fewest lanes, and its description says why and records the local
+  commands, revision, seeds or scenarios and results. Release qualification still needs them,
+  because `just release-evidence` requires their checks. Once a label enabled a check, its result
+  stands, and removing the label never hides a failure.
+- An agent never changes a job's runner on its own: no `runs-on` label, runner size or provider, or
+  the cache bucket that follows them, in any pull request. When CI malfunctions, it stops, reports
+  the evidence to the user and asks for approval; a runner change lands only with the user's
+  explicit approval for that change, never inside a feature or a fix.
+
+### Finishing a change
+
+- A final implementation report names the Cucumber scenario added or updated, or the explicit
+  user-approved reason none was.
+- A final report of concurrency-related work states whether the Deloxide rule applies. When it
+  applies, the report names the lane runs of every selection, whether the registered workloads reach
+  the changed path, and the inventory and owner records the change added; when the work is
+  async-only or otherwise untracked, it records that the detector does not see it and names the
   Shuttle, Loom, Turmoil, Chaos or Bolero evidence that covers it instead.
-- After completing requested repository changes, include a proposed Conventional Commit title and
-  description in the final response. Follow Conventional Commits and select the title type from the
-  current `type-enum` in `./commitlint.config.js` by the meanings in [Commit Types](#commit-types).
-  Put the title and description together in one fenced code block. Keep the title and each
-  description paragraph on a single unwrapped line; do not insert manual line breaks within them
-  because Git and GitHub handle display wrapping.
-- When the user requests follow-up changes, regenerate both so the final response contains an
-  updated title and description that reflect the complete resulting change instead of a stale
-  earlier proposal.
+- After completing requested repository changes, the final response proposes a Conventional Commit
+  title and description together in one fenced code block, with the type selected from the current
+  `type-enum` in `./commitlint.config.js` by [Commit Types](#commit-types). The title and each
+  description paragraph stay on one unwrapped line, because Git and GitHub handle display wrapping.
+  A follow-up change regenerates both, so they describe the complete resulting change.
 
 ## Commit Types
 
-A commit or pull request title takes its type from the `type-enum` in `./commitlint.config.js`,
-and each type has exactly one meaning:
+A commit or pull request title takes its type from the `type-enum` in `./commitlint.config.js`, and
+each type has exactly one meaning:
 
-- `feat` adds or extends a product feature: something a user of Nervix, a developer building on
-  it, or an operator or administrator running it can see.
+- `feat` adds or extends a product feature: something a user of Nervix, a developer building on it,
+  or an operator or administrator running it can see.
 - `fix` repairs an actual product defect. A repair to a test is `test`, and a repair to CI or a
   script is `build`; neither is ever `fix`.
 - `perf` improves the performance of the product. Faster tests are `test` and faster scripts are
   `build`; neither is ever `perf`.
-- `refactor` changes product code without changing its functionality or its performance. A product
+- `refactor` changes product code without changing its functionality or its performance; a product
   code change that also affects performance is `perf`.
 - `style` changes style, such as formatting, anywhere in the repository.
 - `test` covers anything related to tests of every kind, including new tests and fixes to existing
@@ -1886,16 +1438,8 @@ and each type has exactly one meaning:
   references, such as the skills under `.agents/skills`.
 - `bench` changes benchmarks only.
 
-Choose the most relevant type even where types intersect. A type names the change as a whole
-rather than every part it touches: a feature adds tests and is still `feat`, and a fix adds its
-reproducer and is still `fix`. Where two types describe the same change, the more specific one is
-the more relevant: an upgrade to a dependency version that fixes a vulnerability is `security`, not
-`dep`. A change to the `type-enum` keeps this section current in the same change.
-
-## Error and Diagnostic Quality
-
-- Parse errors should report precise expected and found tokens and retain source spans suitable for
-  diagnostic rendering.
-- Prefer semantic labels over generic messages.
-- Validation errors must identify the owning node, route, operation, and relevant fields without
-  including sensitive payload values.
+Choose the most relevant type even where types intersect. A type names the change as a whole rather
+than every part it touches: a feature adds tests and is still `feat`, and a fix adds its reproducer
+and is still `fix`. Where two types describe the same change, the more specific one is the more
+relevant: a dependency upgrade that fixes a vulnerability is `security`, not `dep`. A change to the
+`type-enum` keeps this section current in the same change.
