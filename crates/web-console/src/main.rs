@@ -942,13 +942,13 @@ impl SessionRequests {
 
     fn admit(&mut self, issued: IssuedRequest, lane: RequestLane) -> Admission {
         self.supersede_lookup(&issued.request);
-        if let RequestLane::Ordered | RequestLane::Connection(ConnectionPriority::Control) = lane {
-            if let Err(report) = self.outstanding().admits(issued.request.text_bytes()) {
-                return Admission::Refused(Box::new(RefusedRequest {
-                    request: issued.request,
-                    refusal: *report.current_context(),
-                }));
-            }
+        if let RequestLane::Ordered | RequestLane::Connection(ConnectionPriority::Control) = lane
+            && let Err(report) = self.outstanding().admits(issued.request.text_bytes())
+        {
+            return Admission::Refused(Box::new(RefusedRequest {
+                request: issued.request,
+                refusal: *report.current_context(),
+            }));
         }
         let can_send = match lane {
             RequestLane::Ordered => self.can_send_ordered(),
