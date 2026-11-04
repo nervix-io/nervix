@@ -302,7 +302,7 @@ impl IcebergStorageBackend {
             (Self::Gcs, "disable_config_load") => Some("gcs.disable-config-load"),
             (Self::Gcs, "disable_vm_metadata") => Some("gcs.disable-vm-metadata"),
             (Self::Gcs, "no_auth") => Some("gcs.no-auth"),
-            (Self::Gcs, "service_path") => Some("gcs.service.path"),
+            (Self::Gcs, "service_path") => Some("gcs.service.host"),
             (Self::Gcs, "token") => Some("gcs.oauth2.token"),
             (Self::AzureBlob, "account_key") => Some("adls.account-key"),
             (Self::AzureBlob, "account_name") => Some("adls.account-name"),

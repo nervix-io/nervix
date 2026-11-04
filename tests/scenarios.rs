@@ -64,6 +64,7 @@ use iceberg::{
         FileIO, FileIOBuilder, S3_ACCESS_KEY_ID, S3_DISABLE_CONFIG_LOAD, S3_DISABLE_EC2_METADATA,
         S3_ENDPOINT, S3_PATH_STYLE_ACCESS, S3_REGION, S3_SECRET_ACCESS_KEY,
     },
+    transaction::{ApplyTransactionAction as _, Transaction},
 };
 use iceberg_catalog_rest::{
     REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE, RestCatalog, RestCatalogBuilder,
@@ -26459,6 +26460,32 @@ async fn when_the_operator_provisions_iceberg_namespace(
         .expect("failed to provision the Iceberg namespace");
 }
 
+#[given(expr = "Iceberg table {string} declares table property {string} as {string}")]
+async fn given_iceberg_table_declares_table_property(
+    world: &mut ScenarioWorld,
+    table: String,
+    property: String,
+    value: String,
+) {
+    let value = expand_placeholders(world, &value);
+    IcebergTablePropertyFixture::from_step(world, &table, &property)
+        .update(IcebergTablePropertyUpdate::Set(&value))
+        .await
+        .expect("failed to declare the Iceberg table property");
+}
+
+#[when(expr = "the operator removes table property {string} from Iceberg table {string}")]
+async fn when_the_operator_removes_iceberg_table_property(
+    world: &mut ScenarioWorld,
+    property: String,
+    table: String,
+) {
+    IcebergTablePropertyFixture::from_step(world, &table, &property)
+        .update(IcebergTablePropertyUpdate::Remove)
+        .await
+        .expect("failed to remove the Iceberg table property");
+}
+
 #[when(
     expr = "the operator provisions Iceberg table {string} in namespace {string} at {string} with \
             columns"
@@ -34220,6 +34247,61 @@ impl IcebergTableFixture {
             }
             other => panic!("unsupported Iceberg fixture column type '{other}'"),
         }
+    }
+}
+
+/// What an operator's catalog update does to one property of a table.
+#[derive(Clone, Copy)]
+enum IcebergTablePropertyUpdate<'a> {
+    Set(&'a str),
+    Remove,
+}
+
+/// One property of a table in the namespace named after the scenario's Nervix domain, which an
+/// operator updates through the catalog.
+struct IcebergTablePropertyFixture {
+    namespace: IcebergNamespaceFixture,
+    table: String,
+    property: String,
+}
+
+impl IcebergTablePropertyFixture {
+    fn from_step(world: &ScenarioWorld, table: &str, property: &str) -> Self {
+        Self {
+            namespace: IcebergNamespaceFixture::of_domain(world),
+            table: expand_placeholders(world, table),
+            property: expand_placeholders(world, property),
+        }
+    }
+
+    async fn update(&self, update: IcebergTablePropertyUpdate<'_>) -> Result<(), String> {
+        IcebergCatalogProvisioning::run("table property", || self.update_once(update)).await
+    }
+
+    async fn update_once(&self, update: IcebergTablePropertyUpdate<'_>) -> Result<(), String> {
+        let catalog = rustfs_rest_catalog(&self.namespace.dependencies).await?;
+        let namespace = NamespaceIdent::from_strs(self.namespace.namespace.split('.'))
+            .map_err(|source| format!("invalid catalog namespace: {source}"))?;
+        let table_ident = TableIdent::new(namespace, self.table.clone());
+        let table = catalog
+            .load_table(&table_ident)
+            .await
+            .map_err(|source| format!("failed to load Iceberg table {table_ident}: {source}"))?;
+        let transaction = Transaction::new(&table);
+        let properties = transaction.update_table_properties();
+        let action = match update {
+            IcebergTablePropertyUpdate::Set(value) => {
+                properties.set(self.property.clone(), value.to_string())
+            }
+            IcebergTablePropertyUpdate::Remove => properties.remove(self.property.clone()),
+        };
+        let transaction = action.apply(transaction).map_err(|source| {
+            format!("failed to update Iceberg table {table_ident} properties: {source}")
+        })?;
+        transaction.commit(&catalog).await.map_err(|source| {
+            format!("failed to commit Iceberg table {table_ident} properties: {source}")
+        })?;
+        Ok(())
     }
 }
 

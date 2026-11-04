@@ -3846,7 +3846,8 @@ with every writer the emitter starts, and the five-digit count of the files that
 from `00000`. Each opening of the emitter therefore names its files apart from every other's. A
 commit appends its data files in one fast-append snapshot whose summary carries
 `nervix.emitter.append-id`, the identity a retry looks for, as
-[Iceberg retries](#iceberg-retries) describes.
+[Iceberg retries](#iceberg-retries) describes. The snapshot's manifest and manifest list go to the
+table's `write.metadata.path` property, and to `<table location>/metadata` when it is unset.
 
 The emitter writes nothing else:
 
@@ -3859,6 +3860,13 @@ The emitter writes nothing else:
   commit too.
 - **Schema changes.** The emitter never changes the table's schema; provision every column it
   maps, as [Iceberg table schema](#iceberg-table-schema) describes.
+- **Encryption.** The emitter writes no encrypted data files or manifests. A table whose
+  properties declare `encryption.key-id` opens and stages rows, but every commit fails before it
+  writes a data file, with `the Iceberg table declares an encryption key, and the emitter writes
+  no encrypted files`, and is retried on the declared retry policy, keeping its staged rows and
+  their acknowledgements. A format-version 3 table that declares one fails the open instead, as a
+  catalog that fails the load, because Nervix gives the catalog library no key management client
+  to read it with.
 - **Deletes and upserts.** A commit only appends data files. The emitter writes no equality or
   position deletes, replaces no rows and overwrites no files.
 - **Other catalogs.** The emitter commits through an Iceberg REST catalog, its `ICEBERG_REST`

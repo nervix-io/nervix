@@ -1675,7 +1675,11 @@ null (`NullableNestedIntoRequired`). While opening, the error stays beneath
 way the report attaches the error's own description, which the emitter shows as its transient error
 while it retries. An Arrow schema that Iceberg cannot represent keeps the typed Iceberg conversion
 error beneath `IcebergColumnError::MappedSchema`. The plan compares names and nested types after
-narrowing UTC datetimes to microseconds.
+narrowing UTC datetimes to microseconds. A commit also refuses a table whose properties declare
+`encryption.key-id` each time it reloads the table, before it writes a data file and again before it
+appends: `IcebergEncryptedTable` stays beneath `EmitterWriteError::Commit`, its description is the
+emitter's transient error, and the commit keeps its staged rows and their acknowledgements for its
+retry.
 
 An Iceberg emitter with `BATCH` also lays out the selected rows against the table schema before
 staging, so a projection failure there remains an `IcebergColumnError` beneath
