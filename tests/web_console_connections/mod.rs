@@ -25,11 +25,12 @@ use crate::common::console_connections::{
 /// What a console page runs before any script of its own.
 const RECORDER: &str = include_str!("recorder.js");
 
-/// Whether the initial session frames reach the page immediately or at the scenario's release.
+/// The page's initial session delivery and optional bounded frame observations.
 #[derive(Clone, Copy)]
 pub(super) enum InitialSession {
     Deliver,
     Hold,
+    ObserveRequests,
 }
 
 /// A bounded gate installed after the recorder and before the console's own scripts.
@@ -49,6 +50,10 @@ pub(super) async fn record_console_connections(
 ) -> playwright_rs::Result<()> {
     let script = match initial_session {
         InitialSession::Deliver => RECORDER.to_string(),
+        InitialSession::ObserveRequests => {
+            let observer = super::web_console_request_window::observer_script();
+            format!("{RECORDER}\n{observer}")
+        }
         InitialSession::Hold => {
             let path = serde_json::to_string(CONSOLE_SESSION_PATH)
                 .assured("the public session path serializes as JavaScript text");

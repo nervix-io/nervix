@@ -841,6 +841,14 @@ FlatBuffers encoding preserves these optional fields and typed variants across t
 [Client Session Protocol](./client-session-protocol.md#verification-before-reading) defines how a
 receiver keeps an absent optional value distinct from a present zero.
 
+The console distinguishes an awaited sent request from a superseded lookup whose result it no
+longer needs. The latter retains its request identity and capacity place until its terminal reply,
+without retaining the request text or partial reply. A latest lookup is either held under its issue
+order or sent under its request identity. A transaction attachment keeps its issue order while
+held and in flight, so ordered work cannot run before a queued attachment completes. A held
+connection request distinguishes setup from ordinary controls: setup precedes ordered work, while
+ordinary controls share issue order with ready commands.
+
 The shared C binding gives clock observations their own `nx_clock_event_kind` and installations
 their own `nx_clock_state`. Only `NX_CLOCK_PACED` has a mapping for `nx_clock_event_paced`; tick and
 end-reason accessors likewise require their corresponding event kinds. An interruption or a refused

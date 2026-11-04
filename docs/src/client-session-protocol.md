@@ -395,10 +395,11 @@ next request at once; see [Producers](#producers). A session admits at most 64 r
 counting both lanes and producer closes but not submitted batches, which their producer's credit
 bounds instead. A request beyond that is refused with
 `TooManyRequestsInFlight` rather than queued, which also bounds the requests waiting for the ordered
-lane; nothing about the refused request was admitted. The web console never sends a request that
-keeps its order past that limit: it holds the request, in the order it was issued, until an
-earlier reply frees a place. Its completions, choice lookups, and domain selections go out at once
-and report the refusal if they find the session full. A request identity that is already in flight
+lane; nothing about the refused request was admitted. The web console holds every kind of its
+session requests while this window is full, including completions, choice lookups, domain selections
+and transaction attachment. Ready work keeps its issue order, with setup and reattachment first;
+[Restoration And Bounded Consumers](#restoration-and-bounded-consumers) describes lookup replacement
+and connection lifetimes. A request identity that is already in flight
 is refused with `DuplicateRequestId`, and that refusal necessarily names the same identity as the
 request still in flight.
 
@@ -1325,11 +1326,20 @@ session to restore subscriptions or clocks it prints why while the client keeps 
 console keeps at most 256 lines and 256 KiB per REPL and per subscription
 tab, and marks where it omitted earlier lines. It keeps the latest 256 commands and 256 KiB of its
 command history and the snapshot of the one domain it observes. It holds at most 64 requests of its
-controls waiting for a connection, carrying at most 4 MiB of text, and at most 256 held or awaiting
-their reply, carrying at most 16 MiB, and sends the ordered ones only while the server has room for
-them in flight; a request past either bound is not sent, and the control that issued it reports
-why. It drops the parts of a reply nobody awaits, such as a superseded
-completion.
+controls waiting for a connection, carrying at most 4 MiB of text. Connected controls can admit at
+most 256 outstanding requests carrying at most 16 MiB. Setup also restores the retained tabs,
+selected domain and clock, and transaction even with a full control backlog, so that backlog can
+recover. Every request kind shares the 64-place in-flight window,
+including lookups, domain selection, restoration and transaction attachment. Connection setup and
+reattachment progress ahead of ordered work that waits for them; other waiting controls respect
+ready work's issue order, so a stream of lookups cannot keep overtaking earlier commands. A waiting
+completion or choice
+lookup is replaced by the latest one for that input or control; a superseded sent lookup retains
+only its request identity until its terminal reply, so it still occupies its server request place.
+Its text and partial reply are released immediately, and later parts are discarded without
+reassembly; the final part releases its place. Waiting connection-local requests end with that
+connection, while ordered commands retain their issue order and execution references. A request
+past either outstanding bound is not sent, and the control that issued it reports why.
 
 A tab whose generation the server ended with `SubscriptionEnded` turns ended in the web console. It
 keeps its rows and the reason, and it is not restored on a later connection, which would not change
