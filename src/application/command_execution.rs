@@ -23,10 +23,10 @@ use blake3::Hasher;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
-    CommandExecution, CommandExecutionAdmissionPolicy, CommandExecutionDiagnostic,
-    CommandExecutionDisposition, CommandExecutionEffect, CommandExecutionPreviewStale,
-    CommandExecutionRequestConflict, CommandExecutionResult, CommandExecutionState,
-    CommandExecutionStatementDisposition, CommandExecutionStatementResult,
+    CommandExecution, CommandExecutionAdmissionError, CommandExecutionAdmissionPolicy,
+    CommandExecutionDiagnostic, CommandExecutionDisposition, CommandExecutionEffect,
+    CommandExecutionPreviewStale, CommandExecutionRequestConflict, CommandExecutionResult,
+    CommandExecutionState, CommandExecutionStatementDisposition, CommandExecutionStatementResult,
     CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
     CommandExecutionTransactionStatus, CommandExecutionTransactionTarget, ConsensusConflict,
     ConsensusError, RecordedBackupArchive, RestoreExecution,
@@ -459,6 +459,17 @@ fn transaction_targets_match(
 }
 
 impl SessionServiceImpl {
+    pub(in crate::application) fn refuse_expired_reference(
+        &self,
+        reference: &CommandExecutionReference,
+    ) -> CommandResult {
+        self.inner
+            .runtime
+            .metrics()
+            .record_command_execution_refusal(&CommandExecutionAdmissionError::Expired);
+        expired_reference(reference)
+    }
+
     pub(in crate::application) async fn reconcile_persistent_commands(
         &self,
         finished_before: Timestamp,
@@ -556,7 +567,7 @@ impl SessionServiceImpl {
             .await
         {
             if existing.is_expired() {
-                return Err(Box::new(expired_reference(&reference)));
+                return Err(Box::new(self.refuse_expired_reference(&reference)));
             }
             if let Some(conflict) = existing.request_conflict(
                 &owner,
@@ -724,6 +735,15 @@ impl SessionServiceImpl {
         {
             Ok(execution) => Ok(CommandAdmission::Admitted(execution)),
             Err(error) => {
+                if let ConsensusError::Conflict(
+                    ConsensusConflict::ExecutionReferenceAdmissionRefused { refusal, .. },
+                ) = error.current_context()
+                {
+                    self.inner
+                        .runtime
+                        .metrics()
+                        .record_command_execution_refusal(refusal);
+                }
                 if let ConsensusError::LeadershipLost { observed } = error.current_context() {
                     // The admission proposal may have reached the log before leadership moved,
                     // so whether the command was admitted is not known here. A leader that could
@@ -1101,9 +1121,10 @@ fn replicated_admission_refusal(
     error: &ConsensusError,
 ) -> Option<CommandResult> {
     match error {
-        ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceExpired { .. }) => {
-            Some(expired_reference(reference))
-        }
+        ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceAdmissionRefused {
+            refusal: CommandExecutionAdmissionError::Expired,
+            ..
+        }) => Some(expired_reference(reference)),
         ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceConflict {
             kind, ..
         }) => Some(conflicting_reference(reference, *kind)),
@@ -1291,21 +1312,63 @@ mod tests {
         TransactionOperationAdmission, TransactionOperationNumber, TransactionPosition,
         TransactionPreviewIdentity,
     };
-    #[cfg(feature = "testing")]
     use nervix_recovery::Discarded as _;
 
     use super::*;
+    use crate::application::test_fixtures::{
+        TestService, build_test_service, test_execution_reference,
+    };
     #[cfg(feature = "testing")]
     use crate::{
         application::{
             subscription::SessionSubscriptions,
-            test_fixtures::{TestService, build_test_service_with_probe, test_command_request},
+            test_fixtures::{build_test_service_with_probe, test_command_request},
         },
         captured_logs::CapturedLogs,
     };
 
     fn domain() -> DomainName {
         DomainName::parse("default").assured("the test domain is an identifier-shaped literal")
+    }
+
+    #[nervix_primitives::test]
+    async fn completion_projection_keeps_admission_refusals_at_zero() {
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(false).await;
+        let reference = test_execution_reference();
+        let execution = CommandExecution {
+            reference: reference.clone(),
+            state: CommandExecutionState::Expired,
+        };
+        let result = service
+            .result_from_finished_execution(&reference, execution)
+            .await;
+        let metrics = service.inner.runtime.metrics().prometheus_text();
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
+
+        let result = result.expect_err("an expired completion snapshot refuses result recovery");
+        assert_eq!(
+            result.disposition,
+            CommandDisposition::ExecutionReferenceExpired
+        );
+        let refusals = metrics
+            .lines()
+            .find(|line| {
+                line.starts_with("nervix_command_execution_admission_refusals_total{")
+                    && line.contains("reason=\"expired\"")
+            })
+            .verified("registration initializes the expired refusal child")
+            .split_whitespace()
+            .last()
+            .verified("a Prometheus counter sample has a value")
+            .parse::<u64>()
+            .assured("the refusal counter is an unsigned integer");
+        assert_eq!(refusals, 0);
     }
 
     /// The node process a test's command finishes on.
@@ -1407,9 +1470,11 @@ mod tests {
     fn replicated_admission_refusals_keep_their_typed_dispositions() {
         let reference = CommandExecutionReference::parse("reference.admission")
             .assured("the test reference is an identifier-shaped literal");
-        let expired = ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceExpired {
-            reference: reference.clone(),
-        });
+        let expired =
+            ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceAdmissionRefused {
+                reference: reference.clone(),
+                refusal: CommandExecutionAdmissionError::Expired,
+            });
         assert_eq!(
             replicated_admission_refusal(&reference, &expired).map(|result| result.disposition),
             Some(CommandDisposition::ExecutionReferenceExpired)
@@ -1426,9 +1491,7 @@ mod tests {
             ))
         );
 
-        let unrelated = ConsensusError::Conflict(ConsensusConflict::Reason(format!(
-            "command execution reference '{reference}' has expired"
-        )));
+        let unrelated = ConsensusError::Conflict(ConsensusConflict::ClusterParameterInputsChanged);
         assert!(replicated_admission_refusal(&reference, &unrelated).is_none());
     }
 

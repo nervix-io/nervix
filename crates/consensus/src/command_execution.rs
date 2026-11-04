@@ -733,7 +733,19 @@ impl CommandExecutionAdmissionPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    thiserror::Error,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub enum CommandExecutionAdmissionError {
     #[error("has expired")]
     Expired,
@@ -770,6 +782,16 @@ pub(crate) struct CommandExecutionRecords {
 pub struct CommandExecutionReconciliation {
     pub applying: Vec<CommandExecutionReference>,
     pub maintenance_due: bool,
+}
+
+/// Retained history levels and the durable fence from one applied state revision.
+/// Counts come from the existing indexes, without inspecting individual executions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CommandExecutionHistory {
+    pub applying: usize,
+    pub finished: usize,
+    pub expired: usize,
+    pub retry_fence: Option<Timestamp>,
 }
 
 impl CommandExecutionRecords {
@@ -857,6 +879,15 @@ impl CommandExecutionRecords {
 
     pub(crate) fn retry_fence(&self) -> Option<Timestamp> {
         self.retry_fence
+    }
+
+    pub(crate) fn observation(&self) -> CommandExecutionHistory {
+        CommandExecutionHistory {
+            applying: self.applying.len(),
+            finished: self.finished.len(),
+            expired: self.expired.len(),
+            retry_fence: self.retry_fence,
+        }
     }
 
     /// How many keyed records the executions store.
@@ -1170,6 +1201,16 @@ mod tests {
             .verified("the fixture execution is applying");
         records.replace(finished);
 
+        assert_eq!(
+            records.observation(),
+            CommandExecutionHistory {
+                applying: 1,
+                finished: 1,
+                expired: 0,
+                retry_fence: Some(policy.retry_fence()),
+            }
+        );
+
         let current = records.reconciliation(
             Timestamp::from_unix_nanos(1_700_000_010_000_000_000),
             Timestamp::from_unix_nanos(1_699_999_999_000_000_000),
@@ -1185,6 +1226,21 @@ mod tests {
                 .maintenance_due
         );
         records.reclaim(finished_before, before_identity_fence);
+        assert_eq!(
+            records.observation(),
+            CommandExecutionHistory {
+                applying: 1,
+                finished: 0,
+                expired: 1,
+                retry_fence: Some(before_identity_fence),
+            }
+        );
+        let reloaded = CommandExecutionRecords::generated(
+            records.executions().cloned(),
+            records.retry_fence(),
+        )
+        .assured("the records hold admitted identities and a valid expiry index");
+        assert_eq!(reloaded.observation(), records.observation());
         assert!(
             records
                 .get(&finished_reference)
@@ -1203,6 +1259,15 @@ mod tests {
                 .maintenance_due
         );
         records.reclaim(finished_before, identity_fence);
+        assert_eq!(
+            records.observation(),
+            CommandExecutionHistory {
+                applying: 1,
+                finished: 0,
+                expired: 0,
+                retry_fence: Some(identity_fence),
+            }
+        );
         assert!(records.get(&finished_reference).is_none());
         assert!(records.get(&applying_reference).is_some());
     }

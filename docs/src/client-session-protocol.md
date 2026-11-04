@@ -311,7 +311,8 @@ further. The server closes with `1011` the rare answer it cannot fit into a fram
 
 The console has no upload stream: it uploads a resource through its own HTTP path,
 `/console/resources/upload`, where the leader builds the archive from the files it receives, as
-[Resource Versions And Bindings](./resource-versions.md#assignment) describes.
+[Resource Versions And Bindings](./resource-versions.md#assignment) describes. How the console
+sends an upload again is described with the [Resource Uploads](#resource-uploads) contract.
 
 ### Authentication
 
@@ -395,10 +396,11 @@ next request at once; see [Producers](#producers). A session admits at most 64 r
 counting both lanes and producer closes but not submitted batches, which their producer's credit
 bounds instead. A request beyond that is refused with
 `TooManyRequestsInFlight` rather than queued, which also bounds the requests waiting for the ordered
-lane; nothing about the refused request was admitted. The web console never sends a request that
-keeps its order past that limit: it holds the request, in the order it was issued, until an
-earlier reply frees a place. Its completions, choice lookups, and domain selections go out at once
-and report the refusal if they find the session full. A request identity that is already in flight
+lane; nothing about the refused request was admitted. The web console holds every kind of its
+session requests while this window is full, including completions, choice lookups, domain selections
+and transaction attachment. Ready work keeps its issue order, with setup and reattachment first;
+[Restoration And Bounded Consumers](#restoration-and-bounded-consumers) describes lookup replacement
+and connection lifetimes. A request identity that is already in flight
 is refused with `DuplicateRequestId`, and that refusal necessarily names the same identity as the
 request still in flight.
 
@@ -856,14 +858,20 @@ configuration until the commit.
 
 **Binding, attach, and takeover.** The session that begins a transaction is bound to it. The binding
 is soft state in the leader's memory: it routes commands, and it is gone after a leader change or
-when the session ends. A session binds an existing transaction with `AttachTransactionRequest`,
+when the session ends. An open transaction that expires takes its binding with it. A transaction
+that finishes otherwise, such as a commit that another request admitted before this session attached,
+keeps the binding of the session that holds it: that session's next request for the transaction is
+answered from the transaction's recorded outcome, and that answer ends the binding. A session binds
+an existing transaction with `AttachTransactionRequest`,
 which the leader grants only to the transaction's owner; the reply is `TransactionAttached` with the
 current status, `TransactionAlreadyFinished` with the final status and aggregate outcome while its
 tombstone is retained, or a failure for an identity that is unknown or retained no longer. A leader
 that holds no binding for the session's transaction answers the session's next transaction request
 with `TransactionDetached`, and the client attaches again and repeats the request under the same
-reference. A finished or failed attach does not resolve commands whose replies were lost: the
-client repeats each under its own execution reference and expected position. The leader returns a
+reference. An attach that reports the transaction already finished binds nothing, and a session that
+still named that transaction no longer holds it. A finished or failed attach does not resolve
+commands whose replies were lost: the client repeats each under its own execution reference and
+expected position. The leader returns a
 recorded outcome before planning a new request; a command it never admitted receives a failure.
 Attaching from a second session takes the binding over, and the displaced session's next
 transaction request receives `TransactionTakenOver` before anything is admitted. While a session
@@ -1325,11 +1333,20 @@ session to restore subscriptions or clocks it prints why while the client keeps 
 console keeps at most 256 lines and 256 KiB per REPL and per subscription
 tab, and marks where it omitted earlier lines. It keeps the latest 256 commands and 256 KiB of its
 command history and the snapshot of the one domain it observes. It holds at most 64 requests of its
-controls waiting for a connection, carrying at most 4 MiB of text, and at most 256 held or awaiting
-their reply, carrying at most 16 MiB, and sends the ordered ones only while the server has room for
-them in flight; a request past either bound is not sent, and the control that issued it reports
-why. It drops the parts of a reply nobody awaits, such as a superseded
-completion.
+controls waiting for a connection, carrying at most 4 MiB of text. Connected controls can admit at
+most 256 outstanding requests carrying at most 16 MiB. Setup also restores the retained tabs,
+selected domain and clock, and transaction even with a full control backlog, so that backlog can
+recover. Every request kind shares the 64-place in-flight window,
+including lookups, domain selection, restoration and transaction attachment. Connection setup and
+reattachment progress ahead of ordered work that waits for them; other waiting controls respect
+ready work's issue order, so a stream of lookups cannot keep overtaking earlier commands. A waiting
+completion or choice
+lookup is replaced by the latest one for that input or control; a superseded sent lookup retains
+only its request identity until its terminal reply, so it still occupies its server request place.
+Its text and partial reply are released immediately, and later parts are discarded without
+reassembly; the final part releases its place. Waiting connection-local requests end with that
+connection, while ordered commands retain their issue order and execution references. A request
+past either outstanding bound is not sent, and the control that issued it reports why.
 
 A tab whose generation the server ended with `SubscriptionEnded` turns ended in the web console. It
 keeps its rows and the reason, and it is not restored on a later connection, which would not change
@@ -1660,6 +1677,15 @@ names the domain, the declared resource, the upload identity, and the exact size
 each chunk is non-empty and fits one frame. There is no manifest, digest, or finish frame: the
 leader hashes the archive as it stages it and verifies everything else when it installs it. The
 console WebSocket carries no upload stream.
+
+The console posts the selected files to its own HTTP path, `/console/resources/upload`, under an
+upload identity it chooses once per upload. A node that cannot propose for the upload as the
+leader, because another node leads, none is known, or it could not confirm its lease, answers
+`409 Conflict`. That refusal decided nothing, so the console sends the same files under the same
+upload identity again, to the leader it knows by then, after the wait it takes before reconnecting,
+which doubles from 250 ms up to five seconds, for as long as its upload dialog stays open, as the
+Rust client opens another call after a redirect or a reply without a leader. A success names the
+installed version, and every other answer is final.
 
 The Rust client builds one deterministic archive in a temporary file before opening an upload
 call. Archive construction uses bounded 1 MiB read and write buffers. Only a successfully
@@ -2198,6 +2224,12 @@ The protocol makes a client's view of its own work explicit rather than inferred
   owner, domain, state, pending count, progress, age, and idle time, from any node.
   `DESCRIBE TRANSACTION` reads one transaction's full impact report; see [Transaction Quiescence And
   Impact Inspection](./transaction-quiescence.md#observing-a-transaction).
+- **Command history.** Every node's metrics endpoint exposes its applied execution counts by
+  applying, finished and expired state and its durable retry-fence timestamp. Admission refusal
+  counters distinguish expired, future-dated and timestamp-less references and exhausted history
+  capacity on the process that handles the refusal; replicated application on followers does not
+  multiply that count. See [Command Execution History](./metrics-and-observability.md#command-execution-history)
+  for labels, node attribution and restart behavior.
 - **Subscriptions.** A client learns of its own losses from `SubscriptionDeliveryLost`,
   `SubscriptionRowsSkipped`, and `SubscriptionEnded`, and the Rust client reports a lost session as
   an interruption of each clock and of each subscription the server had not ended, and each refused

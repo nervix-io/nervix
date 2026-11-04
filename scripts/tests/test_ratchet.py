@@ -713,15 +713,26 @@ def product_tree(*dependencies: str) -> str:
     return f"{tree}\n{tree}"
 
 
+# The one AWS-LC module the product links, as `aws-lc-rs` brings it.
+AWS_LC = ("1aws-lc-rs v1.18.2", "2aws-lc-sys v0.46.0")
+
 BASE_TREE = product_tree(
     "1argon2 v0.5.3",
     "2blake2 v0.10.6",
+    *AWS_LC,
     "1nervix-interconnect v0.1.0-dev (/workspace/crates/interconnect)",
     "2serde v1.0.229",
     "2sha2 v0.10.9",
     "1nervix-models v0.1.0-dev (/workspace/crates/models)",
     "2serde v1.0.229 (*)",
 )
+
+# The Kafka connector's librdkafka, building against an AWS-LC module of its own choosing.
+KAFKA = "1nervix-connector-kafka v0.1.0-dev (/workspace/crates/connectors/kafka)"
+RDKAFKA_SYS = "2rdkafka-sys v4.10.0+2.12.1 (https://github.com/nervix-io/rust-rdkafka.git?branch=nervix-aws-lc-fetch-stop#07dc1275)"
+
+# An upgrade of `aws-lc-rs` onto the next `aws-lc-sys` that leaves librdkafka's fork behind.
+UPGRADED_AWS_LC = ("1aws-lc-rs v1.19.0", "2aws-lc-sys v0.47.0")
 
 
 class CryptographyGraphTests(unittest.TestCase):
@@ -806,6 +817,49 @@ class CryptographyGraphTests(unittest.TestCase):
         self.assertIn("the lock file needs to be updated", str(raised.exception))
 
 
+class AwsLcModuleTests(unittest.TestCase):
+    def test_one_module_that_several_packages_link_passes(self) -> None:
+        tree = product_tree(*AWS_LC, KAFKA, RDKAFKA_SYS, "3aws-lc-sys v0.46.0 (*)")
+
+        ratchet.check_aws_lc_module(tree)
+
+    def test_a_second_version_is_refused_with_each_module_and_its_dependents(self) -> None:
+        tree = product_tree(*UPGRADED_AWS_LC, KAFKA, RDKAFKA_SYS, "3aws-lc-sys v0.46.0")
+
+        with self.assertRaises(SystemExit) as raised:
+            ratchet.check_aws_lc_module(tree)
+
+        message = str(raised.exception)
+        self.assertIn("the product links 2 AWS-LC modules and must link one", message)
+        self.assertIn("aws-lc-sys 0.46.0, linked by rdkafka-sys 4.10.0+2.12.1", message)
+        self.assertIn("aws-lc-sys 0.47.0, linked by aws-lc-rs 1.19.0", message)
+
+    def test_the_fips_module_beside_the_default_one_is_refused(self) -> None:
+        tree = product_tree(*AWS_LC, KAFKA, RDKAFKA_SYS, "3aws-lc-fips-sys v0.14.2")
+
+        with self.assertRaises(SystemExit) as raised:
+            ratchet.check_aws_lc_module(tree)
+
+        self.assertIn("aws-lc-fips-sys 0.14.2, linked by rdkafka-sys 4.10.0+2.12.1", str(raised.exception))
+
+    def test_a_module_that_differs_on_one_release_target_is_refused(self) -> None:
+        x86_64 = "0nervix-server v0.1.0-dev (/workspace)\n1aws-lc-rs v1.18.2\n2aws-lc-sys v0.46.0\n"
+        aarch64 = "0nervix-server v0.1.0-dev (/workspace)\n1aws-lc-rs v1.18.2\n2aws-lc-sys v0.47.0\n"
+
+        with self.assertRaises(SystemExit) as raised:
+            ratchet.check_aws_lc_module(f"{x86_64}\n{aarch64}")
+
+        self.assertIn("aws-lc-sys 0.47.0, linked by aws-lc-rs 1.18.2", str(raised.exception))
+
+    def test_a_graph_without_a_module_is_refused(self) -> None:
+        tree = product_tree("1nervix-models v0.1.0-dev (/workspace/crates/models)", "2serde v1.0.229")
+
+        with self.assertRaises(SystemExit) as raised:
+            ratchet.check_aws_lc_module(tree)
+
+        self.assertIn("links no AWS-LC module", str(raised.exception))
+
+
 class CryptographyCountTests(unittest.TestCase):
     def setUp(self) -> None:
         patch = mock.patch("scripts.ratchet.check_synchronization", return_value=None)
@@ -862,7 +916,7 @@ use sha2::Sha256;
             self.assertEqual(self.gate(root, BASE_TREE)[0], 0)
 
             added = product_tree(
-                "1argon2 v0.5.3", "2blake2 v0.10.6",
+                "1argon2 v0.5.3", "2blake2 v0.10.6", *AWS_LC,
                 "1nervix-interconnect v0.1.0-dev (/workspace/crates/interconnect)", "2sha2 v0.10.9",
                 "1nervix-models v0.1.0-dev (/workspace/crates/models)", "2sha2 v0.10.9 (*)",
             )
@@ -871,6 +925,16 @@ use sha2::Sha256;
         self.assertEqual(status, 1)
         self.assertIn("non_aws_lc_crypto: 3 -> 4 (+1)", report)
         self.assertIn("non_aws_lc_crypto (graph): nervix-models 0.1.0-dev -> sha2 0.10.9", report)
+
+    def test_a_second_aws_lc_module_fails_the_gate(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, {**ANCHOR, "Cargo.lock": PRODUCT_LOCK})
+            second = product_tree(*UPGRADED_AWS_LC, KAFKA, RDKAFKA_SYS, "3aws-lc-sys v0.46.0")
+            with self.assertRaises(SystemExit) as raised:
+                self.gate(root, second)
+
+        self.assertIn("aws-lc-sys 0.46.0, linked by rdkafka-sys 4.10.0+2.12.1", str(raised.exception))
 
     def test_show_lists_authored_and_graph_sites(self) -> None:
         with TemporaryDirectory() as directory:
