@@ -547,7 +547,6 @@ nervix-checkpoint-replication = { package = "nervix-checkpoint-replication", pat
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
 nervix-client-ffi = { package = "nervix-client-ffi", path = "crates/client-ffi" }
 nervix-client-host = { package = "nervix-client-host", path = "crates/client-host" }
-nervix-client-python = { package = "nervix-client-python", path = "crates/client-python" }
 nervix-client-wire = { package = "nervix-client-wire", path = "crates/client-wire" }
 nervix-columnar-json = { package = "nervix-columnar-json", path = "crates/columnar-json" }
 nervix-connector = { package = "nervix-connector", path = "crates/connector" }
@@ -769,6 +768,8 @@ web-sys = "0.3"
 webpki-roots = "1"
 x509-parser = "0.18"
 zeromq = "0.4"
+nkeys = "0.4.5"
+zeroize = "1.9"
 
 [patch.crates-io]
 # A flush must drain async-nats' queued bytes before flushing the transport. The connection

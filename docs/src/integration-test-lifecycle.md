@@ -471,7 +471,7 @@ The lane then selects `@paced_simulation_reopen` from the public paced-driver fe
 Rust driver in the lane's selection and supplies its path to the same scenario fixture, so the
 driver installs its own detector before entering its runtime. Both drivers exercise endpoint
 replacement, pending submission ownership, explicit replay and replacement refusal against
-diagnostic nodes on one and three nodes, without retries. Python uses the ordinary shared binding;
+diagnostic nodes on one and three nodes, without retries. Python uses the ordinary native package;
 its locks and condition variables are outside this detector.
 
 The buffered-route replacement scenario accounts for every reading in the first run's outcomes
@@ -616,8 +616,9 @@ by a second each, including eleven rows from the first branch before both branch
 retain the same field, key, ordering and shared-timestamp checks, and separately reject a catch-up
 burst, physical scheduling at the slow rate, corrupt rows and a stalled or failed subscription.
 
-`tests-deps` builds the CLI, the Plexus formatter, the paced simulation's Rust driver and the shared
-C binding its Python driver loads in the normal target directory. Every service a scenario depends
+`tests-deps` builds the CLI, the Plexus formatter, the paced simulation's Rust driver and its native
+Python package wheel in the normal target directory. It installs the wheel and the Python coverage
+runtime into `target/paced-simulation/python` before scenarios start. Every service a scenario depends
 on is a container that `crates/test-environment` starts through testcontainers, which pulls its
 image or, for the mock server that no registry holds, builds it on first use: no recipe or workflow
 prepares or starts one. The NATS authentication fixture starts three independent enforcing
@@ -637,10 +638,14 @@ CLI process coverage recipe exercises transaction inspection and the clock-follo
 scenarios.
 
 `test-scenarios-coverage-build`, `coverage-scenarios` and `coverage-scenarios-append` also build the
-paced simulation's Rust driver and the shared binding with coverage flags, and the scenario runner
-selects them through `NERVIX_PACED_SIMULATION_PATH` and `NERVIX_CLIENT_LIBRARY`. A driver process
-inherits the profile location of the scenario binary that starts it, so the Rust driver and the
-binding loaded by the Python driver write their profiles into the same report when they exit.
+paced simulation's Rust driver and native Python extension with coverage flags. The scenario runner
+selects them through `NERVIX_PACED_SIMULATION_PATH` and `NERVIX_PACED_SIMULATION_PYTHON`, the latter
+naming the interpreter whose environment holds the package. The archive carries exactly one wheel,
+and `test-scenarios-coverage-unpack` installs it with coverage into a fresh CPython 3.12 environment
+before any scenario starts. The shard compiles nothing. The instrumented extension also remains
+beside the suite as an object for LLVM's report. Each driver process inherits the scenario
+binary's profile location, so both the Rust driver and Python extension contribute their counters
+to the same ordinary report when they exit.
 
 The CI `scenarios-build` job uses the shared native
 [CI linker](./developing-nervix.md#validation-and-tests) for the server, CLI, unit tests and scenario harness,
@@ -3222,7 +3227,7 @@ held by a consensus commit delay that only its scenario's cleanup releases.
 ### Scenario Shards
 
 CI runs the suite in shards. The `scenarios-build` job builds the instrumented scenario executable,
-CLI, paced simulation driver, shared binding and report tool once with
+CLI, paced simulation driver, native Python extension and report tool once with
 `just test-scenarios-coverage-build`, and packs them with the generated inputs a run reads into one
 archive with `just test-scenarios-coverage-pack`, before it builds the
 [unit tests](#unit-test-archive) in the same target directory and publishes its cache. Cargo holds a target directory

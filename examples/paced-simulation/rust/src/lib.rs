@@ -12,7 +12,7 @@
 //! - **Must not know.** The server. Everything it learns arrives over its session.
 //!
 //! The program is the Rust half of the runnable paced simulation under `examples/paced-simulation`;
-//! the Python driver beside it does the same through the shared C binding, and both print the same
+//! the Python driver beside it does the same through the native Python package, and both print the same
 //! report and write the same files. `examples/paced-simulation/README.md` describes how to run it.
 
 #![cfg_attr(
