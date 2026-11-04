@@ -16,19 +16,19 @@
 
 use chumsky::prelude::*;
 use nervix_models::{
-    HttpEndpointIngestor, HttpRequestHeader, HttpRequestHeaderValue, HttpRequestIngestMode,
-    HttpRequestIngestor,
+    HttpEndpointIngestor, HttpEndpointIngestorChange, HttpRequestHeader, HttpRequestHeaderValue,
+    HttpRequestIngestMode, HttpRequestIngestor, HttpRequestIngestorChange,
 };
 
 use super::{
     delivery::{no_ack, polling_quiesce_clause},
-    endpoint::{EndpointIntake, intake},
+    endpoint::{self, EndpointIntake, intake},
 };
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, client_ref, domain_clock_period_lit, kw, kw_phrase2, max_body_size_clause,
-        string_lit, tok,
+        ParseError, client_ref, domain_clock_period_lit, kw, kw_phrase2, kw_phrase3,
+        max_body_size_clause, string_lit, tok,
     },
 };
 
@@ -104,6 +104,41 @@ pub(super) fn endpoint_body<'src>()
             quiesce,
         },
     )
+}
+
+/// `SET METHOD`, `SET HEADERS`, `DROP HEADERS`, `SET MAX BODY SIZE`, `DROP MAX BODY SIZE`,
+/// `SET EVERY` or `SET MODE`: one part of an `HTTP REQUEST` body.
+pub(super) fn request_change<'src>()
+-> impl Parser<'src, &'src [Token], HttpRequestIngestorChange, extra::Err<ParseError<'src>>> + Clone
+{
+    let method = kw(Identifier::Method)
+        .ignore_then(string_lit())
+        .map(HttpRequestIngestorChange::Method);
+    let headers = request_headers().map(HttpRequestIngestorChange::Headers);
+    let limit = max_body_size_clause().map(HttpRequestIngestorChange::MaxBodySize);
+    let every = kw(Identifier::Every)
+        .ignore_then(domain_clock_period_lit())
+        .map(HttpRequestIngestorChange::Every);
+    let mode = kw(Identifier::Mode)
+        .ignore_then(no_ack().to(HttpRequestIngestMode::NoAck))
+        .map(HttpRequestIngestorChange::Mode);
+    let set = kw(Identifier::Set).ignore_then(choice((method, headers, limit, every, mode)));
+    let drop_headers = kw(Identifier::Headers).to(HttpRequestIngestorChange::DropHeaders);
+    let drop_limit = kw_phrase3(Identifier::Max, Identifier::Body, Identifier::Size)
+        .to(HttpRequestIngestorChange::DropMaxBodySize);
+    let drop = kw(Identifier::Drop).ignore_then(choice((drop_headers, drop_limit)));
+    choice((set, drop)).boxed()
+}
+
+/// `SET MODE`: the one part of an `HTTP ENDPOINT` body beside its endpoint.
+pub(super) fn endpoint_change<'src>()
+-> impl Parser<'src, &'src [Token], HttpEndpointIngestorChange, extra::Err<ParseError<'src>>> + Clone
+{
+    kw(Identifier::Set)
+        .ignore_then(kw(Identifier::Mode))
+        .ignore_then(endpoint::mode())
+        .map(HttpEndpointIngestorChange::Mode)
+        .boxed()
 }
 
 #[cfg(test)]

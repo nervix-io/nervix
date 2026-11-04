@@ -291,6 +291,10 @@ impl IngestorEntityBody for SyslogListenerIngestor {
         IngestorReference::Client(&self.client)
     }
 
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
+    }
+
     fn quiesce(&self) -> &IngestQuiesceMode {
         &self.quiesce
     }
@@ -321,6 +325,38 @@ impl SyslogIngestMode {
     }
 }
 
+/// One change an `ALTER SYSLOG LISTENER INGESTOR` writes to the body of the ingestor it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum SyslogListenerIngestorChange {
+    /// `SET MODE <mode>`.
+    Mode(SyslogIngestMode),
+}
+
+impl crate::IngestorEntityChange for SyslogListenerIngestorChange {
+    type Entity = SyslogListenerIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut SyslogListenerIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
+    }
+}
+
 connector_ingestors! {
     connector Syslog = "SYSLOG";
     /// What a syslog source reads.
@@ -329,7 +365,7 @@ connector_ingestors! {
     pub enum SyslogListenerIngestorAlteration;
     /// The entities a syslog source reads.
     pub enum SyslogIngestorEntity {
-        Listener(SyslogListenerIngestor) = "LISTENER", "Syslog";
+        Listener(SyslogListenerIngestor => SyslogListenerIngestorChange) = "LISTENER", "Syslog";
     }
 }
 
@@ -371,15 +407,47 @@ impl EmitterEntityBody for SyslogCollectorEmitter {
     }
 }
 
+/// One change an `ALTER SYSLOG COLLECTOR EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum SyslogCollectorEmitterChange {
+    /// `SET MODE <mode>`.
+    Mode(SyslogCollectorPublishingMode),
+}
+
+impl crate::EmitterEntityChange for SyslogCollectorEmitterChange {
+    type Entity = SyslogCollectorEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut SyslogCollectorEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector Syslog = "SYSLOG";
     /// What a syslog emitter writes.
     pub enum SyslogEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum SyslogCollectorEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum SyslogEmitterChange;
     /// The entities a syslog emitter writes.
     pub enum SyslogEmitterEntity {
-        Collector(SyslogCollectorEmitter, SyslogCollectorPublishingMode) = "COLLECTOR";
+        Collector(SyslogCollectorEmitter, SyslogCollectorPublishingMode, SyslogCollectorEmitterChange) = "COLLECTOR";
     }
 }
 

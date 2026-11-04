@@ -371,12 +371,14 @@ Method, target, headers, and response bytes are not payload bytes or metric-labe
 Changing the emitter's method, path, client reference, body selection, or retry mode takes an
 `ENTITY_PAUSE`; a `FLUSH`-only change is `DYNAMIC`. Changing source membership or a client
 definition has its existing `DOMAIN_PAUSE` contract. `ALTER HTTP REQUEST EMITTER ... SET TO` restates the
-complete method, path, mode, and body selection. `SET CLIENT`, `SET MODE`, and `SET ENCODE USING`
-retain their current meanings. `DROP ENCODE` cannot select no body; use `SET TO ... WITHOUT BODY`.
+complete method, path, mode, and body selection. `SET METHOD` and `SET PATH` change one request
+field, and `SET CLIENT`, `SET MODE`, and `SET ENCODE USING` retain their current meanings.
+`DROP ENCODE` cannot select no body; use `SET TO ... WITHOUT BODY`.
 The whole retained construction and error scope must validate against that selection. For
 example, an emitter with `INHERIT` cannot switch to `WITHOUT BODY` while retaining that clause.
-Changing construction or header invocations requires a complete `DROP` and `CREATE` replacement
-inside one transaction. A bad candidate or refused commit leaves the active emitter in place.
+The construction and header invocations change in place with `SET INHERIT`, `DROP INHERIT`,
+`ADD SET`, `DROP SET`, `ADD INVOKE`, `DROP INVOKE`, `SET WHERE` and `DROP WHERE`, under the same
+validation and `ENTITY_PAUSE`. A bad candidate or refused commit leaves the active emitter in place.
 
 For example, this replacement changes the first emitter's method and path without replacing its
 codec construction or header invocations:
@@ -393,9 +395,9 @@ SHOW CREATE EMITTER deliver_event;
 DESCRIBE EMITTER deliver_event;
 ```
 
-The retained `INHERIT` still initializes the codec body. A transition to `WITHOUT BODY` would
-require a replacement that also removes `INHERIT`, so the operator uses `DROP` and `CREATE` in one
-transaction for that change. For a destination that cannot drain, the supported operational path
+The retained `INHERIT` still initializes the codec body. A transition to `WITHOUT BODY` also
+removes `INHERIT`, which one `ALTER` writes as `SET TO ... WITHOUT BODY, DROP INHERIT`: the
+candidate is validated once every operation has applied. For a destination that cannot drain, the supported operational path
 is `STOP;`, change the emitter while the domain is stopped, then `START;`, after deciding how the
 source will replay unresolved work.
 

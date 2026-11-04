@@ -11,7 +11,7 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use rstest::rstest;
 
 use super::*;

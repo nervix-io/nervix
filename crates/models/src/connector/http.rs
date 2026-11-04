@@ -398,6 +398,10 @@ impl IngestorEntityBody for HttpRequestIngestor {
         IngestorReference::Client(&self.client)
     }
 
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
+    }
+
     fn quiesce(&self) -> &IngestQuiesceMode {
         &self.quiesce
     }
@@ -485,6 +489,119 @@ impl IngestorEntityBody for HttpEndpointIngestor {
     }
 }
 
+/// One change an `ALTER HTTP REQUEST INGESTOR` writes to the body of the ingestor it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum HttpRequestIngestorChange {
+    /// `SET METHOD '<method>'`.
+    Method(String),
+    /// `SET HEADERS { … }`.
+    Headers(Vec<HttpRequestHeader>),
+    /// `DROP HEADERS`: the request sends no header of its own.
+    DropHeaders,
+    /// `SET MAX BODY SIZE <bytes>`.
+    MaxBodySize(PayloadSizeLimit),
+    /// `DROP MAX BODY SIZE`: the declared default bounds a response again.
+    DropMaxBodySize,
+    /// `SET EVERY <duration>`.
+    Every(DomainClockPeriod),
+    /// `SET MODE <mode>`.
+    Mode(HttpRequestIngestMode),
+}
+
+impl HttpRequestIngestorChange {
+    /// Why dropping `option` from a body that does not write it does not apply.
+    fn not_written(option: &'static str) -> error_stack::Report<crate::AlterIngestorError> {
+        error_stack::Report::new(crate::AlterIngestorError::OptionNotWritten {
+            kind: <HttpRequestIngestor as crate::IngestorEntityModel>::KIND,
+            option,
+        })
+    }
+}
+
+impl crate::IngestorEntityChange for HttpRequestIngestorChange {
+    type Entity = HttpRequestIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut HttpRequestIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Method(method) => entity.method = method.clone(),
+            Self::Headers(headers) => entity.headers = headers.clone(),
+            Self::DropHeaders => {
+                if entity.headers.is_empty() {
+                    return Err(Self::not_written("HEADERS"));
+                }
+                entity.headers.clear();
+            }
+            Self::MaxBodySize(limit) => entity.max_body_size = Some(*limit),
+            Self::DropMaxBodySize => {
+                if entity.max_body_size.take().is_none() {
+                    return Err(Self::not_written("MAX BODY SIZE"));
+                }
+            }
+            Self::Every(every) => entity.every = *every,
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Method(method) => format!("SET METHOD {}", crate::string_literal(method)),
+            Self::Headers(headers) => format!(
+                "SET HEADERS {}",
+                crate::canonical::request_headers_to_plexus(headers)
+            ),
+            Self::DropHeaders => "DROP HEADERS".to_owned(),
+            Self::MaxBodySize(limit) => format!("SET MAX BODY SIZE {limit}"),
+            Self::DropMaxBodySize => "DROP MAX BODY SIZE".to_owned(),
+            Self::Every(every) => format!(
+                "SET EVERY {}",
+                crate::canonical::duration_literal(every.as_nanos())
+            ),
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
+    }
+}
+
+/// One change an `ALTER HTTP ENDPOINT INGESTOR` writes to the body of the ingestor it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum HttpEndpointIngestorChange {
+    /// `SET MODE <mode>`.
+    Mode(EndpointIngestMode),
+}
+
+impl crate::IngestorEntityChange for HttpEndpointIngestorChange {
+    type Entity = HttpEndpointIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut HttpEndpointIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
+    }
+}
+
 connector_ingestors! {
     connector Http = "HTTP";
     /// What an HTTP source reads.
@@ -493,8 +610,8 @@ connector_ingestors! {
     pub enum HttpRequestIngestorAlteration;
     /// The entities an HTTP source reads.
     pub enum HttpIngestorEntity {
-        Request(HttpRequestIngestor) = "REQUEST", "HTTP polling";
-        Endpoint(HttpEndpointIngestor) = "ENDPOINT", "HTTP endpoint";
+        Request(HttpRequestIngestor => HttpRequestIngestorChange) = "REQUEST", "HTTP polling";
+        Endpoint(HttpEndpointIngestor => HttpEndpointIngestorChange) = "ENDPOINT", "HTTP endpoint";
     }
 }
 
@@ -560,15 +677,55 @@ impl EmitterEntityBody for HttpRequestEmitter {
     }
 }
 
+/// One change an `ALTER HTTP REQUEST EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum HttpRequestEmitterChange {
+    /// `SET METHOD <expression>`.
+    Method(Expression),
+    /// `SET PATH <expression>`.
+    Path(Expression),
+    /// `SET MODE <mode>`.
+    Mode(HttpRequestPublishingMode),
+}
+
+impl crate::EmitterEntityChange for HttpRequestEmitterChange {
+    type Entity = HttpRequestEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut HttpRequestEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Method(method) => entity.method = method.clone(),
+            Self::Path(path) => entity.path = path.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Method(method) => format!("SET METHOD {}", crate::expression_to_plexus(method)?),
+            Self::Path(path) => format!("SET PATH {}", crate::expression_to_plexus(path)?),
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector Http = "HTTP";
     /// What an HTTP emitter writes.
     pub enum HttpEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum HttpRequestEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum HttpEmitterChange;
     /// The entities an HTTP emitter writes.
     pub enum HttpEmitterEntity {
-        Request(HttpRequestEmitter, HttpRequestPublishingMode) = "REQUEST";
+        Request(HttpRequestEmitter, HttpRequestPublishingMode, HttpRequestEmitterChange) = "REQUEST";
     }
 }
 

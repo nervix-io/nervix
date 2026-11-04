@@ -521,12 +521,18 @@ fn emitter_alter_reports_name_and_commit_policy_errors() {
             AlterEmitter {
                 kind: crate::EmitterEntityKind::ZeroMq(crate::ZeroMqEmitterEntity::Push),
                 emitter: named("event_emitter"),
-                operations: vec![AlterEmitterOperation::SetCommit {
-                    commit_each: "1m".to_string(),
-                    max_commit_size: "1GiB".parse().expect("valid commit size"),
+                operations: vec![AlterEmitterOperation::Change {
+                    change: crate::IcebergTableEmitterChange::CommitEach {
+                        commit_each: "1m".to_string(),
+                        max_commit_size: "1GiB".parse().expect("valid commit size"),
+                    }
+                    .into(),
                 }],
             },
-            AlterEmitterError::CommitPolicyUnsupported,
+            AlterEmitterError::DestinationKindMismatch {
+                stored: crate::EmitterEntityKind::ZeroMq(crate::ZeroMqEmitterEntity::Push),
+                requested: crate::EmitterEntityKind::Iceberg(crate::IcebergEmitterEntity::Table),
+            },
         ),
         (
             AlterEmitter {
