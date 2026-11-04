@@ -13611,6 +13611,30 @@ async fn then_refused_resource_publication_was_taken_up(
     );
 }
 
+#[given(
+    expr = "node {string} refuses its next resource upload start as a leader that could not \
+            confirm its lease"
+)]
+async fn given_resource_upload_start_refusal(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .refuse_next_resource_upload_start_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "node {string} refused a resource upload start")]
+async fn then_resource_upload_start_was_refused(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let refused = world
+        .fault_injection
+        .refused_resource_upload_start(&crate::common::cluster::node_name(&node_id));
+    assert_eq!(
+        refused,
+        Some(true),
+        "node '{node_id}' must refuse the resource upload start armed for it"
+    );
+}
+
 #[given(expr = "node {string} loses the reply to its next installed resource upload")]
 async fn given_installed_resource_upload_reply_loss(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -21107,7 +21131,10 @@ async fn then_selector_eventually_disappears(world: &mut ScenarioWorld, selector
         .expect("a browser page must be opened before selector assertions");
     let selector = expand_placeholders(world, &selector);
     let locator = page.locator(&selector);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // The wait starts when this step does. A scenario that means a server acknowledgement first
+    // waits for that acknowledgement's own outcome.
+    let bound = Duration::from_secs(10);
+    let deadline = Instant::now() + bound;
     loop {
         nervix_primitives::task::consume_budget().await;
         let texts = locator
@@ -21119,7 +21146,7 @@ async fn then_selector_eventually_disappears(world: &mut ScenarioWorld, selector
         }
         assert!(
             Instant::now() < deadline,
-            "expected selector '{selector}' to disappear after its server acknowledgement, still \
+            "expected selector '{selector}' to disappear within {bound:?} of this step, still \
              showing {texts:?}"
         );
         nervix_primitives::time::sleep(Duration::from_millis(50)).await;

@@ -363,15 +363,20 @@ awaiting replicas offers its revision through the offset state it retains and re
 | `FaultInjectionState::live_view_gaps` | Opened by a scenario for one observing node and one missing node; in a testing build every look of that observer's acknowledgement watchers at a registrar reads the exact pair once, every 100 milliseconds per held acknowledgement, and advances an open gap from opening to open to read; the scenario removes the entry when it closes the gap, and that world's injector drop disposes any left; absent from product builds | test-only live view gap in `fault_injection/live_view_gap.rs` |
 | `FaultInjectionState::refused_resource_publications` | Armed for one node before an upload; a testing build checks the entry before each installing upload's version publication and when reconciliation takes an applying upload up. The refusal's watch holds the original reply until recovery takes it up; explicit scenario observations read that retained state. The entry remains until that world's injector is dropped; absent from product builds | test-only resource publication refusal in `fault_injection/resource_publication.rs` |
 | `FaultInjectionState::lost_resource_upload_replies` | Armed for one node before an upload; a testing build's gRPC upload transport looks the node up once per upload call whose reply reports that it installed a version, after the installation completed, and records the delivery there; explicit scenario observations read that retained state. The entry remains until that world's injector is dropped; absent from product builds | test-only installed upload reply loss in `fault_injection/resource_upload_reply.rs` |
+| `FaultInjectionState::refused_resource_upload_starts` | Armed for one node before an upload; a testing build looks the node up once per upload installation that reaches its upload start, before the start is proposed, and records the delivery there; explicit scenario observations read that retained state. The entry remains until that world's injector is dropped; absent from product builds | test-only resource upload start refusal in `fault_injection/resource_upload_start.rs` |
 | Other `src/fault_injection.rs` maps, consensus `append_stream_counts`, the test DNS authority | test-only; the consensus probe counts each setup attempt and successful open and reads only for explicit harness observations | test-only |
 
 A leader's transaction reconciliation takes one replicated snapshot for cleanup eligibility in
 addition to the transaction-list snapshot. `StoreInner::state` releases its read guard after the
 snapshot clone and before the pure eligibility decision. Replicated removal rechecks the same
-references when it applies. `transaction_bindings` receives one removal attempt for each retained
-finished transaction per pass; an applying execution can extend these attempts beyond the minimum
-tombstone age. These remain control-plane sweeps, including absent-key shard writes. Retaining a
-tombstone does not retain a session binding: terminal request handling and session close release it.
+references when it applies. The pass reaches `transaction_bindings` only to remove the binding of
+a transaction it expires, a control-plane write. It no longer sweeps finished transactions: a
+finished transaction's binding stays with the session that holds it until that session's next
+request for the transaction is answered from the recorded outcome and releases it, that session
+attaches the transaction and finds it finished, the session closes, or leadership changes. An attach
+whose own touch finds the transaction finished, as when an overdue transaction expires at attach,
+removes the binding too. A session holds at most one binding, so the map stays bounded by live
+sessions. Retaining a tombstone does not retain a session binding.
 
 ### Rust client attachment recovery
 

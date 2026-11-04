@@ -238,6 +238,17 @@ Submissions and answers stay in log order. A conflict, higher vote, partial acce
 failure, or liveness failure ends that stream generation after its first result. Raft resumes from
 the last progress the follower confirmed.
 
+A batch the leader cannot write to the stream, because its encoding exceeds the operation limit,
+the node's executor refuses to encode it, or the transport fails while sending it, is a stream
+failure too. The batches submitted before it still receive their answers, and then the generation
+ends with that failure. It never ends as if its input were exhausted while that input still held
+unsent requests: OpenRaft takes an answer stream that ends without an error to mean that every
+request it sent was answered, and would send the unanswered rest again from the follower's last
+confirmed position under the same in-flight request. A new leader that has not yet confirmed any
+position would then acknowledge its probe below the probe's own start, which OpenRaft treats as a
+broken invariant: in a debug build its Raft core panics, and every later write on that node fails
+with `raft write failed: panicked`.
+
 The leader permits at most 16 unacknowledged batches for one follower. It also waits whenever its
 unacknowledged bytes plus the next 1 MiB target would exceed 16 MiB. Because one complete command
 may cross the target, measured outstanding bytes may exceed that target budget by the excess of one
@@ -265,7 +276,8 @@ the applied domain backlog within its assertion bound and the bytes carried by t
 Append stream openings observe actual data-stream setup; initial empty probes do not open those
 streams. A data-setup attempt includes its prefix check, even when that check fails before a stream
 can open. Native transport regressions cover finite probes, the transition to data, ordered empty
-commit updates and rejected probes. The public catch-up scenarios retain their stream-count and
+commit updates, rejected probes and a batch the stream cannot submit after an answered one. The
+public catch-up scenarios retain their stream-count and
 time assertions and change no product deadline.
 
 Heartbeats keep the shorter deadline derived from the configured heartbeat interval, capped at five
