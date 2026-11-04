@@ -100,6 +100,7 @@ use self::{
     producers::SessionProducers,
 };
 use super::{
+    client_traffic::{ClientTraffic, ReplyEnding},
     command_result::CommandResult,
     model_mutation::command_error,
     session_service::{SessionServiceImpl, rejected_source_response},
@@ -107,8 +108,10 @@ use super::{
     transaction::TransactionInspectionOutcome,
 };
 
-/// The transport a session arrived on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The client listener a session, or any other call a client makes, arrived on. Its `snake_case`
+/// name labels the node's client traffic series.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr, strum::EnumIter)]
+#[strum(serialize_all = "snake_case")]
 pub(in crate::application) enum SessionTransport {
     /// A native client over gRPC, served by any node.
     Grpc,
@@ -285,6 +288,10 @@ impl SessionShared {
         &self.delivery.limits
     }
 
+    fn traffic(&self) -> &ClientTraffic {
+        &self.service.inner.traffic
+    }
+
     /// Queues one control frame for the client. An error means the session ended or its
     /// transport stopped taking frames.
     async fn send_frame(&self, frame: EncodedFrame<ServerFrame>) -> Result<(), LaneClosed> {
@@ -314,9 +321,13 @@ impl SessionShared {
     /// Encodes and queues one reply, splitting it into transfer parts when it is larger than a
     /// frame. A reply that cannot be encoded is replaced by a typed rejection, never truncated.
     async fn reply(&self, request_id: RequestId, body: ReplyBody) -> QueuedReply {
+        let ending = ReplyEnding::of(&body);
         let reply = Reply { request_id, body };
         let (delivery, queued) = match self.encode_reply(reply).await {
-            Ok(delivery) => (delivery, QueuedReply::Reply),
+            Ok(delivery) => {
+                self.traffic().reply(self.transport, ending);
+                (delivery, QueuedReply::Reply)
+            }
             Err(failure) => {
                 let rejection = failure.rejection();
                 debug!(
@@ -324,6 +335,8 @@ impl SessionShared {
                     message = rejection.message,
                     "a session reply was replaced by a rejection"
                 );
+                self.traffic()
+                    .reply(self.transport, ReplyEnding::Rejected(rejection.rejection));
                 let rejected = Reply {
                     request_id,
                     body: ReplyBody::Rejected(rejection),
@@ -351,6 +364,7 @@ impl SessionShared {
                         debug!(%request_id, "the session ended during a reply transfer");
                         return QueuedReply::Nothing;
                     }
+                    self.traffic().transfer_part(self.transport);
                 }
             }
         }
@@ -597,6 +611,7 @@ impl SessionServiceImpl {
     ) where
         S: Stream<Item = InboundFrame> + Unpin + Send,
     {
+        let _served = self.inner.traffic.serve_session(transport);
         let subscriptions = SessionSubscriptions::for_user(user);
         let (selection, _) = watch::channel(None);
         let shared = Arc::new(SessionShared {
@@ -719,6 +734,10 @@ async fn accept_frame(
         request_id,
         request,
     } = message;
+    shared.traffic().request(
+        shared.transport,
+        nervix_client_wire::ClientRequestKind::from(&request),
+    );
     let routed = match request {
         ClientRequest::Cancel(cancel) => {
             shared.cancel(request_id, cancel).await;

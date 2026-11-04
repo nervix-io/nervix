@@ -34,6 +34,7 @@ use std::{
     task::{Context, Poll},
 };
 
+use error_stack::Report;
 use futures_util::{Stream, StreamExt as _, stream};
 use nervix_client_wire::{
     BackupDownloadFrame, BackupDownloadRequestFrame, ClientFrame, EncodedFrame, RestoreFrame,
@@ -44,6 +45,7 @@ use nervix_client_wire::{
         UPLOAD_RESOURCE_PATH,
     },
 };
+use nervix_models::UserName;
 use nervix_primitives::sync::{CancellationToken, oneshot};
 use nervix_recovery::Discarded as _;
 use tonic::{
@@ -57,8 +59,38 @@ use tonic::{
 
 use super::{InboundFrame, SessionTransport, download::DownloadFrameStream, outbound};
 use crate::application::{
-    authentication::GrpcAuthenticationError, session_service::SessionServiceImpl,
+    authentication::{BasicAuthCredentials, GrpcAuthenticationError, credentials_from_metadata},
+    client_traffic::ClientCall,
+    session_service::SessionServiceImpl,
 };
+
+/// What a gRPC call presents to be authenticated: where it came from and the credentials its
+/// metadata carries.
+struct PresentedCall {
+    call: ClientCall,
+    credentials: Option<BasicAuthCredentials>,
+}
+
+impl PresentedCall {
+    fn of<T>(request: &Request<T>) -> Self {
+        Self {
+            call: ClientCall {
+                transport: SessionTransport::Grpc,
+                peer: request.remote_addr(),
+            },
+            credentials: credentials_from_metadata(request.metadata()),
+        }
+    }
+
+    /// Authenticates the presented credentials, or names the status the call ends with when they
+    /// do not authenticate it.
+    async fn authenticate(self, service: &SessionServiceImpl) -> Result<UserName, Status> {
+        service
+            .authenticate_client(self.call, self.credentials.as_ref())
+            .await
+            .map_err(|refusal| GrpcAuthenticationError::status(Report::new(refusal.into())))
+    }
+}
 
 /// The status of a call the node ended because it closed admission.
 fn shutting_down() -> Status {
@@ -171,10 +203,7 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for Exchange {
         let service = self.service.clone();
         let limits = self.limits;
         Box::pin(async move {
-            let user = service
-                .authenticate_grpc_metadata(request.metadata())
-                .await
-                .map_err(GrpcAuthenticationError::status)?;
+            let user = PresentedCall::of(&request).authenticate(&service).await?;
             let (failure_sender, failure) = oneshot::channel();
             let mut failure_report = FailureReport {
                 sender: Some(failure_sender),
@@ -249,10 +278,7 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for Upload {
         let limits = self.limits;
         let admission = service.inner.admission_shutdown.clone();
         until_admission_closes(admission, async move {
-            let user = service
-                .authenticate_grpc_metadata(request.metadata())
-                .await
-                .map_err(GrpcAuthenticationError::status)?;
+            let user = PresentedCall::of(&request).authenticate(&service).await?;
             let reply = service.serve_upload(user, request.into_inner()).await?;
             #[cfg(feature = "testing")]
             if service.loses_installed_upload_reply(&reply) {
@@ -285,10 +311,7 @@ impl ClientStreamingService<VerifiedFrame<RestoreFrame>> for Restore {
         let limits = self.limits;
         let admission = service.inner.admission_shutdown.clone();
         until_admission_closes(admission, async move {
-            let user = service
-                .authenticate_grpc_metadata(request.metadata())
-                .await
-                .map_err(GrpcAuthenticationError::status)?;
+            let user = PresentedCall::of(&request).authenticate(&service).await?;
             let reply = service.serve_restore(user, request.into_inner()).await?;
             match reply.encode(&limits) {
                 Ok(frame) => Ok(Response::new(frame)),
@@ -322,10 +345,7 @@ impl ServerStreamingService<VerifiedFrame<BackupDownloadRequestFrame>> for Downl
         let limits = self.limits;
         let admission = service.inner.admission_shutdown.clone();
         until_admission_closes(admission.clone(), async move {
-            let user = service
-                .authenticate_grpc_metadata(request.metadata())
-                .await
-                .map_err(GrpcAuthenticationError::status)?;
+            let user = PresentedCall::of(&request).authenticate(&service).await?;
             let frames = service
                 .serve_backup_download(user, request.get_ref(), limits)
                 .await

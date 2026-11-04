@@ -207,6 +207,7 @@ mod backup;
 mod clickhouse_connections;
 mod client_consumers;
 mod client_producers;
+mod client_traffic;
 mod common;
 mod database_batches;
 #[cfg(feature = "deloxide")]

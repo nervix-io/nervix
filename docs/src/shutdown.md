@@ -32,6 +32,17 @@ A node begins shutting down for exactly three reasons:
   [Prerequisites At Join](./node-settings.md#prerequisites-at-join) describes each. The refused
   node requests its own stop; a node that has joined never stops because of a newcomer.
 
+A public listener stops when the node closes admission or when the server serving it fails. An
+accept that fails never stops it. A connection its client reset or abandoned before the listener
+took it fails only itself, and the listener accepts the next one at once. Any other failed accept,
+such as one refused because the process ran out of file descriptors, is a fault of the node rather
+than of one connection: the listener reports the first one after it last took a connection at `warn`
+as `a public listener failed to accept a connection; it keeps accepting`, the ones repeating it at
+`debug`, and accepts again. When it takes a connection after failing it reports `a public listener
+accepts connections again` at `info` with how many accepts failed, so a node that ran out of
+descriptors keeps every listener and accepts again as soon as it has room. The native gRPC, the
+`VHOST` HTTP and HTTPS, the observability and both web console listeners follow this rule.
+
 There is no Plexus statement, API call, or cluster command that stops a node. `CORDON NODE`,
 `DRAIN NODE`, `RELOCATE`, and `DROP NODE` move work and change eligibility; none of them ends a
 process. Stopping a process is an operator or supervisor action delivered as a signal.

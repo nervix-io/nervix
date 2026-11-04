@@ -139,6 +139,16 @@ Nervix records these raw metric families:
   acknowledgement window
 - `nervix_client_ingestor_submissions_total`: batches the ingestor answered, by `outcome` and
   `cause`
+- `nervix_sessions`: client sessions the node serves now
+- `nervix_sessions_opened_total`: client sessions the node has served
+- `nervix_session_requests_total`: requests the node's client sessions decoded, by `request`
+- `nervix_session_rejections_total`: requests those sessions answered with a rejection, by
+  `rejection`
+- `nervix_session_cancellations_total`: requests a cancellation ended, by `stage`
+- `nervix_session_transfer_parts_total`: transfer parts those sessions queued for replies larger
+  than one frame
+- `nervix_client_authentications_total`: calls the node's client listeners authenticated or
+  refused, by `outcome`
 - `nervix_jemalloc_active_bytes`: bytes in active allocator pages
 - `nervix_jemalloc_allocated_bytes`: bytes allocated by the process
 - `nervix_jemalloc_mapped_bytes`: bytes mapped by active allocator extents
@@ -176,9 +186,36 @@ first observation. Their labels and counting contracts are unchanged.
 
 The two session-subscription families use `domain` and `relay` labels and describe the node that
 exports them: the subscriptions its sessions hold and the rows those sessions lost. A client is told
-of its own losses directly, as described in [Sessions](sessions.md). The server exports no other
-session metrics; [Client Session Protocol](./client-session-protocol.md#observability) describes
-what clients and operators observe instead.
+of its own losses directly, as described in [Sessions](sessions.md). The rest of a node's session
+traffic, and the authentication attempts its client listeners judge, are described under
+[Client Traffic](#client-traffic).
+
+## Client Traffic
+
+Seven families describe the traffic the node's two client listeners carry, the native gRPC listener
+and the web console listener, which the `transport` label names as `grpc` or `console`. They
+describe the node that exports them: a session counts on the node its client connected to, and a
+call counts on the node that judged its credentials. Every other label is drawn from a set fixed at
+compile time. No label carries a user name, a session, request or execution identity, a domain, or
+a payload value, and every child is registered at zero when the node starts, so each series appears
+before its first observation.
+
+| Family | Kind | Labels | Counts |
+| --- | --- | --- | --- |
+| `nervix_sessions` | gauge | `transport` | Sessions the node serves now, from the moment a session's call is authenticated until the session has released its subscriptions and its transaction binding. |
+| `nervix_sessions_opened_total` | counter | `transport` | Sessions the node has served. |
+| `nervix_session_requests_total` | counter | `transport`, `request` | Requests the sessions decoded, by kind: `command`, `suggest`, `choice`, `list_domains`, `select_domain`, `attach_transaction`, `inspect_transaction`, `subscribe`, `unsubscribe`, `cancel`, `attach_domain_clock`, `detach_domain_clock`, `open_ingestor`, `submit_batch`, `close_ingestor`, `open_emitter`, `read_emitter_batch`, `settle_emitter_batch` or `close_emitter`. A frame that does not decode names no kind and counts only as a rejection. |
+| `nervix_session_rejections_total` | counter | `transport`, `rejection` | Requests answered with a rejection, by its reason: `invalid_request`, `unsupported_request`, `unsupported_value`, `duplicate_request_id`, `reply_too_large`, `too_many_requests_in_flight` or `server_busy`. A reply replaced by a rejection because it could not be encoded counts under the replacement's reason. |
+| `nervix_session_cancellations_total` | counter | `transport`, `stage` | Requests a cancellation ended, by whether it found them `before_admission` or `after_admission`. A cancellation whose target was already answered ended nothing and is not counted here; the cancel request itself counts under `request="cancel"`. |
+| `nervix_session_transfer_parts_total` | counter | `transport` | Transfer parts queued for replies larger than one frame. |
+| `nervix_client_authentications_total` | counter | `transport`, `outcome` | Calls whose authentication ended `authenticated`, `missing` (no readable Basic credentials), `rejected` (an unknown user, a wrong password, or a stored hash the node could not verify) or `unavailable` (the node could not judge the credentials now). Every call counts: a session, an upload, a download and a restore, and on the console a `/console/auth` check and a resource upload. |
+
+`rejected` deliberately does not tell an unknown user from a wrong password. The observability
+listener is unauthenticated, and that distinction is what enumerating the cluster's users would
+look for; an unknown user also costs the node the same credentials work, as
+[Authentication](./client-session-protocol.md#authentication) describes. A rate of `rejected`
+attempts is the sign of a client guessing passwords, and the `warn` record of each names the address
+it came from.
 
 ## Client Ingestors
 
