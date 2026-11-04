@@ -439,15 +439,15 @@ pub(in crate::application) fn web_console_advertise_url(
     listen_addr: SocketAddr,
     https_listen_addr: Option<SocketAddr>,
 ) -> error_stack::Result<NodeServiceUrl, NodeServiceUrlParseError> {
-    if let Some(endpoint) = advertise_addr {
-        return NodeServiceUrl::new("http", &endpoint);
-    }
-
     let (scheme, default_addr) = match https_listen_addr {
         Some(addr) => ("https", addr),
         None => ("http", listen_addr),
     };
-    NodeServiceUrl::new(scheme, &NodeEndpoint::from(default_addr))
+    let endpoint = match advertise_addr {
+        Some(endpoint) => endpoint,
+        None => NodeEndpoint::from(default_addr),
+    };
+    NodeServiceUrl::new(scheme, &endpoint)
 }
 
 impl SessionServiceImpl {
@@ -655,13 +655,13 @@ mod tests {
         );
         assert_eq!(
             web_console_advertise_url(
-                Some(NodeEndpoint::from(test_addr(17420))),
+                Some(NodeEndpoint::from(test_addr(17443))),
                 test_addr(17420),
                 Some(test_addr(17443))
             )
             .assured("an advertised endpoint forms a url")
             .as_str(),
-            "http://127.0.0.1:17420"
+            "https://127.0.0.1:17443"
         );
         assert_eq!(
             web_console_advertise_url(None, test_addr(17420), None)

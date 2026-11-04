@@ -15,6 +15,10 @@ holds the producer's workspace export `lcov-workspace.info`, its Python tooling 
 collection of another mode describes modeled or diagnostic execution, so it is never read, and the
 record lists it as left out. No other file of an input is read.
 
+`--python-input` declares a tooling-only artifact. It must hold Python reports and no Rust export
+or native collection. Other artifact directories still require ordinary Rust coverage, and the
+merged report must still measure every workspace member.
+
 Each record's source is mapped onto the repository. The producer's checkout root is stripped and `..`
 segments resolve lexically; a relative source is already relative to the repository. A record is
 kept only when its file is tracked at the tested revision. Dependency, toolchain, generated and any
@@ -28,7 +32,8 @@ under its report; a line no other report counts is then not measured.
 
 The merge fails, writes no report and records why, when the report would be incomplete:
 
-- an input is missing, or a directory holds no workspace export and no complete ordinary collection;
+- an input is missing, or a Rust input holds no workspace export and no complete ordinary collection;
+- a Python-only input holds no tooling report or contains Rust coverage;
 - an input has no root metadata;
 - none of a report's records lies below its producer's checkout root;
 - a report contributes no record of a tracked file;
@@ -287,17 +292,28 @@ class Report:
     collection: Collection | None = None
 
 
+class InputKind(enum.StrEnum):
+    """Whether an artifact requires Rust coverage or contains only Python tooling reports."""
+
+    RUST = "rust"
+    PYTHON = "python"
+
+
 @dataclass
 class Input:
     """One input as the merge record describes it."""
 
     path: str
     origin: PurePosixPath
+    kind: InputKind
     reports: list[dict[str, object]] = field(default_factory=list)
     left_out: list[dict[str, object]] = field(default_factory=list)
 
     def describe(self) -> dict[str, object]:
-        return {"input": self.path, "root": str(self.origin), "reports": self.reports, "left_out": self.left_out}
+        return {
+            "input": self.path, "root": str(self.origin), "kind": str(self.kind),
+            "reports": self.reports, "left_out": self.left_out,
+        }
 
 
 @dataclass(frozen=True)
@@ -373,7 +389,7 @@ class Merge:
     def display(self, path: Path) -> str:
         return display(path, self.root)
 
-    def read(self, item: Path) -> None:
+    def read(self, item: Path, kind: InputKind = InputKind.RUST) -> None:
         """Read one input: a producer's artifact directory, or one report."""
         if not item.exists():
             raise MergeError(f"{self.display(item)} does not exist: name a producer's artifact directory or report")
@@ -385,11 +401,13 @@ class Merge:
             metadata = item / SOURCE_ROOT_FILE
         else:
             metadata = item.with_name(SOURCE_ROOT_FILE)
-        described = Input(path=self.display(item), origin=self.origin(item, metadata))
+        described = Input(path=self.display(item), origin=self.origin(item, metadata), kind=kind)
         self.inputs.append(described)
         if item.is_dir():
-            reports = self.discover(item, described)
+            reports = self.discover(item, described, kind)
         else:
+            if kind is InputKind.PYTHON and item.name != PYTHON_REPORT:
+                raise MergeError(f"{self.display(item)} is not a Python tooling report ({PYTHON_REPORT})")
             reports = [Report(item, described.origin)]
         for report in reports:
             described.reports.append(self.normalize(report))
@@ -406,10 +424,18 @@ class Merge:
             raise MergeError(f"{self.display(metadata)} must name the absolute checkout path its producer ran in, not {value!r}")
         return PurePosixPath(posixpath.normpath(value))
 
-    def discover(self, directory: Path, described: Input) -> list[Report]:
+    def discover(self, directory: Path, described: Input, kind: InputKind) -> list[Report]:
         """The reports a producer's artifact directory holds, and its collections of other modes."""
         workspace = []
         export = directory / WORKSPACE_REPORT
+        python = [Report(path, described.origin) for path in sorted(directory.rglob(PYTHON_REPORT))]
+        if kind is InputKind.PYTHON:
+            if (export.is_file() or any(self.collection_files(directory, native.RECORD))
+                    or any(self.collection_files(directory, native.REPORT))):
+                raise MergeError(f"{self.display(directory)}: Python-only input holds Rust coverage; name it as a Rust input")
+            if not python:
+                raise MergeError(f"{self.display(directory)} holds no Python tooling report ({PYTHON_REPORT})")
+            return python
         if export.is_file():
             workspace.append(Report(export, described.origin))
         recorded = set()
@@ -432,7 +458,6 @@ class Merge:
                 f"{self.display(directory)} holds no workspace export ({WORKSPACE_REPORT}) and no complete "
                 "ordinary native collection: its producer published no ordinary Rust coverage"
             )
-        python = [Report(path, described.origin) for path in sorted(directory.rglob(PYTHON_REPORT))]
         return [*workspace, *python, *ordinary]
 
     @staticmethod
@@ -588,8 +613,12 @@ def main(arguments: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
     )
     parser.add_argument("--output", type=Path, default=Path(WORKSPACE_REPORT))
     parser.add_argument("--record", type=Path, default=RECORD)
+    parser.add_argument(
+        "--python-input", action="append", type=Path, default=[],
+        help="Python-only tooling artifact directory or report; repeat for each input",
+    )
     options = parser.parse_args(arguments)
-    inputs = options.inputs or [Path(WORKSPACE_REPORT)]
+    inputs = options.inputs or ([] if options.python_input else [Path(WORKSPACE_REPORT)])
     output = root / options.output
     record_path = root / options.record
     record: dict[str, object] = {
@@ -605,6 +634,8 @@ def main(arguments: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
             merge = Merge(root, checkout, members, Path(scratch))
             for item in inputs:
                 merge.read(root / item)
+            for item in options.python_input:
+                merge.read(root / item, InputKind.PYTHON)
             merge.write(output)
         record["verdict"] = str(native.Verdict.COMPLETE)
         status = 0

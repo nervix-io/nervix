@@ -1201,7 +1201,7 @@ class WorkflowTests(unittest.TestCase):
             if "uses: actions/download-artifact" in step:
                 self.assertRegex(step, r"\n          pattern: \S+")
         extras = step_section(job, "Download native extra coverage")
-        self.assertIn("if: needs.extra-tests.outputs.coverage-required == 'true'", extras)
+        self.assertIn("if: needs.extra-tests.outputs.native-coverage-required == 'true'", extras)
         combine = step_section(job, "Combine coverage")
         self.assertIn("if: ${{ !cancelled() }}", combine)
 
