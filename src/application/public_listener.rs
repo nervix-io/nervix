@@ -150,7 +150,12 @@ impl PublicListener {
                 "a public listener failed to accept a connection; it keeps accepting"
             );
         } else {
-            debug!(listener, %error, failed_accepts = self.failed_accepts, "a public listener failed to accept a connection again");
+            debug!(
+                listener,
+                %error,
+                failed_accepts = self.failed_accepts,
+                "a public listener failed to accept a connection again"
+            );
         }
     }
 }
@@ -233,6 +238,38 @@ mod tests {
             logs.contains("a public listener accepts connections again")
                 && logs.contains("failed_accepts=1"),
             "the connection that ends the run is reported with how many accepts failed:\n{logs}"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_run_of_failed_accepts_warns_once_and_a_connection_failure_never_warns() {
+        let injection = FaultInjection::default();
+        let socket = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port binds");
+        let mut listener =
+            PublicListener::new(socket, PublicListenerKind::Observability, &injection);
+
+        let logs = CapturedLogs::of(|| {
+            listener.failed(&io::Error::from(io::ErrorKind::ConnectionAborted));
+            listener.failed(&io::Error::other("the process has no descriptor left"));
+            listener.failed(&io::Error::other("the process has no descriptor left"));
+            listener.failed(&io::Error::from(io::ErrorKind::ConnectionReset));
+        });
+
+        assert_eq!(
+            listener.failed_accepts, 2,
+            "only the failures that are not a connection's own count in the run"
+        );
+        assert_eq!(
+            logs.matches("a public listener failed to accept a connection; it keeps accepting")
+                .count(),
+            1,
+            "the run is reported once, at its first failure:\n{logs}"
+        );
+        assert!(
+            !logs.contains("a connection ended before its listener accepted it"),
+            "a connection's own failure is a debug record, below the default level:\n{logs}"
         );
     }
 

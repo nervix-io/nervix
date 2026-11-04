@@ -247,20 +247,17 @@ impl SessionServiceImpl {
         let authenticated = self.authenticate(credentials).await;
         self.inner.traffic.authentication(call, &authenticated);
         let transport: &'static str = call.transport.into();
-        match (&authenticated, call.peer) {
-            (Err(AuthenticationRefusal::Rejected), Some(peer)) => {
-                warn!(transport, %peer, "client authentication failed");
+        // A record leaves out a field whose value is `None`, so a call whose transport knows no
+        // peer address is recorded without one.
+        let peer = call.peer.map(tracing::field::display);
+        match &authenticated {
+            Err(AuthenticationRefusal::Rejected) => {
+                warn!(transport, peer, "client authentication failed");
             }
-            (Err(AuthenticationRefusal::Rejected), None) => {
-                warn!(transport, "client authentication failed");
+            Err(AuthenticationRefusal::Missing) => {
+                debug!(transport, peer, "a client call presented no credentials");
             }
-            (Err(AuthenticationRefusal::Missing), Some(peer)) => {
-                debug!(transport, %peer, "a client call presented no credentials");
-            }
-            (Err(AuthenticationRefusal::Missing), None) => {
-                debug!(transport, "a client call presented no credentials");
-            }
-            (Err(AuthenticationRefusal::Unavailable), _) | (Ok(_), _) => {}
+            Err(AuthenticationRefusal::Unavailable) | Ok(_) => {}
         }
         authenticated
     }
@@ -268,10 +265,15 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
     use nervix_client_wire::{RequestCancelled, RequestRejected};
 
     use super::*;
-    use crate::metrics::RuntimeMetrics;
+    use crate::{
+        application::test_fixtures::{TestService, build_test_service},
+        captured_logs::CapturedLogs,
+        metrics::RuntimeMetrics,
+    };
 
     /// The value `metrics` export for exactly `series`, a family name with its labels in
     /// exposition order, or `None` when they export no such series.
@@ -410,6 +412,63 @@ mod tests {
         ] {
             assert_eq!(exported(&metrics, series), Some(value), "{series}");
         }
+    }
+
+    #[nervix_primitives::test]
+    async fn a_refused_call_is_recorded_with_its_listener_and_peer_and_nothing_it_presented() {
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(false).await;
+        let peer: SocketAddr = "192.0.2.7:41000"
+            .parse()
+            .assured("the test peer is an address literal");
+        let call = ClientCall {
+            transport: SessionTransport::Console,
+            peer: Some(peer),
+        };
+        let presented = BasicAuthCredentials {
+            username: "presented_user".to_string(),
+            password: "presented-secret".to_string(),
+        };
+
+        let logs = CapturedLogs::default();
+        // `#[nervix_primitives::test]` runs the whole future on the calling thread, so the
+        // thread-local default the guard installs stays in force across the awaits.
+        let guard = tracing::subscriber::set_default(logs.subscriber());
+        let refused = service.authenticate_client(call, Some(&presented)).await;
+        let missing = service.authenticate_client(call, None).await;
+        drop(guard);
+
+        assert_eq!(refused, Err(AuthenticationRefusal::Rejected));
+        assert_eq!(missing, Err(AuthenticationRefusal::Missing));
+        let logs = logs.contents();
+        assert_eq!(
+            logs.matches("client authentication failed").count(),
+            1,
+            "the refused call is recorded once:\n{logs}"
+        );
+        assert!(
+            logs.contains("transport=\"console\"") && logs.contains("peer=192.0.2.7:41000"),
+            "the record names the listener and the peer:\n{logs}"
+        );
+        assert!(
+            !logs.contains("presented_user") && !logs.contains("presented-secret"),
+            "the record carries nothing the call presented:\n{logs}"
+        );
+        assert!(
+            !logs.contains("a client call presented no credentials"),
+            "a call without credentials is a debug record, below the default level:\n{logs}"
+        );
+        assert_eq!(
+            exported(
+                &service.inner.runtime.metrics(),
+                "nervix_client_authentications_total{outcome=\"rejected\",transport=\"console\"}"
+            ),
+            Some(1.0)
+        );
+        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[test]
