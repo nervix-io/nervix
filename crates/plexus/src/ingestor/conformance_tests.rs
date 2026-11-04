@@ -630,3 +630,6 @@ fn completion_names_the_declared_locator_then_the_declared_options() {
         );
     }
 }
+
+#[path = "alter_conformance_tests.rs"]
+mod alter;

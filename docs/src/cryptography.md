@@ -55,9 +55,11 @@ No change adds a dependency that brings a cryptography implementation other than
 `nervix-server` product graph. A connector need that cannot be met is recorded on that connector's
 epic, and the [inventory](#inventory-outside-aws-lc) lists what the product links today.
 
-The product links one AWS-LC, so that FIPS brings one module. A second `aws-lc-*-sys` crate is a
-defect. Today there are two: `aws-lc-rs` links `aws-lc-sys` 0.46, and `rdkafka-sys` links
-`aws-lc-sys` 0.44 for librdkafka's TLS.
+The product links one AWS-LC, so that FIPS brings one module. `aws-lc-rs` and librdkafka share it:
+Nervix's fork of `rust-rdkafka` builds librdkafka's TLS against the `aws-lc-sys` that `aws-lc-rs`
+links, with that crate's `ssl` feature, so an upgrade of `aws-lc-rs` that moves to another
+`aws-lc-sys` moves the fork in the same change. A second `aws-lc-*-sys` crate, or a second version
+of one, is a defect, and [the gate](#the-count) refuses it.
 
 ## Classification Register
 
@@ -110,6 +112,16 @@ Libraries bring:
 | `sha2` | `nervix-roto` → `roto` → `cranelift-codegen`; `nervix-wasm` → `wasmtime` → `wasmtime-environ` | Compilation cache keys and artifact checksums | Non-security |
 | `chacha20`, `rand_chacha` | `rand`, through `chitchat`, `pulsar`, `apache-avro` and other libraries | The default generators of `rand` | Depends on the caller |
 
+Native libraries that a crate of the graph builds from source are outside the count, which reads
+crate names. librdkafka takes its TLS, the HMAC of SASL SCRAM and the signatures of OAUTHBEARER
+client assertions from the product's one AWS-LC, and libcurl, which librdkafka uses for
+OAUTHBEARER token requests, takes TLS and randomness from rustls on `aws-lc-rs`. They also bring:
+
+| Code | Path | Use | Purpose |
+| --- | --- | --- | --- |
+| `rd_jitter`, librdkafka's `rand_r` generator seeded from the clock and the thread | `nervix-connector-kafka` → `rdkafka` → `rdkafka-sys` | SASL SCRAM client nonces | Security |
+| MD5, SHA-256, SHA-512/256 and HMAC built into libcurl | `rdkafka-sys` → `curl-sys` | HTTP Digest authentication and AWS SigV4 signing | Unused: librdkafka's token requests ask for neither |
+
 ## The Count
 
 `just ratchet` counts `non_aws_lc_crypto` and holds it at or below its entry in
@@ -146,13 +158,22 @@ complete cryptography libraries such as `ring` and OpenSSL. Crates that only def
 encodings, the entropy interfaces `getrandom` and `rand_core`, and non-cryptographic checksums are
 not on it. AWS-LC is not on it either; a second copy of it is a defect, not debt.
 
+The gate therefore refuses a product graph that does not link exactly one AWS-LC module: one
+`aws-lc-sys`, or the FIPS module's `aws-lc-fips-sys`, in one version across both release targets.
+An `aws-lc-rs` upgrade onto `aws-lc-sys` 0.47 that leaves the fork on 0.46 links two modules, and so
+does `aws-lc-sys` beside `aws-lc-fips-sys`. The refusal names each module with the packages that
+link it, so it says which dependency brought the second one, and no count or baseline admits it. A
+graph without a module is refused too, since the product's cryptography comes from AWS-LC and such
+a graph was not read correctly.
+
 `just ratchet --show non_aws_lc_crypto` lists every site. An authored site shows its file, line and
 source line, marked `(authored)`. A graph site points at the dependent's `Cargo.lock` entry and
 shows the edge, marked `(graph)`. The baseline was measured when the rule landed, and a change may
 lower the count but never raise it. `scripts/tests/test_ratchet.py` pins both parts and the gate,
-including an added dependency on `sha2` or `argon2` and a dependency that brings `ring`. The
-registered `typed-non-aws-lc-crypto` property checks every generated authored location and the
-complete source and site representations.
+including an added dependency on `sha2` or `argon2`, a dependency that brings `ring`, and a second
+AWS-LC module, whether a second version, the FIPS crate beside the default one or a module that
+differs on one release target. The registered `typed-non-aws-lc-crypto` property checks every
+generated authored location and the complete source and site representations.
 
 ## NATS Signing And The Preparation Boundary
 
@@ -173,9 +194,12 @@ Nervix-owned nonce-signing operation.
 ## What The FIPS Migration Will Refuse
 
 The migration enables the FIPS module underneath the boundary: `aws-lc-rs` with its FIPS feature on
-`aws-lc-fips-sys`, and the rustls FIPS provider. A FIPS build refuses to start, and refuses a commit,
-when a resolved TLS policy names an algorithm FIPS 140-3 does not approve. It refuses each security
-path of the inventory until that path moves onto AWS-LC: password authentication through the
-MongoDB, Postgres and MySQL drivers, SQS and object-storage request signing, RabbitMQ PKCS#12
-client identities and Parquet encryption in Iceberg. Non-security uses, the register's entries and
-the inventory's non-security rows, are not refused.
+`aws-lc-fips-sys`, librdkafka built against that same `aws-lc-fips-sys`, and the rustls FIPS
+provider. The fork's build reads the metadata of whichever AWS-LC crate its backend selects, so
+building librdkafka on the FIPS crate is a backend the fork adds, not a rewrite of its build. A
+FIPS build refuses to start, and refuses a commit, when a resolved TLS policy names an algorithm
+FIPS 140-3 does not approve. It refuses each security path of the inventory until that path moves
+onto AWS-LC: password authentication through the MongoDB, Postgres and MySQL drivers, Kafka SASL
+SCRAM while librdkafka draws its client nonce from `rd_jitter`, SQS and object-storage request
+signing, RabbitMQ PKCS#12 client identities and Parquet encryption in Iceberg. Non-security uses,
+the register's entries and the inventory's non-security and unused rows, are not refused.

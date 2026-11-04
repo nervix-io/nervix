@@ -40,6 +40,23 @@ pub(super) fn event_body<'src>(
     )
 }
 
+/// `SET PLATFORM '<platform>'`, `DROP PLATFORM` or `SET MODE <mode>`: one part of a
+/// `SENTRY EVENT` body.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], SentryEventEmitterChange, extra::Err<ParseError<'src>>> + Clone
+{
+    let platform = kw(Identifier::Platform)
+        .ignore_then(string_lit())
+        .map(SentryEventEmitterChange::Platform);
+    let publishing = kw(Identifier::Mode)
+        .ignore_then(mode())
+        .map(SentryEventEmitterChange::Mode);
+    let set = kw(Identifier::Set).ignore_then(choice((platform, publishing)));
+    let drop_platform = kw_phrase2(Identifier::Drop, Identifier::Platform)
+        .to(SentryEventEmitterChange::DropPlatform);
+    choice((set, drop_platform)).boxed()
+}
+
 #[cfg(test)]
 #[cfg_attr(
     nervix_lint,

@@ -187,6 +187,10 @@ pub enum ClientError {
         request: RequestKind,
         stage: CancellationStage,
     },
+    /// The caller cancelled the call while it waited for something other than a reply, so the
+    /// call stopped there and sent nothing more. What it had already sent may still take effect.
+    #[error("the call was cancelled before its outcome arrived")]
+    CallCancelled,
     /// The server answered the request with a reply of a kind that does not answer it.
     #[error("the server answered the {request} request with a reply of another kind")]
     UnexpectedReply { request: RequestKind },
@@ -277,7 +281,12 @@ impl ClientError {
             | Self::RequestInterrupted { .. }
             | Self::ConnectServer(_)
             | Self::SessionOpenDeadline
-            | Self::RetryDeadline => true,
+            | Self::RetryDeadline
+            | Self::CallCancelled
+            | Self::RequestCancelled {
+                stage: CancellationStage::AfterAdmission,
+                ..
+            } => true,
             Self::Transport(_) => self.retryable_session_failure(),
             Self::StartSession(status) | Self::Restore(status) => matches!(
                 status.code(),

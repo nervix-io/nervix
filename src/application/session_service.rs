@@ -1842,9 +1842,9 @@ impl SessionServiceImpl {
                 .await
             {
                 if execution.is_expired() {
-                    return Ok(CommandResponse::executed(expired_reference(
-                        execution_reference,
-                    )));
+                    return Ok(CommandResponse::executed(
+                        self.refuse_expired_reference(execution_reference),
+                    ));
                 }
                 let digest = match PersistentCommandRequest::transaction_digest(&req.query) {
                     Ok(digest) => digest,

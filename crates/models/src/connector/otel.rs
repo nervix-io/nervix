@@ -314,17 +314,209 @@ otel_emitter_declarations!(
     OtelMetricsEmitter(OtelMetricsPublishingMode) => &[METRIC, ATTRIBUTES, RESOURCE, SCOPE],
 );
 
+/// One change an `ALTER OTEL … EMITTER` writes to what its exports carry beside their values.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum OtelMappingChange {
+    /// `SET ATTRIBUTES { '<name>' = <expression>, … }`.
+    Attributes(Vec<OtelValueMapping>),
+    /// `DROP ATTRIBUTES`.
+    DropAttributes,
+    /// `SET RESOURCE { '<name>' = <literal>, … }`.
+    Resource(Vec<OtelValueMapping>),
+    /// `DROP RESOURCE`.
+    DropResource,
+    /// `SET SCOPE '<name>' [VERSION '<version>']`.
+    Scope(OtelScope),
+    /// `DROP SCOPE`.
+    DropScope,
+}
+
+impl OtelMappingChange {
+    /// Writes the change into `mappings`, those of an emitter of `entity`, or leaves them as they
+    /// were and says why the change does not apply.
+    fn apply_to(
+        &self,
+        mappings: &mut OtelMappings,
+        entity: crate::EmitterEntityKind,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        let not_written = |option: &'static str| {
+            error_stack::Report::new(crate::AlterEmitterError::OptionNotWritten { entity, option })
+        };
+        match self {
+            Self::Attributes(attributes) => mappings.attributes = attributes.clone(),
+            Self::DropAttributes => {
+                if mappings.attributes.is_empty() {
+                    return Err(not_written("ATTRIBUTES"));
+                }
+                mappings.attributes.clear();
+            }
+            Self::Resource(resource) => mappings.resource = resource.clone(),
+            Self::DropResource => {
+                if mappings.resource.is_empty() {
+                    return Err(not_written("RESOURCE"));
+                }
+                mappings.resource.clear();
+            }
+            Self::Scope(scope) => mappings.scope = Some(scope.clone()),
+            Self::DropScope => {
+                if mappings.scope.take().is_none() {
+                    return Err(not_written("SCOPE"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The change as the `ALTER` operation that writes it.
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Attributes(attributes) => format!(
+                "SET ATTRIBUTES {{ {} }}",
+                crate::canonical::value_mapping_items(attributes)?.join(", ")
+            ),
+            Self::DropAttributes => "DROP ATTRIBUTES".to_owned(),
+            Self::Resource(resource) => format!(
+                "SET RESOURCE {{ {} }}",
+                crate::canonical::value_mapping_items(resource)?.join(", ")
+            ),
+            Self::DropResource => "DROP RESOURCE".to_owned(),
+            Self::Scope(scope) => format!("SET {}", scope.to_canonical_plexus()),
+            Self::DropScope => "DROP SCOPE".to_owned(),
+        };
+        Ok(text)
+    }
+}
+
+/// One change an `ALTER OTEL LOGS EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum OtelLogsEmitterChange {
+    /// `SET ATTRIBUTES`, `SET RESOURCE` or `SET SCOPE`, or the `DROP` of one.
+    Mappings(OtelMappingChange),
+    /// `SET MODE <mode>`.
+    Mode(OtelLogsPublishingMode),
+}
+
+impl crate::EmitterEntityChange for OtelLogsEmitterChange {
+    type Entity = OtelLogsEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut OtelLogsEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Mappings(change) => change.apply_to(
+                &mut entity.mappings,
+                <OtelLogsEmitter as crate::EmitterEntityModel>::KIND,
+            )?,
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Mappings(change) => change.to_canonical_plexus()?,
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
+/// One change an `ALTER OTEL TRACES EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum OtelTracesEmitterChange {
+    /// `SET ATTRIBUTES`, `SET RESOURCE` or `SET SCOPE`, or the `DROP` of one.
+    Mappings(OtelMappingChange),
+    /// `SET MODE <mode>`.
+    Mode(OtelTracesPublishingMode),
+}
+
+impl crate::EmitterEntityChange for OtelTracesEmitterChange {
+    type Entity = OtelTracesEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut OtelTracesEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Mappings(change) => change.apply_to(
+                &mut entity.mappings,
+                <OtelTracesEmitter as crate::EmitterEntityModel>::KIND,
+            )?,
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Mappings(change) => change.to_canonical_plexus()?,
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
+/// One change an `ALTER OTEL METRICS EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum OtelMetricsEmitterChange {
+    /// `SET METRIC '<name>' UNIT '<unit>' [DESCRIPTION '<description>'] <kind>`.
+    Metric(OtelMetric),
+    /// `SET ATTRIBUTES`, `SET RESOURCE` or `SET SCOPE`, or the `DROP` of one.
+    Mappings(OtelMappingChange),
+    /// `SET MODE <mode>`.
+    Mode(OtelMetricsPublishingMode),
+}
+
+impl crate::EmitterEntityChange for OtelMetricsEmitterChange {
+    type Entity = OtelMetricsEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut OtelMetricsEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Metric(metric) => entity.metric = metric.clone(),
+            Self::Mappings(change) => change.apply_to(
+                &mut entity.mappings,
+                <OtelMetricsEmitter as crate::EmitterEntityModel>::KIND,
+            )?,
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Metric(metric) => format!("SET METRIC {}", metric.to_canonical_plexus()),
+            Self::Mappings(change) => change.to_canonical_plexus()?,
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector Otel = "OTEL";
     /// What an OTEL emitter writes.
     pub enum OtelEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum OtelEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum OtelEmitterChange;
     /// The entities an OTEL emitter writes: one per signal.
     pub enum OtelEmitterEntity {
-        Logs(OtelLogsEmitter, OtelLogsPublishingMode) = "LOGS";
-        Traces(OtelTracesEmitter, OtelTracesPublishingMode) = "TRACES";
-        Metrics(OtelMetricsEmitter, OtelMetricsPublishingMode) = "METRICS";
+        Logs(OtelLogsEmitter, OtelLogsPublishingMode, OtelLogsEmitterChange) = "LOGS";
+        Traces(OtelTracesEmitter, OtelTracesPublishingMode, OtelTracesEmitterChange) = "TRACES";
+        Metrics(OtelMetricsEmitter, OtelMetricsPublishingMode, OtelMetricsEmitterChange) = "METRICS";
     }
 }
 

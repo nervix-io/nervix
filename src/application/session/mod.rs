@@ -611,6 +611,12 @@ impl SessionServiceImpl {
     ) where
         S: Stream<Item = InboundFrame> + Unpin + Send,
     {
+        #[cfg(feature = "testing")]
+        let acceptance_observer = self
+            .inner
+            .runtime
+            .fault_injection()
+            .session_acceptance_observer_on(self.inner.consensus.local_node_id());
         let _served = self.inner.traffic.serve_session(transport);
         let subscriptions = SessionSubscriptions::for_user(user);
         let (selection, _) = watch::channel(None);
@@ -656,6 +662,24 @@ impl SessionServiceImpl {
                     // Taking a frame can wait for room to answer it, which a client that reads
                     // nothing never makes. Neither the node stopping nor the session ending waits
                     // on that client.
+                    #[cfg(feature = "testing")]
+                    let request_id = frame.request_id();
+                    let accepting = accept_frame(&shared, &ordered_tx, frame);
+                    #[cfg(feature = "testing")]
+                    let accepting = async {
+                        match &acceptance_observer {
+                            Some(observer) => {
+                                observer
+                                    .observe(
+                                        request_id,
+                                        || shared.delivery.outbound.control_has_no_room(),
+                                        accepting,
+                                    )
+                                    .await
+                            }
+                            None => accepting.await,
+                        }
+                    };
                     let accepted = nervix_primitives::select! {
                         biased;
                         _ = shared.ended() => break,
@@ -664,7 +688,7 @@ impl SessionServiceImpl {
                             node_stopping = true;
                             break;
                         }
-                        accepted = accept_frame(&shared, &ordered_tx, frame) => accepted,
+                        accepted = accepting => accepted,
                     };
                     if !accepted {
                         break;
@@ -1079,6 +1103,8 @@ async fn serve_command(
     subscriptions: &mut SessionSubscriptions,
 ) {
     let execution_reference = command.execution_reference.clone();
+    #[cfg(feature = "testing")]
+    let reply_script_request = command.clone();
     let processing = shared
         .service
         .process_command(command, subscriptions, admission);
@@ -1091,6 +1117,17 @@ async fn serve_command(
         return;
     };
     let outcome = command_outcome(execution_reference, response);
+    #[cfg(feature = "testing")]
+    let outcome = {
+        let mut outcome = outcome;
+        shared
+            .service
+            .inner
+            .runtime
+            .fault_injection()
+            .substitute_uncertain_command_reply(&reply_script_request, &mut outcome);
+        outcome
+    };
     shared
         .finish_with(request_id, ReplyBody::Command(Box::new(outcome)))
         .await;

@@ -41,6 +41,21 @@ pub(super) fn pubsub_body<'src>(
     )
 }
 
+/// `SET CHANNEL '<name>'` or `SET MODE <mode>`: one part of a `REDIS PUBSUB` body.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], RedisPubSubEmitterChange, extra::Err<ParseError<'src>>> + Clone
+{
+    let locator = kw(Identifier::Channel)
+        .ignore_then(external_name::<RedisChannelName>())
+        .map(RedisPubSubEmitterChange::Channel);
+    let publishing = kw(Identifier::Mode)
+        .ignore_then(mode())
+        .map(RedisPubSubEmitterChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((locator, publishing)))
+        .boxed()
+}
+
 #[cfg(test)]
 mod tests {
     use nervix_models::{EmitterEntity, Model, RedisEmitter};

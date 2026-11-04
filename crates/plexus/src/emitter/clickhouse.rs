@@ -39,3 +39,18 @@ pub(super) fn table_body<'src>() -> impl Parser<
             }),
     )
 }
+
+/// `SET TABLE '<name>'` or `SET MODE <mode>`: one part of a `CLICKHOUSE TABLE` body.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], ClickHouseTableEmitterChange, extra::Err<ParseError<'src>>> + Clone
+{
+    let locator = kw(Identifier::Table)
+        .ignore_then(external_name::<ClickHouseTableName>())
+        .map(ClickHouseTableEmitterChange::Table);
+    let publishing = kw(Identifier::Mode)
+        .ignore_then(mode())
+        .map(ClickHouseTableEmitterChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((locator, publishing)))
+        .boxed()
+}

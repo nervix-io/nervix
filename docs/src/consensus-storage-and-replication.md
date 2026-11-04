@@ -238,6 +238,17 @@ Submissions and answers stay in log order. A conflict, higher vote, partial acce
 failure, or liveness failure ends that stream generation after its first result. Raft resumes from
 the last progress the follower confirmed.
 
+A batch the leader cannot write to the stream, because its encoding exceeds the operation limit,
+the node's executor refuses to encode it, or the transport fails while sending it, is a stream
+failure too. The batches submitted before it still receive their answers, and then the generation
+ends with that failure. It never ends as if its input were exhausted while that input still held
+unsent requests: OpenRaft takes an answer stream that ends without an error to mean that every
+request it sent was answered, and would send the unanswered rest again from the follower's last
+confirmed position under the same in-flight request. A new leader that has not yet confirmed any
+position would then acknowledge its probe below the probe's own start, which OpenRaft treats as a
+broken invariant: in a debug build its Raft core panics, and every later write on that node fails
+with `raft write failed: panicked`.
+
 The leader permits at most 16 unacknowledged batches for one follower. It also waits whenever its
 unacknowledged bytes plus the next 1 MiB target would exceed 16 MiB. Because one complete command
 may cross the target, measured outstanding bytes may exceed that target budget by the excess of one
@@ -265,7 +276,8 @@ the applied domain backlog within its assertion bound and the bytes carried by t
 Append stream openings observe actual data-stream setup; initial empty probes do not open those
 streams. A data-setup attempt includes its prefix check, even when that check fails before a stream
 can open. Native transport regressions cover finite probes, the transition to data, ordered empty
-commit updates and rejected probes. The public catch-up scenarios retain their stream-count and
+commit updates, rejected probes and a batch the stream cannot submit after an answered one. The
+public catch-up scenarios retain their stream-count and
 time assertions and change no product deadline.
 
 Heartbeats keep the shorter deadline derived from the configured heartbeat interval, capped at five
@@ -456,19 +468,22 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The dedicated database owns exactly four current keyspaces: `raft_subscription_types_logs`,
-`raft_subscription_types_meta`, `raft_subscription_types_state`, and
-`raft_subscription_types_snapshots`. Opening it validates the complete keyspace namespace before
-reading any records. This namespace identifies the current Model shape, including a Pulsar
-subscription's required type, an owned Pulsar subscription's required start position, a Kafka
-consumer group's required start position, the serialized Sentry platform field, an ingestor's
-`TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the receive
-count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an
-MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter
-writes beside its publishing mode, a `REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription,
-and whether a polled HTTP request's header holds a literal or names a client secret. Its state
-metadata requires the current `ClusterState` encoding, including committed cluster
-parameters, the durable restore installation gate and the unit-keyed
+The dedicated database owns exactly four current keyspaces: `raft_alter_parity_logs`,
+`raft_alter_parity_meta`, `raft_alter_parity_state`, and `raft_alter_parity_snapshots`. Opening it
+validates the complete keyspace namespace before reading any records. This namespace identifies the
+current Model shape, including a Pulsar subscription's required type, an owned Pulsar
+subscription's required start position, a Kafka consumer group's required start position, the
+serialized Sentry platform field, an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS
+QUEUE emitter's `SEND` request shape, the receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX`
+declares, the session and quality of service an MQTT TOPIC ingestor writes beside its delivery
+mode, the quality of service an MQTT TOPIC emitter writes beside its publishing mode, a
+`REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription, and whether a polled HTTP request's
+header holds a literal or names a client secret. It identifies the current statement shape as well,
+which the statements a transaction keeps are stored in: an `ALTER INGESTOR` or `ALTER EMITTER`
+operation that changes one part of its entity's body, an envelope clause or the properties, or one
+part of a construction where it stands. Its state metadata requires the current `ClusterState`
+encoding, including committed cluster parameters, the durable restore installation gate and the
+unit-keyed
 committed schedule. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
 are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery
 and snapshot installation therefore retain their complete magnitudes. See
@@ -528,6 +543,28 @@ contact hints; current peer identity, incarnation, and endpoint still come from 
 [Cluster Interconnect](./interconnect.md#listener-and-peer-topology).
 
 ## Observability
+
+The command-history observer projects the applying, finished and expired index lengths and the
+optional durable retry fence from one applied state revision. Scrapes read those indexes without
+scanning records or changing retention. Every node exposes its own applied counts and fence;
+admission refusal events are counted only by the application process that handles the refusal,
+never by follower application or replay. See [Command Execution History](./metrics-and-observability.md#command-execution-history).
+
+Opening a consensus node establishes a `consensus_node` trace span with its cluster name, typed
+node name and concrete local interconnect address. OpenRaft captures that context when it starts
+its core. Parallel isolated clusters may use the same node names; the listener address distinguishes
+their core events in a shared log. The span belongs to that consensus lifetime and exposes no
+command, record or credential values.
+The unary append, vote and pre-vote receivers also establish trace-level contexts with the same
+local node and listener address. When detailed tracing is selected, their existing OpenRaft API
+events distinguish arrival at the Raft API from processing by that node's core. The annotations
+change no request, deadline or retry policy.
+Vote and pre-vote clients emit trace-level send and completion events with the local endpoint,
+peer, vote, request deadline, elapsed transport time and result. The elapsed measurement spans
+encoding, connection admission, the exchange and response decoding. An outer OpenRaft timeout may
+cancel the request before its completion event; its timeout event remains the outcome in that
+case. These infrequent requests take one additional monotonic-clock reading when they begin;
+completion timing and result formatting are evaluated only when their trace event is enabled.
 
 Durable record decoding and recovered catalog checks preserve decoding or nested report causes
 inside the standard-error carrier that the storage trait accepts. The carrier's ordinary rendering

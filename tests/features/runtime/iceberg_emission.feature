@@ -643,6 +643,104 @@ Feature: Iceberg emission
       | 1            |
       | 3            |
 
+  @iceberg_batch_carriers
+  Scenario Outline: An Iceberg emitter commits the carriers of one flush in one commit, in data files within its BATCH limits
+    Given Iceberg dependencies are running
+    And temporary files use a custom temp directory
+    And a <cluster_size> node nervix cluster is started
+    And Iceberg table "carriers_{{test_id}}" exists at "s3://nervix-iceberg/tables/carriers_{{test_id}}" with columns
+      """
+      user_id I64
+      action STRING
+      """
+    And the Iceberg REST catalog is reached through a gate that holds every commit to table "carriers_{{test_id}}"
+    # Each submitted batch reaches the emitter as a carrier of its own two rows, unless the ingestor
+    # joins it with a neighbour into a larger carrier, and the emitter's flush releases all six rows
+    # to it in one write. However the rows arrive, BATCH MAX MESSAGES 2 divides them into three
+    # data files of two rows and the default writes one data file.
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA notification (user_id I64, action STRING);
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE CLIENT PRODUCER INGESTOR notifications_in
+        FROM SCHEMA notification
+          MODE ACK PARALLEL MAX 4 ACK TIMEOUT 10m RETRY POLICY BACKOFF 100ms MAX 1s
+          ON QUIESCE SUSPEND
+        TIMESTAMP NOW
+        TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE S3 CLIENT s3_main CONFIG {
+        'endpoint' = '{{rustfs_addr}}',
+        'region' = 'us-east-1',
+        'access_key_id' = 'rustfsadmin',
+        'secret_access_key' = 'rustfsadmin',
+        'path_style_access' = true
+      };
+      CREATE ICEBERG_REST CLIENT iceberg_catalog CONFIG {
+        'uri' = '{{iceberg_catalog_gate}}',
+        'warehouse' = 's3://nervix-iceberg/warehouse'
+      };
+      CREATE ICEBERG TABLE EMITTER iceberg_carriers FROM notifications
+        TO s3_main TABLE 'carriers_{{test_id}}' NAMESPACE '{{domain}}'
+        LOCATION 's3://nervix-iceberg/tables/carriers_{{test_id}}'
+        CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+        VALUES { 'user_id' = input.user_id, 'action' = input.action }
+        <batch>
+        FLUSH EACH 20s MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And client "app" is connected to node "node-1"
+    When client "app" opens producer "input" on ingestor "notifications_in" expecting fields "user_id I64, action STRING"
+    And producer "input" submits batch "first" with rows
+      | user_id | action |
+      | 61      | open   |
+      | 62      | open   |
+    And producer "input" submits batch "second" with rows
+      | user_id | action |
+      | 63      | update |
+      | 64      | update |
+    And producer "input" submits batch "third" with rows
+      | user_id | action |
+      | 65      | close  |
+      | 66      | close  |
+    # The flush cadence starts with the first carrier and releases every one of them together.
+    Then within "10s" DESCRIBE EMITTER "iceberg_carriers" on the leader node reports "messages_total" "received" relay "notifications" totalling "6"
+    # The write stages every carrier in one staging file, and the commit that publishes them holds
+    # their acknowledgements until the catalog has every row.
+    And within "60s" the Iceberg catalog gate holds a commit
+    And the temp directory holds 1 Iceberg staging files
+    And batch "first" remains pending for "1s"
+    When the Iceberg catalog gate passes every commit
+    Then batch "first" completes
+    And batch "second" completes
+    And batch "third" completes
+    And within "60s" the Iceberg table "carriers_{{test_id}}" has <files> data files holding 6 rows, each with at most <file_rows> rows and 1048576 bytes
+    And the latest commit to the Iceberg table "carriers_{{test_id}}" appended <files> data files holding 6 rows
+    And within "30s" the Iceberg table "carriers_{{test_id}}" holds exactly these rows
+      """
+      {"user_id":61,"action":"open"}
+      {"user_id":62,"action":"open"}
+      {"user_id":63,"action":"update"}
+      {"user_id":64,"action":"update"}
+      {"user_id":65,"action":"close"}
+      {"user_id":66,"action":"close"}
+      """
+    And within "30s" DESCRIBE EMITTER "iceberg_carriers" on the leader node reports "messages_total" "sent" relay "notifications" totalling "6"
+    # The commit returned every byte it charged to the bulk memory class for the staged rows.
+    And within "30s" every node reserves only the bulk memory the scenario holds
+
+    Examples:
+      | cluster_size | batch                              | files | file_rows |
+      | 1            | BATCH MAX MESSAGES 2 MAX SIZE 1MiB | 3     | 2         |
+      | 3            | BATCH MAX MESSAGES 2 MAX SIZE 1MiB | 3     | 2         |
+      | 1            |                                    | 1     | 6         |
+      | 3            |                                    | 1     | 6         |
+
   Scenario Outline: Iceberg emitter commits nested datetime lists at microsecond precision
     Given MQTT is running
     And Iceberg dependencies are running
@@ -1217,7 +1315,7 @@ Feature: Iceberg emission
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-        CREATE ICEBERG TABLE EMITTER iceberg_notifications FROM notifications TO s3_main TABLE 'shutdown_notifications_{{test_id}}' NAMESPACE '{{domain}}' LOCATION 's3://nervix-iceberg/tables/shutdown_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 1h MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        CREATE ICEBERG TABLE EMITTER iceberg_notifications FROM notifications TO s3_main TABLE 'shutdown_notifications_{{test_id}}' NAMESPACE '{{domain}}' LOCATION 's3://nervix-iceberg/tables/shutdown_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 1h MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action } <batch> FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
         START;
@@ -1238,9 +1336,11 @@ Feature: Iceberg emission
       """
 
     Examples:
-      | cluster_size | replica_count |
-      | 1            | 0             |
-      | 3            | 0             |
+      | cluster_size | replica_count | batch                              |
+      | 1            | 0             |                                    |
+      | 3            | 0             |                                    |
+      | 1            | 0             | BATCH MAX MESSAGES 2 MAX SIZE 1MiB |
+      | 3            | 0             | BATCH MAX MESSAGES 2 MAX SIZE 1MiB |
 
   Scenario Outline: Iceberg emitter reports a REST catalog failure while opening its table
     Given MQTT is running
@@ -1486,6 +1586,81 @@ Feature: Iceberg emission
       | 1            |
       | 3            |
 
+  Scenario Outline: An Iceberg emitter refuses a table that declares an encryption key and commits the row it kept once the key is gone
+    Given Iceberg dependencies are running
+    And a <cluster_size> node nervix cluster is started
+    And Iceberg table "encrypted_notifications_{{test_id}}" exists at "s3://nervix-iceberg/tables/encrypted_notifications_{{test_id}}" with columns
+      """
+      user_id I64
+      action STRING
+      """
+    And Iceberg table "encrypted_notifications_{{test_id}}" declares table property "encryption.key-id" as "nervix-master-key"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64, action STRING);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer, action string);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE VHOST edge iceberg-encrypted-{{test_id}}.example.com;
+      CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM notifications_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE S3 CLIENT s3_main
+        CONFIG {
+          'endpoint' = '{{rustfs_addr}}',
+          'region' = 'us-east-1',
+          'access_key_id' = 'rustfsadmin',
+          'secret_access_key' = 'rustfsadmin',
+          'path_style_access' = true
+        };
+      CREATE ICEBERG_REST CLIENT iceberg_catalog
+        CONFIG {
+          'uri' = '{{iceberg_rest_addr}}',
+          'warehouse' = 's3://nervix-iceberg/warehouse'
+        };
+      CREATE ICEBERG TABLE EMITTER iceberg_encrypted FROM notifications TO s3_main TABLE 'encrypted_notifications_{{test_id}}' NAMESPACE '{{domain}}' LOCATION 's3://nervix-iceberg/tables/encrypted_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "iceberg-encrypted-{{test_id}}.example.com" path "/notifications"
+      """
+      {"user_id":71,"action":"held"}
+      """
+    # The emitter writes no encrypted files, so every commit refuses the table before it writes a
+    # data file, and keeps the staged row for its retry.
+    Then within "30s" DESCRIBE EMITTER "iceberg_encrypted" on the leader node contains
+      """
+      transient error: the Iceberg table declares an encryption key, and the emitter writes no encrypted files
+      """
+    And the Iceberg table "encrypted_notifications_{{test_id}}" does not contain a row within "1s"
+      """
+      {"user_id":71,"action":"held"}
+      """
+    When the operator removes table property "encryption.key-id" from Iceberg table "encrypted_notifications_{{test_id}}"
+    Then the Iceberg table "encrypted_notifications_{{test_id}}" eventually contains a row
+      """
+      {"user_id":71,"action":"held"}
+      """
+    And within "30s" DESCRIBE EMITTER "iceberg_encrypted" on the leader node contains
+      """
+      transient error: -
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @iceberg_refused_append
   Scenario Outline: An Iceberg commit its catalog refused retries what it began with, and rows staged during its backoff are acknowledged only once a catalog commit of their own holds them
     Given Iceberg dependencies are running
@@ -1533,7 +1708,7 @@ Feature: Iceberg emission
         };
       CREATE ICEBERG TABLE EMITTER iceberg_refused FROM notifications
         COLLECT FOR 5s
-        TO s3_main TABLE 'refused_notifications_{{test_id}}' NAMESPACE '{{domain}}' LOCATION 's3://nervix-iceberg/tables/refused_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 1h MAX SIZE 1B MODE ACK RETRY POLICY BACKOFF 10s MAX 10s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 1h MAX BATCH SIZE 1B
+        TO s3_main TABLE 'refused_notifications_{{test_id}}' NAMESPACE '{{domain}}' LOCATION 's3://nervix-iceberg/tables/refused_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 1h MAX SIZE 1B MODE ACK RETRY POLICY BACKOFF 10s MAX 10s VALUES { 'user_id' = input.user_id, 'action' = input.action } <batch> FLUSH EACH 1h MAX BATCH SIZE 1B
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       START;
@@ -1573,11 +1748,15 @@ Feature: Iceberg emission
       {"user_id":72,"action":"second"}
       """
     And within "30s" DESCRIBE EMITTER "iceberg_refused" on the leader node reports "messages_total" "sent" relay "notifications" totalling "2"
+    # The retry appends the data file the refused commit had already written, once.
+    And within "30s" the Iceberg table "refused_notifications_{{test_id}}" has 2 data files holding 2 rows, each with at most 1 rows and 1048576 bytes
 
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | batch                              |
+      | 1            |                                    |
+      | 3            |                                    |
+      | 1            | BATCH MAX MESSAGES 2 MAX SIZE 1MiB |
+      | 3            | BATCH MAX MESSAGES 2 MAX SIZE 1MiB |
 
   @iceberg_commit_whole_class @slots_2
   Scenario Outline: An Iceberg staged batch larger than the bulk memory class commits only once the whole class is free

@@ -490,9 +490,9 @@ humantime = "2"
 hyper = "1"
 hyper-rustls = "0.27"
 hyper-util = "0.1"
-iceberg = "0.10"
-iceberg-catalog-rest = "0.10"
-iceberg-storage-opendal = { version = "0.10", features = [
+iceberg = "0.11"
+iceberg-catalog-rest = "0.11"
+iceberg-storage-opendal = { version = "0.11", features = [
   "opendal-s3",
   "opendal-gcs",
   "opendal-azdls",
@@ -598,7 +598,10 @@ nix = "0.30"
 # Compile-time checked non-zero literals, so a constant that must not be zero is rejected by the
 # compiler rather than by a runtime guard.
 nonzero_ext = "0.3"
-opendal = "0.57"
+opendal = "0.58"
+# The Reqwest transport an Iceberg object-store operator carries in its context, built over the
+# emitter's own client. Its TLS features stay off: that client brings its AWS-LC configuration.
+opendal-http-transport-reqwest = { version = "0.58", default-features = false }
 # OpenRaft prereleases change snapshot APIs without semver compatibility.
 openraft = { version = "=0.10.0-alpha.33", default-features = false, features = [
   "tokio-rt",
@@ -650,6 +653,8 @@ rcgen = { version = "0.13", default-features = false, features = [
   "pem",
 ] }
 # Keep the AWS-LC support from PR #850 and the librdkafka 2.12.1 backport of duplicate FETCH_STOP fix #5574.
+# The fork builds librdkafka's TLS on the aws-lc-sys that aws-lc-rs links, so an aws-lc-rs upgrade
+# that moves to another aws-lc-sys moves the fork too; `just ratchet` refuses a second AWS-LC.
 rdkafka = { git = "https://github.com/nervix-io/rust-rdkafka.git", branch = "nervix-aws-lc-fetch-stop", default-features = false }
 redis = { version = "1.1.0", default-features = false, features = [
   "aio",
@@ -743,6 +748,7 @@ toml = "0.8"
 tower-service = "0.3"
 # Keep tonic/build on 0.13 for the workspace's Prost 0.13 API while selecting AWS-LC TLS.
 any_spawner = "0.3.0"
+nkeys = "0.4.5"
 tonic = { version = "0.13", features = ["tls-aws-lc", "tls-webpki-roots"] }
 tracing = "0.1"
 tracing-opentelemetry = "0.32"
@@ -768,6 +774,7 @@ wasmtime = { version = "49.0.0", default-features = false, features = [
 web-sys = "0.3"
 webpki-roots = "1"
 x509-parser = "0.18"
+zeroize = "1.9"
 zeromq = "0.4"
 
 [patch.crates-io]

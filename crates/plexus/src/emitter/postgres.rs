@@ -12,7 +12,17 @@
 
 use super::*;
 
+/// The conflict action a body writes: its `ON CONFLICT` clause, or the ordinary insert where it
+/// writes none.
 pub(super) fn postgres_conflict_action<'src>()
+-> impl Parser<'src, &'src [Token], PostgresConflictAction, extra::Err<ParseError<'src>>> + Clone {
+    postgres_conflict_clause()
+        .or_not()
+        .map(|action| action.unwrap_or(PostgresConflictAction::None))
+}
+
+/// `ON CONFLICT [(<column>, …)] DO NOTHING|UPDATE`, as a body or `SET` writes it.
+fn postgres_conflict_clause<'src>()
 -> impl Parser<'src, &'src [Token], PostgresConflictAction, extra::Err<ParseError<'src>>> + Clone {
     on_conflict_phrase()
         .ignore_then(conflict_target().or_not())
@@ -30,8 +40,6 @@ pub(super) fn postgres_conflict_action<'src>()
                 ConflictVerb::DoUpdate => PostgresConflictAction::DoUpdate { target },
             }
         })
-        .or_not()
-        .map(|action| action.unwrap_or(PostgresConflictAction::None))
 }
 pub(super) fn mode<'src>()
 -> impl Parser<'src, &'src [Token], PostgresTablePublishingMode, extra::Err<ParseError<'src>>> + Clone
@@ -68,6 +76,25 @@ pub(super) fn table_body<'src>() -> impl Parser<
                 },
             ),
     )
+}
+
+/// `SET TABLE '<name>'`, `SET ON CONFLICT …`, `DROP ON CONFLICT` or `SET MODE <mode>`:
+/// one part of a `POSTGRES TABLE` body.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], PostgresTableEmitterChange, extra::Err<ParseError<'src>>> + Clone
+{
+    let locator = kw(Identifier::Table)
+        .ignore_then(external_name::<PostgresTableName>())
+        .map(PostgresTableEmitterChange::Table);
+    let conflict = postgres_conflict_clause().map(PostgresTableEmitterChange::OnConflict);
+    let publishing = kw(Identifier::Mode)
+        .ignore_then(mode())
+        .map(PostgresTableEmitterChange::Mode);
+    let set = kw(Identifier::Set).ignore_then(choice((locator, conflict, publishing)));
+    let drop_conflict = kw(Identifier::Drop).ignore_then(on_conflict_phrase()).to(
+        PostgresTableEmitterChange::OnConflict(PostgresConflictAction::None),
+    );
+    choice((set, drop_conflict)).boxed()
 }
 
 #[cfg(test)]

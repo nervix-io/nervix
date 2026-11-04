@@ -12,7 +12,17 @@
 
 use super::*;
 
+/// The conflict action a body writes: its `ON CONFLICT` clause, or the ordinary insert where it
+/// writes none.
 pub(super) fn mysql_conflict_action<'src>()
+-> impl Parser<'src, &'src [Token], MySqlConflictAction, extra::Err<ParseError<'src>>> + Clone {
+    mysql_conflict_clause()
+        .or_not()
+        .map(|action| action.unwrap_or(MySqlConflictAction::None))
+}
+
+/// `ON CONFLICT DO NOTHING|UPDATE`, as a body or `SET` writes it.
+fn mysql_conflict_clause<'src>()
 -> impl Parser<'src, &'src [Token], MySqlConflictAction, extra::Err<ParseError<'src>>> + Clone {
     on_conflict_phrase()
         .ignore_then(kw(Identifier::Do))
@@ -20,8 +30,6 @@ pub(super) fn mysql_conflict_action<'src>()
             kw(Identifier::Nothing).to(MySqlConflictAction::DoNothing),
             kw(Identifier::Update).to(MySqlConflictAction::DoUpdate),
         )))
-        .or_not()
-        .map(|action| action.unwrap_or(MySqlConflictAction::None))
 }
 pub(super) fn mode<'src>()
 -> impl Parser<'src, &'src [Token], MySqlTablePublishingMode, extra::Err<ParseError<'src>>> + Clone
@@ -53,6 +61,24 @@ pub(super) fn table_body<'src>()
                 },
             ),
     )
+}
+
+/// `SET TABLE '<name>'`, `SET ON CONFLICT …`, `DROP ON CONFLICT` or `SET MODE <mode>`:
+/// one part of a `MYSQL TABLE` body.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], MySqlTableEmitterChange, extra::Err<ParseError<'src>>> + Clone {
+    let locator = kw(Identifier::Table)
+        .ignore_then(external_name::<MySqlTableName>())
+        .map(MySqlTableEmitterChange::Table);
+    let conflict = mysql_conflict_clause().map(MySqlTableEmitterChange::OnConflict);
+    let publishing = kw(Identifier::Mode)
+        .ignore_then(mode())
+        .map(MySqlTableEmitterChange::Mode);
+    let set = kw(Identifier::Set).ignore_then(choice((locator, conflict, publishing)));
+    let drop_conflict = kw(Identifier::Drop).ignore_then(on_conflict_phrase()).to(
+        MySqlTableEmitterChange::OnConflict(MySqlConflictAction::None),
+    );
+    choice((set, drop_conflict)).boxed()
 }
 
 #[cfg(test)]
