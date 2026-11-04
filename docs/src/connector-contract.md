@@ -1436,6 +1436,8 @@ changes one unit's primary and state originator without restarting its siblings.
 The vocabulary declares `Single | Instances | PerPartition` once per entity. Grammar, validation,
 console drafts, inspection and capability exports consume that declaration. Per-partition sources
 bind instance `p` to each constructing destination's partition `p`; Kafka requires domain offsets.
+Before placement materializes fixed instances, the registry refuses a count whose execution-unit
+entry layout is unaddressable on the target. The connector receives only its validated unit plan.
 All constructing routes agree on key fields and partition count. A count change freezes the
 complete preceding intake layout, captures and persists each source unit once, and projects
 those exact checkpoints into disjoint target slices. It redistributes positions and complete metric

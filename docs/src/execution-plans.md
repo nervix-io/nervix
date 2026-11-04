@@ -343,7 +343,9 @@ publication and relocation.
 ## Sources, Emitters, And Error Routes
 
 An ingestor start uses the scheduled source class, client configuration, codec, ACK boundary,
-and bound ordered routes from its entrypoint plan. A Pulsar plan retains the owned subscription's
+and bound ordered routes from its entrypoint plan. The registry validates a fixed instance count's
+native conversion and execution-unit entry layout before the schedule materializes those units.
+A Pulsar plan retains the owned subscription's
 required creation position alongside its ownership, and the subscription's required type;
 composition passes those typed choices to the connector without inventing a position for a
 provisioned cursor. A reingestor binds its source predicates and
