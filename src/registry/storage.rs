@@ -966,6 +966,11 @@ impl Registry {
                 domain: planned.domain.as_str().to_string(),
             }));
         }
+        // Planning sees one domain's models; the other domains' hostnames are judged here, under
+        // the commit lock, so two domains cannot claim one hostname through concurrent commits.
+        self.state
+            .read()
+            .ensure_hostnames_exclusive(&planned.domain, &planned.domain_state.models)?;
 
         self.storage
             .commit_batch(
@@ -1048,6 +1053,9 @@ impl Registry {
             .filter(|key| !planned.base_models.contains(key))
             .cloned()
             .collect::<HashSet<_>>();
+        self.state
+            .read()
+            .ensure_hostnames_exclusive(&planned.domain, &planned.base_models)?;
         self.storage
             .commit_batch(&planned.domain, &models_to_persist, &drops)
             .change_context(RegistryError::PersistBatch)?;
@@ -1933,6 +1941,60 @@ mod tests {
             .expect("graph should be installed");
         assert_eq!(graph.node_count(), 2);
         assert_eq!(graph.edge_count(), 0);
+
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn a_hostname_belongs_to_one_domain_until_its_vhost_is_dropped() {
+        use nervix_models::{ModelKind, VhostName};
+
+        use crate::registry::test_fixtures::vhost;
+
+        let path = temp_db_path();
+        let registry = Registry::open(&path).expect("registry should open");
+        let owner = DomainName::parse("owner").expect("valid domain");
+        let claimant = DomainName::parse("claimant").expect("valid domain");
+
+        registry
+            .apply_batch(&owner, vec![vhost("edge", &["Shared.example.com"])])
+            .expect("the first domain claims the hostname");
+
+        let refused = registry
+            .apply_batch(&claimant, vec![vhost("front", &["shared.example.com"])])
+            .expect_err("a hostname another domain serves is refused");
+        assert_eq!(
+            refused.current_context(),
+            &RegistryError::HostnameClaimedByAnotherDomain {
+                domain: claimant.clone(),
+                vhost: VhostName::parse("front").expect("valid identifier"),
+                hostname: "shared.example.com".to_string(),
+                owner_domain: owner.clone(),
+                owner_vhost: VhostName::parse("edge").expect("valid identifier"),
+            }
+        );
+        assert!(
+            registry.active_graph(&claimant).is_none(),
+            "a refused batch installs nothing"
+        );
+
+        // A hostname of its own is fine beside the refused one.
+        registry
+            .apply_batch(&claimant, vec![vhost("front", &["front.example.com"])])
+            .expect("a hostname no other domain serves is accepted");
+
+        registry
+            .drop_batch(
+                &owner,
+                vec![DropModel {
+                    kind: ModelKind::Vhost,
+                    name: named("edge"),
+                }],
+            )
+            .expect("the owner drops its vhost");
+        registry
+            .apply_batch(&claimant, vec![vhost("side", &["shared.example.com"])])
+            .expect("a dropped hostname can be claimed by another domain");
 
         let _ = fs::remove_dir_all(path);
     }

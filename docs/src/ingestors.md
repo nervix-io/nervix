@@ -2967,8 +2967,11 @@ or replacing its source ends that exact intake, including signaling data intake.
 acknowledgement wait returns HTTP 503 or the equivalent WebSocket outcome frame. A request admitted
 before the ending may still finish. The next payload on a retained ended route closes with 1013.
 Open a new connection for a replacement source.
-Stopping a domain withdraws only its routes and intakes; other domains on the same host and path
-continue receiving requests. A withdrawn route returns HTTP 404.
+A hostname belongs to the one domain whose `VHOST` serves it. `CREATE VHOST` refuses a hostname
+a vhost of another domain already serves, naming that vhost and domain, until that vhost is
+dropped; so no host and path is ever published by two domains, and a request is answered by
+exactly one domain's routes. Stopping a domain withdraws its routes and intakes, and
+leaves every other domain's routes as they were. A withdrawn route returns HTTP 404.
 
 A node answers 404 only once it has installed a revision since it started. Before that, it cannot
 tell a route the cluster binds from one no domain declares. This happens, for example, when the

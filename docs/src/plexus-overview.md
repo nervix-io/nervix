@@ -788,6 +788,9 @@ CREATE [IF NOT EXISTS] VHOST <name> <hostname>, ...
   [WITH TLS <resource> VERSION <n> | LATEST];
 ```
 
+A hostname is served by one vhost of one domain. A `VHOST` whose hostname a vhost of another
+domain already serves is refused, naming that vhost and its domain, until that vhost is dropped.
+
 Every resource binding names its version: `WITH TLS` on a VHOST, `USING RESOURCE` on a protobuf
 codec, protobuf signaling protocol, inferencer, or WASM processor, `FROM RESOURCE` on a hash map,
 and `MOUNT` on a client. `VERSION <n>` binds that completed version. `VERSION LATEST` binds the

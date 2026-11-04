@@ -235,26 +235,29 @@ impl Runtime {
         &self,
         domain: &DomainName,
         mut execution: DomainExecution,
-    ) {
+    ) -> Result<(), Report<ExecutionBuildError>> {
         self.withdraw_undeclared_relay_subscriptions(domain, |relay| {
             execution.relay_services.contains_key(relay)
         });
-        self.publish_routed_endpoints(domain, &execution);
+        self.publish_routed_endpoints(domain, &execution)?;
         execution.routing.activate(self, domain);
         execution.routing.publish();
         self.inner
             .domain_routings
             .insert(domain.clone(), execution.routing.shared());
         self.inner.executions.insert(domain.clone(), execution);
+        Ok(())
     }
 
     /// Publishes an execution's endpoint routes into the routing index. Called with the execution
-    /// that is about to become live so inbound requests resolve it by host and path.
+    /// that is about to become live so inbound requests resolve it by host and path. The registry
+    /// gives every hostname to one domain, so a host and path another domain publishes is a
+    /// failure of this domain's publication, which leaves the table unchanged.
     pub(super) fn publish_routed_endpoints(
         &self,
         domain: &DomainName,
         execution: &DomainExecution,
-    ) {
+    ) -> Result<(), Report<ExecutionBuildError>> {
         let definitions = if execution.passive_only {
             Vec::new()
         } else {
@@ -262,7 +265,8 @@ impl Runtime {
         };
         self.inner
             .endpoint_intake_routes
-            .replace_domain(domain, definitions);
+            .replace_domain(domain, definitions)
+            .change_context(ExecutionBuildError::PublishEndpointRoutes)
     }
 
     pub(in crate::runtime) async fn rebuild_domain_from_revision(
@@ -342,7 +346,8 @@ impl Runtime {
             self.clear_relay_branch_presences_for_domain(domain);
             let execution =
                 Box::pin(self.build_passive_execution_from_revision(domain, revision)).await?;
-            self.install_domain_execution(domain, execution);
+            self.install_domain_execution(domain, execution)
+                .change_context_lazy(build)?;
             return Ok(());
         }
         let domain_clock = self
@@ -875,7 +880,8 @@ impl Runtime {
                 relay_owner_tasks,
                 tasks: Vec::new(),
             },
-        );
+        )
+        .change_context_lazy(build)?;
 
         if self
             .inner

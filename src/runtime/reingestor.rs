@@ -1226,6 +1226,7 @@ mod tests {
         time::timeout,
     };
 
+    use meticulous::ResultExt as _;
     use super::*;
     use crate::{
         runtime::{
@@ -1586,7 +1587,8 @@ mod tests {
                 relay_owner_tasks: HashMap::default(),
                 tasks: Vec::new(),
             },
-        );
+        )
+        .assured("the test domain publishes no endpoint route another domain owns");
         let branched_runtime = IngestorRouteRuntime::new(
             runtime.clone(),
             domain.clone(),
@@ -1920,7 +1922,8 @@ mod tests {
                 relay_owner_tasks: HashMap::default(),
                 tasks: Vec::new(),
             },
-        );
+        )
+        .assured("the test domain publishes no endpoint route another domain owns");
         let (shutdown_tx, _) = watch::channel(false);
         let broadcast = RelayBroadcast::with_capacity(nonzero_capacity(4));
         let fan_in = RelayRuntimeFanIn::new(broadcast.new_receiver());
@@ -2181,7 +2184,8 @@ mod tests {
                 relay_owner_tasks: HashMap::default(),
                 tasks: Vec::new(),
             },
-        );
+        )
+        .assured("the test domain publishes no endpoint route another domain owns");
         let (shutdown_tx, _) = watch::channel(false);
         let broadcast = RelayBroadcast::with_capacity(nonzero_capacity(4));
         let fan_in = RelayRuntimeFanIn::new(broadcast.new_receiver());

@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use ahash::HashMap;
 use arrow_array::Array;
+use meticulous::ResultExt as _;
 use nervix_interconnect::{EntityGatePurpose, RelayPayload, RelayPayloadKind};
 use nervix_models::{
     AckMode, ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CreateRelay,
@@ -1045,7 +1046,8 @@ async fn owner_ingress_publishes_branch_presence_to_the_relay_state_placement() 
             relay_owner_tasks: HashMap::default(),
             tasks: Vec::new(),
         },
-    );
+    )
+    .assured("the test domain publishes no endpoint route another domain owns");
     let batch_ipc = schema
         .batch_from_test_rows([[("user_id".to_string(), RuntimeValue::U32(42))]])
         .expect("batch should build")

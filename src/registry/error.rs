@@ -18,7 +18,7 @@ use error_stack::{Context, Report};
 use nervix_models::{
     BranchSelection, ClientName, ConnectorKind, DomainName, EmitterEntityKind, EndpointName,
     EndpointType, FieldName, IngestorEntityKind, IngestorMetadataType, ModelKind, ModelName,
-    RelayName,
+    RelayName, VhostName,
 };
 use thiserror::Error;
 
@@ -360,6 +360,19 @@ pub(crate) enum RegistryError {
         endpoint: EndpointName,
         required: EndpointType,
         found: EndpointType,
+    },
+    /// A vhost claims a hostname a vhost of another domain already serves. A hostname belongs to
+    /// one domain, so no host and path is ever published by two domains.
+    #[error(
+        "vhost '{vhost}' in domain '{domain}' claims hostname '{hostname}', which vhost \
+         '{owner_vhost}' in domain '{owner_domain}' already serves"
+    )]
+    HostnameClaimedByAnotherDomain {
+        domain: DomainName,
+        vhost: VhostName,
+        hostname: String,
+        owner_domain: DomainName,
+        owner_vhost: VhostName,
     },
     /// The Prometheus client context above the vocabulary's key/API-root report.
     #[error(

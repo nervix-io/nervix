@@ -557,11 +557,14 @@ The concurrent map inventory records their lifecycle registration, observation a
 ### Server endpoint intake
 
 `EndpointIntakeRoutes` owns one immutable host-and-path table containing each domain's configured
-endpoint definitions and the source lifetimes bound to them. Domain install or teardown and source
-bind or unbind derive a replacement from the current publication with `ArcSwap::rcu`. Concurrent
-writers retry against the latest complete table, preserving unrelated domains and sources. A
-passive installation publishes no endpoint definitions. The listening socket remains present on
-every node independently of this table.
+endpoint definitions and the source lifetimes bound to them. Each host and path has one owning
+domain: the registry gives every hostname to one domain's vhost before a revision carries it, and a
+domain publication that finds a host and path another domain publishes is refused as a whole,
+leaving the table unchanged, and fails that domain's execution build. Domain install or teardown
+and source bind or unbind derive a replacement from the current publication with `ArcSwap::rcu`.
+Concurrent writers retry against the latest complete table, preserving unrelated domains and
+sources. A passive installation publishes no endpoint definitions. The listening socket remains
+present on every node independently of this table.
 
 The table also records whether a revision installed it since the node started or the runtime last
 cleared it. A revision application marks it installed once every domain of the revision has

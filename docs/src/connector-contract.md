@@ -3253,7 +3253,8 @@ sequenceDiagram
   reject with HTTP 503, and after signaling an established WebSocket closes with 1013 on its next
   refused payload.
   Domain teardown removes only that domain's definitions and ends its bound lifetimes, preserving
-  other domains publishing the same host and path. The host continues to own quiesce, buffering,
+  every other domain's routes. The registry gives each hostname to one domain's vhost, so no host
+  and path is published by two domains. The host continues to own quiesce, buffering,
   decoding, routing, flush cadence, and error reporting.
   Both entities execute on every live node, independently of leadership and placement. The host
   captures HTTP method, path, raw query, TCP peer and routed host, or WebSocket data-frame kind,

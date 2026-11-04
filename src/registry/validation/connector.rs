@@ -1905,6 +1905,59 @@ pub(in crate::registry) fn validate_vhost_hostnames(
     Ok(())
 }
 
+/// The domain and vhost that serve one hostname.
+struct HostnameOwner {
+    domain: DomainName,
+    vhost: VhostName,
+}
+
+/// Refuses a hostname that vhosts of two domains claim.
+///
+/// A hostname belongs to the one domain whose vhost serves it, so a node's route table never
+/// merges two domains' definitions of one host and path. `domains` lists every domain with its
+/// models in the order they are judged: the domain listed first keeps the hostname, and the
+/// refusal names the later claimant with the owner it found. A hostname listed twice inside one
+/// vhost or one domain is [`validate_vhost_hostnames`]'s to refuse.
+pub(in crate::registry) fn validate_hostname_exclusivity<'a>(
+    domains: impl IntoIterator<Item = (&'a DomainName, &'a ModelIndex)>,
+) -> Result<(), Report<RegistryError>> {
+    let mut owners = HashMap::<String, HostnameOwner>::new();
+
+    for (domain, models) in domains {
+        for (key, model) in models {
+            let Model::Vhost(vhost) = model else {
+                continue;
+            };
+            let vhost_name = VhostName::from(&key.identifier);
+            for hostname in &vhost.hostnames {
+                let normalized = hostname.to_ascii_lowercase();
+                let Some(owner) = owners.get(&normalized) else {
+                    owners.insert(
+                        normalized,
+                        HostnameOwner {
+                            domain: domain.clone(),
+                            vhost: vhost_name.clone(),
+                        },
+                    );
+                    continue;
+                };
+                if owner.domain == *domain {
+                    continue;
+                }
+                return Err(Report::new(RegistryError::HostnameClaimedByAnotherDomain {
+                    domain: domain.clone(),
+                    vhost: vhost_name,
+                    hostname: hostname.clone(),
+                    owner_domain: owner.domain.clone(),
+                    owner_vhost: owner.vhost.clone(),
+                }));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub(in crate::registry) fn validate_endpoint_paths(
     domain: &DomainName,
     models: &ModelIndex,

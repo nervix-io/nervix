@@ -48,7 +48,8 @@ use crate::registry::{
             validate_endpoint_paths, validate_http_emitter_client,
             validate_http_literal_request_fields, validate_http_request_expressions,
             validate_iceberg_client_pairing, validate_ingestor_filter_where_for_internal_schemas,
-            validate_ingestor_source, validate_sqs_fifo_group_expression, validate_vhost_hostnames,
+            validate_hostname_exclusivity, validate_ingestor_source,
+            validate_sqs_fifo_group_expression, validate_vhost_hostnames,
         },
         expression::add_udf_dependency_edges,
         materialized_state::{
@@ -106,8 +107,35 @@ impl RegistryState {
             let state = DomainState::build(&domain, &models)?;
             domains.insert(domain, state);
         }
+        let state = Self { domains };
+        validate_hostname_exclusivity(state.domains_by_name())?;
 
-        Ok(Self { domains })
+        Ok(state)
+    }
+
+    /// Every domain with its models, by domain name, so a judgement over all of them is
+    /// deterministic.
+    fn domains_by_name(&self) -> Vec<(&DomainName, &ModelIndex)> {
+        let mut domains = Vec::with_capacity(self.domains.len());
+        for (name, state) in &self.domains {
+            domains.push((name, &state.models));
+        }
+        domains.sort_by(|left, right| left.0.cmp(right.0));
+        domains
+    }
+
+    /// Refuses `models` as the next models of `domain` where one of its vhosts claims a hostname
+    /// a vhost of another domain already serves. The other domains are judged first, so the
+    /// refusal names `domain` as the claimant.
+    pub(in crate::registry) fn ensure_hostnames_exclusive(
+        &self,
+        domain: &DomainName,
+        models: &ModelIndex,
+    ) -> Result<(), Report<RegistryError>> {
+        let mut domains = self.domains_by_name();
+        domains.retain(|(name, _)| *name != domain);
+        domains.push((domain, models));
+        validate_hostname_exclusivity(domains)
     }
 }
 

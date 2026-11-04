@@ -12,7 +12,7 @@
 
 use std::collections::BTreeMap;
 
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{IngestorName, ModelKind};
 use nervix_primitives::sync::Arc;
 
@@ -44,6 +44,17 @@ fn endpoint(endpoint_type: EndpointType) -> RoutedEndpoint {
     }
 }
 
+/// Publishes `definitions` for `domain`, which no other domain of the test publishes.
+fn publish(
+    routes: &EndpointIntakeRoutes<usize>,
+    domain: &DomainName,
+    definitions: Vec<(HttpRouteKey, RoutedEndpoint)>,
+) {
+    routes
+        .replace_domain(domain, definitions)
+        .assured("the test publishes no host and path another domain owns");
+}
+
 fn intakes(route: &EndpointIntakeRoute<usize>) -> Vec<usize> {
     route
         .bindings()
@@ -59,7 +70,8 @@ fn resolved_routes_borrow_one_intake_allocation_until_unbind() {
     let routes = EndpointIntakeRoutes::default();
     let owner = domain(0);
     let keys = [key(0, 0), key(1, 0)];
-    routes.replace_domain(
+    publish(
+        &routes,
         &owner,
         keys.iter()
             .cloned()
@@ -102,36 +114,48 @@ fn replacing_one_domain_keeps_other_domains_and_ends_retained_intakes() {
     let routes = EndpointIntakeRoutes::default();
     let first = domain(0);
     let second = domain(1);
-    let keys = [key(0, 0)];
-    routes.replace_domain(
+    let first_keys = [key(0, 0)];
+    let second_keys = [key(1, 0)];
+    publish(
+        &routes,
         &first,
-        vec![(keys[0].clone(), endpoint(EndpointType::Http))],
+        vec![(first_keys[0].clone(), endpoint(EndpointType::Http))],
     );
-    routes.replace_domain(
+    publish(
+        &routes,
         &second,
-        vec![(keys[0].clone(), endpoint(EndpointType::Websockets))],
+        vec![(second_keys[0].clone(), endpoint(EndpointType::Websockets))],
     );
     routes.mark_installed();
-    let first_binding = routes.bind(identity(&first), 1, &keys);
-    let second_binding = routes.bind(identity(&second), 2, &keys);
+    let first_binding = routes.bind(identity(&first), 1, &first_keys);
+    let second_binding = routes.bind(identity(&second), 2, &second_keys);
     let retained = routes
         .resolve("host0.example.com", "/path0")
         .into_route()
-        .assured("both domains publish the route");
-    assert_eq!(retained.endpoint_type(), EndpointType::Websockets);
-    assert_eq!(intakes(&retained), vec![1, 2]);
-    routes.replace_domain(&first, vec![(key(1, 1), endpoint(EndpointType::Http))]);
+        .assured("the first domain publishes the route");
+    assert_eq!(retained.endpoint_type(), EndpointType::Http);
+    assert_eq!(intakes(&retained), vec![1]);
+    publish(
+        &routes,
+        &first,
+        vec![(key(1, 1), endpoint(EndpointType::Http))],
+    );
     assert!(first_binding.intake().is_none());
-    assert_eq!(intakes(&retained), vec![2]);
+    assert!(intakes(&retained).is_empty());
+    assert!(matches!(
+        routes.resolve("host0.example.com", "/path0"),
+        EndpointResolution::Unrouted
+    ));
     let current = routes
-        .resolve("host0.example.com", "/path0")
+        .resolve("host1.example.com", "/path0")
         .into_route()
-        .assured("the second domain still publishes the route");
+        .assured("the second domain still publishes its route");
+    assert_eq!(current.endpoint_type(), EndpointType::Websockets);
     assert_eq!(intakes(&current), vec![2]);
     routes.withdraw_domain(&second);
     assert!(second_binding.intake().is_none());
     assert!(matches!(
-        routes.resolve("host0.example.com", "/path0"),
+        routes.resolve("host1.example.com", "/path0"),
         EndpointResolution::Unrouted
     ));
     assert_eq!(
@@ -145,11 +169,69 @@ fn replacing_one_domain_keeps_other_domains_and_ends_retained_intakes() {
 }
 
 #[test]
+fn a_route_another_domain_publishes_refuses_the_whole_replacement() {
+    let routes = EndpointIntakeRoutes::default();
+    let owner = domain(0);
+    let claimant = domain(1);
+    let shared = [key(0, 0)];
+    publish(
+        &routes,
+        &owner,
+        vec![(shared[0].clone(), endpoint(EndpointType::Http))],
+    );
+    publish(
+        &routes,
+        &claimant,
+        vec![(key(1, 0), endpoint(EndpointType::Http))],
+    );
+    routes.mark_installed();
+    let owner_binding = routes.bind(identity(&owner), 1, &shared);
+    let claimant_binding = routes.bind(identity(&claimant), 2, &[key(1, 0)]);
+
+    let refused = routes.replace_domain(
+        &claimant,
+        vec![
+            (key(1, 1), endpoint(EndpointType::Websockets)),
+            (shared[0].clone(), endpoint(EndpointType::Websockets)),
+        ],
+    );
+    assert_eq!(
+        refused,
+        Err(EndpointRouteConflict {
+            host: "host0.example.com".to_owned(),
+            path: "/path0".to_owned(),
+            owner: owner.clone(),
+        })
+    );
+
+    // The refused replacement changed nothing: the owner keeps its route and intake, the
+    // claimant keeps the routes and intake it had, and its new route is not published.
+    assert_eq!(owner_binding.intake().as_deref(), Some(&1));
+    assert_eq!(claimant_binding.intake().as_deref(), Some(&2));
+    let shared_route = routes
+        .resolve("host0.example.com", "/path0")
+        .into_route()
+        .assured("the owner still publishes the route");
+    assert_eq!(shared_route.endpoint_type(), EndpointType::Http);
+    assert_eq!(intakes(&shared_route), vec![1]);
+    let claimant_route = routes
+        .resolve("host1.example.com", "/path0")
+        .into_route()
+        .assured("the claimant keeps the route it had");
+    assert_eq!(intakes(&claimant_route), vec![2]);
+    assert!(matches!(
+        routes.resolve("host1.example.com", "/path1"),
+        EndpointResolution::Unrouted
+    ));
+}
+
+#[test]
 fn unbinding_a_preceding_source_does_not_unbind_its_replacement() {
     let routes = EndpointIntakeRoutes::default();
     let owner = domain(0);
     let keys = [key(0, 0)];
-    routes.replace_domain(
+    publish(
+        &routes,
         &owner,
         vec![(keys[0].clone(), endpoint(EndpointType::Http))],
     );
@@ -186,7 +268,8 @@ fn bind_after_domain_teardown_cannot_republish_a_route() {
     let routes = EndpointIntakeRoutes::default();
     let owner = domain(0);
     let keys = [key(0, 0)];
-    routes.replace_domain(
+    publish(
+        &routes,
         &owner,
         vec![(keys[0].clone(), endpoint(EndpointType::Http))],
     );
@@ -210,7 +293,8 @@ fn a_missing_route_is_final_only_once_a_revision_installed_the_table() {
         routes.resolve(&missing.host, &missing.path),
         EndpointResolution::Uninstalled
     ));
-    routes.replace_domain(
+    publish(
+        &routes,
         &owner,
         vec![(published.clone(), endpoint(EndpointType::Http))],
     );
@@ -246,7 +330,7 @@ fn a_missing_route_is_final_only_once_a_revision_installed_the_table() {
 }
 
 #[test]
-fn a_retained_route_keeps_its_selected_signaling_allocation() {
+fn a_retained_route_keeps_its_signaling_allocation_across_replacement() {
     use nervix_models::{SignalingProtocolName, SignalingProtocolOnConnect, SignalingWireFormat};
 
     let protocol = Arc::new(
@@ -265,11 +349,11 @@ fn a_retained_route_keeps_its_selected_signaling_allocation() {
         .assured("an empty native signaling protocol compiles"),
     );
     let routes = EndpointIntakeRoutes::<usize>::default();
-    let first = domain(0);
-    let second = domain(1);
+    let owner = domain(0);
     let key = key(0, 0);
-    routes.replace_domain(
-        &first,
+    publish(
+        &routes,
+        &owner,
         vec![(
             key.clone(),
             RoutedEndpoint {
@@ -278,22 +362,25 @@ fn a_retained_route_keeps_its_selected_signaling_allocation() {
             },
         )],
     );
-    routes.replace_domain(&second, vec![(key.clone(), endpoint(EndpointType::Http))]);
     let retained = routes
         .resolve(&key.host, &key.path)
         .into_route()
-        .assured("both domains publish the route");
+        .assured("the owner publishes the route");
     assert!(Arc::ptr_eq(
         retained
             .signaling_protocol()
-            .assured("the selected endpoint has signaling"),
+            .assured("the published endpoint has signaling"),
         &protocol
     ));
-    routes.withdraw_domain(&first);
+    publish(
+        &routes,
+        &owner,
+        vec![(key.clone(), endpoint(EndpointType::Http))],
+    );
     let current = routes
         .resolve(&key.host, &key.path)
         .into_route()
-        .assured("the second domain still publishes its route");
+        .assured("the owner publishes its replacement route");
     assert_eq!(current.endpoint_type(), EndpointType::Http);
     assert!(current.signaling_protocol().is_none());
     assert!(Arc::ptr_eq(
@@ -339,14 +426,38 @@ fn bolero_endpoint_sequences_preserve_visible_routes_and_intake_lifetimes() {
                         } else {
                             EndpointType::Websockets
                         };
-                        routes.replace_domain(&owner, vec![(selected_key.clone(), endpoint(kind))]);
-                        configured.insert(
-                            owner.clone(),
-                            ahash::HashMap::from_iter([(selected_key, kind)]),
-                        );
-                        for binding in bindings.values_mut() {
-                            if binding.owner == owner {
-                                binding.live = false;
+                        let mut published_by_another = None;
+                        for (other, other_routes) in &configured {
+                            if *other != owner && other_routes.contains_key(&selected_key) {
+                                published_by_another = Some(other.clone());
+                            }
+                        }
+                        let outcome = routes
+                            .replace_domain(&owner, vec![(selected_key.clone(), endpoint(kind))]);
+                        match published_by_another {
+                            // A refused replacement leaves the table, and so the reference, as
+                            // they were.
+                            Some(other) => {
+                                assert_eq!(
+                                    outcome,
+                                    Err(EndpointRouteConflict {
+                                        host: selected_key.host.clone(),
+                                        path: selected_key.path.clone(),
+                                        owner: other,
+                                    })
+                                );
+                            }
+                            None => {
+                                outcome.assured("no other domain publishes the route");
+                                configured.insert(
+                                    owner.clone(),
+                                    ahash::HashMap::from_iter([(selected_key, kind)]),
+                                );
+                                for binding in bindings.values_mut() {
+                                    if binding.owner == owner {
+                                        binding.live = false;
+                                    }
+                                }
                             }
                         }
                     }
@@ -406,11 +517,11 @@ fn bolero_endpoint_sequences_preserve_visible_routes_and_intake_lifetimes() {
                 for host in 0..2 {
                     for path in 0..2 {
                         let key = key(host, path);
+                        // At most one domain publishes a route, so its kind is that domain's.
                         let mut expected_kind = None;
                         for domain_routes in configured.values() {
-                            if let Some(kind) = domain_routes.get(&key)
-                                && (expected_kind.is_none() || *kind == EndpointType::Websockets)
-                            {
+                            if let Some(kind) = domain_routes.get(&key) {
+                                assert!(expected_kind.is_none());
                                 expected_kind = Some(*kind);
                             }
                         }

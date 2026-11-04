@@ -14,6 +14,7 @@
 
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
+use meticulous::ResultExt as _;
 use nervix_primitives::{sync::StdArc, unmodeled::sync::OnceLock};
 
 pub(in crate::runtime) const STUPID_CHANNEL_CAPACITY_REMOVE_ME: NonZeroUsize = NonZeroUsize::MIN;
@@ -1218,7 +1219,8 @@ pub(super) fn install_test_domain_execution(
             relay_owner_tasks: HashMap::default(),
             tasks: Vec::new(),
         },
-    );
+    )
+    .assured("the test domain publishes no endpoint route another domain owns");
 }
 
 pub(super) fn test_execution_revision(

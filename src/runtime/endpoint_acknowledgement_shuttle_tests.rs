@@ -12,7 +12,7 @@
 
 use std::future::pending;
 
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::{DomainName, DomainNodeRef, EndpointType, IngestorName, ModelKind};
 use nervix_primitives::{
@@ -127,7 +127,8 @@ fn ending_a_retained_intake_resolves_its_held_response_and_preserves_replacement
                     signaling_protocol: None,
                 },
             )],
-        );
+        )
+        .assured("the check's one domain publishes the route");
         let binding = routes.bind(identity.clone(), (), std::slice::from_ref(&key));
         let retained = routes
             .resolve(&key.host, &key.path)

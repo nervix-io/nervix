@@ -40,6 +40,10 @@ pub(crate) enum ExecutionBuildError {
         .node.identifier.as_str()
     )]
     UnboundProcessorPlan { node: NodeRef },
+    /// The domain's endpoint definitions could not be published for request routing; the
+    /// conflicting host and path and its owning domain are beneath.
+    #[error("the domain's endpoint routes cannot be published")]
+    PublishEndpointRoutes,
     #[error("relay '{relay}' has no schema on this node")]
     MissingRelaySchema { relay: RelayName },
     #[error("relay '{relay}' has no runtime boundary on this node")]

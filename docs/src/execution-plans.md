@@ -232,8 +232,10 @@ its stopped clock. Guest restoration is deferred until `START` installs a runnin
 Server endpoint installation replaces that domain's complete set of host-and-path definitions in
 the node's immutable intake table. Source starts bind prepared intake lifetimes to the same table;
 source ending and domain teardown end those lifetimes before withdrawing them. Other domains'
-definitions and intakes survive the replacement. Passive execution keeps endpoint definitions for
-inspection but publishes none for request routing. HTTP resolves one route per request and a
+definitions and intakes survive the replacement; a host and path belongs to one domain, because the
+registry gives every hostname to one domain's vhost, and a replacement that finds another domain's
+route fails the domain's execution build without changing the table. Passive execution keeps
+endpoint definitions for inspection but publishes none for request routing. HTTP resolves one route per request and a
 WebSocket retains the route and signaling protocol selected at upgrade. The detailed admission and
 publication contract remains in [Data-Plane Concurrency](./data-plane-concurrency.md).
 

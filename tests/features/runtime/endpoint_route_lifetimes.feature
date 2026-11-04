@@ -1,5 +1,7 @@
 Feature: Published endpoint route lifetimes
-  Scenario Outline: Tearing down one domain keeps another domain's intake on the same HTTP route
+  # A hostname belongs to the one domain whose VHOST serves it, so no host and path is ever
+  # published by two domains. Another domain may claim the hostname only once that VHOST is dropped.
+  Scenario Outline: A hostname one domain serves is refused in another domain until its vhost is dropped
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
@@ -29,6 +31,26 @@ Feature: Published endpoint route lifetimes
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
+      """
+    When these Plexus commands fail with "vhost 'edge' in domain 'intake_peer_{{test_id}}' claims hostname 'shared-{{test_id}}.example.com', which vhost 'edge' in domain 'intake_{{test_id}}' already serves"
+      """
+      CREATE VHOST edge shared-{{test_id}}.example.com;
+      """
+    And endpoint request "owned" is posted on node "<request_node>" host "shared-{{test_id}}.example.com" path "/events"
+      """
+      {"user_id":41}
+      """
+    Then endpoint request "owned" answers HTTP 200
+    When the active session targets domain "intake_{{test_id}}"
+    And these Plexus commands are executed on the active session
+      """
+      DROP INGESTOR event_source;
+      DROP ENDPOINT ingress;
+      DROP VHOST edge;
+      """
+    And the active session targets domain "intake_peer_{{test_id}}"
+    And these Plexus commands are executed on the active session
+      """
       CREATE VHOST edge shared-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
       CREATE HTTP ENDPOINT INGESTOR event_source
@@ -39,20 +61,6 @@ Feature: Published endpoint route lifetimes
       CREATE SUBSCRIPTION event_subscription TO events;
       START;
       """
-    When http payload is posted to node "<request_node>" with host "shared-{{test_id}}.example.com" path "/events"
-      """
-      {"user_id":41}
-      """
-    Then the relay subscription receives a payload
-      """
-      {"user_id":41}
-      """
-    When the active session targets domain "intake_{{test_id}}"
-    And these Plexus commands are executed on the active session
-      """
-      STOP;
-      """
-    And the active session targets domain "intake_peer_{{test_id}}"
     And http payload is posted to node "<request_node>" with host "shared-{{test_id}}.example.com" path "/events"
       """
       {"user_id":42}

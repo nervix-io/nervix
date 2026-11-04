@@ -1496,6 +1496,8 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_order() {
+        use meticulous::ResultExt as _;
+
         let runtime = Runtime::default();
         let domain = domain("default");
         for relay in ["profiles", "rules"] {
@@ -1567,7 +1569,8 @@ mod tests {
                 relay_owner_tasks: HashMap::default(),
                 tasks: Vec::new(),
             },
-        );
+        )
+        .assured("the test domain publishes no endpoint route another domain owns");
         let mut routing = runtime
             .domain_routing_cache(&domain)
             .expect("the test domain execution publishes routing");

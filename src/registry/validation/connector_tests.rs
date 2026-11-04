@@ -2952,3 +2952,49 @@ fn a_routing_key_is_an_exact_non_null_non_sensitive_string() {
         );
     }
 }
+
+#[test]
+fn a_hostname_is_served_by_the_first_listed_domain_and_refused_to_every_later_one() {
+    let owner = DomainName::parse("owner").expect("valid domain");
+    let claimant = DomainName::parse("claimant").expect("valid domain");
+    let owner_models = [vhost("edge", &["Shared.example.com", "owner.example.com"])]
+        .into_iter()
+        .collect::<ModelIndex>();
+    let claimant_models = [
+        vhost("front", &["front.example.com"]),
+        vhost("side", &["shared.example.com"]),
+    ]
+    .into_iter()
+    .collect::<ModelIndex>();
+
+    validate_hostname_exclusivity([(&owner, &owner_models)])
+        .expect("one domain's hostnames never conflict with another's");
+    validate_hostname_exclusivity([(&claimant, &claimant_models)])
+        .expect("hostnames of one domain are judged by validate_vhost_hostnames, not here");
+
+    let refused = validate_hostname_exclusivity([(&owner, &owner_models), (&claimant, &claimant_models)])
+        .expect_err("a hostname a listed domain serves is refused to a later one, whatever its case");
+    assert_eq!(
+        refused.current_context(),
+        &RegistryError::HostnameClaimedByAnotherDomain {
+            domain: claimant.clone(),
+            vhost: named("side"),
+            hostname: "shared.example.com".to_string(),
+            owner_domain: owner.clone(),
+            owner_vhost: named("edge"),
+        }
+    );
+
+    let refused = validate_hostname_exclusivity([(&claimant, &claimant_models), (&owner, &owner_models)])
+        .expect_err("the domain listed first keeps the hostname");
+    assert_eq!(
+        refused.current_context(),
+        &RegistryError::HostnameClaimedByAnotherDomain {
+            domain: owner,
+            vhost: named("edge"),
+            hostname: "Shared.example.com".to_string(),
+            owner_domain: claimant,
+            owner_vhost: named("side"),
+        }
+    );
+}
