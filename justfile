@@ -242,7 +242,7 @@ paced-simulation-python *args:
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/release/libnervix_client_ffi.so") }}
     python3 examples/paced-simulation/python/paced_simulation.py {{ args }}
 
-test: tests-deps
+test: tests-deps build-client-jvm-tests
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
@@ -1340,7 +1340,7 @@ test-coverage-build: coverage-clean-workspace test-coverage-binaries
 # Build the workspace's test binaries beside what the target directory already holds, and record
 # the test executables a run starts. CI builds them after the scenario suite, so both share one
 # target directory and their dependencies compile once.
-test-coverage-binaries: tests-deps
+test-coverage-binaries: tests-deps build-client-jvm-tests
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
@@ -1416,6 +1416,10 @@ test-coverage-pack archive:
 # checking every file it holds and the shared libraries its executables load.
 test-coverage-unpack archive:
     python3 -m scripts.unit_test_archive unpack {{ quote(archive) }}
+
+# Hold the unit archive and its build/restore workflow to the generated-input contract.
+test-unit-test-archive:
+    python3 -m unittest scripts.tests.test_unit_test_archive
 
 # Build the scenario suite and the binaries its scenarios start, under the instrumentation of
 # `cargo llvm-cov`, so `test-scenarios-coverage-run` compiles nothing. Cargo holds a target directory

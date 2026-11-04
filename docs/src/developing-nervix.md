@@ -46,8 +46,10 @@ The JVM library requires a JDK 21 or later (`openjdk-21-jdk-headless` on Debian 
 target's JNI library into `target/client-conformance/java/nervix-client.jar`; all generated classes,
 probe classes and native files stay under `target`. `just test-client-jvm-api` exercises bulk columns,
 handle cleanup and cancellation with `-Xcheck:jni`. `just test-client-jvm` also embeds the JVM for
-the JNI failure and representation tests; the `jvm-tests` Cargo feature keeps that JDK prerequisite
-out of ordinary workspace tests. Client conformance CI runs both at Java 21.
+the JNI failure and representation tests. The all-features workspace recipes `just test` and
+`just test-coverage` enable `jvm-tests` and prepare the same fixtures, so they also require JDK 21.
+The coverage build packages the jar and fixtures for its restored unit runner. Client conformance
+CI and the workspace build/test jobs provision Java 21.
 `NERVIX_CLIENT_JVM_TEST_ARTIFACTS` points embedded tests at the prepared Java artifacts; just exports
 the configured build root's path so instrumented Rust builds use the same jar and fixtures.
 

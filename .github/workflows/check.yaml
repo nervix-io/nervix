@@ -681,6 +681,12 @@ jobs:
             sudo apt-get install --yes --no-install-recommends libpython3.12t64
           fi
 
+      - name: Setup Java for embedded JVM tests
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
       # The tests sync their storage below /tmp and the checkout. A single-use runner needs no crash
       # consistency, so those volumes drop their write barriers, as the build job's kache start step
       # drops them for its store.
@@ -917,6 +923,12 @@ jobs:
       # the scenario suite there.
       - name: Pack the scenario suite
         run: just test-scenarios-coverage-pack "${RUNNER_TEMP}/scenario-suite/scenario-suite.tar.zst"
+
+      - name: Setup Java for embedded JVM tests
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
 
       - name: Build the unit tests
         run: just test-coverage-binaries
