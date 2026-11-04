@@ -987,9 +987,7 @@ impl SessionServiceImpl {
                 OutcomeUnknownCause::StillApplying,
                 format!("command execution reference '{reference}' is still applying"),
             ))),
-            CommandExecutionState::Expired => {
-                Err(Box::new(self.refuse_expired_reference(reference)))
-            }
+            CommandExecutionState::Expired => Err(Box::new(expired_reference(reference))),
             CommandExecutionState::Finished {
                 outcome_revision,
                 result,
@@ -1314,21 +1312,63 @@ mod tests {
         TransactionOperationAdmission, TransactionOperationNumber, TransactionPosition,
         TransactionPreviewIdentity,
     };
-    #[cfg(feature = "testing")]
     use nervix_recovery::Discarded as _;
 
     use super::*;
+    use crate::application::test_fixtures::{
+        TestService, build_test_service, test_execution_reference,
+    };
     #[cfg(feature = "testing")]
     use crate::{
         application::{
             subscription::SessionSubscriptions,
-            test_fixtures::{TestService, build_test_service_with_probe, test_command_request},
+            test_fixtures::{build_test_service_with_probe, test_command_request},
         },
         captured_logs::CapturedLogs,
     };
 
     fn domain() -> DomainName {
         DomainName::parse("default").assured("the test domain is an identifier-shaped literal")
+    }
+
+    #[nervix_primitives::test]
+    async fn completion_projection_keeps_admission_refusals_at_zero() {
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(false).await;
+        let reference = test_execution_reference();
+        let execution = CommandExecution {
+            reference: reference.clone(),
+            state: CommandExecutionState::Expired,
+        };
+        let result = service
+            .result_from_finished_execution(&reference, execution)
+            .await;
+        let metrics = service.inner.runtime.metrics().prometheus_text();
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
+
+        let result = result.expect_err("an expired completion snapshot refuses result recovery");
+        assert_eq!(
+            result.disposition,
+            CommandDisposition::ExecutionReferenceExpired
+        );
+        let refusals = metrics
+            .lines()
+            .find(|line| {
+                line.starts_with("nervix_command_execution_admission_refusals_total{")
+                    && line.contains("reason=\"expired\"")
+            })
+            .verified("registration initializes the expired refusal child")
+            .split_whitespace()
+            .last()
+            .verified("a Prometheus counter sample has a value")
+            .parse::<u64>()
+            .assured("the refusal counter is an unsigned integer");
+        assert_eq!(refusals, 0);
     }
 
     /// The node process a test's command finishes on.

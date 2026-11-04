@@ -204,9 +204,10 @@ references. `future` means the UUIDv7 creation time exceeds the accepted five-mi
 the timestamp range; `missing_timestamp` means the reference carries no UUIDv7 creation time.
 Follower application of a refused proposal adds no event, and a leadership change neither copies
 nor resets counters on either live process. Sum their rates across nodes to follow refusals as
-leadership moves; a process restart resets its counters. Recovered successful outcomes, reference
-content conflicts, redirects and uncertain admission outcomes add no refusal event to these four
-reasons. No execution identity, domain or user appears in their labels.
+leadership moves; a process restart resets its counters. Completion and background recovery add no
+admission event, including when history maintenance has expired the completed outcome. Recovered
+successful outcomes, reference content conflicts, redirects and uncertain admission outcomes add
+no refusal event to these four reasons. No execution identity, domain or user appears in their labels.
 
 See [Bounded History And Expired Identities](./client-session-protocol.md#bounded-history-and-expired-identities)
 for retention and admission semantics.

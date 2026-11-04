@@ -503,7 +503,8 @@ exact placement's dirty mark. Client batch outcome counters, quiesced payload co
 subscription drop counters retain their Prometheus children, including every declared outcome
 label combination, so recording resolves no label set. Persistent-command refusal counters resolve
 their four reason children at node metric registration and increment those retained handles when
-the application returns a refusal. Follower consensus application does not record those events.
+the application refuses admission. Completion, background recovery and follower consensus
+application do not record those events.
 
 Subscription generations also retain the node's executor and pass it directly to predicate
 evaluation. Executor admission continues to own worker and memory bounds for extension calls.
