@@ -449,8 +449,11 @@ fn ingestor_alter_applies_only_under_the_head_of_the_stored_pair() {
     );
     assert_eq!(candidate, base);
 
+    // Whether a source honors its quiesce mode is a question for the complete result, after every
+    // operation applied: the mode is written, and the ingestor it makes reports a mode its pair
+    // does not honor, which validation of the final candidate refuses.
     let mut candidate = base.clone();
-    let error = candidate
+    candidate
         .apply_alter(&AlterIngestor {
             ingestor: named("event_source"),
             alteration: http_endpoint_alteration(vec![
@@ -460,12 +463,9 @@ fn ingestor_alter_applies_only_under_the_head_of_the_stored_pair() {
                 .into(),
             ]),
         })
-        .expect_err("an endpoint cannot suspend its callers");
-    assert_eq!(
-        error.current_context().to_string(),
-        "HTTP ENDPOINT ingestors do not support ON QUIESCE SUSPEND"
-    );
-    assert_eq!(candidate, base);
+        .expect("SET QUIESCE writes the mode, whose pairing the complete result answers");
+    assert_eq!(candidate.input.quiesce(), &IngestQuiesceMode::Suspend);
+    assert!(!candidate.input.supports_quiesce(candidate.input.quiesce()));
 
     let mut candidate = base.clone();
     candidate

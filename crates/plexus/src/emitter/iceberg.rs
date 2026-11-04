@@ -68,6 +68,40 @@ pub(super) fn table_body<'src>()
     )
 }
 
+/// `SET TABLE`, `SET NAMESPACE`, `SET LOCATION`, `SET CATALOG`, `SET COMMIT EACH` or `SET MODE`:
+/// one part of an `ICEBERG TABLE` body.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], IcebergTableEmitterChange, extra::Err<ParseError<'src>>> + Clone
+{
+    let table = kw(Identifier::Table)
+        .ignore_then(external_name::<IcebergTableName>())
+        .map(IcebergTableEmitterChange::Table);
+    let namespace = kw(Identifier::Namespace)
+        .ignore_then(external_name::<IcebergNamespace>())
+        .map(IcebergTableEmitterChange::Namespace);
+    let location = kw(Identifier::Location)
+        .ignore_then(string_lit().labelled("iceberg_location"))
+        .map(IcebergTableEmitterChange::Location);
+    let catalog = kw(Identifier::Catalog)
+        .ignore_then(client_ref())
+        .map(|client| IcebergTableEmitterChange::Catalog(IcebergCatalog::Rest { client }));
+    let commit =
+        commit_each().map(
+            |(commit_each, max_commit_size)| IcebergTableEmitterChange::CommitEach {
+                commit_each,
+                max_commit_size,
+            },
+        );
+    let publishing = kw(Identifier::Mode)
+        .ignore_then(mode())
+        .map(IcebergTableEmitterChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((
+            table, namespace, location, catalog, commit, publishing,
+        )))
+        .boxed()
+}
+
 #[cfg(test)]
 #[path = "iceberg_tests.rs"]
 mod tests;

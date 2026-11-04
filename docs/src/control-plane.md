@@ -458,8 +458,9 @@ operator `PAUSE` or `RESUME` statement.
   also purge the old keyspace before the replacement starts; reorderer ordering changes flush the
   old ordering buffers before swapping. Relay materialized-state changes update membership in
   place. Emitter source-predicate, emitter, publishing-mode (including any confirmation window,
-  timeout, or retry-policy variable), client, codec, input-collection, and attachment changes
-  drain and replace only the affected emitter task. Every ingestor alteration quiesces and drains
+  timeout, or retry-policy variable), client, codec, envelope, construction, input-collection,
+  attachment and general error policy changes drain and replace only the affected emitter task,
+  whether `SET TO` restates the destination or an operation changes one part of it in place. Every ingestor alteration quiesces and drains
   only the affected ingestor instances under their declared source mode, then starts their desired
   source configuration from the published schedule. A `SET QUIESCE` operation still uses this
   level; the mode active when the hold began governs that hold. A client ingestor suspends

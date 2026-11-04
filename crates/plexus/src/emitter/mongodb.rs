@@ -12,7 +12,17 @@
 
 use super::*;
 
+/// The conflict action a body writes: its `ON CONFLICT` clause, or the ordinary insert where it
+/// writes none.
 pub(super) fn mongodb_conflict_action<'src>()
+-> impl Parser<'src, &'src [Token], MongoDbConflictAction, extra::Err<ParseError<'src>>> + Clone {
+    mongodb_conflict_clause()
+        .or_not()
+        .map(|action| action.unwrap_or(MongoDbConflictAction::None))
+}
+
+/// `ON CONFLICT (<field>, …) DO NOTHING|UPDATE`, as a body or `SET` writes it.
+fn mongodb_conflict_clause<'src>()
 -> impl Parser<'src, &'src [Token], MongoDbConflictAction, extra::Err<ParseError<'src>>> + Clone {
     on_conflict_phrase()
         .ignore_then(conflict_target())
@@ -25,45 +35,6 @@ pub(super) fn mongodb_conflict_action<'src>()
             ConflictVerb::DoNothing => MongoDbConflictAction::DoNothing { target },
             ConflictVerb::DoUpdate => MongoDbConflictAction::DoUpdate { target },
         })
-        .or_not()
-        .map(|action| action.unwrap_or(MongoDbConflictAction::None))
-}
-pub(super) fn validate_mongodb_conflict_action<'src>(
-    values: &[ClickHouseValueMapping],
-    conflict_action: &MongoDbConflictAction,
-    span: chumsky::span::SimpleSpan,
-) -> Result<(), ParseError<'src>> {
-    let target = match conflict_action {
-        MongoDbConflictAction::None => return Ok(()),
-        MongoDbConflictAction::DoNothing { target }
-        | MongoDbConflictAction::DoUpdate { target } => target,
-    };
-    let mapped_columns = values
-        .iter()
-        .map(|mapping| mapping.column.as_str())
-        .collect::<HashSet<_>>();
-    for column in target {
-        if !mapped_columns.contains(column.as_str()) {
-            return Err(Rich::custom(
-                span,
-                format!("MongoDB ON CONFLICT target column '{column}' is not mapped in VALUES"),
-            ));
-        }
-    }
-    if let MongoDbConflictAction::DoUpdate { target } = conflict_action {
-        let target_columns = target.iter().map(String::as_str).collect::<HashSet<_>>();
-        let has_update_column = values
-            .iter()
-            .any(|mapping| !target_columns.contains(mapping.column.as_str()));
-        if !has_update_column {
-            return Err(Rich::custom(
-                span,
-                "MongoDB ON CONFLICT DO UPDATE requires at least one non-conflict VALUES field to \
-                 update",
-            ));
-        }
-    }
-    Ok(())
 }
 pub(super) fn mode<'src>()
 -> impl Parser<'src, &'src [Token], MongoDbCollectionPublishingMode, extra::Err<ParseError<'src>>>
@@ -87,7 +58,9 @@ pub(super) fn collection_body<'src>() -> impl Parser<
             .then(mongodb_conflict_action())
             .try_map(
                 |((((client, collection), mode), values), conflict_action), span| {
-                    validate_mongodb_conflict_action(&values, &conflict_action, span)?;
+                    conflict_action
+                        .validate(&values)
+                        .map_err(|error| Rich::custom(span, error))?;
                     Ok(MongoDbCollectionEmitter {
                         client,
                         collection,
@@ -98,6 +71,25 @@ pub(super) fn collection_body<'src>() -> impl Parser<
                 },
             ),
     )
+}
+
+/// `SET COLLECTION '<name>'`, `SET ON CONFLICT …`, `DROP ON CONFLICT` or `SET MODE <mode>`:
+/// one part of a `MONGODB COLLECTION` body.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], MongoDbCollectionEmitterChange, extra::Err<ParseError<'src>>> + Clone
+{
+    let locator = kw(Identifier::Collection)
+        .ignore_then(external_name::<MongoDbCollectionName>())
+        .map(MongoDbCollectionEmitterChange::Collection);
+    let conflict = mongodb_conflict_clause().map(MongoDbCollectionEmitterChange::OnConflict);
+    let publishing = kw(Identifier::Mode)
+        .ignore_then(mode())
+        .map(MongoDbCollectionEmitterChange::Mode);
+    let set = kw(Identifier::Set).ignore_then(choice((locator, conflict, publishing)));
+    let drop_conflict = kw(Identifier::Drop).ignore_then(on_conflict_phrase()).to(
+        MongoDbCollectionEmitterChange::OnConflict(MongoDbConflictAction::None),
+    );
+    choice((set, drop_conflict)).boxed()
 }
 
 #[cfg(test)]

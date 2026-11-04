@@ -17,15 +17,18 @@
 
 use std::num::NonZeroU64;
 
-use chumsky::prelude::*;
+use chumsky::{Boxed, prelude::*};
 use meticulous::ResultExt as _;
-use nervix_models::{IngestQuiesceMode, IngestQuiesceOverflow, IngestStartPosition, RetryPolicy};
+use nervix_models::{
+    DeclaredQuiesce, IngestQuiesceKind, IngestQuiesceMode, IngestQuiesceOverflow,
+    IngestStartPosition, RetryPolicy,
+};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, ack_timeout, boxed_choice, byte_size_lit, duration_lit, kw, kw_phrase2,
-        nonzero_u64_value, parallel_ack_window, retry_policy, sequential_ack_window,
+        ParseError, ack_timeout, byte_size_lit, duration_lit, kw, kw_phrase2, nonzero_u64_value,
+        parallel_ack_window, retry_policy, sequential_ack_window,
     },
 };
 
@@ -225,15 +228,22 @@ pub(super) fn endpoint_ack_quiesce_clause<'src>()
     quiesce_clause(quiesce_reject_parser())
 }
 
-/// The quiesce body `SET QUIESCE` writes. Every form parses here, and the stored source decides
-/// which of them it honors.
-pub(super) fn alter_quiesce_body<'src>()
--> impl Parser<'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> + Clone {
-    boxed_choice!(
-        quiesce_suspend_parser(),
-        quiesce_buffer_parser(),
-        quiesce_drop_parser(),
-        quiesce_reject_parser(),
-        endpoint_quiesce_buffer_parser(),
-    )
+/// The quiesce body `SET QUIESCE` writes for an entity that declares `declared`: each mode the
+/// entity declares and no other. Whether the rest of the body keeps a mode's requirements is
+/// checked on the complete ingestor, once every operation applied.
+pub(super) fn declared_quiesce_body<'src>(
+    declared: &'static [DeclaredQuiesce],
+) -> Boxed<'src, 'src, &'src [Token], IngestQuiesceMode, extra::Err<ParseError<'src>>> {
+    let mut bodies = Vec::with_capacity(declared.len());
+    for quiesce in declared {
+        let body = match quiesce.kind {
+            IngestQuiesceKind::Suspend => quiesce_suspend_parser().boxed(),
+            IngestQuiesceKind::Buffer => quiesce_buffer_parser().boxed(),
+            IngestQuiesceKind::Drop => quiesce_drop_parser().boxed(),
+            IngestQuiesceKind::Reject => quiesce_reject_parser().boxed(),
+            IngestQuiesceKind::EndpointBuffer => endpoint_quiesce_buffer_parser().boxed(),
+        };
+        bodies.push(body);
+    }
+    choice(bodies).boxed()
 }

@@ -190,10 +190,9 @@ impl Generated {
 
     /// The statement up to the publishing mode `MODE` introduces.
     fn through_mode(&self) -> String {
-        // A direct `VALUES` emitter writes its option after the body.
         let before_mode = self
             .option
-            .filter(|_| self.kind.capabilities().body != EmitterBodyForm::Values);
+            .filter(|option| !self.written_after_body(option));
         format!(
             "CREATE {} EMITTER generated FROM events TO {} MODE ",
             self.kind.phrase(),
@@ -201,15 +200,25 @@ impl Generated {
         )
     }
 
+    /// Whether the statement writes `option` after its body: a direct `VALUES` emitter writes its
+    /// optional options there, and every required option before `MODE`.
+    fn written_after_body(&self, option: &WrittenOption) -> bool {
+        let declared = self.kind.capabilities();
+        if declared.body != EmitterBodyForm::Values {
+            return false;
+        }
+        let Some(declaration) = declared.option(option.keywords) else {
+            return true;
+        };
+        !declaration.is_required()
+    }
+
     fn text(&self) -> String {
         let mut words = vec![format!("{}{}", self.through_mode(), self.mode)];
         if !self.body.is_empty() {
             words.push(self.body.to_owned());
         }
-        if let Some(option) = self
-            .option
-            .filter(|_| self.kind.capabilities().body == EmitterBodyForm::Values)
-        {
+        if let Some(option) = self.option.filter(|option| self.written_after_body(option)) {
             words.push(option.example.to_owned());
         }
         if let Some(envelope) = self.envelope {
@@ -665,3 +674,6 @@ fn through_locator(kind: EmitterEntityKind) -> String {
         None => reference,
     }
 }
+
+#[path = "alter_conformance_tests.rs"]
+mod alter;
