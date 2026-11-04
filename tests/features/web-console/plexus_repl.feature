@@ -671,6 +671,37 @@ Feature: Web console Plexus REPL
     When selector ".modal-scrim" is clicked by script
     Then selector ".resource-dialog" does not exist
 
+  Scenario Outline: Web console uploads a version after its leader refused the upload start before proposing it
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And node "node-1" has resource directory "console_refused_start_dir" containing
+      """
+      {
+        "alpha.txt": "alpha"
+      }
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE console_bundle;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the web console is opened on node "{{leader}}"
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".nav-item.resources" contains "console_bundle"
+    Given node "{{leader}}" refuses its next resource upload start as a leader that could not confirm its lease
+    When selector ".nav-item.resources:has-text('console_bundle')" is clicked
+    Then selector ".resource-dialog" contains "console_bundle"
+    When selector ".resource-dialog .file-upload-input" uploads resource directory "console_refused_start_dir"
+    Then selector ".resource-upload-status" contains "uploaded resource version 1"
+    And node "{{leader}}" refused a resource upload start
+    And selector ".resource-version-list" contains "version 1"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Web console shows the latest completed resource version and the usages bound to each version
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"

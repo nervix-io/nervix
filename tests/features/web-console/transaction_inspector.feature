@@ -306,7 +306,8 @@ Feature: Web console transaction inspector
     When selector ".transaction-inspector button[aria-label='Close transaction inspector']" is pressed with "Enter"
     And selector ".prompt-row input" is filled with "COMMIT;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".transaction-indicator" eventually disappears
+    Then selector ".terminal" contains "quiesce level: DYNAMIC" exactly 2 times
+    And selector ".transaction-indicator" eventually disappears
     When selector ".prompt-row input" is filled with "SHOW CREATE SCHEMA retained_after_reconnect;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "CREATE SCHEMA retained_after_reconnect"
