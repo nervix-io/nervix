@@ -81,6 +81,69 @@ Feature: Restore configuration, users and resources from a backup archive
     When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "route.nvxb" is streamed to node "{{first_route}}" under execution reference "route-restore" with outcome recovery
     Then the restore stream's outcome is "completed" as "recovered"
 
+  Scenario Outline: A restore stream whose admission a lapsed lease refused learns its outcome under its reference on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed through the client on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "lapsed.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    Given the leader refuses the admission of execution reference "lapsed-restore" as a leader whose lease lapsed
+    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "lapsed.nvxb" is streamed to node "{{leader}}" under execution reference "lapsed-restore"
+    Then the leader refused the admission of execution reference "lapsed-restore" as a leader whose lease lapsed
+    And the restore stream's outcome is "completed" as "executed"
+    And the restore stream's report shows every step applied
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: A background restore stream whose admission a lapsed lease refused completes under its reference on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed through the client on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "lapsed-background.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    Given the leader refuses the admission of execution reference "lapsed-background-restore" as a leader whose lease lapsed
+    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "lapsed-background.nvxb" is streamed to node "{{leader}}" under execution reference "lapsed-background-restore" in the background
+    Then the background restore stream completes with a known outcome
+    And the leader refused the admission of execution reference "lapsed-background-restore" as a leader whose lease lapsed
+    And the restore stream's report shows every step applied
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario: A background restore stream that leadership moved under after its admission keeps the origin it executed with
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed through the client on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    And a node other than placeholder "leader" is saved as placeholder "successor"
+    When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "moved.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    Given restore step "import resources" of domain "{{domain}}_copy" on node "{{leader}}" pauses before it applies
+    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "moved.nvxb" is streamed to node "{{leader}}" under execution reference "moved-restore" in the background
+    Then the restore pauses at step "import resources" of domain "{{domain}}_copy" on node "{{leader}}"
+    When leadership is transferred from node "{{leader}}" to node "{{successor}}"
+    Then node "{{successor}}" eventually reports a leader other than "{{leader}}"
+    And node "{{leader}}" eventually reports a leader other than "{{leader}}"
+    When the restore step pause on node "{{leader}}" is released
+    Then the background restore stream's outcome is "completed" as "executed"
+    And the restore stream's report shows every step applied
+
   Scenario Outline: A fresh cluster whose nodes are named differently restores a cluster archive
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
