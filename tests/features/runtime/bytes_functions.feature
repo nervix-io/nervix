@@ -34,7 +34,7 @@ Feature: Typed bytes and native encoding functions
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    And this Plexus command is executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       SHOW CREATE CODEC binary_event_codec;
       """

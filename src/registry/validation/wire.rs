@@ -1048,7 +1048,7 @@ mod tests {
             };
             let domain = named("example");
             let identifier = named("binary_codec");
-            macro_rules! check {
+            macro_rules! validate_binding {
                 ($format:ident, $ty:expr) => {
                     ensure_codec_schema_compatibility(
                         &domain,
@@ -1068,9 +1068,9 @@ mod tests {
                 };
             }
             match self.wire {
-                WireTypeCompatibility::Json(ty) => check!(Json, ty),
-                WireTypeCompatibility::Cbor(ty) => check!(Cbor, ty),
-                WireTypeCompatibility::Avro(ty) => check!(Avro, ty),
+                WireTypeCompatibility::Json(ty) => validate_binding!(Json, ty),
+                WireTypeCompatibility::Cbor(ty) => validate_binding!(Cbor, ty),
+                WireTypeCompatibility::Avro(ty) => validate_binding!(Avro, ty),
             }
         }
     }
