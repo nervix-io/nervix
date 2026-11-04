@@ -28,15 +28,22 @@ and the same signature and namespace fence that shape.
 
 Pulsar subscription generators draw both required owned creation positions, `EARLIEST` and
 `LATEST`, provisioned subscriptions without a position, and all four subscription types, with one
-instance for a type that reads through one consumer. Statement generators mix typed `SET START AT`
-and `SET TYPE` with shared ingestor operations. The Model, registry and consensus properties
+instance for a type that reads through one consumer. The Model, registry and consensus properties
 preserve those complete values.
 
 KAFKA TOPIC ingestor generators draw domain-owned offsets, with no position, and a consumer group
-with either required `START AT` position. Statement generators mix typed `SET START AT` with shared
-ingestor operations. The Model, registry and consensus properties preserve those complete values.
-The `NERVIX SUB TYPES` registry signature and `raft_subscription_types_` consensus namespace
-identify this current Model layout before decoding.
+with either required `START AT` position. The Model, registry and consensus properties preserve
+those complete values. The `NERVIX SUB TYPES` registry signature identifies this current Model
+layout before decoding.
+
+`ALTER INGESTOR` and `ALTER EMITTER` statement generators draw, for every entity, each change its
+own grammar writes: a locator, a declared option and the `DROP` of an optional one, `SET MODE`,
+Kafka's and Pulsar's `SET START AT`, a declared quiesce mode and `SET CLIENT` where the entity reads
+or writes through a client. They mix them with the shared operations, the in-place construction
+changes of a route or an emitter, and an emitter's envelope clauses and properties. The Model/archive,
+consensus and canonical Plexus properties preserve the complete operations in order, and the
+`raft_alter_parity_` consensus namespace identifies the statement layout the transactions it keeps
+are stored in before decoding.
 
 MQTT TOPIC ingestor generators draw either session at QoS 0, 1 or 2 beside `NO ACK`, and the
 persistent session at QoS 1 or 2 beside an acknowledged mode, so every pairing the declaration

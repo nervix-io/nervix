@@ -488,6 +488,10 @@ impl IngestorEntityBody for MqttTopicIngestor {
         IngestorReference::Client(&self.client)
     }
 
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
+    }
+
     fn quiesce(&self) -> &IngestQuiesceMode {
         &self.quiesce
     }
@@ -641,6 +645,50 @@ impl MqttIngestMode {
     }
 }
 
+/// One change an `ALTER MQTT TOPIC INGESTOR` writes to the body of the ingestor it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum MqttTopicIngestorChange {
+    /// `SET TOPIC '<filter>'`.
+    Topic(MqttTopicFilter),
+    /// `SET SESSION CLEAN|PERSISTENT`.
+    Session(MqttSession),
+    /// `SET QOS 0|1|2`.
+    Qos(MqttQos),
+    /// `SET MODE <mode>`.
+    Mode(MqttIngestMode),
+}
+
+impl crate::IngestorEntityChange for MqttTopicIngestorChange {
+    type Entity = MqttTopicIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut MqttTopicIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Topic(topic) => entity.topic = topic.clone(),
+            Self::Session(session) => entity.session = *session,
+            Self::Qos(qos) => entity.qos = *qos,
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Topic(topic) => format!("SET TOPIC {}", crate::string_literal(topic.as_str())),
+            Self::Session(session) => format!("SET SESSION {}", session.keyword()),
+            Self::Qos(qos) => format!("SET QOS {}", qos.spelling()),
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
+    }
+}
+
 connector_ingestors! {
     connector Mqtt = "MQTT";
     /// What an MQTT source reads.
@@ -649,7 +697,7 @@ connector_ingestors! {
     pub enum MqttTopicIngestorAlteration;
     /// The entities an MQTT source reads.
     pub enum MqttIngestorEntity {
-        Topic(MqttTopicIngestor) = "TOPIC", "MQTT";
+        Topic(MqttTopicIngestor => MqttTopicIngestorChange) = "TOPIC", "MQTT";
     }
 }
 
@@ -717,15 +765,55 @@ impl EmitterEntityBody for MqttTopicEmitter {
     }
 }
 
+/// One change an `ALTER MQTT TOPIC EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum MqttTopicEmitterChange {
+    /// `SET TOPIC '<name>'`.
+    Topic(MqttTopicName),
+    /// `SET QOS 0|1|2`.
+    Qos(MqttQos),
+    /// `SET MODE <mode>`.
+    Mode(MqttTopicPublishingMode),
+}
+
+impl crate::EmitterEntityChange for MqttTopicEmitterChange {
+    type Entity = MqttTopicEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut MqttTopicEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Topic(name) => entity.topic = name.clone(),
+            Self::Qos(qos) => entity.qos = *qos,
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Topic(name) => format!("SET TOPIC {}", crate::string_literal(name.as_str())),
+            Self::Qos(qos) => format!("SET QOS {}", qos.spelling()),
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector Mqtt = "MQTT";
     /// What an MQTT emitter writes.
     pub enum MqttEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum MqttTopicEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum MqttEmitterChange;
     /// The entities an MQTT emitter writes.
     pub enum MqttEmitterEntity {
-        Topic(MqttTopicEmitter, MqttTopicPublishingMode) = "TOPIC";
+        Topic(MqttTopicEmitter, MqttTopicPublishingMode, MqttTopicEmitterChange) = "TOPIC";
     }
 }
 

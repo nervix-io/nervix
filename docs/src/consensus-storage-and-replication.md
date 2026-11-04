@@ -456,18 +456,20 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The dedicated database owns exactly four current keyspaces: `raft_subscription_types_logs`,
-`raft_subscription_types_meta`, `raft_subscription_types_state`, and
-`raft_subscription_types_snapshots`. Opening it validates the complete keyspace namespace before
-reading any records. This namespace identifies the current Model shape, including a Pulsar
-subscription's required type, an owned Pulsar subscription's required start position, a Kafka
-consumer group's required start position, the serialized Sentry platform field, an ingestor's
-`TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the receive
-count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an
-MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter
-writes beside its publishing mode, a `REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription,
-and whether a polled HTTP request's header holds a literal or names a client secret. Its state
-metadata requires the current
+The dedicated database owns exactly four current keyspaces: `raft_alter_parity_logs`,
+`raft_alter_parity_meta`, `raft_alter_parity_state`, and `raft_alter_parity_snapshots`. Opening it
+validates the complete keyspace namespace before reading any records. This namespace identifies the
+current Model shape, including a Pulsar subscription's required type, an owned Pulsar
+subscription's required start position, a Kafka consumer group's required start position, the
+serialized Sentry platform field, an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS
+QUEUE emitter's `SEND` request shape, the receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX`
+declares, the session and quality of service an MQTT TOPIC ingestor writes beside its delivery
+mode, the quality of service an MQTT TOPIC emitter writes beside its publishing mode, a
+`REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription, and whether a polled HTTP request's
+header holds a literal or names a client secret. It identifies the current statement shape as well,
+which the statements a transaction keeps are stored in: an `ALTER INGESTOR` or `ALTER EMITTER`
+operation that changes one part of its entity's body, an envelope clause or the properties, or one
+part of a construction where it stands. Its state metadata requires the current
 `RestoredLifecycle` encoding, including the durable restore installation gate and the unit-keyed
 committed schedule. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
 are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery

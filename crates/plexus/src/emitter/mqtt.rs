@@ -105,6 +105,23 @@ pub(super) fn topic_body<'src>(
     encoded_destination(context, topic_destination())
 }
 
+/// `SET TOPIC '<name>'`, `SET QOS 0|1|2` or `SET MODE <mode>`: one part of a `MQTT TOPIC` body.
+/// Whether the mode pairs with the quality of service is a question for the complete result, once
+/// every operation of the statement has applied.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], MqttTopicEmitterChange, extra::Err<ParseError<'src>>> + Clone {
+    let locator = kw(Identifier::Topic)
+        .ignore_then(external_name::<MqttTopicName>())
+        .map(MqttTopicEmitterChange::Topic);
+    let quality = mqtt_qos_clause().map(MqttTopicEmitterChange::Qos);
+    let publishing = kw(Identifier::Mode)
+        .ignore_then(mode())
+        .map(MqttTopicEmitterChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((locator, quality, publishing)))
+        .boxed()
+}
+
 #[cfg(test)]
 mod tests {
     use nervix_models::{

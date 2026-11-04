@@ -12,7 +12,7 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{ZeroMqIngestMode, ZeroMqPullIngestor};
+use nervix_models::{ZeroMqIngestMode, ZeroMqPullIngestor, ZeroMqPullIngestorChange};
 
 use super::delivery::{flexible_quiesce_clause, no_ack};
 use crate::{
@@ -32,6 +32,17 @@ pub(super) fn pull_body<'src>()
             mode,
             quiesce,
         })
+        .boxed()
+}
+
+/// `SET MODE`: the one part of a `ZEROMQ PULL` body beside its client.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], ZeroMqPullIngestorChange, extra::Err<ParseError<'src>>> + Clone
+{
+    kw(Identifier::Set)
+        .ignore_then(kw(Identifier::Mode))
+        .ignore_then(no_ack().to(ZeroMqIngestMode::NoAck))
+        .map(ZeroMqPullIngestorChange::Mode)
         .boxed()
 }
 

@@ -31,6 +31,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("completed_resource_version", "1"),
     ("instance_count", "2"),
     ("integer_literal", "1"),
+    ("invocation_number", "1"),
     ("max_fuel", "1000000"),
     ("max_in_flight", "10"),
     ("max_instances", "16"),
@@ -105,6 +106,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
 /// Expression bodies and semantic references whose shortest complete continuation needs more
 /// than one name. The expression grammar owns each body; the walker supplies one complete unit.
 const FREE_FORM_FILLERS: &[(&str, &str)] = &[
+    ("assignment_target", "nx_out"),
     ("correlate_expression", "left.nx_field = right.nx_field"),
     ("default_assignments", "nx_field = 1"),
     ("deduplicate_on", "input.nx_field"),

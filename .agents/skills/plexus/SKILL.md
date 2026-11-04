@@ -236,9 +236,11 @@ Deduplicator key and reorderer ordering changes also use entity pause; their `MA
 dynamic. Write an ingestor's `ALTER` under the stored ingestor's own head, such as
 `ALTER KAFKA TOPIC INGESTOR`; an alteration never changes its connector or entity, so reading
 another one takes `DROP INGESTOR` and a new `CREATE`. Use that head's complete body after
-`SET FROM`, or change only the quiesce mode with `SET QUIESCE <body>`; a client ingestor takes the
-complete `SET FROM SCHEMA ...` body under `ALTER CLIENT PRODUCER INGESTOR`, and a change to its
-endpoint contract ends its attached producers.
+`SET FROM`, or change one part in place: `SET CLIENT`, `SET <locator>`, `SET|DROP <option>`,
+`SET MODE` and `SET QUIESCE` with a mode the entity declares, and
+`ALTER ROUTE TO <relay> <construction change>`; see `Ingestors` → `Altering Ingestors`. A client
+ingestor takes the complete `SET FROM SCHEMA ...` body under `ALTER CLIENT PRODUCER INGESTOR`, and a
+change to its endpoint contract ends its attached producers.
 Buffered client routes force-flush and settle their admitted acknowledgements before an alteration
 publishes a replacement contract. Keep reading admitted outcomes while admission is suspended;
 reopen a producer after a committed contract change, and retain its attachment when an alteration
@@ -510,9 +512,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   Declare a `secret.<name>` key on the `HTTP` client and write
   `'authorization' = CLIENT SECRET 'secret.<name>'`; see
   [HTTP REQUEST](../../../docs/src/ingestors.md#http-polling-requests). Change `METHOD`, `HEADERS` or
-  `MAX BODY SIZE` with `ALTER HTTP REQUEST INGESTOR … SET FROM <complete body>`. A poll goes to the
-  client's `endpoint` exactly as written, path and query included, so declare one client for each
-  polled resource; a client an `HTTP REQUEST` emitter also uses must name an origin, and
+  `MAX BODY SIZE` in place with `ALTER HTTP REQUEST INGESTOR … SET METHOD …`, `SET|DROP HEADERS`
+  or `SET|DROP MAX BODY SIZE`. A poll goes to the client's `endpoint` exactly as written, path and
+  query included, so declare one client for each polled resource; a client an `HTTP REQUEST`
+  emitter also uses must name an origin, and
   [`HTTP CLIENT`](../../../docs/src/ingestors.md#http-client) lists the keys both directions share.
 - For an HTTP emitter, write `CREATE HTTP REQUEST EMITTER <name> FROM <relay> TO <client> METHOD <string_expression> PATH
   <string_expression> MODE ACK RETRY POLICY BACKOFF <duration> MAX <duration>` followed by exactly
@@ -634,7 +637,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `CATALOG` and `COMMIT EACH` before `MODE`. Put OTEL attributes, resource and scope with `VALUES`
   after `MODE`.
   Use the stored kind in every emitter ALTER head. `SET TO` requires that entity's complete body,
-  including its payload selection; changing the connector or entity requires drop and create.
+  including its payload selection; changing the connector or entity requires drop and create. Change
+  one part in place with `SET <locator>`, `SET|DROP <option>`, `SET MODE`, `SET|DROP <envelope
+  clause>`, the construction operations and `SET GENERAL ERROR`; see `Emitters` → `Altering
+  emitters`.
   External table and collection names retain case. Keep client/schema/codec references as identifiers.
 - Name the connector and entity in every ingestor head, such as `CREATE KAFKA TOPIC INGESTOR`,
   `CREATE HTTP ENDPOINT INGESTOR`, or `CREATE SYSLOG LISTENER INGESTOR`, and write the body after

@@ -16,18 +16,18 @@
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain, ModelVariant};
 use nervix_models::{
-    AckWindow, AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterIngestorError,
-    BatchMessageLimit, BatchUnavailability, ClickHouseEmitter, ClickHouseEmitterEntity,
-    ClickHouseTableEmitter, ClickHouseValueMapping, ClientConsumerEmitter, ClientEmitterEntity,
-    ClientIngestMode, ClientIngestorEntity, ClientName, ConnectorKind, EmitterBatchLegality,
-    EmitterBatchPolicy, EmitterBodyForm, EmitterClientReference, EmitterEntity, EmitterEntityKind,
-    EmitterReference, EmitterValueMapping, EndpointIngestMode, EndpointType, Expression,
-    HeaderLayout, HeaderModel, HttpEmitterEntity, HttpEndpointIngestor, HttpIngestor,
-    HttpIngestorEntity, IcebergCatalog, IcebergEmitter, IcebergEmitterEntity, IcebergTableEmitter,
-    IngestAcknowledgement, IngestQuiesceMode, IngestQuiesceOverflow, IngestorEntity,
-    IngestorEntityKind, IngestorMetadataType, IngestorReferenceKind, KafkaEmitterEntity,
-    KafkaIngestMode, KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicEmitter, KafkaTopicIngestor,
-    Literal, Model, ModelKind, MongoDbCollectionEmitter, MongoDbConflictAction, MongoDbEmitter,
+    AckWindow, AlterEmitter, AlterEmitterError, AlterEmitterOperation, BatchMessageLimit,
+    BatchUnavailability, ClickHouseEmitter, ClickHouseEmitterEntity, ClickHouseTableEmitter,
+    ClickHouseValueMapping, ClientConsumerEmitter, ClientEmitterEntity, ClientIngestMode,
+    ClientIngestorEntity, ClientName, ConnectorKind, EmitterBatchLegality, EmitterBatchPolicy,
+    EmitterBodyForm, EmitterClientReference, EmitterEntity, EmitterEntityKind, EmitterReference,
+    EmitterValueMapping, EndpointIngestMode, EndpointType, Expression, HeaderLayout, HeaderModel,
+    HttpEmitterEntity, HttpEndpointIngestor, HttpIngestor, HttpIngestorEntity, IcebergCatalog,
+    IcebergEmitter, IcebergEmitterEntity, IcebergTableEmitter, IngestAcknowledgement,
+    IngestQuiesceMode, IngestQuiesceOverflow, IngestorEntity, IngestorEntityKind,
+    IngestorMetadataType, IngestorReferenceKind, KafkaEmitterEntity, KafkaIngestMode,
+    KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicEmitter, KafkaTopicIngestor, Literal, Model,
+    ModelKind, MongoDbCollectionEmitter, MongoDbConflictAction, MongoDbEmitter,
     MongoDbEmitterEntity, MqttEmitterEntity, MqttIngestMode, MqttIngestorEntity, MqttQos,
     MqttSession, MqttTopicIngestor, MySqlConflictAction, MySqlEmitter, MySqlEmitterEntity,
     MySqlTableEmitter, NatsEmitterEntity, NatsIngestorEntity, OtelEmitter, OtelEmitterEntity,
@@ -538,16 +538,11 @@ fn a_source_supports_the_quiesce_modes_its_entity_declares(
     ];
     let bytes = seeded_bytes(1);
     let mut arbitrary = Arbitrary::new(&bytes, Domain::Vocabulary);
-    let mut source = arbitrary
+    let source = arbitrary
         .ingest_source_of(kind)
         .assured("every modeled pair has a transport Model");
     for (mode, supported) in modes.into_iter().zip(expected) {
         assert_eq!(source.supports_quiesce(&mode), supported, "{mode:?}");
-        let outcome = source.set_quiesce(mode.clone());
-        assert_eq!(outcome.is_ok(), supported, "{mode:?}");
-        if supported {
-            assert_eq!(source.quiesce(), &mode);
-        }
     }
 }
 
@@ -1422,7 +1417,7 @@ fn a_client_producer_window_counts_the_batches_it_admits() {
 }
 
 #[test]
-fn an_ingest_source_refuses_a_quiesce_mode_its_transport_lacks() {
+fn an_endpoint_source_honors_no_suspend_whatever_it_holds() {
     let buffer = IngestQuiesceMode::EndpointBuffer {
         max_size: "1MiB".to_string(),
     };
@@ -1431,21 +1426,11 @@ fn an_ingest_source_refuses_a_quiesce_mode_its_transport_lacks() {
         mode: EndpointIngestMode::NoAck,
         quiesce: buffer.clone(),
     }));
+    assert!(source.supports_quiesce(&buffer));
 
-    let error = source
-        .set_quiesce(IngestQuiesceMode::Suspend)
-        .expect_err("an endpoint cannot suspend its callers");
+    // Setting a mode writes it, and the complete Model is what the registry checks it against.
+    source.set_quiesce(IngestQuiesceMode::Suspend);
 
-    assert_eq!(
-        error.current_context(),
-        &AlterIngestorError::UnsupportedQuiesceMode {
-            kind: IngestorEntityKind::Http(HttpIngestorEntity::Endpoint),
-            mode: "SUSPEND",
-        }
-    );
-    assert_eq!(
-        error.to_string(),
-        "HTTP ENDPOINT ingestors do not support ON QUIESCE SUSPEND"
-    );
-    assert_eq!(source.quiesce(), &buffer);
+    assert_eq!(source.quiesce(), &IngestQuiesceMode::Suspend);
+    assert!(!source.supports_quiesce(&IngestQuiesceMode::Suspend));
 }

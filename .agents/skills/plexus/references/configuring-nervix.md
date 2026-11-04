@@ -343,8 +343,9 @@ current connection, retry and deadline limits.
   required `NAMESPACE` names the catalog namespace independently of the Nervix domain; provision
   each of its case-preserving dot-separated levels before starting the emitter. Until the catalog
   holds the namespace and the table, the emitter retries its open and `DESCRIBE EMITTER` names the
-  namespace or the table it lacks. Move an emitter to another namespace with `SET TO`, restating
-  its complete destination with the new `NAMESPACE` and that table's `LOCATION`. A
+  namespace or the table it lacks. Move an emitter to another namespace with
+  `SET NAMESPACE '...', SET LOCATION '...'` in one `ALTER`, naming that table's `LOCATION`, or with
+  `SET TO` restating its complete destination. A
   `DATETIME`, at the top level or inside a `VEC` or `ARRAY`, is written at the containing
   microsecond and needs a `timestamptz` column, not `timestamptz_ns`. A commit writes each mapped
   column into the table column of its name, in any `VALUES` order, and a null into each optional
@@ -451,8 +452,9 @@ current connection, retry and deadline limits.
   `metadata.correlation_data` explicitly before using it as text.
 - An `MQTT TOPIC` emitter writes its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, `NO ACK` only at
   `QOS 0` and `ACK` only at `QOS 1` or `QOS 2`. `SET MODE` stays within the written quality of
-  service, and `SET TO` changes it. Read `Emitters` → `MQTT` for what each level completes on and
-  for the persistent session a new client cannot take over.
+  service; `SET QOS` changes it, beside `SET MODE` in the same `ALTER` when it crosses `QOS 0`, and
+  `SET TO` changes both. Read `Emitters` → `MQTT` for what each level completes on and for the
+  persistent session a new client cannot take over.
 - An `MQTT CLIENT`'s `addr` is `mqtt://` or `mqtts://`, a host and a port, with no credentials,
   path or query: write `username` and `password` (redacted on inspection), `keep_alive_ms` in
   whole seconds and the source admission bound `max_packet_size` as their own keys, checked against

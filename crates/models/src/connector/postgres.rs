@@ -378,15 +378,78 @@ impl EmitterEntityBody for PostgresTableEmitter {
     }
 }
 
+/// One change an `ALTER POSTGRES TABLE EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum PostgresTableEmitterChange {
+    /// `SET TABLE '<table>'`.
+    Table(PostgresTableName),
+    /// `SET ON CONFLICT … DO NOTHING|UPDATE`, or `DROP ON CONFLICT` where the action is the
+    /// ordinary insert a statement that writes no `ON CONFLICT` makes.
+    OnConflict(PostgresConflictAction),
+    /// `SET MODE <mode>`.
+    Mode(PostgresTablePublishingMode),
+}
+
+impl crate::EmitterEntityChange for PostgresTableEmitterChange {
+    type Entity = PostgresTableEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut PostgresTableEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Table(table) => entity.table = table.clone(),
+            Self::OnConflict(action) => {
+                if *action == PostgresConflictAction::None
+                    && entity.conflict_action == PostgresConflictAction::None
+                {
+                    return Err(error_stack::Report::new(
+                        crate::AlterEmitterError::OptionNotWritten {
+                            entity: <PostgresTableEmitter as crate::EmitterEntityModel>::KIND,
+                            option: "ON CONFLICT",
+                        },
+                    ));
+                }
+                action.validate(&entity.values).map_err(|error| {
+                    error_stack::Report::new(error).change_context(
+                        crate::AlterEmitterError::ConflictAction {
+                            entity: <PostgresTableEmitter as crate::EmitterEntityModel>::KIND,
+                        },
+                    )
+                })?;
+                entity.conflict_action = action.clone();
+            }
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Table(table) => format!("SET TABLE {}", crate::string_literal(table.as_str())),
+            Self::OnConflict(action) => match action.conflict_clause() {
+                Some(clause) => format!("SET {clause}"),
+                None => "DROP ON CONFLICT".to_owned(),
+            },
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector Postgres = "POSTGRES";
     /// What a PostgreSQL emitter writes.
     pub enum PostgresEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum PostgresTableEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum PostgresEmitterChange;
     /// The entities a PostgreSQL emitter writes.
     pub enum PostgresEmitterEntity {
-        Table(PostgresTableEmitter, PostgresTablePublishingMode) = "TABLE";
+        Table(PostgresTableEmitter, PostgresTablePublishingMode, PostgresTableEmitterChange) = "TABLE";
     }
 }
 

@@ -23,7 +23,6 @@ use std::{
     num::{NonZeroU16, NonZeroU64},
 };
 
-use error_stack::Report;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumIter};
@@ -651,35 +650,66 @@ pub trait IngestorEntityBody {
     fn chosen(&self, _option: &str) -> Option<&'static str> {
         None
     }
+
+    /// The client the body reads through, for an entity that reads through one: what
+    /// `SET CLIENT` replaces. A body that names an endpoint or a schema has none.
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        None
+    }
 }
 
 /// The pair one entity Model is a source of, which the head of its ingestor's statements names.
 pub trait IngestorEntityModel {
     const KIND: IngestorEntityKind;
+
+    /// One change an `ALTER` writes to what a body of this entity states, without restating the
+    /// rest of the body.
+    type Change: IngestorEntityChange<Entity = Self>
+        + Clone
+        + std::fmt::Debug
+        + PartialEq
+        + Eq
+        + Serialize
+        + serde::de::DeserializeOwned;
+}
+
+/// One change an `ALTER` writes to what the body of an ingestor's entity states: a locator, an
+/// option or the delivery mode, each as the entity's own grammar writes it.
+pub trait IngestorEntityChange {
+    /// The entity Model whose body the change writes to.
+    type Entity;
+
+    /// Writes the change into `entity`, or leaves `entity` as it was and says why the change does
+    /// not apply to it.
+    fn apply_to(&self, entity: &mut Self::Entity) -> error_stack::Result<(), AlterIngestorError>;
+
+    /// The change as the `ALTER` operation that writes it, such as `SET TOPIC 'orders'`.
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError>;
 }
 
 /// A source Model an alteration's `SET FROM` states, and how the alteration reaches the stored
 /// input of the ingestor it changes, which reads this Model's pair.
+///
+/// The enclosing alteration compares the stored pair with the pair its head names before it
+/// applies any operation, so the stored input always holds a Model of this pair.
 pub(crate) trait AlteredIngestorEntity: IngestorEntityModel + Clone {
-    /// Makes this Model the source `input` reads.
-    fn set_into(&self, input: &mut IngestorInput);
+    /// The source Model `input` reads.
+    fn entity_of_mut(input: &mut IngestorInput) -> &mut Self;
 
-    /// Sets the quiesce mode of the source `input` reads, which its pair must honor.
+    /// Makes this Model the source `input` reads.
+    fn set_into(&self, input: &mut IngestorInput) {
+        *Self::entity_of_mut(input) = self.clone();
+    }
+
+    /// Sets the quiesce mode of the source `input` reads. Whether its pair honors the mode beside
+    /// the rest of the body is a question for the complete result, once every operation applied.
     fn set_quiesce_of(
         input: &mut IngestorInput,
         quiesce: IngestQuiesceMode,
     ) -> error_stack::Result<(), AlterIngestorError>;
-}
 
-/// One typed operation of a transport ingestor, shared or owned by its entity.
-/// The enclosing alteration checks the entity pair before applying any operation to its copy.
-pub(crate) trait TransportIngestorOperation {
-    fn apply_to(
-        &self,
-        ingestor: &mut crate::CreateIngestor,
-    ) -> error_stack::Result<(), AlterIngestorError>;
-
-    fn to_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError>;
+    /// The client the source `input` reads through, where its pair reads through one.
+    fn client_of_mut(input: &mut IngestorInput) -> Option<&mut ClientName>;
 }
 
 /// What the kind of one connector's source entities answers for each of them.
@@ -876,17 +906,9 @@ impl IngestorEntity {
         self.body().chosen(option)
     }
 
-    pub fn set_quiesce(
-        &mut self,
-        quiesce: IngestQuiesceMode,
-    ) -> error_stack::Result<(), AlterIngestorError> {
-        if !self.supports_quiesce(&quiesce) {
-            return Err(Report::new(AlterIngestorError::UnsupportedQuiesceMode {
-                kind: self.kind(),
-                mode: quiesce.kind_label(),
-            }));
-        }
+    /// Makes `quiesce` the mode this source holds while its ingestor is paused. Whether the source
+    /// honors it beside the rest of its body is checked on the complete Model.
+    pub fn set_quiesce(&mut self, quiesce: IngestQuiesceMode) {
         *self.body_mut().quiesce_mut() = quiesce;
-        Ok(())
     }
 }

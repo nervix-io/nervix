@@ -15,7 +15,7 @@
 use chumsky::prelude::*;
 use nervix_models::{
     RedisChannelName, RedisChannelPattern, RedisPubSubIngestMode, RedisPubSubIngestor,
-    RedisSubscriptionTarget,
+    RedisPubSubIngestorChange, RedisSubscriptionTarget,
 };
 
 use super::delivery::{no_ack, push_quiesce_clause};
@@ -53,6 +53,20 @@ fn subscription<'src>()
         .ignore_then(external_name::<RedisChannelPattern>())
         .map(RedisSubscriptionTarget::Pattern);
     choice((channel, pattern)).boxed()
+}
+
+/// `SET CHANNEL`, `SET PATTERN` or `SET MODE`: one part of a `REDIS PUBSUB` body. Either locator
+/// replaces the one subscription the body writes.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], RedisPubSubIngestorChange, extra::Err<ParseError<'src>>> + Clone
+{
+    let target = subscription().map(RedisPubSubIngestorChange::Subscription);
+    let mode = kw(Identifier::Mode)
+        .ignore_then(no_ack().to(RedisPubSubIngestMode::NoAck))
+        .map(RedisPubSubIngestorChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((target, mode)))
+        .boxed()
 }
 
 #[cfg(test)]
