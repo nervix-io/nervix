@@ -228,6 +228,7 @@ mod mqtt_publish_properties;
 mod mqtt_sessions;
 mod mqtt_subscription_refusal;
 mod mysql_isolation;
+mod nats_authentication;
 mod nats_delivery;
 mod paced_replication;
 mod paced_simulation;

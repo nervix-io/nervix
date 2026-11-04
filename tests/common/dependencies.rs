@@ -190,6 +190,7 @@ impl TestDependencies {
         start_mongodb_mutual_tls => "mongodb-mutual-tls",
         start_mongodb_replica_set => "mongodb-replica-set",
         start_nats => "nats",
+        start_nats_auth => "nats-auth",
         start_nats_tls => "nats-tls",
         start_prometheus => "prometheus",
         start_prometheus_tls => "prometheus-tls",

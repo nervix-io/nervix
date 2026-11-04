@@ -1235,6 +1235,23 @@ attaches the failure's whole chain, so its transient status reads
 `the PULSAR broker refused the connection with AuthenticationError: ...` or
 `no connection to the PULSAR broker opened: Connection error: ...`.
 
+NATS client option preparation keeps schema, address and user-seed refusals and credentials-file
+I/O or parsing failures beneath their owning typed contexts. Base32 and AWS-LC key preparation
+retain their typed causes; seed length, kind, checksum and incomplete credential sections have
+value-free typed failures. A credentials-file I/O failure is an opaque typed attachment so no
+confidential path is rendered. Executor admission, execution or cancellation failures retain their
+typed causes under `NatsClientOptionsError::CredentialsPreparation`; they judge no credential and
+map to `NatsSubjectIngestorError::ClientPreparation` or emitter `Initialize`, rather than invalid
+configuration. The async-nats callback requires its `AuthError`
+and is the library projection boundary for an AWS-LC nonce-signing failure. Schema
+exclusion errors name the two authentication keys without their values. Ingestor and emitter
+configuration failures preserve those reports, and a broker authentication refusal retains the
+driver's typed connection failure. Emitter status preserves the driver's connection description,
+including its cause, while the report retains the typed driver error for inspection. Authentication
+preparation already projects credentials-file and seed failures through value-free contexts before
+the driver connects. Public client-validation outcomes continue to expose only reviewed, value-free
+contexts.
+
 A NATS source whose client loses its connection to the server reports
 `NatsSubjectIngestorError::ConnectionLost` beneath `IngestorError::Read` once it has handed over what the client
 received, and each reconnect that fails reports `NatsSubjectIngestorError::Connect` beneath

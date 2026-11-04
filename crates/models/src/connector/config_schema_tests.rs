@@ -23,6 +23,51 @@ fn entry(key: &str, value: &str) -> ClientConfigEntry {
 }
 
 #[test]
+fn an_exclusion_group_accepts_absence_or_one_key_and_refuses_every_pair() {
+    let schema = ConnectorKind::Nats
+        .client()
+        .assured("NATS declares its client")
+        .config;
+    let address = entry("addr", "nats://127.0.0.1:4222");
+    schema
+        .validate(std::slice::from_ref(&address))
+        .assured("authentication may be absent");
+    for key in ["credentials_file", "nkey_seed", "token"] {
+        schema
+            .validate(&[address.clone(), entry(key, "secret")])
+            .assured("one declared authentication method is accepted");
+    }
+    for (first, second) in [
+        ("credentials_file", "nkey_seed"),
+        ("credentials_file", "token"),
+        ("nkey_seed", "token"),
+    ] {
+        for validate in [
+            ClientConfigSchema::validate,
+            ClientConfigSchema::validate_rendered,
+        ] {
+            let report = validate(
+                schema,
+                &[
+                    address.clone(),
+                    entry(second, "second-secret"),
+                    entry(first, "first-secret"),
+                ],
+            )
+            .expect_err("the exclusion is independent of entry order and rendering stage");
+            assert_eq!(
+                report.current_context(),
+                &ClientConfigSchemaError::MutuallyExclusive { first, second }
+            );
+            assert_eq!(
+                report.to_string(),
+                format!("client config keys '{first}' and '{second}' are mutually exclusive")
+            );
+        }
+    }
+}
+
+#[test]
 fn defaulted_keys_preserve_authored_configuration_and_explicit_values() {
     let schema = ConnectorKind::ClickHouse
         .client()
@@ -1086,7 +1131,23 @@ fn bolero_schema_checked_client_entries_round_trip() {
                 }
             }
             let mut entries = Vec::new();
+            let mut selected_exclusive = None;
+            if let Some(keys) = schema.mutually_exclusive_keys()
+                && arbitrary.entropy().flag()
+            {
+                let index = arbitrary.entropy().index(
+                    NonZeroUsize::new(keys.len())
+                        .assured("a declared exclusion group names at least two keys"),
+                );
+                selected_exclusive = Some(keys[index]);
+            }
             for key in schema.keys() {
+                if let Some(keys) = schema.mutually_exclusive_keys()
+                    && keys.binary_search(&key.name).is_ok()
+                    && selected_exclusive != Some(key.name)
+                {
+                    continue;
+                }
                 if matches!(key.presence, ClientConfigPresence::Defaulted(_))
                     && arbitrary.entropy().flag()
                 {

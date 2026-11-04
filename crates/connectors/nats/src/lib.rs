@@ -20,5 +20,7 @@
 pub mod subject;
 pub use subject::*;
 
+mod client;
+
 mod offline_config;
 pub use offline_config::validate_client_configuration;

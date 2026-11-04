@@ -620,7 +620,13 @@ burst, physical scheduling at the slow rate, corrupt rows and a stalled or faile
 C binding its Python driver loads in the normal target directory. Every service a scenario depends
 on is a container that `crates/test-environment` starts through testcontainers, which pulls its
 image or, for the mock server that no registry holds, builds it on first use: no recipe or workflow
-prepares or starts one. The full and focused client coverage recipes build a standalone
+prepares or starts one. The NATS authentication fixture starts three independent enforcing
+servers: token authorization, a user NKey, and an operator/account JWT chain with an in-memory
+account resolver. Its checked-in identities are public test fixtures without expiration.
+Scenarios mount the credentials file as a resource, authenticate through public Nervix client
+definitions, and use an independently authenticated publisher to verify both ingestors and
+emitters on one and three nodes. Each scenario uses distinct subjects while sharing the suite's
+servers. The full and focused client coverage recipes build a standalone
 instrumented CLI beside their instrumented scenario executable and place the normal Plexus
 formatter there. The scenario runner selects the covered CLI through
 `NERVIX_TEST_CLI_PATH`, so its one-shot completion and command paths contribute to the same LCOV
