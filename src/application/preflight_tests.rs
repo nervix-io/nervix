@@ -147,7 +147,23 @@ async fn a_quota_beyond_the_database_volume_refuses_the_node_naming_the_setting(
     };
     let db_path = scratch.path().join("db");
 
-    let refused = refusal(&settings, &db_path, scratch.path()).await;
+    let checked = Preflight {
+        settings: &settings,
+        db_path: &db_path,
+        temp_dir: scratch.path(),
+        dns: &DnsConfiguration::system(),
+    }
+    .run()
+    .await
+    .assured("local preflight measures the volume without interpreting local resource seeds");
+    let parameters = settings
+        .bootstrap_parameters()
+        .assured("the bootstrap values have valid scalar bounds");
+    let Err(refused) =
+        super::validate_resource_volume(&parameters, checked.database_volume, &db_path)
+    else {
+        panic!("the chosen policy cannot fit this measured volume");
+    };
 
     let PreflightError::QuotaExceedsVolume {
         setting,

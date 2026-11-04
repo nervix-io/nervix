@@ -31,7 +31,6 @@ use super::{
     *,
 };
 
-pub(super) const DEFAULT_STATE_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
 pub(super) const DEFAULT_STATE_REPLICATION_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const STATE_CHECKPOINT_ANNOUNCEMENT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 /// How many changes one page of an owner's branch checkpoint catalog lists. A change is a branch key
@@ -2120,7 +2119,7 @@ impl Runtime {
     }
 
     pub(crate) fn state_snapshot_interval(&self) -> Duration {
-        self.inner.state_snapshot_interval
+        self.cluster_parameters().state_snapshot_interval()
     }
 
     /// The checkpoint of `placement` this node holds when it is newer than `after_lsm`, as a

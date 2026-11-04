@@ -156,14 +156,15 @@ Feature: Published endpoint route lifetimes
     When node "node-1" is stopped
     And node "node-2" is stopped
     And node "node-3" is stopped
-    And node "node-3" is started without waiting for it to catch up
+    And node "node-3" is started until public observation is available
     And endpoint request "uninstalled" is posted on node "node-3" host "restart-{{test_id}}.example.com" path "/events"
       """
       {"user_id":42}
       """
     Then endpoint request "uninstalled" answers HTTP 503
     When node "node-1" is started
-    Then node "node-3" eventually accepts http traffic for host "restart-{{test_id}}.example.com" path "/events"
+    Then node "node-3" eventually reports status containing "node.initialization=ready"
+    And node "node-3" eventually accepts http traffic for host "restart-{{test_id}}.example.com" path "/events"
       """
       {"user_id":43}
       """

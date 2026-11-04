@@ -107,6 +107,17 @@ retains both sets of four payloads, one- and three-node coverage, the source's b
 deadlines, and the forty-second payload assertions. The pause is scenario-local and adds no suite
 serialization or readiness sleep.
 
+The MQTT publication-property outlines observe complete MQTT 5 packets through a real broker on
+one and three nodes. A bounded subscription queue preserves property values and repeated user
+properties in delivery order; replacing its clean-session subscriber verifies retained delivery.
+A scenario-local forwarder captures complete outbound publications and either withholds the first
+one to exercise a retry or advertises a 1,024-byte CONNACK maximum. A warm-up publication proves
+that the emitter consumed that CONNACK before the oversized-property record is sent. The error
+relay and the next captured valid publication distinguish rejection before sending from a broker
+drop. Subscription readiness and captured-packet waits use the common broker observation budget;
+they introduce no product deadline. Teardown cancels the forwarder's listener and connections,
+and replacing or dropping an observer aborts its subscription task.
+
 The orphaned-transaction expiry scenario holds finished-transaction cleanup for its domain on each
 node before it begins the transaction. Expiry and the leadership transfer proceed normally. The
 successor reaches its cleanup barrier only after it observes the replicated terminal transaction;
@@ -344,7 +355,7 @@ retries. The recorded evidence covers tracked blocking locks reached by those wo
 waits, capture atomics, dependency locks and cross-node waits retain their other concurrency
 checks.
 
-The `@restarted_voter_observation` scenario runs in both selections, reaching whole-cluster teardown, reopening each node's store, and automatic scheduling after the first relayed voter heartbeat. Its watch-channel barrier and concurrent fault map are untracked; the diagnostic evidence covers blocking locks reached by restart and scheduling. The native metadata restore scenario also runs in both selections after its Kafka replication stream and acknowledgement boundaries are repaired, retaining complete primary and replica metadata comparisons and distributed placement checks.
+The `@restarted_voter_observation` scenario runs in both selections, reaching whole-cluster teardown, reopening each node's store, and automatic scheduling after the first relayed voter heartbeat. All voters start concurrently so each can discover a peer's live policy before reporting ready; if another voter leads, the fixture transfers leadership to the bootstrap node before observing its scheduling barrier. It waits for the held voter's catch-up after releasing that barrier. Its watch-channel barrier and concurrent fault map are untracked; the diagnostic evidence covers blocking locks reached by restart and scheduling. The native metadata restore scenario also runs in both selections after its Kafka replication stream and acknowledgement boundaries are repaired, retaining complete primary and replica metadata comparisons and distributed placement checks.
 
 The WASM/Kafka restore outline checks Commands-memory headroom on the restored leader after its
 source becomes ready. The cluster fixture reads the public capacity and reserved-byte metrics,
@@ -1533,8 +1544,9 @@ The harness keeps these boundaries explicit.
   The restarted-voter observation fixture stops every in-process node before arming its fault.
   It blocks direct gossip between the first leader and one voter, then holds that voter's first
   relayed heartbeat while allowing the other voters' heartbeats to advance. The leader's
-  reconciliation starts after that sample arrives, so slow harness startup cannot consume the
-  product's observation grace. A one-shot barrier captures a scheduling pass inside that grace
+  reconciliation starts after that sample arrives and the fixture establishes its leadership, so
+  slow harness startup or a leadership transfer cannot consume the product's observation grace.
+  A one-shot barrier captures a scheduling pass inside that grace
   with the voter marked unavailable; its elapsed-time decision is captured before the barrier
   waits. The scenario checks the failure-detector verdict and final ownership through public
   cluster status. Releasing the barrier waits for that pass to finish before restoring heartbeats
@@ -1930,8 +1942,9 @@ A node that never ends keeps what it holds until the process drops the runtime.
 
 A **readiness probe** is one status request, and it reports one of three outcomes:
 
-- **Ready.** The node returned a successful command result, or one saying it is not the leader.
-  Either way it answered an authenticated command.
+- **Ready.** The authenticated cluster-status command succeeded and reports
+  `node.initialization=ready`. A status response while live-policy discovery is pending remains a
+  non-ready response even though public observation already works.
 - **Request failed.** The status request ended with its typed failure, including the operation a
   passed deadline interrupted.
 - **Non-ready response.** The node answered with an unsuccessful result, kept with its kind,
@@ -1950,6 +1963,13 @@ node '<node>' startup attempt <n> failed after <elapsed>: <failure>; task state:
 
 The task state is `not started`, `running`, or `terminal` with the terminal outcome, and the last
 readiness outcome is the most recent probe or `no readiness probe completed`.
+
+The returning-parameter scenario deliberately starts one owned node with initial live-policy
+discovery paused after its public listeners start. That launch retains normal watchdog, storage,
+port and stop ownership, and waits once for the explicit fault boundary within the existing node
+startup budget. It does not call the readiness waiter, because the scenario asserts the node's
+unready public status and policy refusal before releasing discovery. The hook reuses the existing
+one-shot command-pause owner; ordinary launches retain their readiness and retry contracts.
 
 ## Node Startup
 
@@ -2089,8 +2109,10 @@ ready, it waits for each to catch up with the leader and then for the same conve
 Starting the nodes one after another would hold the last voter back by every earlier node's startup.
 On a loaded host that can outlast the ten-second grace a newly started leader gives voters it has
 not yet observed before it fails their work over, as [Control Plane](./control-plane.md) describes.
-Only the restarted-voter observation fixture keeps the bootstrap node first, because its scenario
-observes scheduling while that node leads. Adding a node, or starting one a
+The restarted-voter observation fixture also starts all nodes together, then uses the shared
+leadership move to establish the bootstrap node as leader within the original cluster-state
+deadline. It releases its reconciliation gate only after that move completes, and waits for the
+held voter's catch-up after releasing its scheduling barrier. Adding a node, or starting one a
 scenario stopped, spends one 84-second node startup and the catch-up that follows it; adding a node
 also repeats the convergence checks. A node started while its consensus connectivity is blocked
 spends the node startup without the catch-up. A scenario whose subject is a node that cannot apply
@@ -2101,6 +2123,15 @@ including a readiness timeout, remains terminal for this startup. The same three
 applies, and the harness never restarts a node after it becomes ready. The interrupted snapshot
 installation scenario also occupies the first launch's observability port and then observes the
 armed interruption on the successful launch.
+
+A scenario that must inspect an initializing node instead starts it until public observation is
+available. This uses the same constrained 36-second startup controller, occupied-listener retry,
+owned-task observation and failed-attempt cleanup, but its completion witness is a completed public
+cluster-status response. It does not require `node.initialization=ready`. An isolated returning
+node can therefore answer observation while it waits for a live peer's policy; the endpoint-route
+restart scenario asserts HTTP 503 during that interval, then starts a peer and explicitly observes
+`node.initialization=ready` before probing route installation with its unchanged HTTP readiness
+deadline. Ordinary readiness and catch-up startups still require completed initialization.
 
 ## Scenario Phases
 
@@ -2665,6 +2696,16 @@ leave before they are killed and their stores deleted: every member's deadlock e
 log, and the failure in `start-failure.txt`, in a directory of its own under `process-clusters/` of
 the evidence directory the run keeps. A cluster that started retains its evidence and logs there
 when its scenario ends.
+
+### Cluster Parameter Seeds In Process Fixtures
+
+The process fixture's typed snapshot interval and transaction-retention options seed the initial
+bootstrapping node. Joining nodes use its committed record. Once a process has accepted commands,
+the fixture records that proof and omits those seed options from subsequent launches, retaining the
+same database. Explicit written command-line and environment options remain literal inputs on each
+launch, including scenarios that assert a seed-option refusal. Lost-bind retries before the first
+successful startup retain the first-start configuration. Live policy changes use Plexus
+`ALTER CLUSTER SET`; [Node Settings](node-settings.md#committed-parameter-changes) owns that contract.
 
 ## Test Dependencies
 
@@ -3242,6 +3283,12 @@ job ends on its own.
 For focused local coverage, `just coverage-scenarios <lcov-path> <scenario-options>` starts a
 fresh measurement. `just coverage-scenarios-append <lcov-path> <scenario-options>` retains the
 current profiles and reuses unchanged instrumented artifacts for another scenario selection.
+Both coverage recipes forward each scenario argument unchanged, including empty arguments. Quote
+a scenario name or regular expression containing spaces or `|` as one shell argument, and quote
+input globs for the scenario runner to expand. Pass each option and its value separately.
+`just test-scenario-arguments` exercises their production bodies with recording tool boundaries,
+checking argument forwarding, build dependencies, tool environment and fresh versus append flags
+without compiling or starting services.
 When collecting a different source revision, first run `just coverage-clean-workspace` so
 instrumented binaries and line mappings from earlier sources cannot enter the new report.
 After collecting unit and scenario profiles, `just coverage-report-workspace` exports all
