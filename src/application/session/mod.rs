@@ -597,6 +597,12 @@ impl SessionServiceImpl {
     ) where
         S: Stream<Item = InboundFrame> + Unpin + Send,
     {
+        #[cfg(feature = "testing")]
+        let acceptance_observer = self
+            .inner
+            .runtime
+            .fault_injection()
+            .session_acceptance_observer_on(self.inner.consensus.local_node_id());
         let subscriptions = SessionSubscriptions::for_user(user);
         let (selection, _) = watch::channel(None);
         let shared = Arc::new(SessionShared {
@@ -641,6 +647,24 @@ impl SessionServiceImpl {
                     // Taking a frame can wait for room to answer it, which a client that reads
                     // nothing never makes. Neither the node stopping nor the session ending waits
                     // on that client.
+                    #[cfg(feature = "testing")]
+                    let request_id = frame.request_id();
+                    let accepting = accept_frame(&shared, &ordered_tx, frame);
+                    #[cfg(feature = "testing")]
+                    let accepting = async {
+                        match &acceptance_observer {
+                            Some(observer) => {
+                                observer
+                                    .observe(
+                                        request_id,
+                                        || shared.delivery.outbound.control_has_no_room(),
+                                        accepting,
+                                    )
+                                    .await
+                            }
+                            None => accepting.await,
+                        }
+                    };
                     let accepted = nervix_primitives::select! {
                         biased;
                         _ = shared.ended() => break,
@@ -649,7 +673,7 @@ impl SessionServiceImpl {
                             node_stopping = true;
                             break;
                         }
-                        accepted = accept_frame(&shared, &ordered_tx, frame) => accepted,
+                        accepted = accepting => accepted,
                     };
                     if !accepted {
                         break;
