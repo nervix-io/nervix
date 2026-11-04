@@ -1077,7 +1077,7 @@ class Run:
 
     def connect(self):
         try:
-            self.session = nx.Session.connect(
+            self.session = nx.Session(
                 self.settings.server, domain=self.settings.domain,
                 username=self.settings.username, password=self.settings.password)
         except nx.ClientError as failure:

@@ -32,6 +32,20 @@ class CoverageStartupTests(unittest.TestCase):
         coverage.process_startup.assert_not_called()
 
 
+class ConnectionTests(unittest.TestCase):
+    def test_connect_constructs_the_native_session_with_its_domain_and_credentials(self):
+        settings = SimpleNamespace(server="http://127.0.0.1:47391", domain="simulation",
+                                   username="sensor", password="credential")
+        run = driver.Run(settings)
+        session = object()
+        with patch.object(driver.nx, "Session", autospec=True, return_value=session) as constructor:
+            run.connect()
+        constructor.assert_called_once_with(
+            settings.server, domain=settings.domain,
+            username=settings.username, password=settings.password)
+        self.assertIs(run.session, session)
+
+
 class EndpointOpenTests(unittest.TestCase):
     def open_sequence(self, refusals, intent, times):
         def attempt():
