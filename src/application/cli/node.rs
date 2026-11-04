@@ -22,8 +22,10 @@ use nervix_models::{ClusterNodeName, NodeEndpoint};
 
 use crate::{
     application::{
-        InternalTransportMode, authentication::DEFAULT_USER, error::AppError,
-        node_identity::NodeIdentity,
+        InternalTransportMode,
+        authentication::DEFAULT_USER,
+        error::AppError,
+        node_identity::{GrpcTransport, NodeIdentity},
     },
     cluster,
 };
@@ -39,6 +41,12 @@ pub struct NodeArgs {
     pub grpc_https_listen_addr: Option<String>,
     #[arg(long, env = "NERVIX_GRPC_HTTPS_ADVERTISE_ADDR")]
     pub grpc_https_advertise_addr: Option<String>,
+    /// PEM certificate chain presented to native session clients in HTTPS mode; loaded at startup.
+    #[arg(long, env = "NERVIX_GRPC_TLS_CERT")]
+    pub grpc_tls_cert: Option<PathBuf>,
+    /// Matching PEM private key for the native session certificate; loaded at startup.
+    #[arg(long, env = "NERVIX_GRPC_TLS_KEY")]
+    pub grpc_tls_key: Option<PathBuf>,
     #[arg(long, env = "NERVIX_HTTP_LISTEN_ADDR", default_value = "0.0.0.0:8080")]
     pub http_listen_addr: String,
     #[arg(long, env = "NERVIX_HTTPS_LISTEN_ADDR", default_value = "0.0.0.0:8443")]
@@ -156,6 +164,26 @@ impl TryFrom<NodeArgs> for NodeIdentity {
                 })
             })
             .transpose()?;
+        let grpc_transport = match args.grpc_mode {
+            InternalTransportMode::Http => {
+                if args.grpc_tls_cert.is_some() || args.grpc_tls_key.is_some() {
+                    return Err(Report::new(AppError::GrpcTlsRequiresHttps));
+                }
+                GrpcTransport::Http
+            }
+            InternalTransportMode::Https => GrpcTransport::Https {
+                listen_addr: grpc_https_listen_addr
+                    .ok_or_else(|| Report::new(AppError::MissingGrpcHttpsListenAddress))?,
+                advertise_addr: grpc_https_advertise_addr
+                    .ok_or_else(|| Report::new(AppError::MissingGrpcHttpsAdvertiseAddress))?,
+                certificate: args
+                    .grpc_tls_cert
+                    .ok_or_else(|| Report::new(AppError::MissingGrpcTlsCertificate))?,
+                private_key: args
+                    .grpc_tls_key
+                    .ok_or_else(|| Report::new(AppError::MissingGrpcTlsPrivateKey))?,
+            },
+        };
         let http_listen_addr = args
             .http_listen_addr
             .parse::<SocketAddr>()
@@ -222,9 +250,7 @@ impl TryFrom<NodeArgs> for NodeIdentity {
         };
         Ok(Self::builder()
             .addr(addr)
-            .grpc_mode(args.grpc_mode)
-            .grpc_https_listen_addr(grpc_https_listen_addr)
-            .grpc_https_advertise_addr(grpc_https_advertise_addr)
+            .grpc_transport(grpc_transport)
             .http_listen_addr(http_listen_addr)
             .https_listen_addr(https_listen_addr)
             .observability_listen_addr(observability_listen_addr)

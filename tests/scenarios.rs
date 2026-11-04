@@ -244,6 +244,7 @@ mod rabbitmq_envelope;
 mod rabbitmq_properties;
 mod restarted_voter;
 mod session_protocol;
+mod session_tls;
 mod standalone_transaction;
 mod subscription_restoration;
 mod web_console_connections;

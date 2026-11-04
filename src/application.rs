@@ -213,7 +213,7 @@ pub use command_execution::{
 };
 use join_supervision::{JoinOutcome, JoinStanding, JoinSupervision};
 use nervix_primitives::sync::Arc;
-pub use node_identity::NodeIdentity;
+pub use node_identity::{GrpcTransport, NodeIdentity};
 pub use node_settings::NodeSettings;
 use preflight::{Preflight, PreflightOutcome};
 pub use scheduling::{ReplicaCount, SchedulingSettings};
@@ -341,13 +341,10 @@ impl Application {
         tracing: Option<&TracingGuard>,
     ) -> Result<(), Report<AppError>> {
         let addr = self.identity.addr;
-        let grpc_mode = self.identity.grpc_mode;
-        let grpc_listen_addr = match grpc_mode {
-            InternalTransportMode::Http => addr,
-            InternalTransportMode::Https => self
-                .identity
-                .grpc_https_listen_addr
-                .ok_or_else(|| Report::new(AppError::MissingGrpcHttpsListenAddress))?,
+        let grpc_mode = self.identity.grpc_transport.mode();
+        let grpc_listen_addr = match &self.identity.grpc_transport {
+            GrpcTransport::Http => addr,
+            GrpcTransport::Https { listen_addr, .. } => *listen_addr,
         };
         let http_listen_addr = self.identity.http_listen_addr;
         let https_listen_addr = self.identity.https_listen_addr;
@@ -364,13 +361,9 @@ impl Application {
         let drain_timeout = self.settings.shutdown.drain_timeout();
         let cluster_id = self.identity.cluster_id.clone();
         let node_id = self.identity.node_id.clone();
-        let grpc_advertise_addr = match grpc_mode {
-            InternalTransportMode::Http => self.identity.grpc_advertise_addr.clone(),
-            InternalTransportMode::Https => self
-                .identity
-                .grpc_https_advertise_addr
-                .clone()
-                .ok_or_else(|| Report::new(AppError::MissingGrpcHttpsAdvertiseAddress))?,
+        let grpc_advertise_addr = match &self.identity.grpc_transport {
+            GrpcTransport::Http => self.identity.grpc_advertise_addr.clone(),
+            GrpcTransport::Https { advertise_addr, .. } => advertise_addr.clone(),
         };
         let grpc_advertise_url = NodeServiceUrl::new(grpc_mode.scheme(), &grpc_advertise_addr)
             .change_context(AppError::BuildClientAdvertiseUrl)?;
@@ -427,17 +420,25 @@ impl Application {
         let shutdown_coordinator = self.shutdown.clone();
         let shutdown = shutdown_coordinator.drain_support_token();
         let fault_injection = self.fault_injection.clone();
-        let grpc_tls_server_config = if grpc_mode.is_tls() {
-            let config = match load_grpc_tls_server_config().await {
-                Ok(config) => config,
-                Err(error) => {
-                    error!(?error, "failed to build grpc tls server config");
-                    return Err(error);
-                }
-            };
-            Some(config)
-        } else {
-            None
+        let grpc_tls_server_config = match &self.identity.grpc_transport {
+            GrpcTransport::Http => None,
+            GrpcTransport::Https {
+                certificate,
+                private_key,
+                ..
+            } => {
+                let config = match load_grpc_tls_server_config(certificate, private_key).await {
+                    Ok(config) => config,
+                    Err(error) => {
+                        error!(
+                            error = format!("{error:#}"),
+                            "failed to build grpc tls server config"
+                        );
+                        return Err(error);
+                    }
+                };
+                Some(config)
+            }
         };
         let web_console_tls_server_config = match (
             &self.identity.web_console_tls_cert,
@@ -1039,15 +1040,11 @@ impl Application {
         let grpc_connections_cut = shutdown_coordinator.connections_cut_token();
         let api_server = async move {
             let mut builder = Server::builder();
-            builder = if grpc_mode.is_tls() {
-                builder
-                    .tls_config(
-                        grpc_tls_server_config.ok_or_else(|| Report::new(AppError::LoadGrpcTls))?,
-                    )
-                    .change_context(AppError::LoadGrpcTls)?
-            } else {
-                builder
-            };
+            if let Some(config) = grpc_tls_server_config {
+                builder = builder
+                    .tls_config(config)
+                    .change_context(AppError::LoadGrpcTls)?;
+            }
             // Closing admission stops this listener accepting and ends every call it carries, a
             // session's after its ending. The connections it accepted are cut only once
             // shutdown's grace period has passed, so a client that reads nothing holds the
