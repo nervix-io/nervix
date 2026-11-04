@@ -452,7 +452,8 @@ current connection, retry and deadline limits.
 - An `MQTT TOPIC` emitter writes its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, `NO ACK` only at
   `QOS 0` and `ACK` only at `QOS 1` or `QOS 2`. `SET MODE` stays within the written quality of
   service, and `SET TO` changes it. Read `Emitters` → `MQTT` for what each level completes on and
-  for the persistent session a new client cannot take over.
+  for the persistent session a new client cannot take over. Use that section for `RETAIN`, typed
+  publish `PROPERTIES` and ordered, repeated user properties written with `write_header`.
 - An `MQTT CLIENT`'s `addr` is `mqtt://` or `mqtts://`, a host and a port, with no credentials,
   path or query: write `username` and `password` (redacted on inspection), `keep_alive_ms` in
   whole seconds and the source admission bound `max_packet_size` as their own keys, checked against

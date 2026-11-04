@@ -1149,15 +1149,21 @@ with `SESSION PERSISTENT` and `QOS 1` or `QOS 2`, the session a broker keeps mes
 redelivers after a lost connection; `BUFFER` and `DROP` stay connected under any session. The
 ingestor's headers are a publish's MQTT 5 user properties, `ordered_repeats` exact names, and its
 metadata is the delivered packet's topic, retain flag, quality of service and duplicate flag, then
-its content type, response topic, correlation data and message expiry; the emitter carries no
-transport headers. Every emitter statement writes `QOS 0`, `QOS 1` or `QOS 2`, which has no default,
+its content type, response topic, correlation data and message expiry. The emitter writes ordered,
+repeated MQTT 5 user properties through its text header model. Every emitter statement writes
+`QOS 0`, `QOS 1` or `QOS 2`, which has no default,
 and its modes declare what each can complete: `NO ACK` only with `QOS 0`, which nothing answers, and
 `ACK` with either window only with `QOS 1` or `QOS 2`, which a broker answers with `PUBACK` or
 `PUBCOMP`. The start plan holds the two as one value, so the connector receives no pairing the
 declaration refuses. The emitter connects a clean session at `QOS 0` and a persistent one otherwise,
 and declares that as a driver limit rather than an option, together with the session a new client
-cannot resume. It takes codec payloads, no envelope clause and optional batching up to the Maximum
-Packet Size each broker declares when the client connects. The unpooled client's keys are
+cannot resume. Its envelope declares `RETAIN` and the exact `PROPERTIES` types `content_type STRING`,
+`message_expiry U32` (seconds), `response_topic STRING` and `correlation_data BYTES`. The connector
+validates MQTT string/binary field bounds and the response topic before handing a record to its
+driver. Packet measurement includes the complete property section and its variable-length prefix;
+the retained payload keeps the same envelope for every retry. It takes codec payloads and optional
+batching up to the Maximum Packet Size each broker declares when the client connects. The unpooled
+client's keys are
 all Nervix-owned: `addr` names the broker by `mqtt` or `mqtts`, a host and a nonzero port, and
 nothing else, since a connection reads no credentials, path, query or fragment from it;
 `client_id`; and the TLS files, of which `tls_ca_file` is required exactly with `mqtts` and the
@@ -1351,7 +1357,7 @@ the `write_header` calls of one record become on the published message.
 | --- | --- | --- | --- |
 | `last_wins`, exact names | `SQS QUEUE` | `PULSAR TOPIC` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | `last_wins`, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary | None | `SQS QUEUE` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included; a value's exact type decides the type it travels as |
-| `ordered_repeats`, exact names | `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC` | `KAFKA TOPIC` | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| `ordered_repeats`, exact names | `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC` | `KAFKA TOPIC`, `MQTT TOPIC` | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `repeats_by_name`, exact names | `NATS SUBJECT` | `NATS SUBJECT` | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | `repeats_by_name`, lowercase names | `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT` | None | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | `sorted_by_name`, exact names | `RABBITMQ QUEUE` | `RABBITMQ QUEUE`, `RABBITMQ EXCHANGE` | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |

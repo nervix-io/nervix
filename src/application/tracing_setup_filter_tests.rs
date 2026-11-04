@@ -18,7 +18,7 @@ use tracing::{
 };
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt as _, registry::LookupSpan};
 
-use super::{DEFAULT_TRACE_FILTER, LogFilter};
+use super::{DEFAULT_TRACE_FILTER, LogFilter, MqttWarningPrefix};
 use crate::captured_logs::CapturedLogs;
 
 /// What Lapin's returned-message event carries in place of a returned record.
@@ -70,6 +70,73 @@ fn node_logs_its_startup() {
 
 fn node_debugs_a_batch() {
     debug!(target: "nervix_server::runtime", "batch detail");
+}
+
+/// The pinned MQTT driver's warning carries the full refused request inside its message.
+fn mqtt_logs_a_refused_retained_publication() {
+    let request = "confidential-retained-payload-and-user-properties";
+    warn!(target: "rumqttc::eventloop",
+        "rejecting retained publish because the broker does not support retained messages: {request:?}");
+}
+
+fn mqtt_logs_a_connection_warning() {
+    warn!(target: "rumqttc::eventloop", "MQTT connection closed before CONNACK");
+}
+
+#[test]
+fn mqtt_connection_warnings_remain_visible_without_refused_retained_payloads() {
+    fn warnings() {
+        let span = info_span!(target: "rumqttc::eventloop", "mqtt_publish", channel = 7_u64);
+        let _entered = span.enter();
+        mqtt_logs_a_refused_retained_publication();
+        mqtt_logs_a_connection_warning();
+    }
+    for directives in [
+        "info",
+        "trace",
+        "error,rumqttc::eventloop=warn",
+        "error,[mqtt_publish]=trace",
+        "error,rumqttc::eventloop[mqtt_publish{channel=7}]=trace",
+    ] {
+        let unruled = recorded(filter_alone(directives), warnings);
+        assert!(unruled.contains("confidential-retained-payload-and-user-properties"));
+        let ruled = recorded(operator_filter(directives).into_subscriber(), warnings);
+        assert!(!ruled.contains("confidential-retained-payload-and-user-properties"));
+        assert!(ruled.contains("MQTT connection closed before CONNACK"));
+    }
+}
+
+#[test]
+fn the_mqtt_prefix_comparison_stops_at_a_match_or_the_first_difference() {
+    use std::fmt::Write as _;
+
+    let mut prefix = MqttWarningPrefix::Matching(b"fixed prefix");
+    assert!(prefix.write_str("fixed ").is_ok());
+    assert!(!prefix.matched());
+    assert!(prefix.write_str("prefix").is_err());
+    assert!(prefix.matched());
+    assert!(prefix.write_str("request").is_err());
+
+    let mut prefix = MqttWarningPrefix::Matching(b"fixed prefix");
+    assert!(prefix.write_str("fixed ").is_ok());
+    assert!(prefix.write_str("other warning").is_err());
+    assert!(matches!(prefix, MqttWarningPrefix::Different));
+}
+
+#[test]
+fn the_refused_mqtt_request_is_never_formatted_by_the_payload_filter() {
+    struct ConfidentialRequest;
+    impl std::fmt::Debug for ConfidentialRequest {
+        fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            panic!("the payload filter must decide from the fixed prefix before the request");
+        }
+    }
+    let logs = recorded(operator_filter("trace").into_subscriber(), || {
+        let request = ConfidentialRequest;
+        warn!(target: "rumqttc::eventloop",
+            "rejecting retained publish because the broker does not support retained messages: {request:?}");
+    });
+    assert!(logs.is_empty());
 }
 
 /// Everything these tests look for, so every filter sees every callsite.

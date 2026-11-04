@@ -93,6 +93,17 @@ retains both sets of four payloads, one- and three-node coverage, the source's b
 deadlines, and the forty-second payload assertions. The pause is scenario-local and adds no suite
 serialization or readiness sleep.
 
+The MQTT publication-property outlines observe complete MQTT 5 packets through a real broker on
+one and three nodes. A bounded subscription queue preserves property values and repeated user
+properties in delivery order; replacing its clean-session subscriber verifies retained delivery.
+A scenario-local forwarder captures complete outbound publications and either withholds the first
+one to exercise a retry or advertises a 1,024-byte CONNACK maximum. A warm-up publication proves
+that the emitter consumed that CONNACK before the oversized-property record is sent. The error
+relay and the next captured valid publication distinguish rejection before sending from a broker
+drop. Subscription readiness and captured-packet waits use the common broker observation budget;
+they introduce no product deadline. Teardown cancels the forwarder's listener and connections,
+and replacing or dropping an observer aborts its subscription task.
+
 The orphaned-transaction expiry scenario holds finished-transaction cleanup for its domain on each
 node before it begins the transaction. Expiry and the leadership transfer proceed normally. The
 successor reaches its cleanup barrier only after it observes the replicated terminal transaction;

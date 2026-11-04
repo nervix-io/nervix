@@ -36,6 +36,13 @@ separately from the VM's typed compile cause. The registry associates that cause
 with the lowered mapping before reporting the refusal; a null-only mapping is refused at admission.
 [Errors And Diagnostics](errors-and-diagnostics.md#registry-validation-and-planning) owns the report.
 
+MQTT publish properties cross two validation boundaries. The vocabulary declaration and expression
+compiler establish each property's exact non-null scalar type. The connector then checks the
+evaluated MQTT string and binary field bounds and constructs a validated response-topic value
+before driver admission. An absent property stays absent; an empty correlation value and a zero
+expiry interval remain present values. The retained payload owns the evaluated envelope, so retry
+does not evaluate a new property value.
+
 The MongoDB engine resolves a required nonempty database from its explicit key or the URL path
 into one private configuration value. It consumes the driver's optional default rather than
 carrying a second database identity. Collection names are validated vocabulary values that retain
