@@ -66,6 +66,10 @@ the downloaded artifact:
 | `coverage-typed-ratchet-python` | Architecture source/compiler rule runners and their qualification, the native collector, the Bolero runner and its coverage export, and the console build script |
 | `coverage-primitive-boundary` | Primitive provenance and thread-owner validation |
 
+The collector's real toolchain fixtures and Deloxide's real process supervision tests run in
+separate Python interpreters, so each supervisor retains ownership of its own children.
+`coverage-model-runner` appends both executions into one branch coverage file before exporting it.
+
 Only reports the artifact actually exports are inputs; running a focused coverage recipe does not
 register it in CI by itself. Focused Backup, Visual Create, client and runtime recipes export local
 ordinary reports for `coverage-patch`, using the same normalization as the workspace merge.
@@ -73,6 +77,13 @@ ordinary reports for `coverage-patch`, using the same normalization as the works
 ordinary profiles, with the browser build and configured ORT environment. It exports a local
 focused report, rather than a CI merge input. Start a new source generation with
 `just coverage-clean-workspace`; owner collections and this focused recipe can then append to it.
+The focused `coverage-scenarios` and `coverage-scenarios-append` recipes preserve each scenario
+argument, including spaces, regular-expression pipes, literal shell characters and empty values.
+Quote a name filter or input glob as one argument; pass separate options as separate arguments.
+They retain the instrumented CLI, report tool, paced driver, shared binding, formatter and ORT
+environment. The first starts a fresh measurement; the append variant retains current profiles
+with `--no-clean`. `just test-scenario-arguments` checks these boundaries through the actual recipe
+bodies with recording builders and Cargo, without compiling or starting services.
 Checks [outside collected counters](#verification-outside-collected-counters) retain their own
 verdicts, including Deloxide supervision and compiler-cache qualification.
 

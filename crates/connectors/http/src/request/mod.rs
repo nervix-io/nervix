@@ -58,6 +58,7 @@ pub struct HttpRequestIngestorPlan {
     pub dns: DnsResolver,
     pub method: String,
     pub headers: Vec<HttpRequestHeader>,
+    pub header_limits: nervix_models::HttpHeaderLimits,
     pub max_body_size: PayloadSizeLimit,
 }
 
@@ -110,7 +111,7 @@ impl IngestorConnector for HttpRequestIngestor {
                 Report::new(source).change_context(HttpRequestIngestorError::InvalidMethod)
             })
             .change_context(IngestorError::Open { connector: HTTP })?;
-        let headers = Self::request_headers(&plan.headers, &plan.config)
+        let headers = Self::request_headers(&plan.headers, &plan.config, plan.header_limits)
             .change_context(IngestorError::Open { connector: HTTP })?;
         let transport = ClientTransport::declared(&plan.config, "HTTP")
             .change_context(IngestorError::Open { connector: HTTP })?;
@@ -198,24 +199,39 @@ impl HttpRequestIngestor {
     fn request_headers(
         declared: &[HttpRequestHeader],
         config: &[ClientConfigEntry],
+        limits: nervix_models::HttpHeaderLimits,
     ) -> Result<HeaderMap, Report<HttpRequestIngestorError>> {
         let mut headers = HeaderMap::new();
+        let mut checked = nervix_models::HttpApplicationHeaders::with_limits(limits);
         for header in declared {
             let name = HeaderName::from_bytes(header.name.as_bytes()).map_err(|source| {
                 Report::new(source).change_context(HttpRequestIngestorError::InvalidHeader)
             })?;
-            let value = match &header.value {
-                HttpRequestHeaderValue::Literal(value) => Self::header_value(value)?,
-                HttpRequestHeaderValue::ClientSecret(key) => {
-                    let secret = client_config_value(config, key, "HTTP")
-                        .change_context(HttpRequestIngestorError::InvalidHeader)?;
-                    let mut value = Self::header_value(&secret)?;
-                    value.set_sensitive(true);
-                    value
-                }
+            let text = match &header.value {
+                HttpRequestHeaderValue::Literal(value) => Cow::Borrowed(value.as_str()),
+                HttpRequestHeaderValue::ClientSecret(key) => Cow::Owned(
+                    client_config_value(config, key, "HTTP")
+                        .change_context(HttpRequestIngestorError::InvalidHeader)?,
+                ),
             };
+            checked
+                .insert(
+                    nervix_models::HttpHeaderName::parse(&header.name)
+                        .change_context(HttpRequestIngestorError::InvalidHeader)?,
+                    nervix_models::HttpHeaderValue::parse(&text)
+                        .change_context(HttpRequestIngestorError::InvalidHeader)?,
+                )
+                .change_context(HttpRequestIngestorError::InvalidHeader)?;
+            let mut value = Self::header_value(&text)?;
+            value.set_sensitive(matches!(
+                header.value,
+                HttpRequestHeaderValue::ClientSecret(_)
+            ));
             headers.insert(name, value);
         }
+        checked
+            .validate_total()
+            .change_context(HttpRequestIngestorError::InvalidHeader)?;
         Ok(headers)
     }
 
@@ -557,6 +573,7 @@ mod tests {
                 name: "x-tenant".to_string(),
                 value: HttpRequestHeaderValue::Literal("north".to_string()),
             }],
+            header_limits: nervix_models::HttpHeaderLimits::default(),
             max_body_size: "1KiB".parse().expect("a byte size"),
         };
         HttpRequestIngestor::open(&plan, 0)
@@ -639,6 +656,7 @@ mod tests {
                 },
             ],
             &config,
+            nervix_models::HttpHeaderLimits::default(),
         )
         .expect("both fields are valid");
 
@@ -647,6 +665,50 @@ mod tests {
         assert_eq!(headers["authorization"], "Bearer fixture-token");
         assert!(headers["authorization"].is_sensitive());
         assert!(!format!("{headers:?}").contains("fixture-token"));
+    }
+
+    /// The host's captured caps apply to complete fields after resolving client-secret values.
+    #[test]
+    fn resolved_polling_headers_obey_the_captured_parameter_caps() {
+        use nervix_models::{
+            ClusterParameterChange, ClusterParameterUpdates, ClusterParameterValues,
+        };
+
+        let value = "unpublished-credential";
+        let config = vec![ClientConfigEntry {
+            key: "secret.payload".to_string(),
+            value: value.to_string(),
+        }];
+        let bytes = u64::try_from("x-key".len() + value.len()).expect("fixture fits");
+        let policy = |maximum| {
+            let changes = ClusterParameterUpdates::try_from(vec![
+                ClusterParameterChange::HttpHeaderBytes(maximum),
+                ClusterParameterChange::HttpHeaderFields(1),
+            ])
+            .expect("distinct settings");
+            ClusterParameterValues::default()
+                .changed(&changes)
+                .expect("positive limits")
+                .http_header_limits()
+        };
+        for source in [
+            HttpRequestHeaderValue::Literal(value.to_string()),
+            HttpRequestHeaderValue::ClientSecret("secret.payload".to_string()),
+        ] {
+            let declared = [HttpRequestHeader {
+                name: "x-key".to_string(),
+                value: source,
+            }];
+            HttpRequestIngestor::request_headers(&declared, &config, policy(bytes))
+                .expect("the complete field fits exactly");
+            let error = HttpRequestIngestor::request_headers(&declared, &config, policy(bytes - 1))
+                .expect_err("the resolved value exceeds the captured byte cap");
+            assert!(matches!(
+                error.current_context(),
+                HttpRequestIngestorError::InvalidHeader
+            ));
+            assert!(!format!("{error:?}").contains(value));
+        }
     }
 
     /// `CREATE` admits a UTF-8 header value, literal or secret, so open sends its bytes unchanged.
@@ -668,6 +730,7 @@ mod tests {
                 },
             ],
             &config,
+            nervix_models::HttpHeaderLimits::default(),
         )
         .expect("the registry admits both values");
 
@@ -687,8 +750,12 @@ mod tests {
             name: "authorization".to_string(),
             value: HttpRequestHeaderValue::ClientSecret("secret.api_token".to_string()),
         }];
-        let error = HttpRequestIngestor::request_headers(&declared, &config)
-            .expect_err("a line break cannot be a header value");
+        let error = HttpRequestIngestor::request_headers(
+            &declared,
+            &config,
+            nervix_models::HttpHeaderLimits::default(),
+        )
+        .expect_err("a line break cannot be a header value");
         assert!(matches!(
             error.current_context(),
             HttpRequestIngestorError::InvalidHeader
@@ -704,8 +771,12 @@ mod tests {
             name: "authorization".to_string(),
             value: HttpRequestHeaderValue::ClientSecret("secret.api_token".to_string()),
         }];
-        let error = HttpRequestIngestor::request_headers(&declared, &[])
-            .expect_err("the configuration holds no such key");
+        let error = HttpRequestIngestor::request_headers(
+            &declared,
+            &[],
+            nervix_models::HttpHeaderLimits::default(),
+        )
+        .expect_err("the configuration holds no such key");
         assert!(matches!(
             error.current_context(),
             HttpRequestIngestorError::InvalidHeader

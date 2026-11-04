@@ -24,25 +24,24 @@ pub struct SchedulingArgs {
     #[arg(
         long = ReplicaCount::NAME,
         env = "NERVIX_REPLICA_COUNT",
-        default_value_t = ReplicaCount::default_value(&()),
-        help = "How many nodes besides its owner hold a replica of each piece of runtime state"
+        help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::ReplicaCount, "How many nodes besides its owner hold a replica of each piece of runtime state")
     )]
-    pub replica_count: usize,
+    pub replica_count: Option<usize>,
 }
 
 impl SchedulingArgs {
     pub(super) fn settings(&self) -> SchedulingSettings {
-        SchedulingSettings::resolve(Some(self.replica_count))
-            .assured("the scheduling settings declare no validation")
+        SchedulingSettings::resolve(self.replica_count)
+            .assured("the scheduling settings have valid bounds")
     }
 
     pub(super) fn from_settings(settings: &SchedulingSettings) -> Self {
         Self {
-            replica_count: settings.replica_count(),
+            replica_count: Some(settings.replica_count()),
         }
     }
 
     pub(super) fn render(&self, command_line: &mut CommandLine) {
-        command_line.option(ReplicaCount::NAME, self.replica_count);
+        command_line.optional(ReplicaCount::NAME, self.replica_count);
     }
 }

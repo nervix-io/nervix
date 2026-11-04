@@ -235,6 +235,10 @@ pub struct CommandExecutionTransactionRequest {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum CommandExecutionEffect {
+    AlterCluster {
+        changes: nervix_models::ClusterParameterUpdates,
+        applied: Option<Box<nervix_models::ClusterParameterRecord>>,
+    },
     CreateDomain {
         if_not_exists: bool,
         existed_at_admission: bool,
@@ -463,6 +467,7 @@ impl CommandExecution {
             Some(CommandExecutionEffect::TransactionRequest(request)) => Some(request),
             Some(
                 CommandExecutionEffect::CreateDomain { .. }
+                | CommandExecutionEffect::AlterCluster { .. }
                 | CommandExecutionEffect::Transaction { .. }
                 | CommandExecutionEffect::Statement { .. }
                 | CommandExecutionEffect::CreateUser { .. }
@@ -479,6 +484,7 @@ impl CommandExecution {
             Some(CommandExecutionEffect::Restore(restore)) => Some(restore),
             Some(
                 CommandExecutionEffect::CreateDomain { .. }
+                | CommandExecutionEffect::AlterCluster { .. }
                 | CommandExecutionEffect::Transaction { .. }
                 | CommandExecutionEffect::TransactionRequest(_)
                 | CommandExecutionEffect::Statement { .. }
@@ -510,6 +516,7 @@ impl CommandExecution {
             CommandExecutionState::Applying { effect, .. } => match effect.as_ref() {
                 CommandExecutionEffect::TransactionRequest(request) => Some(&request.target),
                 CommandExecutionEffect::CreateDomain { .. }
+                | CommandExecutionEffect::AlterCluster { .. }
                 | CommandExecutionEffect::Transaction { .. }
                 | CommandExecutionEffect::Statement { .. }
                 | CommandExecutionEffect::CreateUser { .. }
@@ -530,6 +537,7 @@ impl CommandExecution {
             CommandExecutionState::Applying { effect, .. } => match effect.as_ref() {
                 CommandExecutionEffect::CreateUser { password_hash, .. } => Some(password_hash),
                 CommandExecutionEffect::CreateDomain { .. }
+                | CommandExecutionEffect::AlterCluster { .. }
                 | CommandExecutionEffect::Transaction { .. }
                 | CommandExecutionEffect::TransactionRequest(_)
                 | CommandExecutionEffect::Statement { .. }
@@ -626,6 +634,7 @@ impl CommandExecution {
                 }
             }
             CommandExecutionEffect::CreateDomain { .. }
+            | CommandExecutionEffect::AlterCluster { .. }
             | CommandExecutionEffect::Transaction { .. }
             | CommandExecutionEffect::Statement { .. }
             | CommandExecutionEffect::DropNode { .. }

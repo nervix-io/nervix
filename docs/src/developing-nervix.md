@@ -362,8 +362,9 @@ just test-scenarios --input tests/features/tools/cli_session.feature \
 such as `'tests/features/runtime/{first,second}.feature'` so the scenario runner expands it.
 Pass each option and its value separately; a quoted string containing several options stays one
 argument. `test-scenarios-reuse` accepts the same selections and keeps dependency containers for
-the next run. `just test-scenario-arguments` checks both recipes without compiling Rust or
-starting services.
+the next run. `coverage-scenarios` and `coverage-scenarios-append` take an LCOV output path before
+the same scenario arguments and preserve those boundaries too. `just test-scenario-arguments`
+checks all four recipes without compiling Rust or starting services.
 
 For representation properties and sanitizer fuzzing, see
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md). The focused entry points are
