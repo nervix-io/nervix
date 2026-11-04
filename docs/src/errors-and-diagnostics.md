@@ -1437,11 +1437,18 @@ message names only the key, and a file it cannot read as `InvalidKey` above the 
 its value; shared HTTP name, value and limit causes remain beneath it. Planning retains that typed
 cause if a ingestor cannot produce its validated header collection. Rendered client values are
 validated again by the connector before opening transport.
+Canonical upgrade fields that exceed committed HTTP caps produce the registry's typed
+`ClusterParameterLimit` at model admission or parameter transition, naming the parameter and
+ingestor. The subprotocol offer contributes its canonical field bytes to that check.
 `HttpRequestHeadersError` is the frame beneath the registry's `InvalidHttpRequestHeaders` context,
 which names only the ingestor and its domain. It names the offending header of a polling
 ingestor's `HEADERS`, and the client key of a `CLIENT SECRET` it cannot read, with the client where
 the key is undeclared. It never quotes the key's value, and neither does the connector's
 `InvalidHeader` when a rendered secret cannot be a header at open.
+A polling header whose known name and literal or resolved client-secret value exceed committed
+policy produces `ClusterParameterLimit` at admission or parameter transition. Complete rendered
+headers are checked against the host-captured caps at connector open; an over-limit value keeps
+`InvalidHeader` and its typed HTTP limit cause without exposing the secret.
 A polling ingestor's `METHOD` that HTTP cannot send is refused at `CREATE` and `ALTER` in the same
 shape: `HttpRequestFieldError` is the frame beneath the registry's `InvalidHttpRequestMethod`
 context, which names only the ingestor and its domain, as in `ingestor 'polled' in domain 'shop'
@@ -1792,8 +1799,10 @@ A node that is refused as it joins stops with `AppError::JoinRefused` above a `J
 `Prerequisite` holds the `JoinRefusal` that names the peer and the `PrerequisiteMismatch` from this
 node's side, and `ClockSkew` names the peer whose clock was judged, the skew one probe proved and
 this node's tolerance. The refusal is logged at `error` as
-`this node was refused at join and stops` when the node requests its own stop, and returned once
-its shutdown phases have run, so the exit renders the whole chain.
+`this node was refused at join and stops` when the node requests its own stop. Before live policy
+discovery completes, startup cleans up the subsystems it started and returns that typed refusal.
+After startup, it returns the refusal once the shutdown phases have run. The exit renders the
+whole chain in either case.
 
 Memory-pressure watermarks are validated the same way. A watermark set without its pair, a low
 watermark that is not below the high one, or a zero check interval while the watermarks are set is
@@ -1812,6 +1821,34 @@ an execution revision as `AppError::PlanStartupRuntime`, and a revision the runt
 as `AppError::ApplyStartupRuntime`; the last two name the domain. Each keeps the registry's or the
 runtime's report beneath it, so the node's exit renders the whole chain rather than the top context
 of the failure.
+
+## Cluster Parameter Refusals
+
+Parameter definitions own positive duration and numeric range errors, and structured assignments
+own empty or duplicate-key refusals. The registry names the exact parameter, domain/model or
+resource, actual requirement and candidate maximum when a lowered cap cannot hold committed
+state. Application preflight reports `SchedulePlanningStale::Parameters` when the captured parameter
+record differs, and consensus reports a typed parameter-input conflict before publication. Both
+compare the complete record and revision, after the existing domain, resource, schedule and topology
+checks. An identified transaction preview includes that record in its fingerprint; a parameter
+publication therefore produces the ordinary `PreviewStale` refusal with the transaction still open
+and no effects. Bootstrap seed refusal names the parameter and `ALTER CLUSTER SET`. A failed seed
+append is logged with its complete consensus report, including the typed causes beneath it.
+HTTP polling's literal header requirements use the same model-limit refusal as emitter headers;
+the header-count definition also refuses values beyond the native request map's capacity.
+
+A live publication that disagrees with an equal applied revision is a typed installation failure,
+not a default or retry interpretation. Invalid current consensus metadata preserves its decoder
+cause beneath a typed node-state recreation error.
+
+`ClusterParameterAdmissionError` distinguishes awaiting a live publication, awaiting local catch-up,
+and completing initialization. These are ordinary request refusals before policy-dependent work
+begins. A durable command projects this temporary absence into
+`OutcomeUnknown(NotYetAuthoritative)` because its reference may already name a committed execution;
+a read-only request can be refused definitively. An inconsistent equal-revision publication
+preserves its typed publication error. Public
+cluster inspection remains available while these refusals apply; transfer boundaries project the
+refusal into their existing installation, staging or read failure with its full message.
 
 ## Runtime Message Errors
 
@@ -2941,12 +2978,22 @@ subscriber's maximum level stays the filter's, and an event the filter refuses c
 without the rule. The scenario run's subscriber, which writes
 `tests/logs/scenarios.log`, applies the same rule to its own default.
 
-The node drops one such event: Lapin's report of a message its broker returned. Lapin logs every
+The node drops Lapin's report of a message its broker returned. Lapin logs every
 returned message at `warn` under the target `lapin::returned_messages`, with the whole message, its
 body and properties included. The node drops that target's `info`, `warn` and `error` events; its
 `debug` and `trace` events carry no message and stay with the filter. What the log carries about a
 return is the RabbitMQ emitter's own report of it, which names the broker's reply code and text and
-never the record. A change that makes another payload-bearing dependency event reachable, through a
+never the record.
+
+The MQTT driver also logs its complete outbound request at `warn` when the broker does not support
+retained publications. The node suppresses that specific warning under `rumqttc::eventloop` while
+retaining the target's connection warnings. The filter recognizes the warning's fixed message
+prefix without formatting the request that follows it; operator directives cannot re-enable it.
+The emitter reports the typed refusal through its record outcome. MQTT field-length and NUL
+refusals name the field and its bound without carrying the field's content; a response-topic
+refusal retains the vocabulary's typed cause.
+
+A change that makes another payload-bearing dependency event reachable, through a
 dependency upgrade or a driver option a connector starts to use, adds it to the dropped events in
 the same change. Several drivers log messages, requests or frames at `debug` and `trace`; an
 operator who selects those levels for a driver's target chooses to see them.

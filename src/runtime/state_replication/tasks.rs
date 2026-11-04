@@ -22,6 +22,34 @@ use nervix_primitives::sync::DropGuard;
 
 use super::*;
 
+/// The snapshot owners observe policy at their existing bounded replication-poll boundary. A
+/// changed interval starts a fresh period; unrelated policy changes never postpone a checkpoint.
+struct SnapshotCadence {
+    interval: Duration,
+    due: Instant,
+}
+
+impl SnapshotCadence {
+    fn new(interval: Duration, now: Instant) -> Self {
+        Self {
+            interval,
+            due: now + interval,
+        }
+    }
+
+    fn poll(&mut self, interval: Duration, now: Instant) -> bool {
+        if interval != self.interval {
+            self.interval = interval;
+            self.due = now + interval;
+        }
+        if now < self.due {
+            return false;
+        }
+        self.due = now + interval;
+        true
+    }
+}
+
 /// The tasks that write this node's checkpoints of runtime state: the snapshot task of each
 /// deduplicator and window branch, and the [`CheckpointWriter`] of the state each scheduled node's
 /// placement keeps on this node.
@@ -186,7 +214,7 @@ impl Runtime {
         state: KafkaOffsetStatePersistence,
     ) -> Option<CheckpointWriter> {
         let store = self.inner.state_store.as_ref()?.clone();
-        let snapshot_interval = self.inner.state_snapshot_interval;
+        let mut cadence = SnapshotCadence::new(self.state_snapshot_interval(), Instant::now());
         let runtime = self.clone();
         let domain = state.read().placement().domain.clone();
         Some(self.inner.state_snapshot_tasks.spawn_checkpoint_writer(
@@ -215,7 +243,8 @@ impl Runtime {
                     nervix_primitives::task::consume_budget().await;
                     nervix_primitives::select! {
                         _ = last_write.arrived() => break,
-                        _ = sleep(snapshot_interval) => {
+                        _ = sleep(runtime.inner.state_replication_poll_interval.min(runtime.state_snapshot_interval())) => {
+                            if !cadence.poll(runtime.state_snapshot_interval(), Instant::now()) { continue; }
                             match flush_latest_snapshot(&state, &store) {
                                 Ok(Some(lsm)) => {
                                     let offsets = state.read();
@@ -264,15 +293,12 @@ impl Runtime {
         snapshot_requests: mpsc::Sender<ProcessorSnapshotRequest>,
     ) -> Option<JoinHandle<()>> {
         let store = self.inner.state_store.as_ref()?.clone();
-        let snapshot_interval = self.inner.state_snapshot_interval;
-        let publication_interval =
-            snapshot_interval.min(self.inner.state_replication_poll_interval);
+        let mut cadence = SnapshotCadence::new(self.state_snapshot_interval(), Instant::now());
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         let runtime_stopping = self.inner.state_snapshot_tasks.stopping();
         let domain = state.placement().domain.clone();
         Some(self.inner.state_snapshot_tasks.spawn(&domain, async move {
-            let mut next_persist = Instant::now() + snapshot_interval;
             loop {
                 nervix_primitives::task::consume_budget().await;
                 nervix_primitives::select! {
@@ -295,7 +321,7 @@ impl Runtime {
                         runtime.persist_stopped_branch_state(&state, &store).await;
                         break;
                     }
-                    _ = sleep(publication_interval) => {
+                    _ = sleep(runtime.inner.state_replication_poll_interval.min(runtime.state_snapshot_interval())) => {
                         if let Err(error) = state.request_publication(&snapshot_requests).await {
                             warn!(
                                 kind = state.placement().kind.as_str(),
@@ -303,10 +329,9 @@ impl Runtime {
                                 "failed to publish branch state"
                             );
                         }
-                        if Instant::now() < next_persist {
+                        if !cadence.poll(runtime.state_snapshot_interval(), Instant::now()) {
                             continue;
                         }
-                        next_persist = Instant::now() + snapshot_interval;
                         match state
                             .persist_published(
                                 &store,
@@ -375,7 +400,7 @@ impl Runtime {
         state: MaterializedRelayStatePersistence,
     ) -> Option<CheckpointWriter> {
         let store = self.inner.state_store.as_ref()?.clone();
-        let snapshot_interval = self.inner.state_snapshot_interval;
+        let mut cadence = SnapshotCadence::new(self.state_snapshot_interval(), Instant::now());
         let runtime = self.clone();
         let executor = self.inner.executor.clone();
         let domain = state.read().placement().domain.clone();
@@ -418,7 +443,8 @@ impl Runtime {
                     nervix_primitives::task::consume_budget().await;
                     nervix_primitives::select! {
                         _ = last_write.arrived() => break,
-                        _ = sleep(snapshot_interval) => {
+                        _ = sleep(runtime.inner.state_replication_poll_interval.min(runtime.state_snapshot_interval())) => {
+                            if !cadence.poll(runtime.state_snapshot_interval(), Instant::now()) { continue; }
                             match flush_latest_snapshot(&state, &store).await {
                                 Ok(Some(lsm)) => {
                                     let materialized = state.read();
@@ -463,7 +489,7 @@ impl Runtime {
     ) -> Option<CheckpointWriter> {
         let store = self.inner.state_store.as_ref()?.clone();
         let metrics = self.inner.metrics.clone();
-        let snapshot_interval = self.inner.state_snapshot_interval;
+        let mut cadence = SnapshotCadence::new(self.state_snapshot_interval(), Instant::now());
         let runtime = self.clone();
         let domain = state.placement.domain.clone();
         Some(self.inner.state_snapshot_tasks.spawn_checkpoint_writer(
@@ -488,7 +514,8 @@ impl Runtime {
                     nervix_primitives::task::consume_budget().await;
                     nervix_primitives::select! {
                         _ = last_write.arrived() => break,
-                        _ = sleep(snapshot_interval) => {
+                        _ = sleep(runtime.inner.state_replication_poll_interval.min(runtime.state_snapshot_interval())) => {
+                            if !cadence.poll(runtime.state_snapshot_interval(), Instant::now()) { continue; }
                             match flush_latest_snapshot(&state, &metrics, &store) {
                                 Ok(Some(lsm)) => runtime.announce_checkpoint(
                                     &state.placement, state.replication(), lsm,
@@ -910,6 +937,7 @@ impl Runtime {
 
     /// Before cluster assignment, preserve an existing guest-state generation while installing
     /// the schema identities of the unplaced revision.
+    #[cfg(test)]
     pub(in crate::runtime) fn install_state_identities_from_unplaced_revision(
         &self,
         domain: &DomainName,
@@ -918,6 +946,7 @@ impl Runtime {
         self.install_state_identities_from_unplaced_nodes(domain, revision.nodes.values());
     }
 
+    #[cfg(test)]
     fn install_state_identities_from_unplaced_nodes<'a>(
         &self,
         domain: &DomainName,

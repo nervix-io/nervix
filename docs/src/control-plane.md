@@ -107,7 +107,8 @@ that domain as its selected domain. An unclean transport loss or leadership chan
 transaction available for attach. Binding is leader-local soft state, so a leader that does not
 hold it reports the session as detached; clients treat that as a routing condition, attach the
 transaction again, and replay the command. A session that its client closes cleanly, with no
-request in flight, reverts the open transaction bound to it on the leader.
+request in flight, reverts the open transaction bound to it on the leader; a revert the leader
+cannot record leaves the transaction open until it expires.
 
 Only the bound domain's replicated configuration effects may be queued:
 
@@ -891,3 +892,17 @@ one Raft operation. The leader rolls back an unpublished local registry candidat
 every node synchronizes its registry cache from the committed schedule across leadership changes.
 
 What it does not do is provide transactional semantics for the actual records flowing through the graph. Message batches and ACK state are data-plane hot-path state and are never persisted by the control plane.
+
+## Cluster Policy Administration
+
+`ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;`
+changes Nervix cluster policy without a selected domain. It runs outside domain transactions.
+Assignments are structured Plexus Models, validated together against the current parameter record,
+every committed model and completed resource metadata. Publication compares those captured inputs
+again in the replicated apply step. Domain plans carry their parameter record and obtain their
+Models from that same consensus snapshot, so a concurrent cap change invalidates their basis.
+
+The command's authoritative effect and applied parameter revision are recorded atomically.
+Recovery of an earlier execution observes that progress and never reapplies its values over a
+later command. Success waits for the existing runtime readiness barrier.
+[Node Settings](node-settings.md#committed-parameter-changes) owns the values and bootstrap contract.

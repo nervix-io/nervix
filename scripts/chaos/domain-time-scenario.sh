@@ -396,8 +396,9 @@ run_domain_time() {
 
     phase 'domain time: clock and window verdicts'
     local unavailability
-    unavailability="$(jq -r '.[0].Config.Env[] | select(startswith("NERVIX_NODE_UNAVAILABILITY_TIMEOUT=")) | sub("^[^=]*="; "")' \
-        "${case_dir}/node-1-inspect.json")"
+    capture_cluster_parameters "${case_dir}/cluster-parameters" "${node_names[@]}" \
+        || domain_time_fail product 'the nodes did not publish one installed cluster policy'
+    unavailability="$(jq -er '.committed["node-unavailability-timeout"]' "${case_dir}/cluster-parameters.json")"
     local observer_args=()
     for host in "${node_hosts[@]}"; do
         observer_args+=(--observer "${host}=${case_dir}/clock-${host}.log")

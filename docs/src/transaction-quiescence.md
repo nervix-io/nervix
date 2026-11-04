@@ -211,6 +211,15 @@ as different roles rather than as one ambiguous list of “affected nodes.”
 
 ## Coherent Preview And Guarded Commit
 
+The complete committed cluster-parameter record, including its revision, is part of the captured
+planning inputs and the preview's planning-basis fingerprint. Model validation uses its typed limits
+and the Models from that same consensus schedule. Application preflight and replicated publication
+compare that exact record before applying an effect. A parameter publication makes an earlier
+capture stale even when later assignments return its values to the same settings. `ALTER CLUSTER SET`
+runs outside domain transactions, through durable command execution; its transition validates all
+current Models and resource versions before publishing one parameter record. [Node Settings](node-settings.md)
+owns its syntax, bounds and live installation contract.
+
 The planner uses one captured view of the domain, models, resource versions, schedule, placement,
 membership, and liveness inputs for an ordered prefix. Its planning-basis fingerprint identifies
 the inputs relevant to that report. The report also carries the accepted-operation position and

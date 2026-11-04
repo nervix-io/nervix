@@ -468,6 +468,9 @@ fn emitter_template(kind: EmitterEntityKind, body: &str) -> String {
     for clause in declared.envelope {
         body_clause.push_str(&format!("\n    [{}]", clause.example()));
     }
+    if !declared.properties.is_empty() {
+        body_clause.push_str("\n    [PROPERTIES { '<key>' = <expression>, ... }]");
+    }
     let batch = match declared.batch {
         EmitterBatchLegality::Required { .. } => "\n  BATCH MAX MESSAGES <count> MAX SIZE <bytes>",
         EmitterBatchLegality::Optional { .. } => {

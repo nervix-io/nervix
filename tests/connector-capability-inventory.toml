@@ -1984,3 +1984,38 @@ entity = "RABBITMQ EXCHANGE EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/rabbitmq_envelope.feature", scenario = "Both RabbitMQ emitter entities write every AMQP property and retain it across a retry" },
 ]
+
+[[capability]]
+capability = "RETAIN"
+entity = "MQTT TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_publish_properties.feature", scenario = "A retained MQTT QOS <qos> publication reaches a late subscriber with its properties" },
+]
+
+[[capability]]
+capability = "PROPERTIES content_type"
+entity = "MQTT TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_publish_properties.feature", scenario = "A retained MQTT QOS <qos> publication reaches a late subscriber with its properties" },
+]
+
+[[capability]]
+capability = "PROPERTIES message_expiry"
+entity = "MQTT TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_publish_properties.feature", scenario = "A retained MQTT QOS <qos> publication reaches a late subscriber with its properties" },
+]
+
+[[capability]]
+capability = "PROPERTIES response_topic"
+entity = "MQTT TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_publish_properties.feature", scenario = "A retained MQTT QOS <qos> publication reaches a late subscriber with its properties" },
+]
+
+[[capability]]
+capability = "PROPERTIES correlation_data"
+entity = "MQTT TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_publish_properties.feature", scenario = "A retained MQTT QOS <qos> publication reaches a late subscriber with its properties" },
+]

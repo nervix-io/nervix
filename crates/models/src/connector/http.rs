@@ -181,7 +181,8 @@ impl HttpRequestIngestor {
         client: &CreateClientHttp,
     ) -> error_stack::Result<(), HttpRequestHeadersError> {
         let mut names = BTreeSet::new();
-        let mut validated = HttpApplicationHeaders::default();
+        let mut validated =
+            HttpApplicationHeaders::with_limits(crate::HttpHeaderLimits::representable());
         for header in &self.headers {
             let name = HttpHeaderName::parse(&header.name).change_context_lazy(|| {
                 HttpRequestHeadersError::InvalidName {
@@ -208,6 +209,22 @@ impl HttpRequestIngestor {
 }
 
 impl HttpRequestHeader {
+    /// Projects the value available to size planning. Unresolved clients or secret bindings,
+    /// and values awaiting template rendering, have no known value yet. Graph validation owns
+    /// the complete declaration's validity before it can commit.
+    pub fn known_value_from<'a>(&'a self, client: Option<&'a CreateClientHttp>) -> Option<&'a str> {
+        match &self.value {
+            HttpRequestHeaderValue::Literal(value) => Some(value.as_str()),
+            HttpRequestHeaderValue::ClientSecret(key) => {
+                if !CLIENT_CONFIG.is_secret(key) {
+                    return None;
+                }
+                let value = &client?.config.iter().find(|entry| entry.key == *key)?.value;
+                (!value.contains("{{")).then_some(value.as_str())
+            }
+        }
+    }
+
     /// The value this header sends through `client`, or `None` for a client secret whose value
     /// keeps a template until the ingestor opens.
     fn value_from(
@@ -723,19 +740,19 @@ mod tests {
     }
 
     #[test]
-    fn polling_headers_are_held_to_the_shared_application_header_bounds() {
+    fn polling_header_syntax_uses_the_request_representation_bounds() {
         let filler = "x".repeat(16 * 1024);
         let declared = client(&[("secret.filler", filler.as_str())]);
-        assert_eq!(
-            refusal(
-                vec![
-                    literal("x-first", &filler),
-                    secret("x-second", "secret.filler"),
-                ],
-                &declared,
-            ),
-            HttpRequestHeadersError::Limit
-        );
+        polling(vec![
+            literal("x-first", &filler),
+            secret("x-second", "secret.filler"),
+        ])
+        .validate_headers(&declared)
+        .assured("registry policy owns the byte cap; syntax checks representability");
+        let headers = (0..=crate::HttpHeaderFields::MAXIMUM)
+            .map(|index| literal(&format!("x-field-{index}"), "v"))
+            .collect();
+        assert_eq!(refusal(headers, &declared), HttpRequestHeadersError::Limit);
     }
 
     #[test]

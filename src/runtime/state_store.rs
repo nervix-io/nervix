@@ -751,6 +751,8 @@ impl PersistedRuntimeStateEntry {
 /// the serializer's error, or the [`StoredStateIssue`] the stored bytes have, as its cause.
 #[derive(Debug, Error)]
 pub(crate) enum RuntimePersistenceError {
+    #[error("runtime settings do not satisfy their definitions")]
+    InvalidRuntimeSettings,
     #[error("runtime state storage has an invalid format; recreate the node state directory")]
     InvalidStorageFormat,
     #[error("checkpoint placement exceeds the bounded storage key size")]

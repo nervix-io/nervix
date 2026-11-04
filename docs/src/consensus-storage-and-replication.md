@@ -456,20 +456,21 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The dedicated database owns exactly four current keyspaces: `raft_unit_subscription_logs`,
-`raft_unit_subscription_meta`, `raft_unit_subscription_state`, and
-`raft_unit_subscription_snapshots`. Opening it validates the complete keyspace namespace before
+The dedicated database owns exactly four current keyspaces: `raft_unit_cluster_logs`,
+`raft_unit_cluster_meta`, `raft_unit_cluster_state`, and
+`raft_unit_cluster_snapshots`. Opening it validates the complete keyspace namespace before
 reading any records. This namespace identifies the current Model shape, including a Pulsar
 subscription's required type and an owned subscription's required start position, a Kafka consumer
 group's required start position, the serialized Sentry platform field, an ingestor's
 `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the receive count
 an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an MQTT TOPIC
 ingestor writes beside its delivery mode, the quality of service an
-MQTT TOPIC emitter writes beside its publishing mode, a `REDIS PUBSUB`
+MQTT TOPIC emitter writes beside its publishing mode, its retained-publication flag and MQTT 5
+property mappings, a `REDIS PUBSUB`
 ingestor's `CHANNEL` or `PATTERN` subscription, whether a polled HTTP request's header holds a
 literal or names a client secret, `ALTER BRANCH` among the archived statements and the branch
 partition count every resolved branch declaration of the committed schedule carries. Its state
-metadata requires the current `RestoredLifecycle` encoding, including the durable restore
+metadata requires the current `ClusterState` encoding, including committed cluster parameters and the durable restore
 installation gate and the unit-keyed committed schedule in which a relay of a partitioned branch is
 scheduled as one unit per partition. The current shape also requires typed ingestor instancing,
 exact-unit placement-group members and entity-versus-unit transaction gate targets. Native counts
@@ -628,3 +629,20 @@ cross that boundary. The current state encoding requires these records and rejec
 whose encoding does not match, requiring recreation under the alpha persistence contract. The current encoding also requires a restore's explicit lifecycle policy and its
 installed-state effect's clock. RESUME changes the domain to running and removes its complete-set
 installation gate in that single applied effect; it preserves the archived generation and mapping.
+
+## Cluster Parameter Publication
+
+Current state metadata includes the optional committed cluster parameter record; absence is only
+the unseeded bootstrap state. The first bootstrap submits the complete seed through Raft. Later
+parameter commands atomically compare their policy/model/resource snapshot, replace the record
+and record durable command progress. Their apply advances the coherent runtime revision and its
+existing schedule notification. Model planning inputs include the parameter record. Every new
+model or schedule publication compares that complete record, including its revision, inside the
+serialized state-machine application before changing the graph. A parameter publication that
+applies first therefore conflicts with a plan captured before it, even if another publication
+restores the same values. Transaction commit admission, new step effects, and rollback use this
+same fence; an idempotent retry only rejoins retained progress and never reapplies its effect.
+
+The metadata encoding has one current identity. Data from a different stored shape fails decoding
+with a typed error asking for node-state recreation. Parameter durations and numeric bounds are
+validated on archive recovery as well as construction. No migration or second decoder is present.

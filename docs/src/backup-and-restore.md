@@ -1024,8 +1024,9 @@ A restore that failed at a step reports `restore failed at step '<step>':`, the 
 steps before it stay applied, together with the report of every step. The reasons are a consensus
 refusal of the step, a created domain whose stopped state did not become usable on every live node,
 a resource version that could not be installed or completed on every live node, a domain that holds
-models the restore did not apply, a model batch the leader refused, such as lookup data that does
-not load at its path or TLS material that does not load, a node that did not apply the installation
+models the restore did not apply, a model batch the leader refused, such as a committed parameter
+cap that its Models exceed, lookup data that does not load at its path or TLS material that does
+not load, a node that did not apply the installation
 revision within five seconds, and state that does not convert or install. Installation converts
 each keyspace and window as planning did, with the same wait for room, so a momentarily busy node
 does not fail the step; a refusal for room that outlasts the wait does. An admitted restore that

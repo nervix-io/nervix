@@ -1915,6 +1915,14 @@ checks below establish what a caller may do with them.
 
 ## Diagnostic Deadlock Detection
 
+The temporary CI execution policy disables all Deloxide execution, including the diagnostic
+evidence probes, primitive conformance and documentation checks, labeled lanes and diagnostic
+Chaos images. Labels, schedules, manual dispatch and reruns cannot re-enable them; that requires
+an explicit user decision. Ordinary report-tool diagnostics still run. Local diagnostic commands
+and their inventories remain available for targeted investigation. The
+[coverage contract](./coverage-reports.md) records the resulting CI producer selection and its
+qualification gap without weakening ordinary report integrity or the complexity gate.
+
 The resource-source-discovery workload exercises resource publication, a pending replica and
 installation once source visibility resumes, followed by a lookup of the replicated file. Its
 active, order and stressed records name the consensus-storage and cluster lifecycle owners it
@@ -2279,6 +2287,10 @@ broker waits remain outside its tracked lock graph. The existing ingestor-host S
 retain responsibility for host acknowledgement and cancellation interleavings.
 
 The registered `@restarted_voter_observation` workload reaches whole-cluster restart and automatic scheduling when the leader first hears a voter through a relayed heartbeat. Its test-only watch channels and concurrent fault map are untracked. The registered native metadata restore workload exercises distributed Kafka checkpoint replication, acknowledgement, restart and exact restoration above the resident replication message budget; its stream waits and assignment atomics retain their complementary checks.
+
+The `@restarted_voter_observation` workload also reaches concurrent live-policy discovery. Its
+test-only reconciliation gate releases after leadership is established and remains outside the
+detector's tracked lock graph.
 
 The lane builds all selected executables and diagnostic drivers before starting its workload clock.
 For each prepared invocation it lists what the build holds or reads
@@ -3095,3 +3107,32 @@ workloads exercise real start, stop, drain and failover beside the unit-local tr
 checkpoint locks. These are lifecycle and interleaving claims; no new cross-location memory-ordering
 protocol is introduced. The concurrent-map ledger records preparation, observation and retirement
 frequency for each affected registry, including the execution-owned immutable MQTT client cache.
+
+## Live Cluster Policy
+
+Runtime timing and resource bounds are immutable publications through the governed `ArcSwap`.
+Control-plane installation remains serialized by runtime admission. A new client attachment
+captures its grant and each worker batch keeps that attachment's row bound; no record consults a
+shared policy map. HTTP preparation captures its typed header-byte and field-count bounds once per publication.
+Snapshot owners observe changed intervals at the existing bounded replica-poll boundary, without
+a new wait/notify protocol or changes to checkpoint/acknowledgement ownership.
+
+A live node-unavailability interval change wakes the existing control-plane health watch. Retained
+watchers read the installed interval again when deriving their next deadline. The production-owner
+`cluster::peer_health_watcher::shuttle_tests::shuttle_a_policy_change_racing_a_retained_health_wait_is_never_missed`
+check, registered in the Shuttle inventory, races installation against wait registration without a
+peer deadline: a lost wake leaves it deadlocked. It runs 1,000 random schedules and 1,000 PCT schedules
+at depth three, each with the harness's 10,000-step limit. These searches supply the modeled random
+data that fair `select!` polling requires. The separate nondeterminism run repeats 100 random
+schedules twice for each search. Paused-clock unit tests separately check elapsed transition timing
+and unchanged publication. This check establishes notification liveness for the explored schedules;
+it makes no memory-ordering claim about the governed `ArcSwap` implementation.
+
+The application's `NodeInitialization` uses the primitive once-publication owner to open public
+policy-dependent work after live-policy catch-up and handler registration. Session and configured
+HTTP intake read that same publication before admission; it changes once per process and carries
+no row, batch or persisted state. The returning-parameter public scenario holds initial discovery
+through the existing test-pause owner and exercises observation, refusal and release. Its async
+pause, network waits and standard-library once publication remain outside the blocking-lock detector.
+The diagnostic parameter workloads reach the surrounding tracked owners; the public scenario and
+external partition recovery verify admission and observation during an isolated process restart.

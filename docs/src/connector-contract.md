@@ -866,8 +866,12 @@ is declared as it behaves, and a buffer that nothing bounds yet is declared unbo
 shows each gap until its connector closes it. A `PROMETHEUS QUERY` or `HTTP REQUEST` response is
 bounded by its statement's `MAX BODY SIZE` (16 MiB where omitted). A response that exceeds the
 bound fails the poll, which the ingestor reports as its transient error, and the next poll reads
-again. The HTTP polling request's method and headers are carried by the typed ingestor plan;
-its client supplies the required total `timeout_ms` and TLS settings. The polling client follows
+again. The HTTP polling request's method, literal or client-secret header declarations and captured
+committed header caps are carried by the typed ingestor plan. After the host resolves client
+configuration, the connector checks the complete header values and count before opening the
+request and retains sensitivity on secret values. Admission and parameter transitions check every
+known value and name; a templated secret's full value is checked at open. Its client supplies the
+required total `timeout_ms` and TLS settings. The polling client follows
 redirects and uses a proxy only as [HTTP client transport](#http-client-transport) describes. An
 HTTP response carries its status and scheduled poll instant into the same metadata group as its
 response headers, including when quiescence buffers the poll.
@@ -1149,15 +1153,21 @@ with `SESSION PERSISTENT` and `QOS 1` or `QOS 2`, the session a broker keeps mes
 redelivers after a lost connection; `BUFFER` and `DROP` stay connected under any session. The
 ingestor's headers are a publish's MQTT 5 user properties, `ordered_repeats` exact names, and its
 metadata is the delivered packet's topic, retain flag, quality of service and duplicate flag, then
-its content type, response topic, correlation data and message expiry; the emitter carries no
-transport headers. Every emitter statement writes `QOS 0`, `QOS 1` or `QOS 2`, which has no default,
+its content type, response topic, correlation data and message expiry. The emitter writes ordered,
+repeated MQTT 5 user properties through its text header model. Every emitter statement writes
+`QOS 0`, `QOS 1` or `QOS 2`, which has no default,
 and its modes declare what each can complete: `NO ACK` only with `QOS 0`, which nothing answers, and
 `ACK` with either window only with `QOS 1` or `QOS 2`, which a broker answers with `PUBACK` or
 `PUBCOMP`. The start plan holds the two as one value, so the connector receives no pairing the
 declaration refuses. The emitter connects a clean session at `QOS 0` and a persistent one otherwise,
 and declares that as a driver limit rather than an option, together with the session a new client
-cannot resume. It takes codec payloads, no envelope clause and optional batching up to the Maximum
-Packet Size each broker declares when the client connects. The unpooled client's keys are
+cannot resume. Its envelope declares `RETAIN` and the exact `PROPERTIES` types `content_type STRING`,
+`message_expiry U32` (seconds), `response_topic STRING` and `correlation_data BYTES`. The connector
+validates MQTT string/binary field bounds and the response topic before handing a record to its
+driver. Packet measurement includes the complete property section and its variable-length prefix;
+the retained payload keeps the same envelope for every retry. It takes codec payloads and optional
+batching up to the Maximum Packet Size each broker declares when the client connects. The unpooled
+client's keys are
 all Nervix-owned: `addr` names the broker by `mqtt` or `mqtts`, a host and a nonzero port, and
 nothing else, since a connection reads no credentials, path, query or fragment from it;
 `client_id`; and the TLS files, of which `tls_ca_file` is required exactly with `mqtts` and the
@@ -1351,7 +1361,7 @@ the `write_header` calls of one record become on the published message.
 | --- | --- | --- | --- |
 | `last_wins`, exact names | `SQS QUEUE` | `PULSAR TOPIC` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | `last_wins`, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary | None | `SQS QUEUE` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included; a value's exact type decides the type it travels as |
-| `ordered_repeats`, exact names | `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC` | `KAFKA TOPIC` | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| `ordered_repeats`, exact names | `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC` | `KAFKA TOPIC`, `MQTT TOPIC` | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `repeats_by_name`, exact names | `NATS SUBJECT` | `NATS SUBJECT` | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | `repeats_by_name`, lowercase names | `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT` | None | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | `sorted_by_name`, exact names | `RABBITMQ QUEUE` | `RABBITMQ QUEUE`, `RABBITMQ EXCHANGE` | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
@@ -3471,3 +3481,23 @@ compares external sessions once per local logical input and retires only the exp
 global indices. This keeps preparation
 and retirement proportional to the declared instance count. A declaration change invalidates the
 prepared entry; no mutable driver or source task is shared between units.
+
+## Committed Host Bounds
+
+The Nervix host validates batch counts and client-emitter batch bytes against the committed
+cluster policy. HTTP request preparation captures typed header-byte and field-count bounds for that publication.
+Transition validation counts known HTTP header names independently of their values and preserves
+guaranteed byte contributions across dynamic replacements. `HttpApplicationHeaders` enforces the
+captured limits and the syntax contract on the evaluated envelope. Connector
+transport ownership and per-record acknowledgement boundaries are unchanged.
+HTTP polling headers are literal plan inputs. Their complete count and byte requirements are
+checked against that same committed policy at model admission and parameter transitions, with
+case-insensitive replacement and the last written value retained. A lowering cannot invalidate
+an existing request. The field-count setting ends at 16,384 application fields, leaving native
+capacity for client and transport fields. The connector receives the validated literal fields
+without a second fixed default.
+Each literal name/value write and the final retained envelope must fit the byte cap.
+WebSocket upgrade headers use the same committed caps at model admission and parameter
+transitions. Their canonical subprotocol offer counts as one field, and its comma-joined tokens
+contribute to the byte count. Syntax and plan conversion enforce physical HTTP representation
+bounds; they impose no second fixed default on a model admitted under raised cluster caps.

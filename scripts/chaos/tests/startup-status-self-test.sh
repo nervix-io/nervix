@@ -74,3 +74,76 @@ status=0
 PATH="${tmp_dir}/bin:${PATH}" publish_startup_status 2>/dev/null || status=$?
 [[ "${status}" != 0 && "${status}" != 73 && ! -e "${artifact_dir}/public/cluster-status.txt" ]]
 printf 'startup status self-test passed\n'
+
+
+# Startup applies the requested policy once through the cluster command, before installing a graph.
+# shellcheck source=../cluster-parameters.sh
+source "${chaos_dir}/cluster-parameters.sh"
+(
+    export CHAOS_REPLICA_COUNT=2 CHAOS_STATE_SNAPSHOT_INTERVAL=250ms
+    export CHAOS_NODE_UNAVAILABILITY_TIMEOUT=15s CHAOS_COMMAND_RETRY_VALIDITY=20m
+    cli_command() { printf '%s\n' "$1"; }
+    configured="$(configure_cluster_parameters)"
+    [[ "${configured}" == $'ALTER CLUSTER SET REPLICA_COUNT = 2, STATE_SNAPSHOT_INTERVAL = 250ms, NODE_UNAVAILABILITY_TIMEOUT = 15s, COMMAND_RETRY_VALIDITY = 20m;\nDESCRIBE CLUSTER;' ]]
+    export CHAOS_STATE_SNAPSHOT_INTERVAL='1s; SHOW CLUSTER STATUS;'
+    status=0
+    configure_cluster_parameters >"${tmp_dir}/policy-refusal.txt" 2>&1 || status=$?
+    [[ "${status}" == 2 ]]
+)
+printf 'cluster parameter startup control self-test passed\n'
+
+# The public observation keeps all parameter values and refuses a partial installation.
+# shellcheck source=cluster-parameters-fixture.sh
+source "${chaos_dir}/tests/cluster-parameters-fixture.sh"
+for parameter_topology in 1 3; do
+    parameter_nodes=(node-1)
+    if ((parameter_topology == 3)); then parameter_nodes+=(node-2 node-3); fi
+    cluster_parameter_publication_fixture '1m 30s' "${parameter_nodes[@]}" \
+        >"${tmp_dir}/parameters-${parameter_topology}.txt"
+    cluster_parameter_observation "${tmp_dir}/parameters-${parameter_topology}.txt" "${parameter_nodes[@]}" \
+        >"${tmp_dir}/parameters-${parameter_topology}.json"
+    jq -e --argjson nodes "${parameter_topology}" '
+        .revision == "17" and (.committed | length) == 22
+        and .committed["node-unavailability-timeout"] == "1m 30s"
+        and (.running | length) == $nodes
+        and all(.running[]; .revision == "17" and (.values | length) == 22)
+    ' "${tmp_dir}/parameters-${parameter_topology}.json" >/dev/null
+done
+sed 's/revision=17$/revision=18446744073709551615/' "${tmp_dir}/parameters-3.txt" \
+    >"${tmp_dir}/parameters-maximum-revision.txt"
+cluster_parameter_observation "${tmp_dir}/parameters-maximum-revision.txt" node-1 node-2 node-3 \
+    >"${tmp_dir}/parameters-maximum-revision.json"
+jq -e '.revision == "18446744073709551615" and .running["node-3"].revision == .revision' \
+    "${tmp_dir}/parameters-maximum-revision.json" >/dev/null
+
+expect_parameter_refusal() {
+    local transcript="$1" status=0
+    cluster_parameter_observation "${transcript}" node-1 node-2 node-3 \
+        >"${tmp_dir}/parameter-refusal.txt" 2>&1 || status=$?
+    ((status != 0)) || { printf 'incomplete parameter installation was accepted: %s\n' "${transcript}" >&2; exit 1; }
+}
+sed '/^node=node-3 /d' "${tmp_dir}/parameters-3.txt" >"${tmp_dir}/parameters-pending-node.txt"
+printf 'node=node-3 cluster parameters running=not installed\n' >>"${tmp_dir}/parameters-pending-node.txt"
+expect_parameter_refusal "${tmp_dir}/parameters-pending-node.txt"
+sed 's/^node=node-1 node-unavailability-timeout running=1m 30s/node=node-1 node-unavailability-timeout running=2m/' \
+    "${tmp_dir}/parameters-3.txt" >"${tmp_dir}/parameters-different-value.txt"
+expect_parameter_refusal "${tmp_dir}/parameters-different-value.txt"
+sed 's/^node=node-1 node-unavailability-timeout running=1m 30s revision=17$/node=node-1 node-unavailability-timeout running=1m 30s revision=16/' \
+    "${tmp_dir}/parameters-3.txt" >"${tmp_dir}/parameters-different-revision.txt"
+expect_parameter_refusal "${tmp_dir}/parameters-different-revision.txt"
+cp "${tmp_dir}/parameters-3.txt" "${tmp_dir}/parameters-repeated-key.txt"
+grep '^node-unavailability-timeout committed=' "${tmp_dir}/parameters-3.txt" >>"${tmp_dir}/parameters-repeated-key.txt"
+expect_parameter_refusal "${tmp_dir}/parameters-repeated-key.txt"
+
+(
+    cli_command() { cat "${tmp_dir}/parameters-3.txt"; }
+    capture_cluster_parameters "${tmp_dir}/published-parameters" node-1 node-2 node-3
+    cmp "${tmp_dir}/published-parameters.json" "${tmp_dir}/parameters-3.json"
+    cli_command() { cat "${tmp_dir}/parameters-pending-node.txt"; }
+    status=0
+    capture_cluster_parameters "${tmp_dir}/published-parameters" node-1 node-2 node-3 \
+        >"${tmp_dir}/capture-refusal.txt" 2>&1 || status=$?
+    ((status != 0))
+    cmp "${tmp_dir}/published-parameters.json" "${tmp_dir}/parameters-3.json"
+)
+printf 'committed and running parameter observation self-test passed\n'

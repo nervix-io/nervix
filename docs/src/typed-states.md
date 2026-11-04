@@ -36,6 +36,13 @@ separately from the VM's typed compile cause. The registry associates that cause
 with the lowered mapping before reporting the refusal; a null-only mapping is refused at admission.
 [Errors And Diagnostics](errors-and-diagnostics.md#registry-validation-and-planning) owns the report.
 
+MQTT publish properties cross two validation boundaries. The vocabulary declaration and expression
+compiler establish each property's exact non-null scalar type. The connector then checks the
+evaluated MQTT string and binary field bounds and constructs a validated response-topic value
+before driver admission. An absent property stays absent; an empty correlation value and a zero
+expiry interval remain present values. The retained payload owns the evaluated envelope, so retry
+does not evaluate a new property value.
+
 The MongoDB engine resolves a required nonempty database from its explicit key or the URL path
 into one private configuration value. It consumes the driver's optional default rather than
 carrying a second database identity. Collection names are validated vocabulary values that retain
@@ -278,15 +285,16 @@ platform string; connector preparation uses it only when the codec's event omits
 A polled HTTP request's header holds a literal or names a client secret as two states of one enum,
 so a value cannot be both or neither, and the Model that names a secret holds its key and never its
 value.
-The registry's `NERVIX UNIT SUBS` archive signature identifies the current Model layout, including
+The registry's `NERVIX UNIT PUBS` archive signature identifies the current Model layout, including
 a Pulsar subscription's required type and an owned subscription's required start position, a Kafka
 consumer group's required start position, the required 16-bit branch partition count, typed ingestor
 instancing, Sentry platform,
 an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape,
 the receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of
 service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC
-emitter writes beside its publishing mode, a `REDIS PUBSUB` ingestor's subscription, which is either
-a `CHANNEL` or a `PATTERN`, and that header state. Consensus's `raft_unit_subscription_` keyspaces and current state
+emitter writes beside its publishing mode, its retained-publication flag and MQTT 5 property
+mappings, a `REDIS PUBSUB` ingestor's subscription, which is either
+a `CHANNEL` or a `PATTERN`, and that header state. Consensus's `raft_unit_cluster_` keyspaces and current state
 metadata encoding identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule. The runtime state store's
 `wide-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the
@@ -678,6 +686,21 @@ interconnect's wire fingerprint fences it between nodes. Unrecognized stored sta
 and must be recreated. Complete equality properties exercise the production representations at
 their range boundaries; see [Property Testing And Fuzzing](./property-testing-and-fuzzing.md).
 
+## Parameter Authority and Installation
+
+`ClusterParameterValues` holds validated class-typed settings with a single definition for each
+default and bound. `ClusterParameterRecord` pairs them with a positive revision. The state machine
+has no record until first bootstrap; it never fills missing persisted fields from defaults.
+A node's gossip publication keeps committed and optional running records together and validates
+their revision/value relationship. A live construction record distinguishes pending catch-up from
+ready installation and rejects equal revisions with unequal values.
+
+The application shares one `NodeInitialization` publication between session admission, configured
+HTTP intake and readiness. Its private `OnceLock<()>` distinguishes initialization pending from
+completed and can publish completion once. This state is separate from the live construction
+record and quorum-confirmed runtime admission: policy can be caught up while initialization is
+still registering owners, and observation is available throughout.
+
 ## Atomic States On The Data Plane
 
 The bounded executor's worker has `Selected`, `Executing` and `Idle` states. `Selected` owns its
@@ -884,6 +907,12 @@ default. [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadloc
 current representation, qualification policy and coverage limits.
 
 ## Validation And Failure Boundaries
+
+Parameter sizing projects only what a candidate already knows. A polling header contributes its
+name and any available literal or client-secret value; unresolved client or secret bindings and
+templates keep the value unknown. Graph validation owns binding validity and can retain an
+incomplete transaction candidate until later statements complete it. Publication requires the
+complete graph, and connector opening checks every resolved value against captured policy.
 
 Configuration-backup round-trip validation names an unpinned resource binding with its own typed
 refusal, rather than using a resource name itself as the error. Its exact outcome classification

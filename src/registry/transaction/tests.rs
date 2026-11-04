@@ -40,6 +40,7 @@ pub(super) fn snapshot(
     models: impl IntoIterator<Item = Model>,
 ) -> TransactionPlanningSnapshot {
     TransactionPlanningSnapshot {
+        parameters: nervix_models::ClusterParameterValues::default(),
         domain: domain_state(status),
         models: models.into_iter().collect(),
         resources: BTreeSet::new(),
@@ -63,6 +64,7 @@ pub(super) fn scheduled_snapshot(
         .assured("the scheduler fixture node is an identifier-shaped literal");
     let schedule = graph.schedule_for_domain(&domain, &[node], 0, PlacementPolicy::Neutral);
     TransactionPlanningSnapshot {
+        parameters: nervix_models::ClusterParameterValues::default(),
         domain: domain_state(status),
         models,
         resources: BTreeSet::new(),

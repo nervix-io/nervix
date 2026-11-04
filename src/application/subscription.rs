@@ -1632,7 +1632,13 @@ impl SessionServiceImpl {
                             match self
                                 .inner
                                 .consensus
-                                .open_transaction(transaction, self.inner.transaction_max_open)
+                                .open_transaction(
+                                    transaction,
+                                    usize::try_from(
+                                        self.cluster_parameters().transaction_max_open(),
+                                    )
+                                    .assured("the committed count fits a supported target"),
+                                )
                                 .await
                             {
                                 Ok(transaction) => {

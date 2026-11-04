@@ -373,7 +373,10 @@ reset. A genuine reset failure arrives as `RequestFailed` and follows the failur
   already include an append whose outcome has not arrived; the client MUST keep that preview under
   the position the report names and use it once the append's outcome reports that position, rather
   than discard it. It MUST NOT refresh that preview from a `PreviewStale` reply, from an inspection
-  of another transaction, or from an inspection at an older position.
+  of another transaction, or from an inspection at an older position. The planning basis includes
+  the committed cluster-parameter record and revision, so a publication can invalidate a reviewed
+  preview even when its queued Models still fit the limits. A client MUST NOT replace that
+  reviewed identity from an informational parameter-change notice.
 - **X-5.** While a commit is `COMMITTING`, a client MUST keep waiting for the commit's own outcome,
   repeating the commit under its reference after any interruption.
 - **X-6.** On `TransactionDetached`, a client MUST send `AttachTransactionRequest` for the
@@ -385,8 +388,12 @@ reset. A genuine reset failure arrives as `RequestFailed` and follows the failur
   definitive failure for a command that was never admitted.
 - **X-7.** Ending a session cleanly, by half-closing the gRPC request stream or sending a WebSocket
   close with no request in flight, reverts the open transaction the session holds. A client MUST end
-  a session that way only when it intends that revert. Any other ending leaves the transaction open
-  for a later attach.
+  a session that way only when it intends that revert. An append or commit whose `OutcomeUnknown`
+  the client has not yet repeated to a definitive outcome may never have been admitted, so ending
+  the session cleanly then discards the transaction with it. Any other ending leaves the transaction
+  open for a later attach. The server reports that revert to no one, and a revert it cannot record
+  leaves the transaction open until it expires; a client that must know the transaction ended sends
+  `REVERT` and ends the session after its outcome.
 - **X-8.** A client MUST expect an open transaction to expire after its idle timeout, 15 minutes by
   default, whether or not a session is bound to it. Only attaching, appending, and commit admission
   renew it.
@@ -545,7 +552,8 @@ payload, infinity, and nullable and sensitive branch key fields.
 
 - **P-1.** A client MUST open a producer with `OpenIngestorRequest`, naming the domain, the
   ingestor, the exact fields it expects, including each field's optionality and sensitivity, and
-  positive credit no larger than 1,024 batches and 32 MiB. It MUST handle both dispositions:
+  positive credit no larger than 1,024 batches and the committed producer session-byte cap
+  (32 MiB by default). It MUST handle both dispositions:
   `Opened` with the producer's description, and `Refused` with a `ClientProducerRefusal`. It MUST
   NOT open a producer while its session holds a transaction.
 - **P-2.** The producer's identity is the request identity of its open. A client MUST start
@@ -1115,3 +1123,17 @@ so opening before START does not prevent later filtering. Clients continue
 to handle domain-time-unavailable skipped-row notices and generation termination using the existing
 subscription protocol. Internal clock and metric handle retention introduces no additional client
 request, capability negotiation or recovery step.
+
+## Cluster Policy and Attachment Grants
+
+Treat producer and consumer byte defaults as request preferences. Validate an opened producer's
+grant against the corresponding request, including its batch and byte limits, and use the row
+limit returned in that grant. Do not reject a grant solely because it exceeds a compiled default.
+A parameter change governs new admission; an existing attachment retains its grant until it ends.
+`ALTER CLUSTER SET` uses the same durable command recovery and completion contract as other
+administrative commands. Its informational notice is not a replacement for a command outcome.
+
+During node initialization, cluster status and description are available before policy-dependent
+work. A durable command sent then can return `OutcomeUnknown(NotYetAuthoritative)`, including an
+exact retry of an execution that completed before restart. Keep the same execution reference and
+continue recovery; this response establishes neither success nor failure of that execution.

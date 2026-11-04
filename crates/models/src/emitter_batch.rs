@@ -3,7 +3,7 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The two hard limits of `BATCH MAX MESSAGES <n> MAX SIZE <bytes>` as validated
-//!   values: the member count, bounded by what the message histograms track, and the exact encoded
+//!   values: the member count, bounded by its wire representation, and the exact encoded
 //!   size, as a positive whole number of bytes with its canonical Plexus spelling. The same size
 //!   value bounds a polled source's response through `MAX BODY SIZE`.
 //! - **Depends on.** Serialization primitives.
@@ -80,8 +80,7 @@ pub enum PayloadSizeError {
 
 /// The most members one batch may carry: a count from 1 to [`BatchMessageLimit::MAX`].
 ///
-/// The upper bound is the largest batch the message histograms track, so a batch at the limit is
-/// still observable as one batch.
+/// The committed max-batch-messages parameter bounds model admission within this representation.
 ///
 /// Every form of the limit is decoded through its range check: the serde form through
 /// `TryFrom<u32>`, the archived form through the same conversion.
@@ -104,7 +103,7 @@ where
 
 impl BatchMessageLimit {
     /// The largest member count an emitter may declare.
-    pub const MAX: u32 = 65_536;
+    pub const MAX: u32 = u32::MAX;
 
     pub const fn get(self) -> NonZeroU32 {
         self.0
@@ -119,9 +118,6 @@ impl TryFrom<u64> for BatchMessageLimit {
         let Ok(count) = u32::try_from(value) else {
             return Err(out_of_range);
         };
-        if count > Self::MAX {
-            return Err(out_of_range);
-        }
         let Some(count) = NonZeroU32::new(count) else {
             return Err(out_of_range);
         };
@@ -396,13 +392,6 @@ mod tests {
     }
 
     #[test]
-    fn archived_message_limits_above_the_maximum_are_refused() {
-        let archived =
-            rkyv::to_bytes::<rkyv::rancor::Error>(&nonzero!(65_537_u32)).expect("a count archives");
-        assert!(rkyv::from_bytes::<BatchMessageLimit, rkyv::rancor::Error>(&archived).is_err());
-    }
-
-    #[test]
     fn decoders_refuse_sizes_that_are_not_whole_units() {
         let json = r#"{"bytes":1025,"unit":"KiB"}"#;
         assert!(serde_json::from_str::<PayloadSizeLimit>(json).is_err());
@@ -501,7 +490,7 @@ mod tests {
 
     #[rstest]
     #[case::one(1)]
-    #[case::maximum(65_536)]
+    #[case::maximum(u64::from(u32::MAX))]
     fn accepts_message_limits_in_range(#[case] value: u64) {
         let limit = BatchMessageLimit::try_from(value).expect("limit is in range");
 
@@ -510,21 +499,12 @@ mod tests {
 
     #[rstest]
     #[case::zero(0)]
-    #[case::above_maximum(65_537)]
     #[case::above_u32(u64::from(u32::MAX) + 1)]
     fn rejects_message_limits_out_of_range(#[case] value: u64) {
         assert_eq!(
             BatchMessageLimit::try_from(value),
             Err(EmitterBatchLimitError::MessageLimitOutOfRange { value })
         );
-    }
-
-    #[test]
-    fn serde_rejects_a_message_limit_out_of_range() {
-        let error = serde_json::from_str::<BatchMessageLimit>("65537")
-            .expect_err("an out-of-range limit must not load");
-
-        assert!(error.to_string().contains("between 1 and 65536"));
     }
 
     #[test]
