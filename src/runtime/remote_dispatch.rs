@@ -655,10 +655,11 @@ impl RemoteDispatcher {
             RelayAdmissionStatus::Rejected(reason) => {
                 cancellation_guard.disarm();
                 FailedRelayAdmissionResolution::Failed(
-                    Report::new(RemoteDispatchError::AdmissionRejected {
-                        target: node_id.clone(),
-                    })
-                    .attach_printable(reason),
+                    original_error
+                        .change_context(TransportError::RelayRejected(reason))
+                        .change_context(RemoteDispatchError::AdmissionRejected {
+                            target: node_id.clone(),
+                        }),
                 )
             }
             RelayAdmissionStatus::Cancelled => {
@@ -706,10 +707,10 @@ impl RemoteDispatcher {
                         RelayAdmissionUpdate::Pending | RelayAdmissionUpdate::Alive => {}
                         RelayAdmissionUpdate::Admitted => return Ok(()),
                         RelayAdmissionUpdate::Rejected(reason) => {
-                            return Err(Report::new(RemoteDispatchError::AdmissionRejected {
-                                target: node_id.clone(),
-                            })
-                            .attach_printable(reason));
+                            return Err(Report::new(TransportError::RelayRejected(reason))
+                                .change_context(RemoteDispatchError::AdmissionRejected {
+                                    target: node_id.clone(),
+                                }));
                         }
                     }
                 }
@@ -2446,6 +2447,15 @@ mod tests {
                 target: error_target,
             } if error_target == &target
         ));
+        assert!(matches!(
+            error.downcast_ref::<TransportError>(),
+            Some(TransportError::RelayRejected(reason)) if reason == "branch is draining"
+        ));
+        assert_eq!(
+            format!("{error:#}"),
+            "node 'relay-owner' rejected relay admission: relay delivery was rejected before \
+             runtime admission: branch is draining"
+        );
     }
 
     #[nervix_primitives::test]

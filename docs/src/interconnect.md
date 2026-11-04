@@ -2151,6 +2151,11 @@ When remote ACK registration cannot reserve correlation memory, the affected rec
 acknowledgement carries the registration report chain, including its admission cause.
 An answering node sends its established remote failure class or stream rejection text over the
 wire; a local report's cause chain is not serialized into an HTTP/2 response.
+The forwarding node resumes a relay rejection's received text as `TransportError::RelayRejected`
+beneath `RemoteDispatchError::AdmissionRejected`, so alternate report display retains the reason.
+When cancellation reconciliation discovers that rejection after a failed send, the report also
+retains the original local send cause. The text remains an intentional wire projection, never an
+input to admission or retry classification.
 
 The exact source owners classify `RemoteRequestFailure`, `RemoteOperationFailure`,
 `OwnershipHandoffFailure`, gossip refusals and resource-publication answers as fixed wire outcomes
