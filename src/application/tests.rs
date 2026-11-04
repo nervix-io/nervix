@@ -107,6 +107,135 @@ fn args_parse_web_console_listen_addr() {
 }
 
 #[test]
+fn args_parse_operator_grpc_tls_files() -> Result<(), Report<AppError>> {
+    let args = test_args(&[
+        "--grpc-mode",
+        "https",
+        "--grpc-https-listen-addr",
+        "127.0.0.1:17443",
+        "--grpc-https-advertise-addr",
+        "session.example.com:17443",
+        "--grpc-tls-cert",
+        "/operator/session.pem",
+        "--grpc-tls-key",
+        "/operator/session-key.pem",
+    ]);
+    let app = Application::try_from(args)?;
+    assert_eq!(
+        app.identity.grpc_transport,
+        GrpcTransport::Https {
+            listen_addr: test_addr(17443),
+            advertise_addr: "session.example.com:17443"
+                .parse()
+                .assured("the fixed DNS name and port satisfy the endpoint grammar"),
+            certificate: PathBuf::from("/operator/session.pem"),
+            private_key: PathBuf::from("/operator/session-key.pem"),
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn args_grpc_tls_requires_certificate() {
+    let args = test_args(&[
+        "--grpc-mode",
+        "https",
+        "--grpc-https-listen-addr",
+        "127.0.0.1:17443",
+        "--grpc-https-advertise-addr",
+        "session.example.com:17443",
+        "--grpc-tls-key",
+        "/operator/session-key.pem",
+    ]);
+    let Err(error) = Application::try_from(args) else {
+        panic!("HTTPS provisioning requires a certificate");
+    };
+    assert!(matches!(
+        error.current_context(),
+        AppError::MissingGrpcTlsCertificate
+    ));
+}
+
+#[test]
+fn args_grpc_tls_requires_private_key() {
+    let args = test_args(&[
+        "--grpc-mode",
+        "https",
+        "--grpc-https-listen-addr",
+        "127.0.0.1:17443",
+        "--grpc-https-advertise-addr",
+        "session.example.com:17443",
+        "--grpc-tls-cert",
+        "/operator/session.pem",
+    ]);
+    let Err(error) = Application::try_from(args) else {
+        panic!("HTTPS provisioning requires a private key");
+    };
+    assert!(matches!(
+        error.current_context(),
+        AppError::MissingGrpcTlsPrivateKey
+    ));
+}
+
+#[test]
+fn args_grpc_tls_refuses_material_in_http_mode() {
+    for option in ["--grpc-tls-cert", "--grpc-tls-key"] {
+        let args = test_args(&[option, "/operator/session.pem"]);
+        let Err(error) = Application::try_from(args) else {
+            panic!("HTTP mode must refuse {option}");
+        };
+        assert!(matches!(
+            error.current_context(),
+            AppError::GrpcTlsRequiresHttps
+        ));
+    }
+}
+
+#[test]
+fn args_grpc_tls_plaintext_default() -> Result<(), Report<AppError>> {
+    let app = Application::try_from(test_args(&[]))?;
+    assert_eq!(app.identity.grpc_transport, GrpcTransport::Http);
+    Ok(())
+}
+
+#[test]
+fn args_grpc_tls_requires_https_addresses() {
+    let args = test_args(&[
+        "--grpc-mode",
+        "https",
+        "--grpc-tls-cert",
+        "/operator/session.pem",
+        "--grpc-tls-key",
+        "/operator/session-key.pem",
+    ]);
+    let Err(error) = Application::try_from(args) else {
+        panic!("HTTPS provisioning requires a listen address");
+    };
+    assert!(matches!(
+        error.current_context(),
+        AppError::MissingGrpcHttpsListenAddress
+    ));
+
+    let args = test_args(&[
+        "--grpc-mode",
+        "https",
+        "--grpc-https-listen-addr",
+        "127.0.0.1:17443",
+        "--grpc-tls-cert",
+        "/operator/session.pem",
+        "--grpc-tls-key",
+        "/operator/session-key.pem",
+    ]);
+    let Err(error) = Application::try_from(args) else {
+        panic!("HTTPS provisioning requires an advertised address");
+    };
+    assert!(matches!(
+        error.current_context(),
+        AppError::MissingGrpcHttpsAdvertiseAddress
+    ));
+}
+
+#[test]
 fn parse_and_text_encoding_helpers_roundtrip() {
     assert_eq!(current_word_prefix("CREATE SCHE", 11), "sche");
     assert_eq!(word_start("CREATE SCHE", 11), 7);
