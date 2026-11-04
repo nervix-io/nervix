@@ -71,6 +71,7 @@ mod backup_dialog;
 mod clock_display;
 mod create_dialog;
 mod request_handoff;
+mod resource_upload;
 mod transaction_inspector;
 
 use backup_dialog::{
@@ -83,6 +84,7 @@ use create_dialog::{
     CreateDispatch, CreateKind, CreateMenu, CreateSignals, CreateSubmission, SubscriptionDispatch,
 };
 use request_handoff::{RequestReceiver, RequestSender, request_handoff};
+use resource_upload::UploadAnswer;
 use transaction_inspector::{InspectorSignals, TransactionInspector};
 
 const RUNTIME_VERSION_LABEL: &str = concat!("nervix runtime v", env!("CARGO_PKG_VERSION"));
@@ -4725,7 +4727,7 @@ fn ResourceDialog(
                     resource_name.clone(),
                     upload_domain,
                     input,
-                    upload_base_url.get_untracked(),
+                    upload_base_url,
                     attempt_auth.clone(),
                 ),
                 registration,
@@ -4900,11 +4902,18 @@ fn event_target_input(event: &ev::Event) -> web_sys::HtmlInputElement {
         .verified("this handler is only bound to the upload input element")
 }
 
+/// Uploads the files selected in `input` as a new version of `resource`, and returns what the
+/// dialog shows of the outcome.
+///
+/// Every attempt posts the same files under one upload identity to the leader the console knows
+/// at that moment. An answer that decided nothing, from a node that could not act as the leader,
+/// is sent again after the wait the console's reconnects use, doubling up to their longest, for as
+/// long as the dialog keeps the upload; every other answer ends it.
 async fn upload_resource_files(
     resource: String,
     domain: DomainName,
     input: web_sys::HtmlInputElement,
-    upload_base_url: Option<String>,
+    upload_base_url: RwSignal<Option<String>>,
     auth_token: Option<String>,
 ) -> String {
     let Some(files) = input.files() else {
@@ -4942,30 +4951,45 @@ async fn upload_resource_files(
         return "failed to access browser upload identity source".to_string();
     };
     let upload_identity = crypto.random_uuid();
-    let url = web_console_resource_upload_url(
-        upload_base_url.as_deref(),
-        &resource,
-        domain.as_str(),
-        &upload_identity,
-        auth_token.as_deref(),
-    );
-    match gloo_net::http::Request::post(&url).body(form) {
-        Ok(request) => match request.send().await {
-            Ok(response) => {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
-                if (200..300).contains(&status) {
-                    text
-                } else if text.is_empty() {
-                    format!("upload failed with HTTP {status}")
-                } else {
-                    text
-                }
-            }
-            Err(error) => format!("upload request failed: {error}"),
-        },
-        Err(error) => format!("failed to build upload request: {error}"),
+    let mut retry_delay = WEBSOCKET_INITIAL_RECONNECT_DELAY;
+    loop {
+        let base_url = upload_base_url.get_untracked();
+        let url = web_console_resource_upload_url(
+            base_url.as_deref(),
+            &resource,
+            domain.as_str(),
+            &upload_identity,
+            auth_token.as_deref(),
+        );
+        let answer = post_resource_upload(&url, &form).await;
+        match answer {
+            UploadAnswer::Installed(text) | UploadAnswer::Failed(text) => return text,
+            UploadAnswer::NotDecided(_) => {}
+        }
+        wait_for_browser_delay(retry_delay).await;
+        let doubled = retry_delay
+            .checked_mul(2)
+            .assured("a delay of at most the reconnect ceiling doubles well within a Duration");
+        retry_delay = doubled.min(WEBSOCKET_MAX_RECONNECT_DELAY);
     }
+}
+
+/// Posts one attempt of an upload and reads what its answer decided. A request the browser could
+/// not build or send is a final failure.
+async fn post_resource_upload(url: &str, form: &web_sys::FormData) -> UploadAnswer {
+    let request = match gloo_net::http::Request::post(url).body(form.clone()) {
+        Ok(request) => request,
+        Err(error) => {
+            return UploadAnswer::Failed(format!("failed to build upload request: {error}"));
+        }
+    };
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(error) => return UploadAnswer::Failed(format!("upload request failed: {error}")),
+    };
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    UploadAnswer::of_response(status, text)
 }
 
 fn web_console_resource_upload_url(
