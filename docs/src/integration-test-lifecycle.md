@@ -1675,6 +1675,12 @@ explicitly awaits the Playwright driver's shutdown before dropping its handle. T
 five-second exit grace is asynchronous, so cleanup keeps the shared scenario runner and its
 watchdog available rather than waiting in Playwright's blocking destructor.
 
+The cluster-wide metric-total and saved-metric comparison steps use the canonical 40-second
+status-wait budget around the whole polling operation, with 100 milliseconds between reads. A
+metric read failure ends the step immediately; a comparison timeout retains each node's latest
+value, or the last observed value and its saved target. These steps read the public metrics
+endpoint and do not substitute internal counter state for an observation.
+
 ## Absolute Phase Deadlines
 
 A phase deadline is one instant on the monotonic clock: the moment the phase started plus its

@@ -769,6 +769,8 @@ web-sys = "0.3"
 webpki-roots = "1"
 x509-parser = "0.18"
 zeromq = "0.4"
+nkeys = "0.4.5"
+zeroize = "1.9"
 
 [patch.crates-io]
 # A flush must drain async-nats' queued bytes before flushing the transport. The connection

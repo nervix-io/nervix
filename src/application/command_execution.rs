@@ -23,10 +23,10 @@ use blake3::Hasher;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
-    CommandExecution, CommandExecutionAdmissionPolicy, CommandExecutionDiagnostic,
-    CommandExecutionDisposition, CommandExecutionEffect, CommandExecutionPreviewStale,
-    CommandExecutionRequestConflict, CommandExecutionResult, CommandExecutionState,
-    CommandExecutionStatementDisposition, CommandExecutionStatementResult,
+    CommandExecution, CommandExecutionAdmissionError, CommandExecutionAdmissionPolicy,
+    CommandExecutionDiagnostic, CommandExecutionDisposition, CommandExecutionEffect,
+    CommandExecutionPreviewStale, CommandExecutionRequestConflict, CommandExecutionResult,
+    CommandExecutionState, CommandExecutionStatementDisposition, CommandExecutionStatementResult,
     CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
     CommandExecutionTransactionStatus, CommandExecutionTransactionTarget, ConsensusConflict,
     ConsensusError, RecordedBackupArchive, RestoreExecution,
@@ -459,6 +459,17 @@ fn transaction_targets_match(
 }
 
 impl SessionServiceImpl {
+    pub(in crate::application) fn refuse_expired_reference(
+        &self,
+        reference: &CommandExecutionReference,
+    ) -> CommandResult {
+        self.inner
+            .runtime
+            .metrics()
+            .record_command_execution_refusal(&CommandExecutionAdmissionError::Expired);
+        expired_reference(reference)
+    }
+
     pub(in crate::application) async fn reconcile_persistent_commands(
         &self,
         finished_before: Timestamp,
@@ -556,7 +567,7 @@ impl SessionServiceImpl {
             .await
         {
             if existing.is_expired() {
-                return Err(Box::new(expired_reference(&reference)));
+                return Err(Box::new(self.refuse_expired_reference(&reference)));
             }
             if let Some(conflict) = existing.request_conflict(
                 &owner,
@@ -724,6 +735,15 @@ impl SessionServiceImpl {
         {
             Ok(execution) => Ok(CommandAdmission::Admitted(execution)),
             Err(error) => {
+                if let ConsensusError::Conflict(
+                    ConsensusConflict::ExecutionReferenceAdmissionRefused { refusal, .. },
+                ) = error.current_context()
+                {
+                    self.inner
+                        .runtime
+                        .metrics()
+                        .record_command_execution_refusal(refusal);
+                }
                 if let ConsensusError::LeadershipLost { observed } = error.current_context() {
                     // The admission proposal may have reached the log before leadership moved,
                     // so whether the command was admitted is not known here. A leader that could
@@ -967,7 +987,9 @@ impl SessionServiceImpl {
                 OutcomeUnknownCause::StillApplying,
                 format!("command execution reference '{reference}' is still applying"),
             ))),
-            CommandExecutionState::Expired => Err(Box::new(expired_reference(reference))),
+            CommandExecutionState::Expired => {
+                Err(Box::new(self.refuse_expired_reference(reference)))
+            }
             CommandExecutionState::Finished {
                 outcome_revision,
                 result,
@@ -1101,9 +1123,10 @@ fn replicated_admission_refusal(
     error: &ConsensusError,
 ) -> Option<CommandResult> {
     match error {
-        ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceExpired { .. }) => {
-            Some(expired_reference(reference))
-        }
+        ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceAdmissionRefused {
+            refusal: CommandExecutionAdmissionError::Expired,
+            ..
+        }) => Some(expired_reference(reference)),
         ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceConflict {
             kind, ..
         }) => Some(conflicting_reference(reference, *kind)),
@@ -1407,9 +1430,11 @@ mod tests {
     fn replicated_admission_refusals_keep_their_typed_dispositions() {
         let reference = CommandExecutionReference::parse("reference.admission")
             .assured("the test reference is an identifier-shaped literal");
-        let expired = ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceExpired {
-            reference: reference.clone(),
-        });
+        let expired =
+            ConsensusError::Conflict(ConsensusConflict::ExecutionReferenceAdmissionRefused {
+                reference: reference.clone(),
+                refusal: CommandExecutionAdmissionError::Expired,
+            });
         assert_eq!(
             replicated_admission_refusal(&reference, &expired).map(|result| result.disposition),
             Some(CommandDisposition::ExecutionReferenceExpired)
@@ -1426,9 +1451,7 @@ mod tests {
             ))
         );
 
-        let unrelated = ConsensusError::Conflict(ConsensusConflict::Reason(format!(
-            "command execution reference '{reference}' has expired"
-        )));
+        let unrelated = ConsensusError::Conflict(ConsensusConflict::ClusterParameterInputsChanged);
         assert!(replicated_admission_refusal(&reference, &unrelated).is_none());
     }
 

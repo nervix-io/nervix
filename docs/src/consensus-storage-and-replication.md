@@ -529,6 +529,12 @@ contact hints; current peer identity, incarnation, and endpoint still come from 
 
 ## Observability
 
+The command-history observer projects the applying, finished and expired index lengths and the
+optional durable retry fence from one applied state revision. Scrapes read those indexes without
+scanning records or changing retention. Every node exposes its own applied counts and fence;
+admission refusal events are counted only by the application process that handles the refusal,
+never by follower application or replay. See [Command Execution History](./metrics-and-observability.md#command-execution-history).
+
 Durable record decoding and recovered catalog checks preserve decoding or nested report causes
 inside the standard-error carrier that the storage trait accepts. The carrier's ordinary rendering
 includes the entire chain when a later report names the I/O error as its context. Transaction
