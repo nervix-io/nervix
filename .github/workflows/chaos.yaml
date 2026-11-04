@@ -1,12 +1,10 @@
 name: Chaos
 
-# Runs a suite of the external chaos runner against an already built Nervix image: the Docker
-# Build workflow calls it with each image its build jobs published, the release image and the
-# Deloxide diagnostic image of the same revision, and a manual run names an immutable image. Every
-# shard runs `just chaos suite` on its own Docker worker, which needs no Rust toolchain, compiles
-# nothing and runs no repository test binary. The suite refuses an image of another kind or
-# revision than the caller names, and on a diagnostic image every run judges the deadlock evidence
-# of its nodes with the image's own report tool.
+# Runs the external chaos suite against an already built ordinary Nervix image. Docker Build
+# supplies the release image of its revision; a manual run names an immutable image. Every shard
+# runs `just chaos suite` on its own Docker worker, needs no Rust toolchain and compiles no test
+# binary. The suite verifies the image's kind and revision before execution. The temporary CI
+# policy disables diagnostic images for reusable and manual calls alike.
 on:
   workflow_call:
     inputs:
@@ -67,6 +65,9 @@ env:
 jobs:
   plan:
     name: plan
+    # Diagnostic images execute Deloxide even without a diagnostic PR label.
+    # Temporary CI policy: re-enabling execution requires an explicit user decision.
+    if: inputs.image-kind == 'ordinary'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:

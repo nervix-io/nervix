@@ -1954,6 +1954,10 @@ a peer unavailable and does not extend a previous run of failures. Only continuo
 for the configured node-unavailability interval produce unavailable status; a healthy observation
 resets that run. Consensus membership continues to use the cluster topology established by gossip.
 
+The node-unavailability interval is installed live from the committed cluster parameters. A changed
+interval wakes retained health waiters, which recompute their next monotonic transition using the
+installed value. Republishing an unchanged interval does not wake those waiters.
+
 Scheduling and runtime availability retain a previously discovered incarnation that gossip stops
 listing live only while its latest application observation is younger than the node-unavailability
 interval and has not made it unavailable. A healthy, briefly failing, or capacity-refused
@@ -2114,6 +2118,11 @@ When remote ACK registration cannot reserve correlation memory, the affected rec
 acknowledgement carries the registration report chain, including its admission cause.
 An answering node sends its established remote failure class or stream rejection text over the
 wire; a local report's cause chain is not serialized into an HTTP/2 response.
+The forwarding node resumes a relay rejection's received text as `TransportError::RelayRejected`
+beneath `RemoteDispatchError::AdmissionRejected`, so alternate report display retains the reason.
+When cancellation reconciliation discovers that rejection after a failed send, the report also
+retains the original local send cause. The text remains an intentional wire projection, never an
+input to admission or retry classification.
 
 The exact source owners classify `RemoteRequestFailure`, `RemoteOperationFailure`,
 `OwnershipHandoffFailure`, gossip refusals and resource-publication answers as fixed wire outcomes
@@ -2186,3 +2195,16 @@ undelivered batch and branch field values stay out of that diagnostic.
 Per-batch and payload-bearing logs use debug or trace levels and do not expose sensitive field
 values. See [Metrics And Observability](./metrics-and-observability.md) for the metric and logging
 contract.
+
+## Cluster Parameter Observations
+
+The existing authenticated gossip exchange publishes a coherent `cluster_parameters` value: the
+committed parameter record and the optional record installed by that node. Revisions are positive;
+a running revision cannot exceed its committed publication or name different values at the same
+revision. A delayed committed observation leaves a newer publication intact.
+
+A returning node obtains its construction policy from a live peer publication and gates graph
+installation until its applied Raft record reaches that revision; equal revisions must contain
+equal values. The interconnect simulation qualifies this encoding and catch-up decision under a
+partition over the real transport, without claiming whole-node Raft or Fjall crash simulation.
+[Node Settings](node-settings.md#committed-parameter-changes) owns policy application.

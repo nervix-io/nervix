@@ -22,11 +22,12 @@ use nervix_dataflow_graph::{
     DataflowInputSide, DataflowMetricRef, DataflowNode, DataflowNodeRole, DataflowProcessorKind,
     DataflowSchemaField,
 };
+#[cfg(test)]
+use nervix_models::ScheduledNode;
 use nervix_models::{
     ConcreteBranchCoverage, CreateSchema, DomainName, DomainSchedule, ImpactEdgeKind,
     ImpactNodeCoverage, IngestorInput, Model, ModelIndex, ModelKind, ModelName, NodeRef,
-    ParseAsType, PlacementPolicy, RelayName, ResolvedBranching, ScheduledNode, SchemaField,
-    SchemaFingerprint,
+    ParseAsType, PlacementPolicy, RelayName, ResolvedBranching, SchemaField, SchemaFingerprint,
 };
 use nervix_primitives::sync::Arc;
 use petgraph::{
@@ -349,6 +350,7 @@ impl ActiveGraph {
 
     /// Every node of this graph as an unplaced schedule entry, carrying the branching and the
     /// schema fingerprint the registry resolved for it, before a scheduler decides where it runs.
+    #[cfg(test)]
     pub(crate) fn unplaced_schedule_nodes(&self) -> Vec<ScheduledNode> {
         let mut nodes = Vec::with_capacity(self.graph.node_count());
         for index in self.graph.node_indices() {

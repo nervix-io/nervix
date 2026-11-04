@@ -231,10 +231,8 @@ stateful_checkpoints_committed() {
 
 # The configured runtime snapshot interval of the first node, in whole milliseconds.
 stateful_snapshot_interval_ms() {
-    local container_id interval
-    container_id="$(owned_service_container "${node_hosts[0]}")" || return 1
-    interval="$(run_bounded 20 docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "${container_id}" \
-        | awk -F '=' '$1 == "NERVIX_STATE_SNAPSHOT_INTERVAL" { print $2; exit }')"
+    # Startup installed this fixture policy through ALTER CLUSTER SET before graph construction.
+    local interval="${CHAOS_STATE_SNAPSHOT_INTERVAL:-30s}"
     case "${interval}" in
         *ms) printf '%d\n' "${interval%ms}" ;;
         *s) printf '%d\n' "$(( ${interval%s} * 1000 ))" ;;

@@ -11,12 +11,12 @@ downloaded artifact directory, or one report or record.
 
 The selection decides which producers the union requires. Every run whose tested diff requires the
 suites needs the ordinary workspace report the coverage job merged and the collections of the
-diagnostic-evidence job. `extra-primitives` adds the extra-tests job's Shuttle, Loom, Turmoil and
-Deloxide primitive conformance collections, the `shuttle`, `loom`, `turmoil` and `deloxide` labels
-add their jobs' canonical collections, and a pull request carrying `fuzz` adds the combined live Bolero fuzz
-campaign. The Bolero call's selection record must show that its randomized properties passed exactly
-when `bolero-random` requested them and that its sanitizer campaigns ran exactly when `fuzz`
-requested them: a deliberate skip is valid and supplies no report. Every required producer job must
+diagnostic-evidence job's ordinary report-tool collection. The temporary CI execution policy
+disables all Deloxide and fuzz targets, regardless of labels or event; local collections retain
+their declared execution modes. `extra-primitives` adds the extra-tests job's Shuttle, Loom and
+Turmoil conformance, and the `shuttle`, `loom` and `turmoil` labels add canonical collections.
+The Bolero call's selection record must show that randomized properties passed exactly when
+`bolero-random` requested them and sanitizer campaigns were deliberately skipped in CI. Every required producer job must
 have succeeded, and every other one must have been skipped, except extra-tests, whose other labels
 run steps of their own.
 
@@ -186,6 +186,12 @@ class Requirement:
         return f"{self.producer} ({self.mode})"
 
     def enabled(self, selection: Selection) -> bool:
+        # The temporary CI policy permits neither diagnostic execution nor sanitizer campaigns.
+        # Local collections retain their declared modes; a PR label cannot override CI policy.
+        if selection.provider is Provider.GITHUB and self.mode in {
+            "deloxide", "deloxide-order", "deloxide-stress", FUZZ_MODE,
+        }:
+            return False
         if self.label is None:
             return True
         if self.label == FUZZ_LABEL:
@@ -259,7 +265,7 @@ class Selection:
     jobs: Mapping[str, str]
 
     def fuzz_requested(self) -> bool:
-        return self.event == PULL_REQUEST and FUZZ_LABEL in self.labels
+        return self.provider is Provider.LOCAL and self.event == PULL_REQUEST and FUZZ_LABEL in self.labels
 
     def randomized_requested(self) -> bool:
         """A pull request runs the randomized properties only when `bolero-random` requests them, and
@@ -972,7 +978,12 @@ class FullCoverage:
             self.problem(f"{self.display(record.path)}: the Bolero selection {problem}")
             return
         if not self.selection.fuzz_requested():
-            self.fuzz = {"skipped": "the pull request carries no fuzz label, so the sanitizer campaigns were deliberately skipped"}
+            reason = (
+                "the temporary CI execution policy disables sanitizer campaigns"
+                if self.selection.provider is Provider.GITHUB else
+                "this local selection requests no sanitizer campaign"
+            )
+            self.fuzz = {"skipped": reason}
 
     def bolero_selection_problem(self, content: Mapping[str, object]) -> str | None:
         """The first reason the Bolero call's record is not this run's, or does not show the

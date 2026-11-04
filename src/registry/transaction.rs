@@ -49,6 +49,7 @@ use rebind::plan_resource_rebind;
 /// Every mutable control-plane input one planning pass may inspect.
 #[derive(Debug, Clone)]
 pub(crate) struct TransactionPlanningSnapshot {
+    pub(crate) parameters: nervix_models::ClusterParameterValues,
     pub(crate) domain: ControlDomainState,
     pub(crate) models: ModelIndex,
     pub(crate) resources: BTreeSet<ResourceName>,
@@ -174,6 +175,8 @@ impl PlannedTransaction {
 
 #[derive(Debug, Error)]
 pub(crate) enum TransactionPlanningError {
+    #[error("cluster parameters have not been seeded")]
+    ClusterParametersUnseeded,
     #[error("domain '{domain}' does not exist")]
     DomainNotFound { domain: DomainName },
     #[error("domain '{domain}' is paused by a model alteration")]
@@ -282,7 +285,8 @@ impl TransactionPlanningError {
             | Self::ExternalModelValidation { operation }
             | Self::UdfPreparation { operation } => Some(*operation),
             Self::ResetIdentityMissing { operation } => Some(*operation),
-            Self::DomainNotFound { .. }
+            Self::ClusterParametersUnseeded
+            | Self::DomainNotFound { .. }
             | Self::DomainPaused { .. }
             | Self::ConcurrentDomainAlter { .. }
             | Self::DomainAlreadyRunning { .. }
@@ -326,6 +330,7 @@ struct ModelRunPlan {
 }
 
 struct ModelRunPlanningInput<'a> {
+    parameters: &'a nervix_models::ClusterParameterValues,
     domain: &'a DomainName,
     domain_state: &'a ControlDomainState,
     resources: &'a BTreeSet<ResourceName>,
@@ -504,6 +509,7 @@ impl Registry {
             &ImpactAttribution,
         ) -> TransactionScheduleDecision,
     {
+        let parameters = snapshot.parameters;
         let domain = snapshot.domain.id.clone();
         let mut domain_state = snapshot.domain;
         let mut models = snapshot.models;
@@ -538,6 +544,7 @@ impl Registry {
                     .get(operation_offset..end)
                     .verified("the model run bounds were found in this statement slice");
                 let input = ModelRunPlanningInput {
+                    parameters: &parameters,
                     domain: &domain,
                     domain_state: &domain_state,
                     resources: &resources,
@@ -830,6 +837,7 @@ impl Registry {
         ) -> TransactionScheduleDecision,
     {
         let ModelRunPlanningInput {
+            parameters,
             domain,
             domain_state,
             resources,
@@ -953,6 +961,7 @@ impl Registry {
         let preflight = Self::preflight_transaction_mutations_against(
             domain,
             base_models.clone(),
+            parameters,
             &mutations,
             allow_incomplete,
         )

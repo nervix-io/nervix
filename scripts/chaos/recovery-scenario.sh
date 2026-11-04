@@ -412,11 +412,11 @@ configuration_differences() {
         | select($expected[0][$part] != $observed[0][$part]) | $part'
 }
 
-# Prints the consensus, liveness and shutdown settings a node container runs with, read from the
-# environment of its Docker inspection, as one JSON object.
+# Prints the node-local Raft prerequisites from its Docker inspection. Cluster policy is observed
+# through the committed and running records the public cluster description publishes.
 configured_settings() {
     jq -c '.[0].Config.Env
-        | map(select(test("^NERVIX_(RAFT_|NODE_UNAVAILABILITY_TIMEOUT=|SHUTDOWN_TIMEOUT=|DRAIN_TIMEOUT=)")))
+        | map(select(startswith("NERVIX_RAFT_")))
         | map(capture("^(?<key>[^=]+)=(?<value>.*)$")) | from_entries' "$1"
 }
 

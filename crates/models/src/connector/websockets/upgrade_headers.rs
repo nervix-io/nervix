@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    HttpApplicationHeaders, HttpHeaderName, HttpHeaderValue, http_request::http_token_byte,
+    HttpApplicationHeaders, HttpHeaderLimits, HttpHeaderName, HttpHeaderValue,
+    http_request::http_token_byte,
 };
 
 /// The upgrade field that offers subprotocols, in the lowercase spelling field names take.
@@ -37,7 +38,7 @@ pub struct WebsocketsUpgradeHeader {
 
 /// Application fields validated for a WebSockets upgrade: every protocol-owned name is refused
 /// except the subprotocol offer, which holds its canonical tokens.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebsocketsUpgradeHeaders(HttpApplicationHeaders);
 
 /// A refusal names the field and, for an offer, the position of its element; never a value, which
@@ -69,14 +70,23 @@ pub enum WebsocketsUpgradeHeadersError {
     RepeatedSubprotocol { element: usize },
 }
 
+impl Default for WebsocketsUpgradeHeaders {
+    fn default() -> Self {
+        Self(HttpApplicationHeaders::with_limits(
+            HttpHeaderLimits::representable(),
+        ))
+    }
+}
+
 impl WebsocketsUpgradeHeaders {
     /// Applies HTTP field rules, the protocol-owned WebSocket field restrictions and the token
-    /// rules of a subprotocol offer.
+    /// rules of a subprotocol offer. This conversion checks physical representation bounds;
+    /// registry admission and parameter transitions check the canonical fields against committed policy.
     pub fn parse(
         headers: &[WebsocketsUpgradeHeader],
     ) -> error_stack::Result<Self, WebsocketsUpgradeHeadersError> {
         let mut names = BTreeSet::new();
-        let mut validated = HttpApplicationHeaders::default();
+        let Self(mut validated) = Self::default();
         for header in headers {
             let lowercase = header.name.to_ascii_lowercase();
             let offers_subprotocols = lowercase == SUBPROTOCOL_FIELD;
