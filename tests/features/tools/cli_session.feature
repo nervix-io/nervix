@@ -472,3 +472,28 @@ Feature: CLI public session dispatch
       | cluster_size |
       | 1            |
       | 3            |
+
+  Scenario Outline: Ctrl-C during a CLI RESTORE leaves it to recover under its execution reference
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "interrupted.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    And the path of backup archive "interrupted.nvxb" is saved as placeholder "archive"
+    Given restore step "import resources" of domain "{{domain}}_copy" on node "{{leader}}" pauses before it applies
+    When the CLI starts executing "RESTORE DOMAIN {{domain}} AS {{domain}}_copy FROM '{{archive}}';" on node "{{leader}}"
+    Then the restore pauses at step "import resources" of domain "{{domain}}_copy" on node "{{leader}}"
+    When the started CLI receives Ctrl-C
+    Then the started CLI exits with status 3 and prints "outcome: not known yet"
+    And the execution reference the CLI printed is saved as placeholder "restore_reference"
+    When the restore step pause on node "{{leader}}" is released
+    And the CLI executes "RESTORE DOMAIN {{domain}} AS {{domain}}_copy FROM '{{archive}}';" under execution reference "{{restore_reference}}" on node "{{leader}}"
+    Then the CLI exited with status 0 and printed "{{domain}}_copy"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
