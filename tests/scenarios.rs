@@ -247,6 +247,7 @@ mod session_protocol;
 mod session_tls;
 mod standalone_transaction;
 mod web_console_connections;
+mod web_console_request_window;
 mod websocket_lifecycle;
 
 const SCENARIOS_PATH: &str = "tests/features";
@@ -13324,6 +13325,24 @@ async fn then_command_durable_admission_pause_is_reached(
     });
 }
 
+#[given("command execution on all nodes pauses after durable admission")]
+async fn given_command_durable_admission_pause_on_all_nodes(world: &mut ScenarioWorld) {
+    for node in world.cluster().node_ids() {
+        nervix_primitives::task::consume_budget().await;
+        given_command_durable_admission_pause(world, node).await;
+    }
+}
+
+#[when("the durable command admission pauses on all nodes are released")]
+async fn when_command_durable_admission_pauses_on_all_nodes_are_released(
+    world: &mut ScenarioWorld,
+) {
+    for node in world.cluster().node_ids() {
+        nervix_primitives::task::consume_budget().await;
+        when_command_durable_admission_pause_is_released(world, node).await;
+    }
+}
+
 #[when(expr = "the durable command admission pause on node {string} is released")]
 async fn when_command_durable_admission_pause_is_released(
     world: &mut ScenarioWorld,
@@ -16532,6 +16551,22 @@ async fn when_command_request_with_reference_created_before_now_is_executed(
         .assured("the scenario reference age lies after the Unix epoch");
     let execution_reference = uuid_v7_created_at(created_at);
     execute_command_request_with_reference_on_leader(world, &execution_reference, step).await;
+}
+
+#[given(expr = "command execution reference {string} is created {string} after now")]
+fn given_command_execution_reference_is_created_after_now(
+    world: &mut ScenarioWorld,
+    reference: String,
+    lead: String,
+) {
+    let reference = expand_placeholders(world, &reference);
+    let lead = parse_duration_text(&lead).assured("the scenario reference lead is a duration");
+    let created_at = SystemTime::now()
+        .checked_add(lead)
+        .assured("the scenario reference lead stays within the system clock range");
+    world
+        .command_execution_references
+        .insert(reference, uuid_v7_created_at(created_at));
 }
 
 #[when(
@@ -25694,6 +25729,117 @@ async fn then_node_observability_metric_with_labels_eventually_equals(
     world
         .wait_for_observability_metric_value(&node_id, &metric_name, expected_value, None, step)
         .await;
+}
+
+#[then(expr = "cluster observability metric {string} with labels eventually totals {int}")]
+async fn then_cluster_observability_metric_eventually_totals(
+    world: &mut ScenarioWorld,
+    metric_name: String,
+    expected: i64,
+    #[step] step: &Step,
+) {
+    let labels = docstring(step)
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let expected: f64 = expected.approx_into();
+    let mut observed = BTreeMap::new();
+    let outcome =
+        nervix_primitives::time::timeout(common::status_request::STATUS_WAIT_BUDGET, async {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                observed.clear();
+                let mut total = 0.0;
+                for node in world.cluster().node_ids() {
+                    nervix_primitives::task::consume_budget().await;
+                    let value = match world
+                        .cluster()
+                        .read_observability_metric(&node, &metric_name, &labels)
+                        .await
+                    {
+                        Ok(value) => value,
+                        Err(error) => {
+                            panic!("node '{node}' did not expose '{metric_name}': {error}")
+                        }
+                    };
+                    total += value;
+                    observed.insert(node, value);
+                }
+                if total == expected {
+                    break;
+                }
+                nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+    assert!(
+        outcome.is_ok(),
+        "metric '{metric_name}' with labels {labels:?} did not total {expected}: {observed:?}"
+    );
+}
+
+#[then(expr = "node {string} observability metric {string} is saved as placeholder {string}")]
+async fn then_node_observability_metric_is_saved(
+    world: &mut ScenarioWorld,
+    node: String,
+    metric: String,
+    placeholder: String,
+) {
+    let node = expand_placeholders(world, &node);
+    let value = match world
+        .cluster()
+        .read_observability_metric(&node, &metric, &[])
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => panic!("node '{node}' did not expose '{metric}' before saving it: {error}"),
+    };
+    assert!(value.is_finite());
+    world.placeholders.insert(placeholder, value.to_string());
+}
+
+#[then(
+    expr = "node {string} observability metric {string} eventually reaches saved placeholder \
+            {string}"
+)]
+async fn then_node_observability_metric_reaches_saved_value(
+    world: &mut ScenarioWorld,
+    node: String,
+    metric: String,
+    placeholder: String,
+) {
+    let node = expand_placeholders(world, &node);
+    let expected: f64 = world
+        .placeholders
+        .get(&placeholder)
+        .verified("the preceding step saved this metric")
+        .parse()
+        .assured("saved metric values are numeric");
+    let mut observed = None;
+    let outcome =
+        nervix_primitives::time::timeout(common::status_request::STATUS_WAIT_BUDGET, async {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let value = match world
+                    .cluster()
+                    .read_observability_metric(&node, &metric, &[])
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(error) => panic!("node '{node}' did not expose '{metric}': {error}"),
+                };
+                observed = Some(value);
+                if value >= expected {
+                    break;
+                }
+                nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+    assert!(
+        outcome.is_ok(),
+        "node '{node}' metric '{metric}' did not reach {expected}: {observed:?}"
+    );
 }
 
 #[then(

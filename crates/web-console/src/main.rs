@@ -619,7 +619,7 @@ impl ConsoleRequest {
     ///
     /// Every connection selects the active domain and attaches the session's transaction again
     /// itself. Completion and structured-choice requests only matter for the current input or
-    /// draft, so those are sent at once and forgotten with the connection.
+    /// draft, so those wait only for request capacity and are forgotten with the connection.
     fn is_ordered(&self) -> bool {
         match self {
             Self::Command { .. }
@@ -728,6 +728,40 @@ struct IssuedRequest {
     request: ConsoleRequest,
 }
 
+/// A sent lookup still occupies a server request place after its result becomes irrelevant.
+/// Retain only that identity, releasing its text and any partial reply immediately.
+struct SentRequest {
+    /// Absence means the control no longer awaits the result; the enclosing map entry still
+    /// owns this sent request's identity and capacity place.
+    awaited: Option<IssuedRequest>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LookupPosition {
+    Held(IssueOrder),
+    Sent(RequestId),
+}
+
+/// Connection setup and lookups may progress before ordered commands are ready to run.
+#[derive(Clone, Copy)]
+enum RequestLane {
+    Ordered,
+    Connection(ConnectionPriority),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConnectionPriority {
+    Control,
+    /// Existing session intent must be restored even when all control backlog places are
+    /// occupied. These requests still share the same 64-place wire window.
+    Setup,
+}
+
+struct HeldConnectionRequest {
+    request: ConsoleRequest,
+    priority: ConnectionPriority,
+}
+
 /// Where a server message goes.
 enum Routed {
     /// An unsolicited message. It never answers a request.
@@ -780,10 +814,14 @@ struct OutstandingLoad {
 
 impl OutstandingLoad {
     fn add(&mut self, request: &ConsoleRequest) {
+        self.add_text(request.text_bytes());
+    }
+
+    fn add_text(&mut self, bytes: usize) {
         self.requests = self.requests.checked_add(1).assured(
             "the outstanding requests are held in memory, so they cannot number usize::MAX",
         );
-        self.bytes = self.bytes.checked_add(request.text_bytes()).assured(
+        self.bytes = self.bytes.checked_add(bytes).assured(
             "every counted text is held in memory at once, so the texts cannot add up past \
              usize::MAX",
         );
@@ -818,23 +856,27 @@ struct SessionRequests {
     next_issue: u64,
     /// Ordered requests waiting until the session can serve them, in the order they were issued.
     held: BTreeMap<IssueOrder, ConsoleRequest>,
+    /// Connection-local requests waiting for capacity, including the opening prefix and a
+    /// transaction reattach. Setup precedes ordered commands; other controls respect ready
+    /// work's issue order. Every request here ends with this connection.
+    connection_held: BTreeMap<IssueOrder, HeldConnectionRequest>,
     /// The identity the next request sent on the current connection carries.
     next_request_id: NonZeroU64,
     /// The requests sent on the current connection that await their terminal reply, by the
     /// identity the reply carries. Identities only increase, so iteration is send order.
-    in_flight: BTreeMap<RequestId, IssuedRequest>,
+    in_flight: BTreeMap<RequestId, SentRequest>,
     /// The replies too large for one frame whose parts are still arriving.
     transfers: BTreeMap<RequestId, TransferAssembly>,
     /// The latest completion request. An earlier one is no longer awaited, so its stale
     /// suggestions are never shown.
-    latest_suggestion: Option<RequestId>,
+    latest_suggestion: Option<LookupPosition>,
     /// The latest request for each structured control. Older replies cannot overwrite a newer
     /// draft or search.
-    latest_choices: BTreeMap<ChoiceControl, RequestId>,
+    latest_choices: BTreeMap<ChoiceControl, LookupPosition>,
     /// Whether the server confirmed that the node serving the connection leads the cluster.
     leader_confirmed: bool,
-    /// The request attaching the session's transaction to the connection, while it is in flight.
-    attaching: Option<RequestId>,
+    /// A transaction attach blocks ordered commands while waiting for capacity and in flight.
+    attaching: Option<IssueOrder>,
 }
 
 impl SessionRequests {
@@ -842,6 +884,7 @@ impl SessionRequests {
         Self {
             next_issue: 0,
             held: BTreeMap::new(),
+            connection_held: BTreeMap::new(),
             next_request_id: NonZeroU64::MIN,
             in_flight: BTreeMap::new(),
             transfers: BTreeMap::new(),
@@ -868,7 +911,7 @@ impl SessionRequests {
         self.leader_confirmed && self.attaching.is_none()
     }
 
-    /// Whether an attach of the session's transaction is in flight.
+    /// Whether a transaction attach is waiting for capacity or in flight.
     fn is_attaching(&self) -> bool {
         self.attaching.is_some()
     }
@@ -880,16 +923,62 @@ impl SessionRequests {
 
     /// Takes a request one of the console's controls issued. It is refused when the session
     /// already keeps as many requests outstanding, or as much of their text, as it holds. An
-    /// ordered request then waits until it can go out in its place; anything else is sent at once.
+    /// ordered request waits until it can go out in its place. Other controls wait only for
+    /// capacity on this connection, respecting earlier ready work.
     fn accept(&mut self, issued: IssuedRequest) -> Admission {
-        if let Err(report) = self.outstanding().admits(issued.request.text_bytes()) {
+        let lane = if issued.request.is_ordered() {
+            RequestLane::Ordered
+        } else {
+            RequestLane::Connection(ConnectionPriority::Control)
+        };
+        self.admit(issued, lane)
+    }
+
+    /// Opening and reattachment requests precede ordered work, including when they must wait
+    /// for an earlier terminal reply to free a request place.
+    fn accept_connection(&mut self, issued: IssuedRequest) -> Admission {
+        self.admit(issued, RequestLane::Connection(ConnectionPriority::Setup))
+    }
+
+    fn admit(&mut self, issued: IssuedRequest, lane: RequestLane) -> Admission {
+        self.supersede_lookup(&issued.request);
+        if let RequestLane::Ordered | RequestLane::Connection(ConnectionPriority::Control) = lane
+            && let Err(report) = self.outstanding().admits(issued.request.text_bytes())
+        {
             return Admission::Refused(Box::new(RefusedRequest {
                 request: issued.request,
                 refusal: *report.current_context(),
             }));
         }
-        if issued.request.is_ordered() && !self.can_send_ordered() {
-            self.held.insert(issued.order, issued.request);
+        let can_send = match lane {
+            RequestLane::Ordered => self.can_send_ordered(),
+            RequestLane::Connection(priority) => {
+                self.connection_held.is_empty()
+                    && self.has_room_in_flight()
+                    && (priority == ConnectionPriority::Setup
+                        || !self.is_ready()
+                        || self.held.is_empty())
+            }
+        };
+        if let ConsoleRequest::AttachTransaction(_) = &issued.request {
+            self.attaching = Some(issued.order);
+        }
+        if !can_send {
+            self.remember_lookup(&issued.request, LookupPosition::Held(issued.order));
+            match lane {
+                RequestLane::Ordered => {
+                    self.held.insert(issued.order, issued.request);
+                }
+                RequestLane::Connection(priority) => {
+                    self.connection_held.insert(
+                        issued.order,
+                        HeldConnectionRequest {
+                            request: issued.request,
+                            priority,
+                        },
+                    );
+                }
+            };
             return Admission::Held;
         }
         Admission::Sent(self.dispatch(issued))
@@ -900,7 +989,10 @@ impl SessionRequests {
     /// `MAX_IN_FLIGHT_REQUESTS` the server would refuse the request rather than queue it, so the
     /// console holds it until an earlier reply frees a place.
     fn can_send_ordered(&self) -> bool {
-        self.is_ready() && self.held.is_empty() && self.has_room_in_flight()
+        self.is_ready()
+            && self.held.is_empty()
+            && self.connection_held.is_empty()
+            && self.has_room_in_flight()
     }
 
     /// Whether the server admits another request in flight on this connection. The console
@@ -913,70 +1005,119 @@ impl SessionRequests {
     /// The requests the session keeps outstanding: held, or sent and awaiting their reply.
     fn outstanding(&self) -> OutstandingLoad {
         let mut load = OutstandingLoad::default();
-        // Bounded by `MAX_OUTSTANDING_REQUESTS`, which `accept` enforces, together with the
-        // requests the session issues itself: the requests that open a connection, one
-        // restoration or deletion per subscription tab, and one description per completed
-        // resource creation.
+        // Control admission enforces MAX_OUTSTANDING_REQUESTS and its text bound. As before,
+        // setup adds the requests for the retained tabs, selected domain/clock and transaction;
+        // refusing those at a full control backlog would prevent that backlog from recovering.
+        // Every kind still shares the wire window. Superseded sent lookups carry no text.
         for request in self.held.values() {
             load.add(request);
         }
-        for issued in self.in_flight.values() {
-            load.add(&issued.request);
+        for request in self.connection_held.values() {
+            load.add(&request.request);
+        }
+        for request in self.in_flight.values() {
+            match &request.awaited {
+                Some(issued) => load.add(&issued.request),
+                None => load.add_text(0),
+            }
         }
         load
+    }
+
+    /// Replacing a waiting lookup frees its text immediately. A sent lookup keeps only its
+    /// identity until its terminal reply, because the server still counts that request.
+    fn supersede_lookup(&mut self, request: &ConsoleRequest) {
+        let previous = match request {
+            ConsoleRequest::Suggest(_) => self.latest_suggestion.take(),
+            ConsoleRequest::Choice { context, .. } => self.latest_choices.remove(&context.control),
+            _ => None,
+        };
+        match previous {
+            Some(LookupPosition::Held(order)) => {
+                self.connection_held.remove(&order);
+            }
+            Some(LookupPosition::Sent(request_id)) => {
+                if let Some(request) = self.in_flight.get_mut(&request_id) {
+                    request.awaited = None;
+                }
+                self.transfers.remove(&request_id);
+            }
+            None => {}
+        }
+    }
+
+    fn remember_lookup(&mut self, request: &ConsoleRequest, position: LookupPosition) {
+        match request {
+            ConsoleRequest::Suggest(_) => self.latest_suggestion = Some(position),
+            ConsoleRequest::Choice { context, .. } => {
+                self.latest_choices.insert(context.control, position);
+            }
+            _ => {}
+        }
     }
 
     /// Registers a request as sent on the current connection and returns the message that
     /// carries it, under a fresh identity.
     fn dispatch(&mut self, issued: IssuedRequest) -> ClientMessage {
+        assert!(
+            self.has_room_in_flight(),
+            "admission reserves a server request place"
+        );
         let request_id = RequestId::new(self.next_request_id);
         self.next_request_id = self
             .next_request_id
             .checked_add(1)
             .assured("a console connection cannot send 2^64 requests");
-        match &issued.request {
-            ConsoleRequest::Suggest(_) => {
-                if let Some(previous) = self.latest_suggestion.replace(request_id) {
-                    self.in_flight.remove(&previous);
-                    self.transfers.remove(&previous);
-                }
-            }
-            ConsoleRequest::Choice { context, .. } => {
-                if let Some(previous) = self.latest_choices.insert(context.control, request_id) {
-                    self.in_flight.remove(&previous);
-                    self.transfers.remove(&previous);
-                }
-            }
-            ConsoleRequest::AttachTransaction(_) => {
-                self.attaching = Some(request_id);
-            }
-            ConsoleRequest::Command { .. }
-            | ConsoleRequest::ListDomains
-            | ConsoleRequest::InspectTransaction(_)
-            | ConsoleRequest::SubscriptionStart { .. }
-            | ConsoleRequest::SubscriptionStop { .. }
-            | ConsoleRequest::SelectDomain(_)
-            | ConsoleRequest::DomainClockAttach { .. }
-            | ConsoleRequest::DomainClockDetach { .. } => {}
+        self.remember_lookup(&issued.request, LookupPosition::Sent(request_id));
+        if let ConsoleRequest::AttachTransaction(_) = &issued.request {
+            self.attaching = Some(issued.order);
         }
         let message = ClientMessage {
             request_id,
             request: issued.request.client_request(),
         };
-        self.in_flight.insert(request_id, issued);
+        self.in_flight.insert(
+            request_id,
+            SentRequest {
+                awaited: Some(issued),
+            },
+        );
         message
     }
 
-    /// Dispatches the held requests in the order they were issued, once the session is ready and
-    /// while the server admits them in flight. The rest keep waiting for earlier replies.
+    /// Setup precedes ordered work, and connection-local controls can progress before that work
+    /// is ready. Otherwise issue order prevents a stream of lookups from overtaking commands.
+    fn connection_precedes_ordered(&self) -> bool {
+        let Some((connection_order, connection)) = self.connection_held.first_key_value() else {
+            return false;
+        };
+        if !self.is_ready() || connection.priority == ConnectionPriority::Setup {
+            return true;
+        }
+        match self.held.first_key_value() {
+            Some((ordered_order, _)) => connection_order < ordered_order,
+            None => true,
+        }
+    }
+
+    /// Fills the wire window without letting later controls overtake ready ordered work.
     fn release_held(&mut self) -> Vec<ClientMessage> {
         let mut messages = Vec::new();
-        if !self.is_ready() {
-            return messages;
-        }
         while self.has_room_in_flight() {
-            let Some((order, request)) = self.held.pop_first() else {
-                break;
+            let (order, request) = if self.connection_precedes_ordered() {
+                let (order, held) = self
+                    .connection_held
+                    .pop_first()
+                    .verified("the connection request was found above");
+                (order, held.request)
+            } else {
+                if !self.is_ready() {
+                    break;
+                }
+                let Some(next) = self.held.pop_first() else {
+                    break;
+                };
+                next
             };
             messages.push(self.dispatch(IssuedRequest { order, request }));
         }
@@ -991,6 +1132,14 @@ impl SessionRequests {
     /// Drops every held request, because the session they were issued for is over.
     fn clear_held(&mut self) {
         self.held.clear();
+        let connection_held = std::mem::take(&mut self.connection_held);
+        for held in connection_held.into_values() {
+            let request = held.request;
+            self.supersede_lookup(&request);
+            if let ConsoleRequest::AttachTransaction(_) = request {
+                self.attaching = None;
+            }
+        }
     }
 
     /// Pairs a server message with the request it answers. An event answers no request.
@@ -1012,14 +1161,15 @@ impl SessionRequests {
     fn answer(&mut self, request_id: RequestId) -> Option<IssuedRequest> {
         let request = self.in_flight.remove(&request_id)?;
         self.transfers.remove(&request_id);
-        if self.attaching == Some(request_id) {
+        let request = request.awaited?;
+        if self.attaching == Some(request.order) {
             self.attaching = None;
         }
-        if self.latest_suggestion == Some(request_id) {
+        if self.latest_suggestion == Some(LookupPosition::Sent(request_id)) {
             self.latest_suggestion = None;
         }
         self.latest_choices
-            .retain(|_, latest| *latest != request_id);
+            .retain(|_, latest| *latest != LookupPosition::Sent(request_id));
         Some(request)
     }
 
@@ -1027,6 +1177,16 @@ impl SessionRequests {
     fn assemble(&mut self, part: &TransferPart) -> Routed {
         let request_id = part.request_id();
         if !self.in_flight.contains_key(&request_id) {
+            return Routed::Untracked;
+        }
+        if let Some(SentRequest { awaited: None }) = self.in_flight.get(&request_id) {
+            let end = part
+                .offset()
+                .checked_add(part.chunk().len())
+                .assured("a verified transfer part ends within its declared total");
+            if end == part.total_bytes() {
+                self.in_flight.remove(&request_id);
+            }
             return Routed::Untracked;
         }
         let assembly = match self.transfers.entry(request_id) {
@@ -1074,13 +1234,17 @@ impl SessionRequests {
     /// belongs to the ended connection ends with it.
     fn end_connection(&mut self) {
         let in_flight = std::mem::take(&mut self.in_flight);
-        for issued in in_flight.into_values() {
+        for request in in_flight.into_values() {
+            let Some(issued) = request.awaited else {
+                continue;
+            };
             if issued.request.is_ordered() && !issued.request.belongs_to_connection() {
                 self.hold_again(issued);
             }
         }
         self.held
             .retain(|_, request| !request.belongs_to_connection());
+        self.connection_held.clear();
         self.transfers.clear();
         self.next_request_id = NonZeroU64::MIN;
         self.latest_suggestion = None;
@@ -2343,8 +2507,8 @@ async fn serve_connection(
             return ConnectionEnd::Dropped;
         }
         let issued = requests.issue(request);
-        let message = requests.dispatch(issued);
-        if !send_message(&mut socket, &codec, signals, requests, message).await {
+        let admission = requests.accept_connection(issued);
+        if !send_admission(&mut socket, &codec, signals, requests, admission).await {
             return ConnectionEnd::Dropped;
         }
     }
@@ -2368,17 +2532,9 @@ async fn serve_connection(
                 if issued.request.inspects_transaction() {
                     signals.inspector.requested(issued.order.0);
                 }
-                match requests.accept(issued) {
-                    Admission::Sent(message) => {
-                        if !send_message(&mut socket, &codec, signals, requests, message).await {
-                            return ConnectionEnd::Dropped;
-                        }
-                    }
-                    Admission::Held => {}
-                    Admission::Refused(refused) => {
-                        let RefusedRequest { request, refusal } = *refused;
-                        fail_request(signals, request, refusal.to_string());
-                    }
+                let admission = requests.accept(issued);
+                if !send_admission(&mut socket, &codec, signals, requests, admission).await {
+                    return ConnectionEnd::Dropped;
                 }
                 SessionStep::Continue
             }
@@ -2423,8 +2579,8 @@ async fn serve_connection(
                 if requests.can_send_ordered() && !transaction_active {
                     for request in signals.begin_restorations() {
                         let issued = requests.issue(request);
-                        let message = requests.dispatch(issued);
-                        if !send_message(&mut socket, &codec, signals, requests, message).await {
+                        let admission = requests.accept_connection(issued);
+                        if !send_admission(&mut socket, &codec, signals, requests, admission).await {
                             return ConnectionEnd::Dropped;
                         }
                     }
@@ -2440,8 +2596,8 @@ async fn serve_connection(
                         transaction_id,
                     });
                     let issued = requests.issue(attach);
-                    let message = requests.dispatch(issued);
-                    if !send_message(&mut socket, &codec, signals, requests, message).await {
+                    let admission = requests.accept_connection(issued);
+                    if !send_admission(&mut socket, &codec, signals, requests, admission).await {
                         return ConnectionEnd::Dropped;
                     }
                 }
@@ -2493,11 +2649,27 @@ fn interrupt_subscription_tabs(signals: WebConsoleSignals) {
     }
 }
 
-/// Sends one request message as one binary WebSocket message.
-///
-/// `false` says the connection is gone. The request stays registered, so the next connection sends
-/// it again when it is ordered. A request that cannot become a frame is answered here, because no
-/// reply will ever answer it.
+/// Applies admission without bypassing the session's count or text bounds.
+async fn send_admission(
+    socket: &mut WebSocket,
+    codec: &ClientWebSocketCodec,
+    signals: WebConsoleSignals,
+    requests: &mut SessionRequests,
+    admission: Admission,
+) -> bool {
+    match admission {
+        Admission::Sent(message) => send_message(socket, codec, signals, requests, message).await,
+        Admission::Held => true,
+        Admission::Refused(refused) => {
+            let RefusedRequest { request, refusal } = *refused;
+            fail_request(signals, request, refusal.to_string());
+            true
+        }
+    }
+}
+
+/// Sends an admitted request as one binary WebSocket message. An encoding refusal ends it
+/// locally; a lost connection retains ordered work for recovery under its original identity.
 async fn send_message(
     socket: &mut WebSocket,
     codec: &ClientWebSocketCodec,
@@ -10112,6 +10284,264 @@ mod tests {
     }
 
     #[test]
+    fn every_control_waits_for_a_place_in_the_session_request_window() {
+        for request in [
+            suggest("CREATE "),
+            choice_request(ChoiceControl::DomainPace, 1),
+            ConsoleRequest::SelectDomain(SelectDomainRequest {
+                domain: domain_name("selected"),
+            }),
+            ConsoleRequest::AttachTransaction(AttachTransactionRequest {
+                transaction_id: "transaction".to_string(),
+            }),
+        ] {
+            let mut requests = SessionRequests::new();
+            requests.confirm_leader();
+            for _ in 0..MAX_IN_FLIGHT_REQUESTS {
+                let issued = requests.issue(repl_command("SHOW CLUSTER STATUS;"));
+                sent(requests.accept(issued));
+            }
+            let issued = requests.issue(request);
+            assert!(
+                matches!(requests.accept(issued), Admission::Held),
+                "every control waits while the server's request window is full"
+            );
+            assert_eq!(requests.in_flight.len(), MAX_IN_FLIGHT_REQUESTS);
+            assert!(requests.release_held().is_empty());
+            assert!(requests.answer(request_id(1)).is_some());
+            assert_eq!(requests.release_held().len(), 1);
+        }
+    }
+
+    #[test]
+    fn superseding_a_lookup_does_not_release_its_server_request_place() {
+        let mut requests = SessionRequests::new();
+        for _ in 0..MAX_IN_FLIGHT_REQUESTS {
+            let issued = requests.issue(suggest("CREATE "));
+            sent(requests.accept(issued));
+        }
+        let latest = requests.issue(suggest("SHOW "));
+        assert!(matches!(requests.accept(latest), Admission::Held));
+        assert!(requests.release_held().is_empty());
+        assert!(matches!(
+            requests.route(reply(request_id(1), ready_choice_reply())),
+            Routed::Untracked
+        ));
+        let released = requests.release_held();
+        assert_eq!(released.len(), 1);
+        assert!(matches!(released[0].request, ClientRequest::Suggest(_)));
+    }
+
+    #[test]
+    fn waiting_lookups_keep_the_latest_input_and_each_controls_latest_draft() {
+        let mut requests = SessionRequests::new();
+        requests.confirm_leader();
+        for _ in 0..MAX_IN_FLIGHT_REQUESTS {
+            let issued = requests.issue(repl_command("SHOW CLUSTER STATUS;"));
+            sent(requests.accept(issued));
+        }
+        for request in [
+            suggest(&"a".repeat(1024)),
+            choice_request(ChoiceControl::DomainPace, 1),
+            suggest("SHOW "),
+            choice_request(ChoiceControl::DomainPace, 2),
+            choice_request(ChoiceControl::PlacementPolicy, 1),
+        ] {
+            let issued = requests.issue(request);
+            assert!(matches!(requests.accept(issued), Admission::Held));
+        }
+        let load = requests.outstanding();
+        assert_eq!(load.requests, MAX_IN_FLIGHT_REQUESTS + 3);
+        assert_eq!(
+            load.bytes,
+            "SHOW CLUSTER STATUS;".len() * MAX_IN_FLIGHT_REQUESTS + "SHOW ".len()
+        );
+        for number in 1..=MAX_IN_FLIGHT_REQUESTS {
+            let number = u64::try_from(number).assured("the request window fits in u64");
+            assert!(requests.answer(request_id(number)).is_some());
+        }
+        let released = requests.release_held();
+        assert_eq!(released.len(), 3);
+        let ClientRequest::Suggest(suggestion) = &released[0].request else {
+            panic!("the latest completion goes out first");
+        };
+        assert_eq!(suggestion.input(), "SHOW ");
+        let Routed::Reply(answered) =
+            requests.route(reply(released[1].request_id, ready_choice_reply()))
+        else {
+            panic!("the latest domain choice remains awaited");
+        };
+        let ConsoleRequest::Choice { context, .. } = answered.request.request else {
+            panic!("the reply belongs to a choice lookup");
+        };
+        assert_eq!(context.control, ChoiceControl::DomainPace);
+        assert_eq!(context.draft_revision, 2);
+        assert!(matches!(released[2].request, ClientRequest::Choice(_)));
+    }
+
+    #[test]
+    fn a_waiting_transaction_attach_precedes_held_commands_and_releases_them() {
+        let mut requests = SessionRequests::new();
+        requests.confirm_leader();
+        for _ in 0..MAX_IN_FLIGHT_REQUESTS {
+            let issued = requests.issue(repl_command("SHOW CLUSTER STATUS;"));
+            sent(requests.accept(issued));
+        }
+        let command = requests.issue(repl_command("held command"));
+        assert!(matches!(requests.accept(command), Admission::Held));
+        let attach = requests.issue(ConsoleRequest::AttachTransaction(
+            AttachTransactionRequest {
+                transaction_id: "transaction".to_string(),
+            },
+        ));
+        assert!(matches!(
+            requests.accept_connection(attach),
+            Admission::Held
+        ));
+        assert!(requests.is_attaching());
+        assert!(requests.answer(request_id(1)).is_some());
+        let released = requests.release_held();
+        assert_eq!(released.len(), 1);
+        assert!(matches!(
+            released[0].request,
+            ClientRequest::AttachTransaction(_)
+        ));
+        assert!(requests.answer(released[0].request_id).is_some());
+        assert_eq!(sent_queries(&requests.release_held()), vec!["held command"]);
+    }
+
+    #[test]
+    fn waiting_controls_and_ready_commands_share_issue_order() {
+        let mut requests = SessionRequests::new();
+        requests.confirm_leader();
+        for _ in 0..MAX_IN_FLIGHT_REQUESTS {
+            let issued = requests.issue(repl_command("SHOW CLUSTER STATUS;"));
+            sent(requests.accept(issued));
+        }
+        for request in [
+            repl_command("earlier command"),
+            suggest("CREATE "),
+            repl_command("later command"),
+            choice_request(ChoiceControl::DomainPace, 1),
+        ] {
+            let issued = requests.issue(request);
+            assert!(matches!(requests.accept(issued), Admission::Held));
+        }
+        assert!(requests.answer(request_id(1)).is_some());
+        assert_eq!(
+            sent_queries(&requests.release_held()),
+            vec!["earlier command"]
+        );
+        // New input replaces the waiting lookup in its new issue position. It must not
+        // continually overtake the command that was issued before that replacement.
+        let latest = requests.issue(suggest("SHOW "));
+        assert!(matches!(requests.accept(latest), Admission::Held));
+        let last = requests.issue(repl_command("last command"));
+        assert!(matches!(requests.accept(last), Admission::Held));
+        assert!(requests.answer(request_id(2)).is_some());
+        assert_eq!(
+            sent_queries(&requests.release_held()),
+            vec!["later command"]
+        );
+        assert!(requests.answer(request_id(3)).is_some());
+        let choice = requests.release_held();
+        assert_eq!(choice.len(), 1);
+        assert!(matches!(choice[0].request, ClientRequest::Choice(_)));
+        assert!(requests.answer(request_id(4)).is_some());
+        let completion = requests.release_held();
+        assert_eq!(completion.len(), 1);
+        let ClientRequest::Suggest(suggestion) = &completion[0].request else {
+            panic!("the latest input keeps its own position after the earlier choice");
+        };
+        assert_eq!(suggestion.input(), "SHOW ");
+        assert!(requests.answer(request_id(5)).is_some());
+        assert_eq!(sent_queries(&requests.release_held()), vec!["last command"]);
+    }
+
+    #[test]
+    fn a_new_connection_replays_commands_and_issues_its_own_local_controls() {
+        let mut requests = SessionRequests::new();
+        requests.confirm_leader();
+        for _ in 0..MAX_IN_FLIGHT_REQUESTS {
+            let issued = requests.issue(repl_command("SHOW CLUSTER STATUS;"));
+            sent(requests.accept(issued));
+        }
+        for request in [
+            suggest("CREATE "),
+            choice_request(ChoiceControl::DomainPace, 1),
+            ConsoleRequest::SelectDomain(SelectDomainRequest {
+                domain: domain_name("selected"),
+            }),
+            ConsoleRequest::AttachTransaction(AttachTransactionRequest {
+                transaction_id: "transaction".to_string(),
+            }),
+        ] {
+            let issued = requests.issue(request);
+            assert!(matches!(requests.accept(issued), Admission::Held));
+        }
+        requests.end_connection();
+        requests.confirm_leader();
+        let replayed = requests.release_held();
+        assert_eq!(
+            sent_queries(&replayed),
+            vec!["SHOW CLUSTER STATUS;"; MAX_IN_FLIGHT_REQUESTS]
+        );
+        assert!(!requests.is_attaching());
+        assert_eq!(replayed[0].request_id, request_id(1));
+    }
+
+    #[test]
+    fn a_full_control_backlog_can_restore_its_transaction_before_it_replays() {
+        let mut requests = SessionRequests::new();
+        for _ in 0..MAX_OUTSTANDING_REQUESTS {
+            let issued = requests.issue(repl_command("held command"));
+            assert!(matches!(requests.accept(issued), Admission::Held));
+        }
+        let attach = requests.issue(ConsoleRequest::AttachTransaction(
+            AttachTransactionRequest {
+                transaction_id: "transaction".to_string(),
+            },
+        ));
+        let attach = sent(requests.accept_connection(attach));
+        requests.confirm_leader();
+        assert!(requests.release_held().is_empty());
+        assert!(requests.answer(attach.request_id).is_some());
+        let replayed = requests.release_held();
+        assert_eq!(
+            sent_queries(&replayed),
+            vec!["held command"; MAX_IN_FLIGHT_REQUESTS]
+        );
+        assert_eq!(requests.outstanding().requests, MAX_OUTSTANDING_REQUESTS);
+    }
+
+    #[test]
+    fn connection_opening_waits_for_capacity_without_waiting_for_leader_confirmation() {
+        let mut requests = SessionRequests::new();
+        for _ in 0..MAX_IN_FLIGHT_REQUESTS {
+            let issued = requests.issue(ConsoleRequest::SelectDomain(SelectDomainRequest {
+                domain: domain_name("selected"),
+            }));
+            sent(requests.accept_connection(issued));
+        }
+        let issued = requests.issue(ConsoleRequest::AttachTransaction(
+            AttachTransactionRequest {
+                transaction_id: "transaction".to_string(),
+            },
+        ));
+        assert!(matches!(
+            requests.accept_connection(issued),
+            Admission::Held
+        ));
+        assert!(requests.answer(request_id(1)).is_some());
+        let released = requests.release_held();
+        assert_eq!(released.len(), 1);
+        assert!(matches!(
+            released[0].request,
+            ClientRequest::AttachTransaction(_)
+        ));
+    }
+
+    #[test]
     fn ordered_requests_beyond_the_in_flight_limit_wait_in_order_for_earlier_replies() {
         let mut requests = SessionRequests::new();
         requests.confirm_leader();
@@ -10166,6 +10596,13 @@ mod tests {
 
     /// The first part of a completion reply to `request_id` too large for one frame.
     fn first_suggestion_part(request_id: RequestId) -> ServerMessage {
+        suggestion_parts(request_id)
+            .into_iter()
+            .next()
+            .assured("a transfer has a first part")
+    }
+
+    fn suggestion_parts(request_id: RequestId) -> Vec<ServerMessage> {
         let small_frames = SessionLimits::try_from(SessionLimitSettings {
             frame_bytes: std::num::NonZeroUsize::new(1024).assured("a literal nonzero size"),
             transfer_bytes: std::num::NonZeroUsize::new(SESSION_LIMITS.transfer_bytes())
@@ -10195,18 +10632,20 @@ mod tests {
                 }],
             }),
         };
-        let ReplyDelivery::Transfer(mut parts) = reply
+        let ReplyDelivery::Transfer(parts) = reply
             .encode(&small_frames)
             .assured("the reply stays within the transfer limit")
         else {
             panic!("a reply larger than a frame travels as parts");
         };
-        let first = parts
-            .next()
-            .assured("a transfer has a first part")
-            .verify(&small_frames)
-            .assured("an encoded part verifies under the limits it was encoded for");
-        ServerMessage::decode(&first).assured("a verified part decodes")
+        let mut messages = Vec::new();
+        for part in parts {
+            let frame = part
+                .verify(&small_frames)
+                .assured("an encoded part verifies under the limits it was encoded for");
+            messages.push(ServerMessage::decode(&frame).assured("a verified part decodes"));
+        }
+        messages
     }
 
     #[test]
@@ -10224,6 +10663,26 @@ mod tests {
             requests.transfers.is_empty(),
             "the parts of a reply nobody awaits are not kept"
         );
+    }
+
+    #[test]
+    fn a_superseded_transfer_releases_its_request_place_only_at_its_final_part() {
+        let mut requests = SessionRequests::new();
+        let issued = requests.issue(suggest("SH"));
+        let earlier = sent(requests.accept(issued));
+        let issued = requests.issue(suggest("SHOW"));
+        sent(requests.accept(issued));
+        let mut parts = suggestion_parts(earlier.request_id);
+        let last = parts.pop().assured("the large reply has a final part");
+        assert!(!parts.is_empty());
+        for part in parts {
+            assert!(matches!(requests.route(part), Routed::Untracked));
+            assert_eq!(requests.in_flight.len(), 2);
+            assert!(requests.transfers.is_empty());
+        }
+        assert!(matches!(requests.route(last), Routed::Untracked));
+        assert_eq!(requests.in_flight.len(), 1);
+        assert!(requests.transfers.is_empty());
     }
 
     #[test]

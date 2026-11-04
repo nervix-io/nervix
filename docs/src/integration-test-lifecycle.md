@@ -1675,6 +1675,12 @@ explicitly awaits the Playwright driver's shutdown before dropping its handle. T
 five-second exit grace is asynchronous, so cleanup keeps the shared scenario runner and its
 watchdog available rather than waiting in Playwright's blocking destructor.
 
+The cluster-wide metric-total and saved-metric comparison steps use the canonical 40-second
+status-wait budget around the whole polling operation, with 100 milliseconds between reads. A
+metric read failure ends the step immediately; a comparison timeout retains each node's latest
+value, or the last observed value and its saved target. These steps read the public metrics
+endpoint and do not substitute internal counter state for an observation.
+
 ## Absolute Phase Deadlines
 
 A phase deadline is one instant on the monotonic clock: the moment the phase started plus its
@@ -2235,6 +2241,16 @@ however late it reads and however loaded the machine is. The page receives a fra
 act on it, so a frame comes before every connection the page makes because of it. The console lets go of its session connection before it constructs the next one, so
 `the web console never held two session connections at once` tells a reconnect of the console's one
 session from a second session without counting the leader notices, which every reconnect repeats.
+
+The request-window regression also installs a frame observer before the console's scripts. It
+retains at most 1,024 binary session frames and 4 MiB, failing if the observation is incomplete.
+The public codecs recover sent request identities and terminal replies, including the final part
+of a transferred reply. Observations reserve their position before copying outgoing binary Blobs
+asynchronously, so a reply cannot pass its request in the record. Its message listener precedes the
+console's: a browser microtask between listeners may otherwise send the next request before the
+observer accounts for the reply that freed its place. The fixture waits for the input's actual
+scheduled callbacks and their continuations rather than guessing the completion debounce delay. It changes neither frames nor
+their delivery and introduces no product deadline or scenario-admission rule.
 
 The harness reads from those frames which node the nodes reported as the leader on the page's own
 connections. The leader opens every console session it serves by reporting that it leads; any other

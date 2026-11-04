@@ -542,6 +542,12 @@ contact hints; current peer identity, incarnation, and endpoint still come from 
 
 ## Observability
 
+The command-history observer projects the applying, finished and expired index lengths and the
+optional durable retry fence from one applied state revision. Scrapes read those indexes without
+scanning records or changing retention. Every node exposes its own applied counts and fence;
+admission refusal events are counted only by the application process that handles the refusal,
+never by follower application or replay. See [Command Execution History](./metrics-and-observability.md#command-execution-history).
+
 Opening a consensus node establishes a `consensus_node` trace span with its cluster name, typed
 node name and concrete local interconnect address. OpenRaft captures that context when it starts
 its core. Parallel isolated clusters may use the same node names; the listener address distinguishes

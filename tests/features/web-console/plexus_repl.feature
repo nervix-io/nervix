@@ -90,6 +90,25 @@ Feature: Web console Plexus REPL
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "no domains registered"
 
+  @client_wire36
+  Scenario: Web console completes its latest input after a full command request window drains
+    Given a 1 node nervix cluster is started
+    Then the current leader node is saved as placeholder "leader"
+    When the web console is opened on the leader node with its request window observed
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    Given command response delivery on node "{{leader}}" pauses after execution
+    When selector ".prompt-row input" is filled with "SHOW CLUSTER STATUS;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then the command response delivery pause on node "{{leader}}" is reached
+    When the web console submits "SHOW CLUSTER STATUS;" 63 times
+    Then the web console has sent 64 observed commands
+    When selector ".prompt-row input" is filled with "CREATE "
+    And the web console finishes its scheduled input callbacks
+    Then the observed web console session stays within its request window
+    When the command response delivery pause on node "{{leader}}" is released
+    Then selector ".suggestions" contains "DOMAIN"
+    And the observed web console session stays within its request window
+
   @client_wire13
   Scenario: Web console preserves several pending commands across a leader change
     Given a 3 node nervix cluster is started
