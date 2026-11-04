@@ -328,7 +328,11 @@ public final class Nervix {
         }
         synchronized Lease lease() {
             long owned = enter();
-            try { return new Lease(Native.retain(owned)); } finally { leave(); }
+            try {
+                long retained = Native.retain(owned);
+                try { return new Lease(retained); }
+                catch (Throwable failure) { Native.release(retained); throw failure; }
+            } finally { leave(); }
         }
         @Override public synchronized void run() {
             if (phase == Phase.OPEN) {
