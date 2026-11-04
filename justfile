@@ -3395,6 +3395,10 @@ test-chaos-local-image:
 test-chaos-startup-status:
     exec bash scripts/chaos/tests/startup-status-self-test.sh
 
+# Verify fresh public requests in run-owned observation helpers, including input and failures.
+test-chaos-observation-helpers:
+    exec bash scripts/chaos/tests/observation-helpers-self-test.sh
+
 # Derive the backup run's graph from the checked-in baseline fixture, as every verifier self-check does.
 test-chaos-backup-fixture:
     exec bash scripts/chaos/tests/backup-fixture-self-test.sh

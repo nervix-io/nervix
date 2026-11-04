@@ -266,15 +266,25 @@ half of the range. The manifest records the subnet, the dynamic range and the no
 | `broker` | Kafka | One KRaft broker and controller, with automatic topic creation disabled. The run creates every topic explicitly, with one partition and replication factor 1 |
 | `nervix-1` | Nervix | The bootstrap node, the only one given the default user's password |
 | `nervix-2`, `nervix-3` | Nervix | The other voters of a three-node run, joining through `nervix-1` |
-| `admin` | Nervix | Disposable containers that run the packaged `nervix-cli` against a node's session route |
+| `admin` | Nervix | A run-owned container that executes a fresh packaged `nervix-cli` for each command against a node's session route; uploads with their own file mounts use disposable containers |
 | `broker-admin` | Kafka | Disposable topic and consumer-group administration |
 | `kcat` | kcat | Disposable producers and topic readers |
-| `probe` | Alpine | Disposable listener, readiness and metrics probes |
+| `probe` | Alpine | A run-owned container that executes fresh listener, readiness and metrics probes; fault-specific probes may use disposable containers |
 | `load`, `state-load`, `paced-load`, `life-load` | kcat | The continuous loads |
 | `endpoint-load`, `endpoint-websocket` | Python | The [endpoints](#endpoints) scenario's HTTP and WebSocket clients |
 | `postgres` | PostgreSQL | The [lifetimes](#lifetimes) scenario's database, with its data on a tmpfs |
 | `observer` | Alpine | The independent listener observer |
 | `clock-observer` | Nervix | One domain-clock observer per node |
+
+The shared `admin` and `probe` containers start with the broker and end in the run's labeled
+cleanup. They hold no client sessions between commands. Every CLI and probe process has closed
+standard input and runs without a TTY under the existing per-call and whole-run bounds. A failed
+helper or request fails its observation; it does not cause a replacement helper to start. This
+avoids paying container creation and attachment costs for every read without changing endpoints,
+readiness assertions, control commands, delivery ledgers or product deadlines. The independent
+listener observer remains a separate process and container.
+The helper also applies that request's remaining bound inside the container, with a five-second
+kill reserve, so ending a Docker client cannot leave an unbounded client process in a reused helper.
 
 ### Node Settings
 

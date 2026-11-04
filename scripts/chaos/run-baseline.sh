@@ -940,6 +940,18 @@ compose() {
     run_bounded "${compose_call_timeout:-120}" docker compose "${compose_args[@]}" "$@"
 }
 
+# Keep an exec's remote process under the same bound as its Docker client. Ending the client alone
+# does not end a process inside a reusable helper. Both tool images provide timeout's -k form.
+helper_request() {
+    local service="$1"
+    shift
+    local remaining limit="${compose_call_timeout:-120}"
+    remaining="$(remaining_seconds)"
+    if ((remaining == 0)); then return 124; fi
+    if ((limit > remaining)); then limit="${remaining}"; fi
+    compose exec -T --interactive=false "${service}" timeout -k 5s "${limit}s" "$@" </dev/null
+}
+
 run_cli() {
     local domain="$1"
     local command_text="$2"
@@ -950,12 +962,12 @@ run_cli() {
     if [[ -n "${domain}" ]]; then
         domain_args=(--domain "${domain}")
     fi
-    compose run --rm --no-deps admin \
+    helper_request admin \
         nervix-cli \
         --server "http://${cli_host}:47391" \
         "${domain_args[@]}" \
         --password "${CHAOS_PASSWORD}" \
-        --command "${command_text}" >"${cli_output}" 2>&1 || cli_status=$?
+        --command "${command_text}" </dev/null >"${cli_output}" 2>&1 || cli_status=$?
     cat "${cli_output}"
     if [[ "${cli_status}" -eq 0 ]] \
         && ! grep -Fq 'Error:' "${cli_output}" \
@@ -1832,16 +1844,16 @@ node_listener_probe="
 # Requires every listener of HOSTNAME to answer and its /readyz to report a known leader.
 probe_node() {
     local hostname="$1"
-    compose run --rm --no-deps probe sh -eu -c "${node_listener_probe}
+    helper_request probe sh -eu -c "${node_listener_probe}
         wget -q -T 3 -O /dev/null \"http://\$1:9090/readyz\"
-    " -- "${hostname}" >/dev/null 2>&1
+    " -- "${hostname}" </dev/null >/dev/null 2>&1
 }
 
 # Requires every listener of HOSTNAME to answer, whatever its /readyz reports: a node can know no
 # leader for a moment during an election, which loss on a leader's link can start.
 probe_node_listeners() {
     local hostname="$1"
-    compose run --rm --no-deps probe sh -eu -c "${node_listener_probe}" -- "${hostname}" >/dev/null 2>&1
+    helper_request probe sh -eu -c "${node_listener_probe}" -- "${hostname}" </dev/null >/dev/null 2>&1
 }
 
 cluster_status_ready() {
@@ -1930,8 +1942,8 @@ record_load_pacing() {
 capture_metrics() {
     local hostname="$1"
     local output="${artifact_dir}/public/metrics-${hostname}.txt"
-    compose run --rm --no-deps probe wget -q -T 5 -O - \
-        "http://${hostname}:9090/metrics" >"${output}"
+    helper_request probe wget -q -T 5 -O - \
+        "http://${hostname}:9090/metrics" </dev/null >"${output}" || return $?
     trim_file "${output}" 1048576
 }
 
@@ -2241,7 +2253,9 @@ compose config >"${artifact_dir}/compose.rendered.yaml"
 compose_ready=true
 
 phase "broker startup and provisioning"
-compose up --detach broker
+# The helpers live only for this run. Every exec still starts a fresh CLI or probe process with
+# its own public request, while repeated observations avoid creating and attaching containers.
+compose up --detach --no-deps broker admin probe
 wait_for "Kafka broker" 90 probe_broker
 broker_admin /opt/kafka/bin/kafka-topics.sh \
     --bootstrap-server broker:9092 \
