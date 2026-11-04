@@ -2343,6 +2343,14 @@ and a move never as an unconfirmed lease: the context's text says which, so an o
 rendered report or log line tells lease trouble from an election without a separate counter. The
 Raft or I/O error stays beneath the context as the report's cause.
 
+Trace-level vote and pre-vote transport completion events record the existing nested result before
+its foreign-error conversion, beside the local listener, peer and elapsed time. A transport error
+and a peer's typed refusal therefore remain distinguishable in the diagnostic. Cancellation by
+OpenRaft can end the exchange before that event; its own timeout then records the outcome. These
+events do not classify a late reply as leadership loss or change the error returned to OpenRaft.
+The [consensus observability contract](consensus-storage-and-replication.md#observability) describes
+the receive and core contexts used to locate a delay.
+
 The session edge reads the current context of a proposal's report. `LeadershipLost` becomes a
 `NotLeader` disposition with a redirect to the observed leader when nothing of the command was
 admitted, and `OutcomeUnknown` with leadership loss as its cause when leadership moved, or the
