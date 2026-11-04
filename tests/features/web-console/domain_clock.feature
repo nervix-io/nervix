@@ -68,7 +68,8 @@ Feature: Web console domain clock
       """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    When the web console is opened on node "{{old_leader}}"
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
+    And the web console is opened on node "{{old_leader}}"
     Then selector ".domain-clock" contains "PACED"
     And selector ".domain-clock-tick-id" advances as a number within 10000 milliseconds
     When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"

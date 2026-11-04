@@ -2300,6 +2300,19 @@ subject are not exposed as typed metadata; programs read its payload and headers
 NATS ingestors use Core NATS queue subscriptions. `QUEUE GROUP` and `INSTANCES`
 are mandatory; use `INSTANCES 1` for a single queue member.
 
+The NATS client accepts one optional authentication key: `token`, `nkey_seed` for a user NKey
+seed, or `credentials_file` for a NATS user credentials file containing its JWT and signing seed.
+These three keys are mutually exclusive; `CREATE NATS CLIENT` refuses any pair before connecting.
+Mount a resource containing a credentials file and write its resolved path, such as
+`'credentials_file' = '{{identity}}/user.creds'`. All three keys are confidential in public
+inspection. URL user information remains delegated to the NATS driver.
+
+Ingestors and emitters use the same authentication and TLS options. A `tls://` address requires
+TLS on both sides, with the configured CA and optional paired client certificate and key.
+An unreadable or malformed credentials file is a configuration failure; a broker refusing the
+identity is a connection failure reported by the boundary's existing general error policy and
+retry cadence. Nervix does not create accounts or users on the broker.
+
 Core NATS retains no backlog, so `SUSPEND` is unavailable. A quiesced instance remains a member of
 its queue group and keeps receiving its share; that share is buffered or discarded rather than
 shifted to other members.
@@ -2543,9 +2556,9 @@ CA alone. Either way it connects directly: an SQS client takes no proxy, and ign
 name, a silent name server, an unreachable answer or a service that does not answer within
 `timeout_ms` fails the queue lookup, a poll, or a deletion. The AWS SDK makes each request once, so
 a failed lookup or poll is at once a transient source failure that `DESCRIBE INGESTOR` shows, such as
-`the SQS queue lookup did not finish within timeout_ms 5s`, and the source retries it on its
-`RETRY POLICY` alone, so an ingestor started while the service is unreachable consumes once the
-service answers. A queue that does not exist fails the
+`the SQS queue lookup did not finish within timeout_ms 5s`. The source host schedules retries
+using the ingestor's `RETRY POLICY`, so an ingestor started while the service is unreachable
+consumes once the service answers. A queue that does not exist fails the
 lookup with its name, such as `SQS queue 'orders' does not exist`, and is retried the same way;
 Nervix never creates it.
 

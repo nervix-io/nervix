@@ -1301,6 +1301,7 @@ jobs:
         env:
           EXTRA_TESTS_RESULT: ${{ needs.extra-tests.result }}
           EXTRA_COVERAGE_REQUIRED: ${{ needs.extra-tests.outputs.coverage-required }}
+          EXTRA_NATIVE_COVERAGE_REQUIRED: ${{ needs.extra-tests.outputs.native-coverage-required }}
         run: |
           # Every shard's report is an input, so a shard whose report is missing fails the merge.
           scenarios=()
@@ -1311,7 +1312,11 @@ jobs:
           extras=()
           if [[ "${EXTRA_TESTS_RESULT}" == "success" ]]; then
             if [[ "${EXTRA_COVERAGE_REQUIRED}" == "true" ]]; then
-              extras+=(coverage-inputs/coverage-native-extras)
+              if [[ "${EXTRA_NATIVE_COVERAGE_REQUIRED}" == "true" ]]; then
+                extras+=(coverage-inputs/coverage-native-extras)
+              else
+                extras+=(--python-input coverage-inputs/coverage-native-extras)
+              fi
             fi
           fi
           just coverage-merge coverage-inputs/tests "${scenarios[@]}" "${extras[@]}"
@@ -1423,7 +1428,7 @@ jobs:
           path: coverage-full-inputs/coverage-merged
 
       - name: Download native extra coverage
-        if: needs.extra-tests.outputs.coverage-required == 'true'
+        if: needs.extra-tests.outputs.native-coverage-required == 'true'
         uses: actions/download-artifact@v8
         with:
           pattern: coverage-native-extras
@@ -1720,6 +1725,14 @@ jobs:
       coverage-required: >-
         ${{ contains(github.event.pull_request.labels.*.name, 'extra-runners') ||
         contains(github.event.pull_request.labels.*.name, 'extra-compiler') ||
+        contains(github.event.pull_request.labels.*.name, 'extra-bench-smoke') ||
+        contains(github.event.pull_request.labels.*.name, 'extra-primitives') ||
+        contains(github.event.pull_request.labels.*.name, 'extra-completion-walk') ||
+        contains(github.event.pull_request.labels.*.name, 'extra-connector-matrix') }}
+      # Python-only runner reports join the ordinary merge directly. Only native collections
+      # also need discovery by the full union; losing a selected Rust report must still fail.
+      native-coverage-required: >-
+        ${{ contains(github.event.pull_request.labels.*.name, 'extra-compiler') ||
         contains(github.event.pull_request.labels.*.name, 'extra-bench-smoke') ||
         contains(github.event.pull_request.labels.*.name, 'extra-primitives') ||
         contains(github.event.pull_request.labels.*.name, 'extra-completion-walk') ||

@@ -391,6 +391,8 @@ selections = ["deloxide", "deloxide-order"]
 tags = [
   "@kafka_record_metadata",
   "@mqtt_metadata",
+  "@nats_authentication",
+  "@nats_authentication_refusal",
   "@pulsar_message_metadata",
   "@rabbitmq_metadata",
   "@restore_client_inspection",
@@ -4849,3 +4851,43 @@ invariant = "A restored START AT generation resumes its archived positions witho
 invocation = "stress-restore-scenarios"
 scenario = "A backup preserves the applied START AT Kafka generation on <cluster_size> nodes"
 selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Token, nkey and mounted JWT credentials on one and three nodes prepare NATS connections, forward traffic through an ingestor and emitter, and tear down their host lifecycle. Authentication and driver I/O are async and untracked; the host's existing lifecycle locks remain tracked."
+examples = 6
+feature = "tests/features/runtime/nats_authentication.feature"
+id = "scenario.nats-client-authentication"
+invariant = "The same declared authentication method opens both NATS boundary directions, with confidential public inspection."
+invocation = "scenarios"
+scenario = "NATS ingestors and emitters authenticate with <method>"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: authenticated NATS traffic traverses both boundary directions and their host lifecycle on one and three nodes. The driver and authentication operations are async and untracked."
+examples = 6
+feature = "tests/features/runtime/nats_authentication.feature"
+id = "stress.nats-client-authentication"
+invariant = "The same declared authentication method opens both NATS boundary directions, with confidential public inspection."
+invocation = "stress-scenarios"
+scenario = "NATS ingestors and emitters authenticate with <method>"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "A missing token, nkey or JWT identity on one and three nodes reports refusal on both ingestor and emitter while their host retries and subsequently tears down. The broker and client I/O are async and untracked; host lifecycle locks are tracked."
+examples = 6
+feature = "tests/features/runtime/nats_authentication.feature"
+id = "scenario.nats-client-authentication-refusal"
+invariant = "An authentication-refused boundary reports its connection error and remains safe to stop."
+invocation = "scenarios"
+scenario = "A NATS broker refuses a client without its required <method> identity"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: missing NATS identities exercise refusal, host retry and teardown on one and three nodes. Driver authentication and network I/O remain untracked."
+examples = 6
+feature = "tests/features/runtime/nats_authentication.feature"
+id = "stress.nats-client-authentication-refusal"
+invariant = "An authentication-refused boundary reports its connection error and remains safe to stop."
+invocation = "stress-scenarios"
+scenario = "A NATS broker refuses a client without its required <method> identity"
+selections = ["deloxide-stress"]

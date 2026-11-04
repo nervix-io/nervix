@@ -116,11 +116,12 @@ mod snapshot;
 pub use command_execution::{
     CommandExecution, CommandExecutionAdmissionError, CommandExecutionAdmissionPolicy,
     CommandExecutionDiagnostic, CommandExecutionDisposition, CommandExecutionEffect,
-    CommandExecutionPreviewStale, CommandExecutionReconciliation, CommandExecutionRequestConflict,
-    CommandExecutionResult, CommandExecutionState, CommandExecutionStatementDisposition,
-    CommandExecutionStatementResult, CommandExecutionTransactionOperation,
-    CommandExecutionTransactionRequest, CommandExecutionTransactionStatus,
-    CommandExecutionTransactionTarget, DiagnosticSpan, RecordedBackupArchive,
+    CommandExecutionHistory, CommandExecutionPreviewStale, CommandExecutionReconciliation,
+    CommandExecutionRequestConflict, CommandExecutionResult, CommandExecutionState,
+    CommandExecutionStatementDisposition, CommandExecutionStatementResult,
+    CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
+    CommandExecutionTransactionStatus, CommandExecutionTransactionTarget, DiagnosticSpan,
+    RecordedBackupArchive,
 };
 pub use domain_mutation::{DomainMutationLease, DomainMutationOwner, DomainMutationRecoveryFence};
 pub use leadership::LeadershipObservation;
@@ -637,9 +638,10 @@ pub enum ConsensusConflict {
     },
     #[error("{0}")]
     Reason(String),
-    #[error("command execution reference '{reference}' has expired")]
-    ExecutionReferenceExpired {
+    #[error("command execution reference '{reference}' {refusal}")]
+    ExecutionReferenceAdmissionRefused {
         reference: nervix_models::CommandExecutionReference,
+        refusal: CommandExecutionAdmissionError,
     },
     #[error("command execution reference '{reference}' conflicts by {kind}")]
     ExecutionReferenceConflict {
@@ -2379,6 +2381,16 @@ impl Consensus {
             .map_err(io::Error::other)?
     }
 
+    #[tracing::instrument(
+        name = "consensus_node",
+        level = "info",
+        skip_all,
+        fields(
+            cluster = %settings.cluster_name,
+            node = %settings.node_id,
+            local_addr = %settings.interconnect.local_addr(),
+        ),
+    )]
     async fn from_store<Recorder>(
         store: FjallStore,
         settings: ConsensusSettings,
@@ -2970,6 +2982,12 @@ impl Observer {
             .inner
             .with_restore_state_reclamation(reclaim)
     }
+    /// Levels and retry fence of this node's applied command history, read without a record scan.
+    pub fn command_execution_history(&self) -> CommandExecutionHistory {
+        let state = self.inner.store.inner.state();
+        state.command_executions.observation()
+    }
+
     pub async fn current_command_execution(
         &self,
         reference: &nervix_models::CommandExecutionReference,
@@ -4525,6 +4543,12 @@ impl ProtocolReceiver {
             .await
     }
 
+    #[tracing::instrument(
+        name = "receive_raft_append",
+        level = "trace",
+        skip_all,
+        fields(node = %self.inner.local_node_id, local_addr = %self.inner.interconnect.local_addr()),
+    )]
     pub async fn append_entries(
         &self,
         req: AppendEntriesRequest<TypeConfig>,
@@ -4532,6 +4556,12 @@ impl ProtocolReceiver {
         self.inner.raft.append_entries(req).await
     }
 
+    #[tracing::instrument(
+        name = "receive_raft_vote",
+        level = "trace",
+        skip_all,
+        fields(node = %self.inner.local_node_id, local_addr = %self.inner.interconnect.local_addr()),
+    )]
     pub async fn vote(
         &self,
         req: VoteRequest<TypeConfig>,
@@ -4539,6 +4569,12 @@ impl ProtocolReceiver {
         self.inner.raft.vote(req).await
     }
 
+    #[tracing::instrument(
+        name = "receive_raft_pre_vote",
+        level = "trace",
+        skip_all,
+        fields(node = %self.inner.local_node_id, local_addr = %self.inner.interconnect.local_addr()),
+    )]
     pub async fn pre_vote(
         &self,
         req: VoteRequest<TypeConfig>,
@@ -4885,6 +4921,15 @@ where
     ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
         self.connectivity.check().map_err(unreachable_err)?;
         let rpc_timeout = option.hard_ttl();
+        let started = Instant::now();
+        tracing::trace!(
+            node = %self.local_node_id,
+            local_addr = %self.interconnect.local_addr(),
+            peer = %self.target,
+            vote = %rpc.vote,
+            deadline = ?rpc_timeout,
+            "sending Raft vote request",
+        );
         let response = {
             let mapping_input = self
                 .interconnect
@@ -4893,8 +4938,16 @@ where
                     wire::RequestVote(wire::VoteRequestRecord::from_request(rpc)),
                     rpc_timeout,
                 )
-                .await
-                .map_err(io_error);
+                .await;
+            tracing::trace!(
+                node = %self.local_node_id,
+                local_addr = %self.interconnect.local_addr(),
+                peer = %self.target,
+                elapsed = ?started.elapsed(),
+                result = ?mapping_input,
+                "Raft vote request completed",
+            );
+            let mapping_input = mapping_input.map_err(io_error);
             match mapping_input {
                 Ok(mapped_value) => Ok(mapped_value),
                 Err(mapping_error) => Err((unreachable_err)(mapping_error)),
@@ -4917,6 +4970,15 @@ where
     ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
         self.connectivity.check().map_err(unreachable_err)?;
         let rpc_timeout = option.hard_ttl();
+        let started = Instant::now();
+        tracing::trace!(
+            node = %self.local_node_id,
+            local_addr = %self.interconnect.local_addr(),
+            peer = %self.target,
+            vote = %rpc.vote,
+            deadline = ?rpc_timeout,
+            "sending Raft pre-vote request",
+        );
         let response = {
             let mapping_input = self
                 .interconnect
@@ -4925,8 +4987,16 @@ where
                     wire::RequestPreVote(wire::VoteRequestRecord::from_request(rpc)),
                     rpc_timeout,
                 )
-                .await
-                .map_err(io_error);
+                .await;
+            tracing::trace!(
+                node = %self.local_node_id,
+                local_addr = %self.interconnect.local_addr(),
+                peer = %self.target,
+                elapsed = ?started.elapsed(),
+                result = ?mapping_input,
+                "Raft pre-vote request completed",
+            );
+            let mapping_input = mapping_input.map_err(io_error);
             match mapping_input {
                 Ok(mapped_value) => Ok(mapped_value),
                 Err(mapping_error) => Err((unreachable_err)(mapping_error)),
@@ -5363,8 +5433,9 @@ fn apply_consensus_command_at(
             if let Some(existing) = state.command_executions.get(&execution.reference) {
                 if existing.is_expired() {
                     return AppliedConsensusCommand::conflict(
-                        ConsensusConflict::ExecutionReferenceExpired {
+                        ConsensusConflict::ExecutionReferenceAdmissionRefused {
                             reference: execution.reference.clone(),
+                            refusal: CommandExecutionAdmissionError::Expired,
                         },
                     );
                 }
@@ -5393,17 +5464,12 @@ fn apply_consensus_command_at(
                     .command_executions
                     .validate_admission(&execution.reference, policy)
                 {
-                    if let CommandExecutionAdmissionError::Expired = reason.current_context() {
-                        return AppliedConsensusCommand::conflict(
-                            ConsensusConflict::ExecutionReferenceExpired {
-                                reference: execution.reference.clone(),
-                            },
-                        );
-                    }
-                    return AppliedConsensusCommand::conflict(format!(
-                        "command execution reference '{}' {reason}",
-                        execution.reference,
-                    ));
+                    return AppliedConsensusCommand::conflict(
+                        ConsensusConflict::ExecutionReferenceAdmissionRefused {
+                            reference: execution.reference.clone(),
+                            refusal: *reason.current_context(),
+                        },
+                    );
                 }
                 let owner = DomainMutationOwner::command(execution.reference.clone());
                 let admitted = match admit_domain_mutations(state, mutation_domains, &owner) {
@@ -8910,8 +8976,9 @@ mod tests {
         );
         assert_eq!(
             retained_retry.response,
-            ConsensusResponse::Conflict(ConsensusConflict::ExecutionReferenceExpired {
+            ConsensusResponse::Conflict(ConsensusConflict::ExecutionReferenceAdmissionRefused {
                 reference: reference.clone(),
+                refusal: crate::CommandExecutionAdmissionError::Expired,
             })
         );
 
@@ -8934,8 +9001,9 @@ mod tests {
         );
         assert_eq!(
             response.response,
-            ConsensusResponse::Conflict(ConsensusConflict::ExecutionReferenceExpired {
+            ConsensusResponse::Conflict(ConsensusConflict::ExecutionReferenceAdmissionRefused {
                 reference: reference.clone(),
+                refusal: crate::CommandExecutionAdmissionError::Expired,
             })
         );
         assert!(state.command_executions.get(&reference).is_none());

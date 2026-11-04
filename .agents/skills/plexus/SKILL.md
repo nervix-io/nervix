@@ -59,6 +59,9 @@ contract. Refer users to those chapters for cursor edits, transaction-aware cand
 completion status messages. For connector expression completion, including filters, HTTP request
 expressions, ALTER constructions, metadata fields and entity-specific header functions, follow
 the CLI's Completion section.
+For secure CLI connections and console leader redirects, follow those chapters' connection
+sections and [Native session TLS](../../../docs/src/installation-cargo.md#native-session-tls).
+Listener certificates are node provisioning, configured outside Plexus statements.
 Read the Ingestors and Emitters chapters for `SHOW INGESTORS`, `SHOW EMITTERS`, and `DESCRIBE`;
 their inspection contracts distinguish effective options from canonical `SHOW CREATE` configuration.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire

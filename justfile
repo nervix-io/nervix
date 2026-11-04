@@ -619,6 +619,12 @@ test-nats-driver checkout *args:
 test-pulsar-driver checkout *args:
     CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/pulsar-driver") }} cargo test --manifest-path {{ quote(checkout + "/Cargo.toml") }} --no-default-features --features compression,tokio-rustls-runtime --lib -- {{ args }}
 
+# Qualify the pinned Kafka driver's AWS-LC backend through its own tests with the product's enabled
+# features: librdkafka built against aws-lc-sys, an AWS-LC TLS context and an SSL client.
+test-kafka-driver checkout *args:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/kafka-driver") }} cargo test --manifest-path {{ quote(checkout + "/Cargo.toml") }} --package rdkafka-sys --no-default-features --features aws-lc,cmake_build,curl-static,curl-rustls,libz-static,static-linking --test aws_lc -- {{ args }}
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/kafka-driver") }} cargo test --manifest-path {{ quote(checkout + "/Cargo.toml") }} --package rdkafka --no-default-features --features aws-lc,cmake_build,curl-static,curl-rustls,libz-static,static-linking,tokio --test ssl_backends -- {{ args }}
+
 # Run the vocabulary settings' compiling and class-rejection API examples.
 test-settings:
     cargo test --package nervix-models --lib settings::
@@ -1452,7 +1458,8 @@ coverage-report-workspace *args:
 # consumer reads, and record its inputs, counts and dropped records in
 # target/coverage-merge/record.json. An input is a producer's artifact directory or one report, each
 # with the coverage-source-root.txt its producer wrote; CI names the three ordinary artifacts, and
-# without inputs this merges the lcov-workspace.info that test-coverage wrote, in place. It fails,
+# names tooling-only extras with --python-input while preserving required Rust inputs. With
+# no inputs this merges the lcov-workspace.info that test-coverage wrote, in place. It fails,
 # writing no report, when the report would be incomplete.
 coverage-merge *inputs:
     python3 -m scripts.coverage_merge --output lcov-workspace.info --record {{ quote(cargo_target_dir + "/coverage-merge/record.json") }} {{ inputs }}

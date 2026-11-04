@@ -423,6 +423,9 @@ async-tar = { version = "0.6", default-features = false }
 async-trait = "0.1"
 aws-config = "1.8"
 aws-credential-types = "1.2"
+aws-lc-rs = { version = "1.18.2", default-features = false, features = [
+  "aws-lc-sys",
+] }
 # Disable the AWS SDK TLS defaults so the root's Smithy client owns AWS-LC selection.
 aws-sdk-sqs = { version = "1.76", default-features = false, features = [
   "default-https-client",
@@ -448,9 +451,11 @@ clickhouse = { version = "0.15.0", default-features = true }
 combine = { version = "4.6.8", features = ["tokio"] }
 concurrent-queue = "2.5.0"
 console_error_panic_hook = "0.1"
+crc = "3.4"
 criterion = "0.5"
 cucumber = "0.22"
 dashmap = "6"
+data-encoding = "2.11"
 # The deadlock detector of the `deloxide` diagnostic mode. Pinned to the exact release its adapter
 # in nervix-primitives was qualified against: a later release may change what it tracks or reports.
 deloxide = { version = "=1.1.0", default-features = false }
@@ -645,6 +650,8 @@ rcgen = { version = "0.13", default-features = false, features = [
   "pem",
 ] }
 # Keep the AWS-LC support from PR #850 and the librdkafka 2.12.1 backport of duplicate FETCH_STOP fix #5574.
+# The fork builds librdkafka's TLS on the aws-lc-sys that aws-lc-rs links, so an aws-lc-rs upgrade
+# that moves to another aws-lc-sys moves the fork too; `just ratchet` refuses a second AWS-LC.
 rdkafka = { git = "https://github.com/nervix-io/rust-rdkafka.git", branch = "nervix-aws-lc-fetch-stop", default-features = false }
 redis = { version = "1.1.0", default-features = false, features = [
   "aio",
@@ -738,6 +745,7 @@ toml = "0.8"
 tower-service = "0.3"
 # Keep tonic/build on 0.13 for the workspace's Prost 0.13 API while selecting AWS-LC TLS.
 any_spawner = "0.3.0"
+nkeys = "0.4.5"
 tonic = { version = "0.13", features = ["tls-aws-lc", "tls-webpki-roots"] }
 tracing = "0.1"
 tracing-opentelemetry = "0.32"
@@ -763,6 +771,7 @@ wasmtime = { version = "49.0.0", default-features = false, features = [
 web-sys = "0.3"
 webpki-roots = "1"
 x509-parser = "0.18"
+zeroize = "1.9"
 zeromq = "0.4"
 
 [patch.crates-io]

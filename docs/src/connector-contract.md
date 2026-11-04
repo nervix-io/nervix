@@ -695,9 +695,9 @@ JSON protocol's error type `QueueDoesNotExist`. Any other failure to reach the s
 certificate that does not name the configured host, is described by every cause of the driver's
 connection error, which describes the connection and never a record; a service's own response keeps
 its existing description. None of these failures rejects a record or acknowledges input. Both
-directions keep the SDK's own retries disabled, so the SDK makes each request once and the host
-retries a failed one on the entity's declared backoff alone. A request that runs out of `timeout_ms`
-keeps the contract's `DeadlineElapsed` as its innermost cause, naming the request and the key.
+directions keep the SDK's own retries disabled, so the SDK makes each request once. The host owns
+retry scheduling for resume, read, acknowledgement and publish failures. A request that runs out of
+`timeout_ms` keeps the contract's `DeadlineElapsed` as its innermost cause, naming the request and the key.
 Pooled connections stay open when their host's answer changes or expires; the next connection
 resolves again.
 
@@ -749,8 +749,9 @@ sequenceDiagram
 ### Blocking work and the node's executor
 
 A connector runs on the host's asynchronous tasks and never blocks one. Synchronous work it does
-itself, such as writing or reading a local file, goes through the node's bounded executor, which the
-emitter host hands a connector as `EmitterHost::executor`. The connector chooses the storage or CPU class
+itself, such as writing or reading a local file, goes through the node's bounded executor. The
+emitter host supplies it as `EmitterHost::executor`; ingestor composition passes the same node-owned
+handle in a connector plan where its startup needs synchronous work. The connector chooses the storage or CPU class
 of its work and the memory it charges; the executor admits that work beside the rest of the node's,
 and a refusal is the connector's own typed failure. The Iceberg emitter appends to and reads its
 Arrow IPC staging files on the filesystem storage workers. A staging write the node cannot take now
@@ -970,8 +971,8 @@ signaling precedes its mount. This syntax does not change which layer interprets
 how clients connect, pool or execute.
 
 Client keys are lowercase and case-sensitive. The pure registry refuses unknown, repeated,
-missing-required or mistyped Nervix-owned keys and incomplete TLS identities before a candidate
-can become an active graph. It also refuses a key its driver reads as another name for a property
+missing-required or mistyped Nervix-owned keys, mutually exclusive keys and incomplete TLS
+identities before a candidate can become an active graph. It also refuses a key its driver reads as another name for a property
 the client accepts under one name, and a key written under a prefix the driver strips, since the
 driver would apply whichever of two entries for one property it was handed last. Kafka properties
 and object-store/catalog properties are explicitly
@@ -1138,8 +1139,22 @@ acknowledgement for a subscriber. Both directions carry headers by name, and the
 no typed metadata field. The emitter declares Core `NO ACK` and `JETSTREAM ACK` publication, codec
 payloads, no envelope clause, and optional batching without a protocol maximum: each server
 announces its `max_payload`, and the client refuses a message above it before writing it. The
-unpooled client's Nervix-owned keys are the address, `timeout_ms` and the TLS files, while the
-address's userinfo and query options belong to the driver and are masked in inspection. The
+unpooled client's Nervix-owned keys are the address, `timeout_ms`, the TLS files and the optional
+authentication keys `token`, `credentials_file` and `nkey_seed`. Its schema declares the latter
+three mutually exclusive and confidential, and identifies `credentials_file` as a mounted file.
+Both sides build authentication and TLS options through one connector-owned builder, then attach
+their own connection-loss notifications or reconnect policy. Token authentication uses the driver;
+nkey and JWT credentials use its auth callback with AWS-LC Ed25519 signing. The connector validates
+the fixed-size user seed's base32, user prefix and transcription checksum, and reads a mounted
+credentials file through the node's filesystem workers. Its immutable mounted length is charged to
+credentials memory before allocation or reading, and that charge stays until the temporary bytes
+are cleared. Cancellation is checked before and after the bounded file read. Admission or execution
+refusal judges no credential and remains a retryable initialization failure, distinct from invalid
+configuration. Decoded seed bytes and temporary file bytes are cleared on drop. Reading preserves
+the filesystem's typed I/O cause without rendering the path; parsing
+preserves a value-free typed authentication cause. A broker's authentication refusal remains a
+typed connection failure. The cryptography chapter records the signing owner and its FIPS limits.
+The address's userinfo and query options belong to the driver and are masked in inspection. The
 NATS-specific declaration tests, generated grammar conformance and one-/three-node public
 declaration scenarios qualify these facts together.
 
@@ -2929,6 +2944,18 @@ sequenceDiagram
   the existing assignment publication. The host's announcer retains its route and follows replica
   assignment changes without reading node-wide state or execution registries. The Kafka commit and
   acknowledgement boundary remains the state's highest durable replica progress.
+
+- **Kafka client build.** Kafka clients, ingestors and emitters run librdkafka 2.12.1 through
+  Nervix's fork of `rust-rdkafka`, `nervix-io/rust-rdkafka`, which carries the librdkafka backport
+  of the duplicate `FETCH_STOP` fix and builds librdkafka's TLS on AWS-LC instead of OpenSSL. Its
+  `aws-lc` feature compiles librdkafka with CMake against the libcrypto and libssl that
+  `aws-lc-sys` builds with its `ssl` feature: the same `aws-lc-sys` `aws-lc-rs` links, so Kafka
+  TLS, SASL SCRAM and OAUTHBEARER share the product's one AWS-LC. The fork's build reads the
+  `links` metadata of the AWS-LC crate its backend selects under that crate's versioned key, so a
+  new `aws-lc-sys` release changes only the version the fork requires. An upgrade of `aws-lc-rs`
+  that moves to another `aws-lc-sys` moves the fork in the same change, because `just ratchet`
+  refuses a product that links two; [Cryptography](cryptography.md) owns that rule and lists what
+  librdkafka and the libcurl of its OAUTHBEARER token requests implement themselves.
 
 - **Pulsar client.** The Pulsar ingestor and emitter build on Nervix's fork of `pulsar-rs`,
   `nervix-io/pulsar-rs`, because the released crate discards delivered redelivery counts and
