@@ -450,6 +450,7 @@ struct ScenarioWorld {
     /// Bulk-worker holds that cleanup releases even when a step fails before explicit release.
     occupied_bulk_nodes: BTreeSet<nervix_models::ClusterNodeName>,
     active_session: Option<TestSession>,
+    unread_session: Option<session_protocol::UnreadSession>,
     /// A bounded next-row reader installed before the publication whose delay it measures.
     subscription_arrival: Option<ArrivalObservation<SubscriptionReceipt>>,
     active_session_node: Option<String>,
@@ -35771,6 +35772,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 stop_receivers(world).await;
                 close_browser(world).await;
                 world.active_session = None;
+                world.unread_session = None;
                 world.subscription_arrival = None;
                 world.active_session_node = None;
                 world.active_session_has_subscription = false;
