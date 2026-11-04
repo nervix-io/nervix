@@ -2071,6 +2071,13 @@ async fn then_restore_pauses_at_step(
         world.background_restore = Some(background);
         return;
     }
+    if let Some(started) = world.started_cli.as_mut() {
+        let reached = started.keeps_running_until(paused, "its restore reached the step pause");
+        nervix_primitives::time::timeout(RESTORE_PAUSE_TIMEOUT, reached)
+            .await
+            .unwrap_or_else(|_| panic!("the restore did not reach step {step} on node '{node}'"));
+        return;
+    }
     nervix_primitives::time::timeout(RESTORE_PAUSE_TIMEOUT, paused)
         .await
         .unwrap_or_else(|_| panic!("the restore did not reach step {step} on node '{node}'"));

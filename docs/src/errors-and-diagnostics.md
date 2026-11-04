@@ -2554,11 +2554,20 @@ name's report beneath `InvalidResourceName`, a local archive's I/O error beneath
 `InvalidCursor` or `InvalidCompletionPageSize`, the event queue's overflow beneath `EventOverflow`,
 and the `BackupDownloadError` beneath `BackupDownload`. A failure that may hide an admitted command
 or an installed upload is `UncertainCommand` or `UncertainUpload` above the failure that left the
-outcome unknown. The client decides retries, session recovery and uncertainty from those typed
-contexts and never from text, and a context names its own operation without repeating its
-transport status, which the next frame shows. The CLI adds the operation it ran above the client's
-report, `failed to connect to the server` or `the request to the server failed`; its text and JSON
-failure reports, its JSON inspection errors and its event-stream notices render the whole chain. A
+outcome unknown. A call its caller cancels through `execute_prepared_with_cancellation` ends with
+the server's `RequestCancelled` at `BeforeAdmission` for a command that never ran,
+`UncertainCommand` above `RequestCancelled` at `AfterAdmission` for one that keeps running, or
+`CallCancelled` when no request of the call waited for a reply, beneath `UncertainCommand` or
+`UncertainUpload` where the call may already have taken effect. The client decides retries, session
+recovery and uncertainty from those typed contexts and never from text, and a context names its own
+operation without repeating its transport status, which the next frame shows. The CLI adds the
+operation it ran above the client's report, `failed to connect to the server` or `the request to
+the server failed`; its text and JSON failure reports, its JSON inspection errors and its
+event-stream notices render the whole chain. It decides its exit status from the outcome's typed
+disposition and the report's current context, never from text: a failure is `1`, an outcome that
+did not arrive is `3` with the reference or identity that recovers it, and a command the server
+cancelled before admitting it is `130`, as [Exit Status](./client-tools-cli.md#exit-status)
+describes. At the prompt it prints a failed request's whole chain and keeps the REPL running. A
 restoration failure the client reports as a subscription or domain clock event carries the whole
 chain as its message. The shared C binding classifies a failure from the current context, a failed
 backup download from the `BackupDownloadError` beneath it, and returns the whole chain as the

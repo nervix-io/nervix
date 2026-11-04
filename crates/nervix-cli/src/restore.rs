@@ -19,11 +19,12 @@
 
 use std::io::{IsTerminal as _, Write as _};
 
-use error_stack::{Report as StackReport, ResultExt as _};
+use error_stack::Report as StackReport;
 use meticulous::ResultExt as _;
 use nervix_client_core::{
-    Client, CommandOutcome, ConnectOptions, ExistingUserPolicy, Restore, RestoreMode,
-    RestoreReport, RestoreScope, RestoreStepOutcome,
+    Client, ClientError as CoreClientError, CommandExecutionReference, CommandOutcome,
+    ConnectOptions, ExistingUserPolicy, Restore, RestoreMode, RestoreReport, RestoreScope,
+    RestoreStepOutcome,
 };
 use nervix_models::{DomainName, RestoreLifecycle, RestoreState, Statement};
 use nervix_plexus::client_statement::{ClientStatement, parse_client_statements};
@@ -34,7 +35,10 @@ use nervix_primitives::sync::{
 use nervix_recovery::{Discarded as _, Reported as _};
 use serde_json::{Value, json};
 
-use super::{ClientError, backup::CliReportFormat, human_bytes};
+use super::{
+    ClientError, backup::CliReportFormat, interrupt::unless_interrupted, statement::human_bytes,
+    status::RunEnd,
+};
 
 /// What a restore recreates, as the subcommand names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -209,21 +213,30 @@ pub(super) fn restore_statement(query: &str) -> Option<Restore> {
     Some(restore.clone())
 }
 
-/// Runs a `RESTORE` typed at the prompt, showing its progress, and prints its report.
-pub(super) async fn execute_restore_and_print(
+/// Streams the archive a `RESTORE` typed at the prompt or given to `--command` names, under
+/// `reference`, showing its progress. `None` when Ctrl-C stopped the stream before the restore
+/// ended.
+pub(super) async fn stream_restore(
     client: &Client,
     restore: &Restore,
-) -> Result<(), StackReport<ClientError>> {
+    reference: &CommandExecutionReference,
+) -> Result<Option<error_stack::Result<CommandOutcome, CoreClientError>>, StackReport<ClientError>>
+{
     let progress = ProgressLine::start(&restore.source);
-    let restored = client.restore(restore, progress.counter()).await;
+    let restoring = client.restore_with_reference(restore, reference, progress.counter());
+    let restored = unless_interrupted(restoring).await;
     progress.finish().await;
-    let outcome = restored.change_context(ClientError::Request)?;
+    restored
+}
+
+/// Prints the report of a `RESTORE` statement that ended, and returns how it ended.
+pub(super) fn print_restore_outcome(outcome: &CommandOutcome) -> RunEnd {
     if outcome.succeeded() {
-        println!("{}", report_text(&outcome));
-    } else {
-        println!("error: {}", report_text(&outcome));
+        println!("{}", report_text(outcome));
+        return RunEnd::Completed;
     }
-    Ok(())
+    println!("error: {}", report_text(outcome));
+    RunEnd::Failed
 }
 
 /// How much of an archive a restore has sent, and whether it is done sending.
