@@ -536,12 +536,15 @@ impl Client {
         }
     }
 
-    pub async fn execute_prepared(
+    /// Runs a prepared statement under the identity its handle captured.
+    ///
+    /// The call is the prepared execution itself rather than a future that awaits it, so a host
+    /// blocking on it carries no extra frame on its thread's stack.
+    pub fn execute_prepared(
         &self,
         execution: &ExecutionHandle,
-    ) -> error_stack::Result<CommandOutcome, ClientError> {
+    ) -> impl Future<Output = error_stack::Result<CommandOutcome, ClientError>> {
         self.execute_prepared_until(execution, CallCancellation::NONE)
-            .await
     }
 
     /// Runs a prepared statement as [`execute_prepared`](Self::execute_prepared) does, and stops
@@ -560,13 +563,12 @@ impl Client {
     /// it waits, as when its caller drops the future: an upload fails with
     /// [`ClientError::UncertainUpload`] and a restore with `UncertainCommand` above
     /// `CallCancelled`. The archive download of a `BACKUP` that completed is not stopped.
-    pub async fn execute_prepared_with_cancellation(
+    pub fn execute_prepared_with_cancellation(
         &self,
         execution: &ExecutionHandle,
         cancellation: &CancellationToken,
-    ) -> error_stack::Result<CommandOutcome, ClientError> {
+    ) -> impl Future<Output = error_stack::Result<CommandOutcome, ClientError>> {
         self.execute_prepared_until(execution, CallCancellation::by(cancellation))
-            .await
     }
 
     async fn execute_prepared_until(
@@ -580,7 +582,8 @@ impl Client {
                 .execute_prepared_after_lock(execution, deadline, cancellation)
                 .await;
         }
-        let locking = cancellation.unless_requested(self.inner.command_lock.lock());
+        let lock = std::pin::pin!(self.inner.command_lock.lock());
+        let locking = cancellation.unless_requested(lock);
         let locked = nervix_primitives::time::timeout_at(deadline, locking)
             .await
             .map_err(|_| Report::new(ClientError::RetryDeadline))?;
@@ -605,7 +608,8 @@ impl Client {
             }
             // An archive may take far longer to send than the retry deadline allows a command, so
             // a restore bounds each frame and each reply instead.
-            let restoring = self.restore_with_reference(restore, &execution.reference, |_| {});
+            let restoring =
+                std::pin::pin!(self.restore_with_reference(restore, &execution.reference, |_| {}));
             return match cancellation.unless_requested(restoring).await {
                 Ok(restored) => restored,
                 Err(cancelled) => Err(cancelled.change_context(ClientError::UncertainCommand {
@@ -864,7 +868,8 @@ impl Client {
             let outcome = match self.execute_once(execution, cancellation).await {
                 Ok(outcome) => outcome,
                 Err(report) if report.current_context().retryable_session_failure() => {
-                    let recovering = self.recover_session(RecoveryMode::IfClosed, recovery);
+                    let recovering =
+                        std::pin::pin!(self.recover_session(RecoveryMode::IfClosed, recovery));
                     match cancellation.unless_requested(recovering).await?? {
                         SessionRecovery::Ready => continue,
                         SessionRecovery::Unavailable => return Err(report),
@@ -875,18 +880,17 @@ impl Client {
             match outcome.routing() {
                 Routing::Complete => return Ok(outcome),
                 Routing::Detached if self.active_transaction_status().await.is_some() => {
-                    let attaching = self.restore_transaction_binding();
+                    let attaching = std::pin::pin!(self.restore_transaction_binding());
                     cancellation.unless_requested(attaching).await??;
                 }
                 Routing::Detached => return Ok(outcome),
                 Routing::Redirect(leader) => {
-                    let following = self.follow_leader(leader, recovery);
+                    let following = std::pin::pin!(self.follow_leader(leader, recovery));
                     cancellation.unless_requested(following).await??;
                 }
                 Routing::AwaitElection | Routing::AwaitOutcome => {
-                    let waited = cancellation
-                        .unless_requested(Self::await_retry(attempt))
-                        .await?;
+                    let retrying = std::pin::pin!(Self::await_retry(attempt));
+                    let waited = cancellation.unless_requested(retrying).await?;
                     if !waited {
                         return Ok(outcome);
                     }
@@ -926,7 +930,8 @@ impl Client {
                 Ok(CommandOutcome::completed_locally(message))
             }
             StatementRoute::Local(LocalStatement::ListDomains) => {
-                let domains = cancellation.unless_requested(self.list_domains()).await??;
+                let listing = std::pin::pin!(self.list_domains());
+                let domains = cancellation.unless_requested(listing).await??;
                 Ok(CommandOutcome::completed_locally(format_domain_list(
                     &domains,
                 )))
@@ -936,7 +941,7 @@ impl Client {
                     return Err(Report::new(ClientError::NoActiveDomain));
                 };
                 let request = ClientRequest::AttachDomainClock(AttachDomainClockRequest { domain });
-                let attaching = self.clock_request_once(&request);
+                let attaching = std::pin::pin!(self.clock_request_once(&request));
                 match cancellation.unless_requested(attaching).await?? {
                     ReplyBody::DomainClockAttach(outcome) => Ok(CommandOutcome::from(outcome)),
                     other => Err(Report::new(ClientError::unexpected_reply(
@@ -950,7 +955,7 @@ impl Client {
                     return Err(Report::new(ClientError::NoActiveDomain));
                 };
                 let request = ClientRequest::DetachDomainClock(DetachDomainClockRequest { domain });
-                let detaching = self.clock_request_once(&request);
+                let detaching = std::pin::pin!(self.clock_request_once(&request));
                 match cancellation.unless_requested(detaching).await?? {
                     ReplyBody::DomainClockDetach(outcome) => Ok(CommandOutcome::from(outcome)),
                     other => Err(Report::new(ClientError::unexpected_reply(
@@ -963,13 +968,13 @@ impl Client {
                 let Some(domain) = execution.domain.clone() else {
                     return Err(Report::new(ClientError::NoActiveDomain));
                 };
-                let uploading = self.upload_resource_from_directory_with_identity(
+                let uploading = std::pin::pin!(self.upload_resource_from_directory_with_identity(
                     upload.identifier.as_str(),
                     PathBuf::from(&upload.source_path),
                     domain,
                     execution.upload_identity.clone(),
                     |_| {},
-                );
+                ));
                 // The server may already hold the whole archive of an upload stopped while it
                 // waits, so its outcome is uncertain.
                 match cancellation.unless_requested(uploading).await {
@@ -1012,11 +1017,11 @@ impl Client {
                 let statement = statement.clone();
                 let offset = *offset;
                 // The creation completes even when the caller stops waiting for it.
-                let creating = nervix_primitives::task::spawn(async move {
+                let creating = std::pin::pin!(nervix_primitives::task::spawn(async move {
                     client
                         .create_subscription(attempt, requests, statement, offset)
                         .await
-                });
+                }));
                 cancellation
                     .unless_requested(creating)
                     .await?
@@ -1050,16 +1055,17 @@ impl Client {
                 };
                 let client = self.clone();
                 // The deletion completes even when the caller stops waiting for it.
-                let deleting = nervix_primitives::task::spawn(async move {
+                let deleting = std::pin::pin!(nervix_primitives::task::spawn(async move {
                     client.delete_subscription(attempt, requests).await
-                });
+                }));
                 cancellation
                     .unless_requested(deleting)
                     .await?
                     .map_err(|error| Report::new(ClientError::SubscriptionTask(error)))?
             }
             StatementRoute::Restore(restore) => {
-                let restoring = self.run_restore(restore, &execution.reference, |_| {});
+                let restoring =
+                    std::pin::pin!(self.run_restore(restore, &execution.reference, |_| {}));
                 cancellation.unless_requested(restoring).await?
             }
             StatementRoute::Command | StatementRoute::Backup(_) => {

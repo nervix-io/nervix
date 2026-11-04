@@ -2030,7 +2030,11 @@ The C ABI's lifecycle follows from that choice:
 - **Threads.** Each session runs on a runtime of its own, with two threads the library owns. The
   library never calls host code, so no host function ever runs on a library thread. Every blocking
   call runs on the calling thread until it completes, fails, or is cancelled, and a session may be
-  used from several threads at once; commands of one session still run one at a time. A call made
+  used from several threads at once; commands of one session still run one at a time. The call's
+  futures, and every frame that polls them, live on that thread's stack. A prepared command
+  completes on a thread with a 512 KiB stack in the unoptimized library, half the default stack of
+  a Java thread, as `a_prepared_command_completes_on_a_host_thread_with_half_a_java_stack` in
+  `nervix-client-core` holds. A call made
   from a thread that is itself driving a Tokio runtime cannot block on the library's runtime and
   aborts the process, so a Rust host calls the binding from a blocking thread.
 - **Cancellation and deadlines.** Every blocking call takes an optional `nx_cancel`. A token

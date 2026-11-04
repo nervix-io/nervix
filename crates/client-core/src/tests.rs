@@ -15,6 +15,8 @@ mod cancellation;
 #[cfg(not(feature = "shuttle"))]
 mod clock_restoration;
 #[cfg(not(feature = "shuttle"))]
+mod host_stack;
+#[cfg(not(feature = "shuttle"))]
 mod reports;
 #[cfg(not(feature = "shuttle"))]
 mod restoration;

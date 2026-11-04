@@ -77,9 +77,18 @@ impl Termination for RunEnd {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use nervix_client_core::{LeaderRedirect, UnknownOutcomeCause};
+    use nervix_client_core::{ExecutionReferenceConflict, LeaderRedirect, UnknownOutcomeCause};
+    use nervix_models::{ImpactPlanningBasis, TransactionPosition, TransactionPreviewIdentity};
 
     use super::*;
+
+    fn preview(position: usize) -> TransactionPreviewIdentity {
+        TransactionPreviewIdentity {
+            transaction_id: "tx".to_string(),
+            position: TransactionPosition::new(position),
+            planning_basis: ImpactPlanningBasis::new([7; 32]),
+        }
+    }
 
     #[test]
     fn every_disposition_takes_the_status_of_what_it_says_about_the_command() {
@@ -104,7 +113,12 @@ mod tests {
             CommandDisposition::TransactionTakenOver {
                 transaction_id: "tx".to_string(),
             },
+            CommandDisposition::ExecutionReferenceConflict(ExecutionReferenceConflict::Content),
             CommandDisposition::ExecutionReferenceExpired,
+            CommandDisposition::PreviewStale {
+                expected: preview(1),
+                current: preview(2),
+            },
         ] {
             assert_eq!(RunEnd::of_command(&failed), RunEnd::Failed, "{failed:?}");
         }

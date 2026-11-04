@@ -365,6 +365,8 @@ Feature: CLI public session dispatch
     Then the CLI exited with status 0 and printed "created resource 'admitted_resource'"
     When the CLI executes "CREATE RESOURCE admitted_resource;" on node "{{leader}}"
     Then the CLI exited with status 1 and printed "resource 'admitted_resource' already exists"
+    When the CLI executes "CREATE RESOURCE other_resource;" under execution reference "{{admitted_reference}}" on node "{{leader}}"
+    Then the CLI exited with status 1 and printed "conflicts by content"
 
     Examples:
       | cluster_size |

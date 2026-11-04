@@ -10,6 +10,8 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
+use std::pin::Pin;
+
 use error_stack::Report;
 use nervix_primitives::sync::CancellationToken;
 
@@ -48,9 +50,13 @@ impl<'call> CallCancellation<'call> {
 
     /// Runs `work` unless the caller cancels the call first. A cancellation stops `work` where it
     /// waits, as dropping it does, and fails the call with [`ClientError::CallCancelled`].
+    ///
+    /// `work` stays pinned where its caller holds it, so this wait adds only a reference to the
+    /// call's state. A future moved into the wait would be copied into every frame that polls it,
+    /// which a host blocking on the call pays for on its own thread's stack.
     pub(crate) async fn unless_requested<F: Future>(
         self,
-        work: F,
+        work: Pin<&mut F>,
     ) -> error_stack::Result<F::Output, ClientError> {
         let Some(token) = self.token else {
             return Ok(work.await);
@@ -72,7 +78,8 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn a_call_no_caller_can_cancel_runs_its_work_to_the_end() {
-        let ran = CallCancellation::NONE.unless_requested(async { 7 }).await;
+        let work = std::pin::pin!(async { 7 });
+        let ran = CallCancellation::NONE.unless_requested(work).await;
         assert_eq!(ran.ok(), Some(7));
         assert!(!CallCancellation::NONE.is_requested());
     }
@@ -84,9 +91,8 @@ mod tests {
         assert!(!cancellation.is_requested());
         token.cancel();
         assert!(cancellation.is_requested());
-        let stopped = cancellation
-            .unless_requested(std::future::pending::<()>())
-            .await;
+        let waiting = std::pin::pin!(std::future::pending::<()>());
+        let stopped = cancellation.unless_requested(waiting).await;
         let Err(report) = stopped else {
             panic!("a cancelled call must not wait for its work");
         };
