@@ -221,7 +221,10 @@ async fn a_cancellation_the_ended_session_cannot_send_leaves_the_command_uncerta
         .await
         .assured("the command task runs to its end")
         .expect_err("a command whose session ended while it waited has no known outcome");
-    let ClientError::UncertainCommand { reference: uncertain } = error.current_context() else {
+    let ClientError::UncertainCommand {
+        reference: uncertain,
+    } = error.current_context()
+    else {
         panic!("a command sent before its session ended may have been admitted: {error:?}");
     };
     assert_eq!(uncertain, &reference(COMMAND_REFERENCE));
