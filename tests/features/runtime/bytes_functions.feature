@@ -1,4 +1,64 @@
 Feature: Typed bytes and native encoding functions
+  Scenario Outline: A <wire_format> string carries bytes through explicit BASE64 ingestion and emission
+    Given HTTP receiver "binary_api" is running
+    And HTTP receiver "binary_api" answers unscripted requests with "respond 204"
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA binary_event (id STRING, payload BYTES);
+      CREATE WIRE <wire_format> SCHEMA binary_event_wire MODE STRICT (id string, payload string);
+      CREATE CODEC binary_event_codec FROM WIRE <wire_format> SCHEMA binary_event_wire TO SCHEMA binary_event
+        ENCODE payload AS BASE64;
+      CREATE RELAY binary_events SCHEMA binary_event UNBRANCHED;
+      CREATE VHOST edge bytes-base64-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/bytes' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR binary_source
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING binary_event_codec
+        TO binary_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP CLIENT binary_api CONFIG {
+        'endpoint' = '{{http_receiver.binary_api}}', 'timeout_ms' = 5000
+      };
+      CREATE HTTP REQUEST EMITTER binary_sink FROM binary_events
+        TO binary_api METHOD 'POST' PATH '/bytes'
+          MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s
+          ENCODE USING binary_event_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And this Plexus command is executed on the leader node
+      """
+      SHOW CREATE CODEC binary_event_codec;
+      """
+    Then the last command output contains
+      """
+      ENCODE payload AS BASE64
+      """
+    When http payload encoded as "<wire_format>" is posted to host "bytes-base64-{{test_id}}.example.com" path "/bytes"
+      """
+      {"id":"binary","payload":"AP8="}
+      """
+    Then HTTP receiver "binary_api" eventually receives at least 1 requests
+    And HTTP receiver "binary_api" request 1 carries this "<wire_format>" payload
+      """
+      {"id":"binary","payload":"AP8="}
+      """
+
+    Examples:
+      | cluster_size | wire_format |
+      | 1            | JSON        |
+      | 3            | JSON        |
+      | 1            | AVRO        |
+      | 3            | AVRO        |
+
   Scenario Outline: Binary values survive conversion and hashing across the public data path
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -141,8 +201,8 @@ Feature: Typed bytes and native encoding functions
       """
       CREATE SCHEMA binary_input (id STRING, payload BYTES);
       CREATE SCHEMA binary_text (id STRING, hexadecimal STRING);
-      CREATE WIRE JSON SCHEMA binary_wire MODE STRICT (id STRING, payload BYTES);
-      CREATE CODEC binary_codec FROM WIRE JSON SCHEMA binary_wire TO SCHEMA binary_input;
+      CREATE WIRE JSON SCHEMA binary_wire MODE STRICT (id STRING, payload string);
+      CREATE CODEC binary_codec FROM WIRE JSON SCHEMA binary_wire TO SCHEMA binary_input ENCODE payload AS BASE64;
       CREATE RELAY binary_inputs SCHEMA binary_input UNBRANCHED;
       CREATE RELAY binary_texts SCHEMA binary_text UNBRANCHED;
       CREATE VHOST edge bytes-wire-{{test_id}}.example.com;
@@ -192,8 +252,8 @@ Feature: Typed bytes and native encoding functions
       """
       CREATE SCHEMA binary_input (id STRING, secret BYTES SENSITIVE);
       CREATE SCHEMA binary_output (id STRING, encoded STRING SENSITIVE, digest BYTES SENSITIVE, fast_hash U64 SENSITIVE);
-      CREATE WIRE JSON SCHEMA binary_wire MODE STRICT (id STRING, secret BYTES);
-      CREATE CODEC binary_codec FROM WIRE JSON SCHEMA binary_wire TO SCHEMA binary_input;
+      CREATE WIRE JSON SCHEMA binary_wire MODE STRICT (id STRING, secret string);
+      CREATE CODEC binary_codec FROM WIRE JSON SCHEMA binary_wire TO SCHEMA binary_input ENCODE secret AS BASE64;
       CREATE RELAY binary_inputs SCHEMA binary_input UNBRANCHED;
       CREATE RELAY binary_outputs SCHEMA binary_output UNBRANCHED;
       CREATE VHOST edge bytes-sensitive-{{test_id}}.example.com;

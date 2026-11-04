@@ -4,7 +4,7 @@ use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
     AlterSchema, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AvroType,
-    CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, CreateSchema,
+    CborType, CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, CreateSchema,
     CreateStatement, CreateWireSchema, JsonType, Model, ParseAsType, SchemaField, Statement,
     WireSchemaField, WireSchemaStrictness,
 };
@@ -24,34 +24,39 @@ fn json_type<'src>()
         kw(Identifier::String).to(JsonType::String),
         kw(Identifier::Number).to(JsonType::Number),
         kw(Identifier::Integer).to(JsonType::Integer),
-        kw(Identifier::Object).to(JsonType::Object),
         kw(Identifier::Array).to(JsonType::Array),
         kw(Identifier::Boolean).to(JsonType::Boolean),
-        kw(Identifier::Null).to(JsonType::Null),
-        kw(Identifier::U8).to(JsonType::U8),
-        kw(Identifier::I8).to(JsonType::I8),
-        kw(Identifier::U16).to(JsonType::U16),
-        kw(Identifier::I16).to(JsonType::I16),
-        kw(Identifier::U32).to(JsonType::U32),
-        kw(Identifier::I32).to(JsonType::I32),
-        kw(Identifier::U64).to(JsonType::U64),
-        kw(Identifier::I64).to(JsonType::I64),
-        kw(Identifier::Datetime).to(JsonType::Datetime),
-        kw(Identifier::F32).to(JsonType::F32),
-        kw(Identifier::F64).to(JsonType::F64),
-        kw(Identifier::Bytes).to(JsonType::Bytes),
     )
 }
 
 fn cbor_type<'src>()
--> impl Parser<'src, &'src [Token], JsonType, extra::Err<ParseError<'src>>> + Clone {
-    json_type()
+-> impl Parser<'src, &'src [Token], CborType, extra::Err<ParseError<'src>>> + Clone {
+    boxed_choice!(
+        kw(Identifier::String).to(CborType::String),
+        kw(Identifier::Number).to(CborType::Number),
+        kw(Identifier::Integer).to(CborType::Integer),
+        kw(Identifier::Object).to(CborType::Object),
+        kw(Identifier::Array).to(CborType::Array),
+        kw(Identifier::Boolean).to(CborType::Boolean),
+        kw(Identifier::Null).to(CborType::Null),
+        kw(Identifier::U8).to(CborType::U8),
+        kw(Identifier::I8).to(CborType::I8),
+        kw(Identifier::U16).to(CborType::U16),
+        kw(Identifier::I16).to(CborType::I16),
+        kw(Identifier::U32).to(CborType::U32),
+        kw(Identifier::I32).to(CborType::I32),
+        kw(Identifier::U64).to(CborType::U64),
+        kw(Identifier::I64).to(CborType::I64),
+        kw(Identifier::Datetime).to(CborType::Datetime),
+        kw(Identifier::F32).to(CborType::F32),
+        kw(Identifier::F64).to(CborType::F64),
+        kw(Identifier::Bytes).to(CborType::Bytes),
+    )
 }
 
 fn avro_type<'src>()
 -> impl Parser<'src, &'src [Token], AvroType, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
-        kw(Identifier::Null).to(AvroType::Null),
         kw(Identifier::Boolean).to(AvroType::Boolean),
         kw(Identifier::Int).to(AvroType::Int),
         kw(Identifier::Long).to(AvroType::Long),
@@ -59,11 +64,7 @@ fn avro_type<'src>()
         kw(Identifier::Double).to(AvroType::Double),
         kw(Identifier::Bytes).to(AvroType::Bytes),
         kw(Identifier::String).to(AvroType::String),
-        kw(Identifier::Record).to(AvroType::Record),
-        kw(Identifier::Enum).to(AvroType::Enum),
         kw(Identifier::Array).to(AvroType::Array),
-        kw(Identifier::Map).to(AvroType::Map),
-        kw(Identifier::Fixed).to(AvroType::Fixed),
     )
 }
 
@@ -847,7 +848,7 @@ mod tests {
             CREATE WIRE JSON SCHEMA notification MODE STRICT (
                 user_id integer,
                 created_at string,
-                payload object
+                payload string
             );
         "#;
 
@@ -869,7 +870,7 @@ mod tests {
         let input = r#"
             CREATE WIRE JSON SCHEMA notification MODE STRICT (
                 user_id integer,
-                payload object
+                payload string
             );
         "#;
 
@@ -881,7 +882,7 @@ mod tests {
             panic!("expected JSON wire schema");
         };
         assert_eq!(schema.strictness, WireSchemaStrictness::Strict);
-        assert_eq!(schema.fields[1].ty, JsonType::Object);
+        assert_eq!(schema.fields[1].ty, JsonType::String);
     }
 
     #[test]
@@ -901,22 +902,8 @@ mod tests {
             panic!("expected CBOR wire schema");
         };
         assert_eq!(schema.strictness, WireSchemaStrictness::Loose);
-        assert_eq!(schema.fields[0].ty, JsonType::Integer);
+        assert_eq!(schema.fields[0].ty, CborType::Integer);
         assert!(schema.fields[1].optional);
-    }
-
-    #[test]
-    fn rejects_strictness_before_legacy_wire_schema_order() {
-        let input = "CREATE STRICT WIRE JSON SCHEMA notification ( user_id integer );";
-
-        assert!(parse_create_wire_schema(input).is_err());
-    }
-
-    #[test]
-    fn rejects_legacy_wire_schema_order_without_strictness() {
-        let input = "CREATE JSON WIRE SCHEMA notification ( user_id integer );";
-
-        assert!(parse_create_wire_schema(input).is_err());
     }
 
     #[test]
@@ -968,20 +955,31 @@ mod tests {
     }
 
     #[test]
-    fn parses_exact_json_wire_numeric_and_datetime_types() {
-        let input =
-            "CREATE WIRE JSON SCHEMA typed MODE STRICT (id U32, time DATETIME, metric F32);";
-        let parsed = parse_create_wire_schema_tokens(&to_tokens(input))
-            .expect("exact JSON wire types are current schema types");
-        let Statement::Create(create) = parsed else {
-            panic!("expected create statement");
-        };
-        let Model::WireJsonSchema(schema) = *create.body else {
-            panic!("expected JSON wire schema");
-        };
-        assert_eq!(schema.fields[0].ty, JsonType::U32);
-        assert_eq!(schema.fields[1].ty, JsonType::Datetime);
-        assert_eq!(schema.fields[2].ty, JsonType::F32);
+    fn parses_every_json_and_avro_wire_type() {
+        for (format, types) in [
+            (
+                "JSON",
+                &["string", "number", "integer", "boolean", "array"][..],
+            ),
+            (
+                "AVRO",
+                &[
+                    "boolean", "int", "long", "float", "double", "string", "bytes", "array",
+                ][..],
+            ),
+        ] {
+            for ty in types {
+                let input = format!("CREATE WIRE {format} SCHEMA typed MODE STRICT (value {ty});");
+                let parsed = parse_create_wire_schema(&input);
+                assert!(
+                    parsed.is_ok(),
+                    "the current {format} type {ty} parses: {parsed:?}"
+                );
+            }
+            let malformed =
+                format!("CREATE WIRE {format} SCHEMA typed MODE STRICT (value unknown_type);");
+            assert!(parse_create_wire_schema(&malformed).is_err());
+        }
     }
 
     #[test]
@@ -1031,12 +1029,25 @@ mod tests {
     #[test]
     fn suggests_types_from_json_wire_schema_grammar() {
         let input = "CREATE WIRE JSON SCHEMA s MODE STRICT (id ";
-        let suggestions = suggest_create_wire_schema(input, input.len());
-        assert!(suggestions.contains(&"STRING".to_string()));
-        assert!(suggestions.contains(&"NUMBER".to_string()));
-        assert!(suggestions.contains(&"U32".to_string()));
-        assert!(suggestions.contains(&"DATETIME".to_string()));
-        assert!(!suggestions.contains(&"BOOL".to_string()));
+        let mut suggestions = suggest_create_wire_schema(input, input.len());
+        suggestions.sort();
+        assert_eq!(
+            suggestions,
+            ["ARRAY", "BOOLEAN", "INTEGER", "NUMBER", "STRING"]
+        );
+    }
+
+    #[test]
+    fn suggests_types_from_avro_wire_schema_grammar() {
+        let input = "CREATE WIRE AVRO SCHEMA s MODE STRICT (id ";
+        let mut suggestions = suggest_create_wire_schema(input, input.len());
+        suggestions.sort();
+        assert_eq!(
+            suggestions,
+            [
+                "ARRAY", "BOOLEAN", "BYTES", "DOUBLE", "FLOAT", "INT", "LONG", "STRING"
+            ]
+        );
     }
 
     #[test]
@@ -1139,15 +1150,12 @@ mod tests {
 
             let parsed = parse_alter_wire_schema(&input).expect("parse should succeed");
             let (schema, operations_len) = match parsed {
-                Statement::AlterWireJsonSchema(alter) | Statement::AlterWireCborSchema(alter) => {
-                    (alter.schema.to_string(), alter.operations.len())
-                }
-                Statement::AlterWireAvroSchema(alter) => {
-                    (alter.schema.to_string(), alter.operations.len())
-                }
+                Statement::AlterWireJsonSchema(alter) => (alter.schema, alter.operations.len()),
+                Statement::AlterWireCborSchema(alter) => (alter.schema, alter.operations.len()),
+                Statement::AlterWireAvroSchema(alter) => (alter.schema, alter.operations.len()),
                 _ => panic!("expected exact-format wire schema ALTER"),
             };
-            assert_eq!(schema, "payload");
+            assert_eq!(schema.as_str(), "payload");
             assert_eq!(operations_len, 6);
         }
     }

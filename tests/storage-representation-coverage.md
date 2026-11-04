@@ -35,8 +35,12 @@ preserve those complete values.
 KAFKA TOPIC ingestor generators draw domain-owned offsets, with no position, and a consumer group
 with either required `START AT` position. Statement generators mix typed `SET START AT` with shared
 ingestor operations. The Model, registry and consensus properties preserve those complete values.
-The `NERVIX SUB TYPES` registry signature and `raft_subscription_types_` consensus namespace
-identify this current Model layout before decoding.
+
+Wire-schema generators carry each format's declared types, and codec generators carry explicit
+`BASE64` byte-text rules alongside `RFC3339` datetime-text rules. JSON, CBOR and AVRO retain their
+own wire type enums. The Model/archive, registry and consensus properties preserve those complete
+values. The `NERVIX WIRE TYPE` registry signature and `raft_wire_types_` consensus namespace
+identify the current Model layout before decoding.
 
 MQTT TOPIC ingestor generators draw either session at QoS 0, 1 or 2 beside `NO ACK`, and the
 persistent session at QoS 1 or 2 beside an acknowledged mode, so every pairing the declaration

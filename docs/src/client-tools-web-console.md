@@ -143,7 +143,11 @@ branches. Schema fields are added in declaration order and can be moved or remov
 field selects its exact scalar type, then may wrap it in any sequence of variable vectors and
 fixed arrays; each fixed array needs a positive length. Optional and sensitive flags are separate
 controls. Wire fields select the types of their chosen format and an explicit `STRICT` or `LOOSE`
-mode. A wire schema's format is part of its identity, so JSON, CBOR, and AVRO definitions may
+mode. JSON offers `string`, `number`, `integer`, `boolean`, and `array`; AVRO offers `boolean`,
+`int`, `long`, `float`, `double`, `string`, `bytes`, and `array`. Codec field encoding controls
+select `RFC3339` or `BASE64` for explicit text interchange, as described in
+[Schemas And Codecs](schemas-and-codecs.md#codecs).
+A wire schema's format is part of its identity, so JSON, CBOR, and AVRO definitions may
 share a name. The preview and submitted command come from the completed semantic Model's
 canonical renderer, just as they do for the earlier forms.
 
@@ -173,8 +177,9 @@ schema is an exact typed selection. Declared wire-schema choices are limited to 
 format, even when wire schemas of different formats share a name. JAQ-native and Protobuf codecs
 choose ingestion (decode), emitting (encode), or both, and may add an emitting-batch program after
 an emitting program. These are program editors: their contents remain jaq source in the current
-codec Model, including quotes and whitespace. RFC3339 field encoding rules can be added in order
-where the format supports them. The preview renders the complete codec Model as canonical Plexus.
+codec Model, including quotes and whitespace. Field encoding rules select RFC3339 or BASE64 and
+can be added in order where the format supports them. The preview renders the complete codec
+Model as canonical Plexus.
 
 The Protobuf controls select an existing resource and one of its completed versions, including
 `LATEST`, then accept an optional `.proto` file and include root, additional compiler

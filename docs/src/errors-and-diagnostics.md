@@ -595,9 +595,15 @@ chain names each cause once.
 
 Schemaful JSON parsing has one codec decode failure carrying the simd-json source. Malformed
 syntax, invalid UTF-8, and invalid escapes enter through that failure; object shape, missing or
-unexpected fields, nullability, exact wire types, integer ranges, datetime parsing, base64, and
+unexpected fields, nullability, declared wire representations, integer ranges, datetime parsing, base64, and
 nested sequence shapes keep their existing typed codec or runtime-schema failures. Diagnostics name
 the codec and field when one is known and never attach the rejected payload value.
+
+Registry validation checks each `ENCODE` rule against its internal field and declared wire
+representation. `RFC3339` applies to datetime text, and `BASE64` to byte text in JSON or AVRO
+strings; an AVRO native `bytes` field accepts no rule. A refusal names the codec and field, including
+unknown fields, duplicate rules and incompatible types. Canonical base64 decoding retains the typed
+binary-builder failure beneath the codec's field context without including the encoded input.
 
 Codec jaq transformations are compiled during registry validation for every declared direction.
 A syntax error names the codec, domain, and direction and rejects the transaction before the model
@@ -642,7 +648,8 @@ transport failure. Registry Model records validate their current frame signature
 record's key holds its domain, Model kind and name exactly as a commit encodes them; a key spelling
 a name another way or holding bytes after its encoding is `RegistryError::DecodeKey`, so no stored
 record is read as another Model. Consensus validates its complete current keyspace namespace and
-state encoding and reports `StorageFailure::InvalidState` with a recreation instruction. Window snapshot decoding reports
+state encoding before decoding Model-bearing records, and reports `StorageFailure::InvalidState`
+with a recreation instruction. Window snapshot decoding reports
 `WindowSnapshotIssue::Header` with a recreation instruction for an invalid current frame signature.
 These boundaries reject unrecognized data before its counts can be reinterpreted; none clamps,
 truncates, or supplies a replacement value. See [Archived Counts](./typed-states.md#archived-counts).

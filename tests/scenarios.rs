@@ -2328,6 +2328,29 @@ async fn then_http_receiver_request_is(
     );
 }
 
+/// Compare a captured payload with the independent fixture encoder's complete wire datum.
+#[then(expr = "HTTP receiver {string} request {int} carries this {string} payload")]
+async fn then_http_receiver_request_carries_encoded_payload(
+    world: &mut ScenarioWorld,
+    name: String,
+    position: usize,
+    wire_format: String,
+    #[step] step: &Step,
+) {
+    let payload = expand_placeholders(world, docstring(step));
+    let expected = encode_http_payload_for_codec(
+        &wire_format,
+        &payload,
+        &world.avro_http_field_order,
+        &world.avro_http_optional_fields,
+    );
+    let request = captured_http_request(world, &name, position);
+    assert_eq!(
+        request.body, expected,
+        "HTTP receiver '{name}' request {position} must carry the complete {wire_format} payload"
+    );
+}
+
 /// Finds the one captured request with the docstring's request line, wherever it arrived, and
 /// compares it with the request the docstring describes. Requests of independent branches or
 /// source relays have no order between them, so a scenario names each by its request line.
