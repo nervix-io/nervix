@@ -26,8 +26,8 @@ use nervix_backup::{
     SectionPath, WasmStateDescriptor,
 };
 use nervix_client_wire::{
-    CommandDisposition, CommandOutcome as WireCommandOutcome, OutcomeOrigin, RestoreDisposition,
-    RestoreUploadFailure, UnknownOutcomeCause,
+    CommandDisposition, CommandOutcome as WireCommandOutcome, NodeEndpoints, OutcomeOrigin,
+    RestoreDisposition, RestoreUploadFailure, UnknownOutcomeCause,
 };
 use nervix_models::{ResourceName, RestoreStep, SchemaFingerprint};
 use nervix_primitives::task::AbortOnDropHandle;
@@ -37,8 +37,9 @@ use super::*;
 use crate::common::{
     backup_phase::BackupPhase,
     cluster::node_name,
+    command_recovery::LeaderRoutes,
     phase_deadline::PhaseDeadline,
-    raw_session::{TestRestore, TestRestoreEnd, outcome_awaits_leader, send_restore},
+    raw_session::{TestRestore, TestRestoreEnd, send_restore},
 };
 
 /// How long a restore waits at an armed pause before a scenario gives up on reaching it.
@@ -65,15 +66,31 @@ enum BackgroundRestoreObservation {
 }
 
 impl BackgroundRestore {
+    /// How the background stream ended: a raw stream's own end, with the request a step may send
+    /// again under its reference, or the outcome its completion probe learned.
+    async fn ended(self) -> RestoreStreamEnd {
+        let end = self
+            .task
+            .await
+            .assured("the background restore task does not panic");
+        match self.observation {
+            BackgroundRestoreObservation::Raw { request, .. } => {
+                RestoreStreamEnd::sent(end, request)
+            }
+            BackgroundRestoreObservation::OutcomeRecovery => {
+                RestoreStreamEnd::learned_by_probe(end)
+            }
+        }
+    }
+
     /// Reaches an execution pause without replacing the raw stream's received answer. A redirect
     /// can precede its first pause; a leadership-loss reply remains raw while setup alone recovers.
     async fn wait_for_pause(
         &mut self,
         paused: impl std::future::Future<Output = ()>,
-        servers: Vec<String>,
+        routes: LeaderRoutes,
     ) {
         let mut paused = std::pin::pin!(paused);
-        let mut routes = servers.iter().cycle();
         let raw_end = nervix_primitives::time::timeout(RESTORE_PAUSE_TIMEOUT, async {
             loop {
                 nervix_primitives::task::consume_budget().await;
@@ -101,15 +118,12 @@ impl BackgroundRestore {
                 else {
                     panic!("restore completion observer ended before its armed pause: {ended:?}");
                 };
-                if matches!(&outcome.disposition, CommandDisposition::NotLeader(_)) {
+                if let CommandDisposition::NotLeader(redirect) = &outcome.disposition {
                     assert!(
                         !*pause_observed,
                         "a raw restore is not redirected after reaching its first pause: {ended:?}"
                     );
-                    request.server = routes
-                        .next()
-                        .assured("a scenario cluster has at least one restore endpoint")
-                        .clone();
+                    request.route_to(&routes, redirect.leader.as_ref());
                     append_cucumber_log_line(&format!(
                         "restore probe retry before pause: reference={}, route={}, end={ended:?}",
                         self.reference, request.server
@@ -134,7 +148,7 @@ impl BackgroundRestore {
                     self.reference
                 ));
                 let mut observer = AbortOnDropHandle::new(nervix_primitives::task::spawn(
-                    request.clone().complete(servers.clone()),
+                    request.clone().complete(routes.clone()),
                 ));
                 nervix_primitives::select! {
                     biased;
@@ -674,7 +688,7 @@ async fn then_restore_eventually_completes(
     .await
     .assured("restore completes under the new coordinator");
     assert_restore_completed(&end);
-    world.last_restore_end = Some(end);
+    world.last_restore_end = Some(RestoreStreamEnd::learned_by_probe(end));
 }
 
 #[then(
@@ -1527,7 +1541,9 @@ fn then_cli_restore_report_shows_step(
 
 /// What one restore stream a scenario shapes carries, owned so it can be sent from a task.
 #[derive(Clone, Debug)]
-struct RestoreStreamRequest {
+pub(crate) struct RestoreStreamRequest {
+    /// The node the stream goes to, whose endpoint `server` is.
+    node: String,
     server: String,
     reference: CommandExecutionReference,
     statement: String,
@@ -1535,27 +1551,85 @@ struct RestoreStreamRequest {
 }
 
 /// Every current route is eligible to teach a probe the outcome of its immutable execution.
-fn restore_outcome_routes(world: &ScenarioWorld) -> Vec<String> {
-    world
-        .cluster()
-        .node_ids()
-        .into_iter()
-        .map(|node| {
-            world
-                .cluster()
-                .grpc_uri(&node)
-                .assured("each scenario node has a restore endpoint")
-        })
-        .collect()
+fn restore_outcome_routes(world: &ScenarioWorld) -> LeaderRoutes {
+    world.cluster().leader_routes()
+}
+
+/// What the end of one restore stream says about the restore it carried.
+enum StreamAnswer {
+    /// A node decided the restore or refused the stream itself, or the stream was abandoned.
+    Decided,
+    /// A node redirected the stream, before it looked up the stream's reference, to the leader it
+    /// names when it knows one.
+    Redirected { leader: Option<NodeEndpoints> },
+    /// The node that looked up the reference does not know the outcome yet, or the call ended
+    /// without an answer in a way that sending the stream again can still learn the outcome after.
+    Undecided,
+}
+
+impl StreamAnswer {
+    fn of(end: &TestRestoreEnd) -> Self {
+        match end {
+            TestRestoreEnd::Replied(reply) => match &reply.disposition {
+                RestoreDisposition::Outcome(outcome) => match &outcome.disposition {
+                    CommandDisposition::NotLeader(redirect) => Self::Redirected {
+                        leader: redirect.leader.clone(),
+                    },
+                    CommandDisposition::OutcomeUnknown(_) => Self::Undecided,
+                    _ => Self::Decided,
+                },
+                RestoreDisposition::UploadFailed { .. } => Self::Decided,
+            },
+            TestRestoreEnd::Status(status) => match status.code() {
+                tonic::Code::Cancelled
+                | tonic::Code::DeadlineExceeded
+                | tonic::Code::Unavailable
+                | tonic::Code::Unknown => Self::Undecided,
+                _ => Self::Decided,
+            },
+            TestRestoreEnd::Abandoned => Self::Decided,
+        }
+    }
+}
+
+/// The origin of `end` when a node that looked up the stream's reference answered it. A redirect
+/// is answered before that lookup, so it tells nothing about who executed the restore.
+fn looked_up_origin(end: &TestRestoreEnd) -> Option<OutcomeOrigin> {
+    let TestRestoreEnd::Replied(reply) = end else {
+        return None;
+    };
+    let RestoreDisposition::Outcome(outcome) = &reply.disposition else {
+        return None;
+    };
+    if let CommandDisposition::NotLeader(_) = outcome.disposition {
+        return None;
+    }
+    Some(outcome.origin)
+}
+
+/// The outcome a restore stream's request learned under its reference.
+struct LearnedRestore {
+    /// The end that decided the restore.
+    end: TestRestoreEnd,
+    /// The origin of the first answer to the request from a node that looked its reference up.
+    origin: Option<OutcomeOrigin>,
 }
 
 impl RestoreStreamRequest {
     /// Repeats one immutable restore request until a node knows its outcome. Only the destination
     /// changes; a refusal or definitive failure returns with its actual origin and report.
-    async fn complete(mut self, servers: Vec<String>) -> TestRestoreEnd {
+    async fn complete(self, routes: LeaderRoutes) -> TestRestoreEnd {
+        let first = stream_restore(&self, None, None).await;
+        self.learn(first, &routes).await.end
+    }
+
+    /// Learns the outcome of the restore this request carries, starting from `end`, an answer to
+    /// it. While an end decides nothing, the same request goes again to the node
+    /// [`LeaderRoutes::after`] names, and no attempt starts once [`RESTORE_PAUSE_TIMEOUT`] has
+    /// passed.
+    async fn learn(mut self, mut end: TestRestoreEnd, routes: &LeaderRoutes) -> LearnedRestore {
         let deadline = PhaseDeadline::after(RESTORE_PAUSE_TIMEOUT);
-        let mut routes = servers.iter().cycle();
-        let mut end = stream_restore(&self, None, None).await;
+        let mut origin = None;
         loop {
             nervix_primitives::task::consume_budget().await;
             append_cucumber_log_line(&format!(
@@ -1564,29 +1638,22 @@ impl RestoreStreamRequest {
                 self.server,
                 deadline.remaining()
             ));
-            let pending = match &end {
-                TestRestoreEnd::Replied(reply) => match &reply.disposition {
-                    RestoreDisposition::Outcome(outcome) => {
-                        assert_eq!(
-                            outcome.execution_reference, self.reference,
-                            "each attempt answers the same restore execution"
-                        );
-                        outcome_awaits_leader(outcome)
-                    }
-                    RestoreDisposition::UploadFailed { .. } => false,
-                },
-                TestRestoreEnd::Status(status) => matches!(
-                    status.code(),
-                    tonic::Code::Cancelled
-                        | tonic::Code::DeadlineExceeded
-                        | tonic::Code::Unavailable
-                        | tonic::Code::Unknown
-                ),
-                TestRestoreEnd::Abandoned => false,
-            };
-            if !pending {
-                return end;
+            if let TestRestoreEnd::Replied(reply) = &end
+                && let RestoreDisposition::Outcome(outcome) = &reply.disposition
+            {
+                assert_eq!(
+                    outcome.execution_reference, self.reference,
+                    "each attempt answers the same restore execution"
+                );
             }
+            if origin.is_none() {
+                origin = looked_up_origin(&end);
+            }
+            let leader = match StreamAnswer::of(&end) {
+                StreamAnswer::Decided => return LearnedRestore { end, origin },
+                StreamAnswer::Redirected { leader } => leader,
+                StreamAnswer::Undecided => None,
+            };
             tracing::debug!(reference = %self.reference, ?end, "learning a restore probe's outcome");
             deadline.pause(RESTORE_RETRY_INTERVAL).await;
             assert!(
@@ -1594,11 +1661,142 @@ impl RestoreStreamRequest {
                 "restore {} did not reach a known outcome: {end:?}",
                 self.reference
             );
-            self.server = routes
-                .next()
-                .assured("a scenario cluster has at least one restore endpoint")
-                .clone();
+            self.route_to(routes, leader.as_ref());
             end = stream_restore(&self, None, None).await;
+        }
+    }
+
+    /// Sends the request to the node [`LeaderRoutes::after`] names after its current node answered
+    /// it without deciding it, naming `leader` or no leader.
+    fn route_to(&mut self, routes: &LeaderRoutes, leader: Option<&NodeEndpoints>) {
+        let next = routes.after(&self.node, leader).to_string();
+        self.server = routes
+            .endpoint(&next)
+            .assured("LeaderRoutes::after names only nodes it has an endpoint for")
+            .to_string();
+        self.node = next;
+    }
+}
+
+/// How the last restore stream a scenario shaped itself ended.
+#[derive(Debug)]
+pub(crate) enum RestoreStreamEnd {
+    /// The stream's own end, with the request a step sends again under its reference when the end
+    /// decided nothing and the scenario names a definitive outcome.
+    Sent {
+        end: TestRestoreEnd,
+        request: RestoreStreamRequest,
+    },
+    /// An outcome learned under the stream's reference: by a completion probe, whose assertions
+    /// read the origin of the attempt that answered, or by a step, whose assertions read the
+    /// origin the stream's own request was answered with.
+    Learned {
+        end: TestRestoreEnd,
+        origin: Option<OutcomeOrigin>,
+    },
+}
+
+impl RestoreStreamEnd {
+    fn sent(end: TestRestoreEnd, request: RestoreStreamRequest) -> Self {
+        Self::Sent { end, request }
+    }
+
+    /// The outcome a completion probe learned, read with the origin of the attempt that answered.
+    fn learned_by_probe(end: TestRestoreEnd) -> Self {
+        let origin = restore_outcome_origin(&end);
+        Self::Learned { end, origin }
+    }
+
+    /// The end a scenario's assertions read.
+    fn end(&self) -> &TestRestoreEnd {
+        match self {
+            Self::Sent { end, .. } | Self::Learned { end, .. } => end,
+        }
+    }
+
+    /// The origin a scenario's assertions read.
+    fn origin(&self) -> Option<OutcomeOrigin> {
+        match self {
+            Self::Sent { end, .. } => restore_outcome_origin(end),
+            Self::Learned { origin, .. } => *origin,
+        }
+    }
+
+    /// What the stream observed for a scenario that names `named`.
+    ///
+    /// The stream's own end is what the scenario asserts when it decided the restore, and when the
+    /// scenario names an answer that decides nothing itself. When the scenario names a definitive
+    /// outcome and the stream's own end decided nothing, the step learns the outcome the way a
+    /// client must: it sends the same request again under its reference, statement and archive
+    /// until a node decides the restore. The outcome is then the learned one, and its origin stays
+    /// the stream's own, from the first node that looked its reference up.
+    async fn observe(self, named: NamedDisposition, routes: &LeaderRoutes) -> Self {
+        let Self::Sent { end, request } = self else {
+            return self;
+        };
+        if !named.is_definitive() || matches!(StreamAnswer::of(&end), StreamAnswer::Decided) {
+            return Self::Sent { end, request };
+        }
+        let learned = request.learn(end, routes).await;
+        Self::Learned {
+            end: learned.end,
+            origin: learned.origin,
+        }
+    }
+}
+
+/// A restore stream's disposition, as a scenario names it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::Display, strum::EnumString)]
+enum NamedDisposition {
+    #[strum(serialize = "completed")]
+    Completed,
+    #[strum(serialize = "failed")]
+    Failed,
+    #[strum(serialize = "redirected")]
+    Redirected,
+    #[strum(serialize = "reference conflict")]
+    ReferenceConflict,
+    #[strum(serialize = "still applying")]
+    StillApplying,
+    #[strum(serialize = "leadership lost")]
+    LeadershipLost,
+}
+
+impl NamedDisposition {
+    fn named(name: &str) -> Self {
+        let Ok(named) = name.parse() else {
+            panic!("a restore stream has no outcome '{name}'");
+        };
+        named
+    }
+
+    /// Whether this disposition decides the restore, so no answer that decides nothing is it.
+    fn is_definitive(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::ReferenceConflict
+        )
+    }
+
+    fn matches(self, disposition: &CommandDisposition) -> bool {
+        match self {
+            Self::Completed => matches!(disposition, CommandDisposition::Completed { .. }),
+            Self::Failed => matches!(disposition, CommandDisposition::Failed),
+            Self::Redirected => matches!(disposition, CommandDisposition::NotLeader(_)),
+            Self::ReferenceConflict => {
+                matches!(
+                    disposition,
+                    CommandDisposition::ExecutionReferenceConflict(_)
+                )
+            }
+            Self::StillApplying => matches!(
+                disposition,
+                CommandDisposition::OutcomeUnknown(UnknownOutcomeCause::StillApplying)
+            ),
+            Self::LeadershipLost => matches!(
+                disposition,
+                CommandDisposition::OutcomeUnknown(UnknownOutcomeCause::LeadershipLost)
+            ),
         }
     }
 }
@@ -1625,6 +1823,7 @@ async fn restore_stream_request(
             .cluster()
             .grpc_uri(&node)
             .expect("the scenario names a cluster node"),
+        node,
         reference: CommandExecutionReference::parse(reference)
             .expect("scenario execution references are valid"),
         statement: format!("RESTORE {scope} FROM '{}'{lifecycle};", path.display()),
@@ -1670,7 +1869,8 @@ async fn when_restore_is_streamed(
     reference: String,
 ) {
     let request = restore_stream_request(world, &restore, &file, &node, &reference).await;
-    world.last_restore_end = Some(stream_restore(&request, None, None).await);
+    let end = stream_restore(&request, None, None).await;
+    world.last_restore_end = Some(RestoreStreamEnd::sent(end, request));
 }
 
 #[when(
@@ -1685,7 +1885,8 @@ async fn when_restore_is_streamed_under_a_fresh_reference(
 ) {
     let reference = crate::common::raw_session::fresh_execution_reference();
     let request = restore_stream_request(world, &restore, &file, &node, &reference).await;
-    world.last_restore_end = Some(stream_restore(&request, None, None).await);
+    let end = stream_restore(&request, None, None).await;
+    world.last_restore_end = Some(RestoreStreamEnd::sent(end, request));
 }
 
 #[when(
@@ -1701,7 +1902,8 @@ async fn when_restore_is_streamed_and_abandoned(
     chunks: usize,
 ) {
     let request = restore_stream_request(world, &restore, &file, &node, &reference).await;
-    world.last_restore_end = Some(stream_restore(&request, None, Some(chunks)).await);
+    let end = stream_restore(&request, None, Some(chunks)).await;
+    world.last_restore_end = Some(RestoreStreamEnd::sent(end, request));
 }
 
 #[when(
@@ -1729,7 +1931,8 @@ async fn when_restore_is_streamed_declaring_another_digest(
         *blake3::hash(&other).as_bytes()
     })
     .await;
-    world.last_restore_end = Some(stream_restore(&request, Some(digest), None).await);
+    let end = stream_restore(&request, Some(digest), None).await;
+    world.last_restore_end = Some(RestoreStreamEnd::sent(end, request));
 }
 
 #[when(
@@ -1776,11 +1979,11 @@ async fn when_restore_is_streamed_with_outcome_recovery(
         "a background restore stream is already running"
     );
     let request = restore_stream_request(world, &restore, &file, &node, &reference).await;
-    let servers = restore_outcome_routes(world);
+    let routes = restore_outcome_routes(world);
     world.background_restore = Some(BackgroundRestore {
         reference: request.reference.clone(),
         observation: BackgroundRestoreObservation::OutcomeRecovery,
-        task: AbortOnDropHandle::new(nervix_primitives::task::spawn(request.complete(servers))),
+        task: AbortOnDropHandle::new(nervix_primitives::task::spawn(request.complete(routes))),
     });
 }
 
@@ -1802,7 +2005,7 @@ async fn when_restore_is_streamed_until_its_outcome_is_known(
     )
     .await
     .assured("restore recovery learns the outcome of its execution reference");
-    world.last_restore_end = Some(end);
+    world.last_restore_end = Some(RestoreStreamEnd::learned_by_probe(end));
 }
 
 /// Holds the initial admission across a scenario-controlled leadership transfer.
@@ -1863,37 +2066,32 @@ fn restore_outcome(end: &TestRestoreEnd) -> &WireCommandOutcome {
     outcome
 }
 
-fn assert_restore_outcome(end: &TestRestoreEnd, disposition: &str, origin: &str) {
-    let outcome = restore_outcome(end);
-    let matched = matches!(
-        (disposition, &outcome.disposition),
-        ("completed", CommandDisposition::Completed { .. })
-            | ("failed", CommandDisposition::Failed)
-            | ("redirected", CommandDisposition::NotLeader(_))
-            | (
-                "reference conflict",
-                CommandDisposition::ExecutionReferenceConflict(_)
-            )
-            | (
-                "still applying",
-                CommandDisposition::OutcomeUnknown(UnknownOutcomeCause::StillApplying),
-            )
-            | (
-                "leadership lost",
-                CommandDisposition::OutcomeUnknown(UnknownOutcomeCause::LeadershipLost),
-            )
-    );
+/// The origin of the command outcome a restore stream was answered with, when it was answered
+/// with one.
+fn restore_outcome_origin(end: &TestRestoreEnd) -> Option<OutcomeOrigin> {
+    let TestRestoreEnd::Replied(reply) = end else {
+        return None;
+    };
+    let RestoreDisposition::Outcome(outcome) = &reply.disposition else {
+        return None;
+    };
+    Some(outcome.origin)
+}
+
+fn assert_restore_outcome(stream: &RestoreStreamEnd, named: NamedDisposition, origin: &str) {
+    let outcome = restore_outcome(stream.end());
     assert!(
-        matched,
-        "the restore stream's outcome is '{disposition}': {:?} {}",
-        outcome.disposition, outcome.message
+        named.matches(&outcome.disposition),
+        "the restore stream's outcome is '{named}': {:?} {}",
+        outcome.disposition,
+        outcome.message
     );
     let expected = match origin {
         "executed" => OutcomeOrigin::Executed,
         "recovered" => OutcomeOrigin::Recovered,
         other => panic!("an outcome has no origin '{other}'"),
     };
-    assert_eq!(outcome.origin, expected, "{}", outcome.message);
+    assert_eq!(stream.origin(), Some(expected), "{}", outcome.message);
 }
 
 /// Requires the known outcome of a restore to have completed it. Its origin is the answering
@@ -1910,12 +2108,19 @@ fn assert_restore_completed(end: &TestRestoreEnd) {
 }
 
 #[then(expr = "the restore stream's outcome is {string} as {string}")]
-fn then_restore_stream_outcome(world: &mut ScenarioWorld, disposition: String, origin: String) {
-    let end = world
+async fn then_restore_stream_outcome(
+    world: &mut ScenarioWorld,
+    disposition: String,
+    origin: String,
+) {
+    let named = NamedDisposition::named(&disposition);
+    let stream = world
         .last_restore_end
-        .as_ref()
+        .take()
         .expect("a preceding step streamed a restore");
-    assert_restore_outcome(end, &disposition, &origin);
+    let stream = stream.observe(named, &restore_outcome_routes(world)).await;
+    assert_restore_outcome(&stream, named, &origin);
+    world.last_restore_end = Some(stream);
 }
 
 #[then(expr = "the background restore stream's outcome is {string} as {string}")]
@@ -1924,39 +2129,38 @@ async fn then_background_restore_stream_outcome(
     disposition: String,
     origin: String,
 ) {
-    let task = world
+    let named = NamedDisposition::named(&disposition);
+    let background = world
         .background_restore
         .take()
         .expect("a preceding step streamed a restore in the background");
-    let end = task
-        .task
-        .await
-        .expect("the background restore stream does not panic");
-    assert_restore_outcome(&end, &disposition, &origin);
-    world.last_restore_end = Some(end);
+    let stream = background.ended().await;
+    let stream = stream.observe(named, &restore_outcome_routes(world)).await;
+    assert_restore_outcome(&stream, named, &origin);
+    world.last_restore_end = Some(stream);
 }
 
 #[then("the background restore stream completes with a known outcome")]
 async fn then_background_restore_stream_completes(world: &mut ScenarioWorld) {
-    let task = world
+    let background = world
         .background_restore
         .take()
         .assured("a preceding step streamed a restore in the background");
-    let end = task
-        .task
-        .await
-        .assured("the background restore completion probe does not panic");
-    assert_restore_completed(&end);
-    world.last_restore_end = Some(end);
+    let stream = background.ended().await;
+    let stream = stream
+        .observe(NamedDisposition::Completed, &restore_outcome_routes(world))
+        .await;
+    assert_restore_completed(stream.end());
+    world.last_restore_end = Some(stream);
 }
 
 #[then(expr = "the restore stream's outcome message contains {string}")]
 fn then_restore_stream_outcome_message_contains(world: &mut ScenarioWorld, fragment: String) {
-    let end = world
+    let stream = world
         .last_restore_end
         .as_ref()
         .assured("a preceding step streamed a restore");
-    let outcome = restore_outcome(end);
+    let outcome = restore_outcome(stream.end());
     assert!(
         outcome.message.contains(&fragment),
         "the restore outcome names '{fragment}': {}",
@@ -1966,11 +2170,11 @@ fn then_restore_stream_outcome_message_contains(world: &mut ScenarioWorld, fragm
 
 #[then("the restore stream's report shows every step applied")]
 fn then_restore_stream_report_shows_every_step_applied(world: &mut ScenarioWorld) {
-    let end = world
+    let stream = world
         .last_restore_end
         .as_ref()
         .expect("a preceding step streamed a restore");
-    let outcome = restore_outcome(end);
+    let outcome = restore_outcome(stream.end());
     let Some(report) = outcome.restore.as_deref() else {
         panic!("the outcome carries a restore report: {}", outcome.message);
     };
@@ -1990,7 +2194,8 @@ fn then_restore_stream_is_refused(world: &mut ScenarioWorld, failure: String) {
     let end = world
         .last_restore_end
         .as_ref()
-        .expect("a preceding step streamed a restore");
+        .expect("a preceding step streamed a restore")
+        .end();
     let TestRestoreEnd::Replied(reply) = end else {
         panic!("the restore stream was answered: {end:?}");
     };
@@ -2017,7 +2222,8 @@ fn then_restore_stream_was_abandoned(world: &mut ScenarioWorld) {
     let end = world
         .last_restore_end
         .as_ref()
-        .expect("a preceding step streamed a restore");
+        .expect("a preceding step streamed a restore")
+        .end();
     assert!(
         matches!(end, TestRestoreEnd::Abandoned),
         "the node did not answer the abandoned stream: {end:?}"
@@ -2694,11 +2900,11 @@ async fn given_archive_with_a_resource_byte_changed(
 }
 
 fn streamed_restore_report(world: &ScenarioWorld) -> &nervix_models::RestoreReport {
-    let end = world
+    let stream = world
         .last_restore_end
         .as_ref()
         .assured("a preceding step streamed a restore");
-    restore_outcome(end)
+    restore_outcome(stream.end())
         .restore
         .as_deref()
         .assured("the completed outcome carries its full report")
