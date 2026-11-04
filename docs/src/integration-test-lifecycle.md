@@ -2199,6 +2199,11 @@ Browser assertions that wait for an acknowledged subscription tab to disappear p
 seconds. This bounds the server reply and browser update together; on expiry, the step reports the
 tab text that remains visible.
 
+Transaction inspector fixtures wait for COMMIT's own rendered outcome before starting the
+transaction indicator's 10-second disappearance check. The command echo only confirms
+submission. When earlier statement replies contain the same outcome text, the fixture counts
+occurrences so that only the COMMIT reply can satisfy the wait.
+
 A continuous browser assertion begins after its readiness predicate holds. The console reconnect
 scenario first waits for the restored clock's `PACED` state, then observes the complete stability
 period and advancing ticks. Leader confirmation and the clock's attach reply are separate events;
