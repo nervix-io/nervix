@@ -2,6 +2,20 @@
 
 *Plexus, the Nervix graph definition language.*
 
+The HTTPS console fixture uses the console's reserved port for its TLS listener and lets the
+system assign the accompanying plaintext listener's port. It advertises the reserved HTTPS
+address explicitly and presents the node's fixture certificate. The redirect scenario launches a
+fresh browser with `--ignore-certificate-errors` for its per-cluster test CA; the CLI and
+native-client TLS scenarios verify the server certificate against their explicitly supplied
+authority. These fixtures preserve the ordinary startup, observation and teardown budgets and
+the scenario suite's parallelism.
+
+HTTPS native session fixtures copy an explicit fixture certificate and key into each node's storage
+root during initial provisioning. Restart reuses those files. The rotation scenario replaces one
+node's files, observes the initially loaded leaf on a fresh connection before restart, then the
+replacement leaf after restart. CLI and Rust-client operations verify the supplied CA and endpoint
+name, and the console recorder checks an opened WSS connection to the advertised leader.
+
 ## Paced Interconnect Fixture
 
 The rate-limited follower catch-up scenario starts a TCP byte pacer before restarting a stopped

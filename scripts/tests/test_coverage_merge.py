@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -456,6 +457,68 @@ class CommandTests(unittest.TestCase):
             )
         return status, errors.getvalue()
 
+    def test_python_extras_merge_with_the_required_rust_reports(self) -> None:
+        tests = self.workspace.export("tests", TESTS_ROOT, {
+            f"{TESTS_ROOT}/src/lib.rs": {1: 2},
+            f"{TESTS_ROOT}/crates/alpha/src/lib.rs": {1: 3},
+        })
+        extras = self.workspace.producer("runner-extras", EXTRAS_ROOT)
+        self.workspace.write("coverage-inputs/runner-extras/tooling/python.lcov", lcov({"scripts/tool.py": {1: 4}}))
+        status, errors = self.main(str(tests), "--python-input", str(extras))
+        self.assertEqual((status, errors), (0, ""))
+        self.assertEqual(sources(self.output.read_text()), ["crates/alpha/src/lib.rs", "scripts/tool.py", "src/lib.rs"])
+        self.assertEqual(counters(self.output.read_text(), "scripts/tool.py"), {1: 4})
+
+    def test_python_extras_do_not_replace_a_missing_workspace_member(self) -> None:
+        tests = self.workspace.export("tests", TESTS_ROOT, {f"{TESTS_ROOT}/src/lib.rs": {1: 1}})
+        extras = self.workspace.producer("runner-extras", EXTRAS_ROOT)
+        (extras / "python.lcov").write_text(lcov({"scripts/tool.py": {1: 4}}))
+        status, errors = self.main(str(tests), "--python-input", str(extras))
+        self.assertEqual(status, 1)
+        self.assertIn("workspace members alpha", errors)
+        self.assertFalse(self.output.exists())
+
+    def test_an_individual_python_input_keeps_report_validation(self) -> None:
+        tests = self.workspace.export("tests", TESTS_ROOT, {
+            f"{TESTS_ROOT}/src/lib.rs": {1: 1}, f"{TESTS_ROOT}/crates/alpha/src/lib.rs": {1: 1},
+        })
+        extras = self.workspace.producer("runner-extras", EXTRAS_ROOT)
+        report = extras / "python.lcov"
+        report.write_text(lcov({"scripts/tool.py": {1: 4}}))
+        self.assertEqual(self.main(str(tests), "--python-input", str(report)), (0, ""))
+        other = extras / "tool.lcov"
+        other.write_text(report.read_text())
+        status, errors = self.main(str(tests), "--python-input", str(other))
+        self.assertEqual(status, 1)
+        self.assertIn("not a Python tooling report", errors)
+        report.write_text("SF:scripts/tool.py\nDA:1,many\nend_of_record\n")
+        status, errors = self.main(str(tests), "--python-input", str(report))
+        self.assertEqual(status, 1)
+        self.assertIn("malformed LCOV line", errors)
+
+    def test_python_extras_alone_do_not_read_an_existing_workspace_report(self) -> None:
+        self.output.write_text(lcov({"src/lib.rs": {1: 1}, "crates/alpha/src/lib.rs": {1: 1}}))
+        extras = self.workspace.producer("runner-extras", EXTRAS_ROOT)
+        (extras / "python.lcov").write_text(lcov({"scripts/tool.py": {1: 4}}))
+        status, errors = self.main("--python-input", str(extras))
+        self.assertEqual(status, 1)
+        self.assertIn("workspace members alpha, server", errors)
+
+    def test_python_extras_require_reports_and_reject_native_collections(self) -> None:
+        tests = self.workspace.export("tests", TESTS_ROOT, {
+            f"{TESTS_ROOT}/src/lib.rs": {1: 1}, f"{TESTS_ROOT}/crates/alpha/src/lib.rs": {1: 1},
+        })
+        extras = self.workspace.producer("runner-extras", EXTRAS_ROOT)
+        status, errors = self.main(str(tests), "--python-input", str(extras))
+        self.assertEqual(status, 1)
+        self.assertIn("holds no Python tooling report", errors)
+        (extras / "python.lcov").write_text(lcov({"scripts/tool.py": {1: 4}}))
+        self.workspace.collection(extras, "bench-smoke", "ordinary", {f"{EXTRAS_ROOT}/crates/alpha/src/lib.rs": {1: 1}})
+        status, errors = self.main(str(tests), "--python-input", str(extras))
+        self.assertEqual(status, 1)
+        self.assertIn("Python-only input holds Rust coverage", errors)
+        self.assertFalse(self.output.exists())
+
     def test_a_local_producer_report_merges_in_place_into_the_shape_ci_publishes(self) -> None:
         root = self.workspace.root
         self.output.write_text(lcov({
@@ -569,7 +632,7 @@ class WorkflowTests(unittest.TestCase):
             if "just coverage" in step:
                 selected.update(re.findall(r"contains\(github.event.pull_request.labels.\*.name, '(extra-[^']+)'\)", step))
         merge = step_section(job_section(self.workflow, "coverage"), "Merge coverage")
-        output = extras.split("    outputs:\n", 1)[1].split("    # It runs", 1)[0]
+        output = extras.split("      coverage-required: >-\n", 1)[1].split("      # Python-only", 1)[0]
         required = set(re.findall(r"contains\(github.event.pull_request.labels.\*.name, '(extra-[^']+)'\)", output))
         self.assertEqual(required, selected)
         self.assertIn("EXTRA_COVERAGE_REQUIRED: ${{ needs.extra-tests.outputs.coverage-required }}", merge)
@@ -580,6 +643,41 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("EXTRA_TESTS_RESULT: ${{ needs.extra-tests.result }}", merge)
         self.assertIn('if [[ "${EXTRA_TESTS_RESULT}" == "success" ]]; then', merge)
         self.assertIn("extras+=(coverage-inputs/coverage-native-extras)", merge)
+
+    def test_native_selection_and_merge_arguments_distinguish_python_only_extras(self) -> None:
+        extras = job_section(self.workflow, "extra-tests")
+        output = extras.split("      native-coverage-required: >-\n", 1)[1].split("    # It runs", 1)[0]
+        native_labels = set(re.findall(r"contains\(github.event.pull_request.labels.\*.name, '(extra-[^']+)'\)", output))
+        selected = set()
+        for step in extras.split("\n      - name: "):
+            if "just coverage-native-extras " in step:
+                selected.update(re.findall(r"contains\(github.event.pull_request.labels.\*.name, '(extra-[^']+)'\)", step))
+        self.assertEqual(native_labels, selected)
+        merge = step_section(job_section(self.workflow, "coverage"), "Merge coverage")
+        self.assertIn("EXTRA_NATIVE_COVERAGE_REQUIRED: ${{ needs.extra-tests.outputs.native-coverage-required }}", merge)
+        run = re.search(r"        run: \|\n((?:          .*\n|\n)*)", merge)[1]
+        run = "\n".join(line[10:] for line in run.splitlines())
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            recorder = path / "just"
+            recorder.write_text('#!/usr/bin/env python3\nimport json, os, sys\nopen(os.environ["RECORDED"], "w").write(json.dumps(sys.argv[1:]))\n')
+            recorder.chmod(0o755)
+            for labels, expected in (
+                (("extra-runners",), ["--python-input", "coverage-inputs/coverage-native-extras"]),
+                (("extra-runners", "extra-compiler"), ["coverage-inputs/coverage-native-extras"]),
+                (("extra-primitives",), ["coverage-inputs/coverage-native-extras"]),
+                (("extra-miri",), []),
+            ):
+                with self.subTest(labels=labels):
+                    env = {**os.environ, "PATH": f"{path}:{os.environ['PATH']}", "RECORDED": str(path / "args.json"),
+                           "SCENARIO_SHARDS": "3", "EXTRA_TESTS_RESULT": "success",
+                           "EXTRA_COVERAGE_REQUIRED": str(bool(set(labels) & (native_labels | {"extra-runners"}))).lower(),
+                           "EXTRA_NATIVE_COVERAGE_REQUIRED": str(bool(set(labels) & native_labels)).lower()}
+                    subprocess.run(["bash", "-eu", "-c", run], env=env, check=True, capture_output=True)
+                    arguments = json.loads((path / "args.json").read_text())
+                    self.assertEqual(arguments, ["coverage-merge", "coverage-inputs/tests",
+                        "coverage-inputs/coverage-scenarios-1", "coverage-inputs/coverage-scenarios-2",
+                        "coverage-inputs/coverage-scenarios-3", *expected])
 
     def test_the_coverage_job_merges_the_ordinary_artifacts_through_the_recipe(self) -> None:
         job = job_section(self.workflow, "coverage")
