@@ -2363,8 +2363,11 @@ error beneath it for a storage or write failure.
 
 A refusal of the replicated state machine is data every voter must agree on, so it is a typed value
 in the Raft response and never a report. `ConsensusConflict` distinguishes an expired execution
-reference and a conflicting one, with the kind of the conflict, from a refusal described by its
-reason. `TransactionMutationError` is the refusal of a transaction mutation, such as an unknown or
+reference and a conflicting one, with the kind of the conflict, and preserves future-time,
+missing-timestamp and capacity admission refusals as `CommandExecutionAdmissionError` values.
+Admission metrics classify those typed values; rendered messages never select their reason.
+Other refusals retain their owning reason. `TransactionMutationError` is the refusal of a
+transaction mutation, such as an unknown or
 finished transaction, an owner or position that does not match, a stale preview, or a lost domain
 mutation fence. The state machine evaluates a mutation with reports and clones the report's current
 context into the response where the response is built; the report's frames stay on the node that

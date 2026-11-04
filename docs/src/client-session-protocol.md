@@ -2214,6 +2214,12 @@ The protocol makes a client's view of its own work explicit rather than inferred
   owner, domain, state, pending count, progress, age, and idle time, from any node.
   `DESCRIBE TRANSACTION` reads one transaction's full impact report; see [Transaction Quiescence And
   Impact Inspection](./transaction-quiescence.md#observing-a-transaction).
+- **Command history.** Every node's metrics endpoint exposes its applied execution counts by
+  applying, finished and expired state and its durable retry-fence timestamp. Admission refusal
+  counters distinguish expired, future-dated and timestamp-less references and exhausted history
+  capacity on the process that handles the refusal; replicated application on followers does not
+  multiply that count. See [Command Execution History](./metrics-and-observability.md#command-execution-history)
+  for labels, node attribution and restart behavior.
 - **Subscriptions.** A client learns of its own losses from `SubscriptionDeliveryLost`,
   `SubscriptionRowsSkipped`, and `SubscriptionEnded`, and the Rust client reports a lost session as
   an interruption of each clock and of each subscription the server had not ended, and each refused

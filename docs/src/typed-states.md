@@ -1067,7 +1067,10 @@ string is only a presentation of the state and never an input to execution.
 Replicated command admission distinguishes a reference that has expired from one bound to a
 different owner, domain, transaction position, or content in its typed conflict result. The
 session carries that distinction into the public command disposition; rendering its message does
-not choose the disposition.
+not choose the disposition. Future-time, missing-timestamp and capacity admission refusals also
+remain typed through the consensus response, so bounded metric reasons come from the actual
+refusal rather than from its rendered text. History observations keep an unestablished retry fence
+as `None`; exposition omits that timestamp instead of inventing an epoch fence.
 
 Error-route branch validation carries the node, source route, error relay, and both branch
 declarations as typed data. Direct emitter `VALUES` validation identifies a sensitive external
