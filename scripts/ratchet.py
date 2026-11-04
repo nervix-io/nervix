@@ -14,7 +14,8 @@ A stable Rust syntax parser visits authored casts, fields and cryptography paths
 inactive configurations, while skipping test-only items. It parses the original source so Unicode
 token locations remain accurate; comments and embedded fixture text never become syntax findings.
 The pinned cargo-crap analyzer measures complexity over the same discovered files. Cargo's
-resolved graph of the product supplies the cryptography the product links.
+resolved graph of the product supplies the cryptography the product links, and the gate refuses a
+graph that links more than one AWS-LC module.
 """
 
 from __future__ import annotations
@@ -73,6 +74,12 @@ NON_AWS_LC_CRYPTOGRAPHY_CRATES = frozenset({
     "boring", "boring-sys", "libsodium-sys", "mbedtls", "openssl", "openssl-sys", "ring",
     "wolfssl",
 })
+
+# The crates that build and link an AWS-LC module: `aws-lc-sys`, and `aws-lc-fips-sys`, which builds
+# the FIPS module. The product links exactly one of them, in one version, so that the FIPS migration
+# brings one module. A second is a defect the gate refuses, not debt the count records.
+AWS_LC_MODULE_CRATES = frozenset({"aws-lc-sys", "aws-lc-fips-sys"})
+
 
 def count_files_over_3000_lines(files: Sequence[RustFile]) -> list[Site]:
     return [
@@ -244,9 +251,42 @@ def cryptography_sites(tree: str, lockfile: str) -> list[Site]:
     return sites
 
 
+def check_aws_lc_module(tree: str) -> None:
+    """Refuse a product graph that does not link exactly one AWS-LC module.
+
+    Two versions of one module crate are two modules, and so are the two crates. A graph without
+    any module was not read correctly, since the product's cryptography comes from AWS-LC. The
+    refusal names each module with the packages that depend on it, so it says which dependency
+    brought the second one.
+    """
+
+    dependents: dict[Package, set[Package]] = {}
+    for edge in dependency_edges(tree):
+        if edge.dependency.name in AWS_LC_MODULE_CRATES:
+            dependents.setdefault(edge.dependency, set()).add(edge.dependent)
+    if len(dependents) == 1:
+        return
+    if not dependents:
+        raise SystemExit(
+            "error: the product dependency graph links no AWS-LC module, but the product's "
+            "cryptography comes from AWS-LC; docs/src/cryptography.md owns the rule"
+        )
+    modules = []
+    for module in sorted(dependents):
+        linked_by = ", ".join(dependent.render() for dependent in sorted(dependents[module]))
+        modules.append(f"  {module.render()}, linked by {linked_by}")
+    raise SystemExit(
+        f"error: the product links {len(dependents)} AWS-LC modules and must link one, so that the "
+        "FIPS migration brings one module; docs/src/cryptography.md owns the rule:\n"
+        + "\n".join(modules)
+    )
+
+
 def product_graph_sites(root: Path) -> list[Site]:
     lockfile = (root / LOCKFILE).read_text(encoding="utf-8")
-    return cryptography_sites(read_product_tree(root), lockfile)
+    tree = read_product_tree(root)
+    check_aws_lc_module(tree)
+    return cryptography_sites(tree, lockfile)
 
 
 @dataclass(frozen=True)
