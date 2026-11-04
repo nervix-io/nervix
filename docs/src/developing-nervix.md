@@ -41,6 +41,16 @@ Install:
   (`python3-dev` on Debian and Ubuntu, or any CPython that `uv python install` provides), which
   the tests of the Python package, `crates/client-python`, embed
 
+The JVM library requires a JDK 21 or later (`openjdk-21-jdk-headless` on Debian and Ubuntu).
+`just build-client-jvm` compiles the API with `javac --release 21` and packages it with the current
+target's JNI library into `target/client-conformance/java/nervix-client.jar`; all generated classes,
+probe classes and native files stay under `target`. `just test-client-jvm-api` exercises bulk columns,
+handle cleanup and cancellation with `-Xcheck:jni`. `just test-client-jvm` also embeds the JVM for
+the JNI failure and representation tests; the `jvm-tests` Cargo feature keeps that JDK prerequisite
+out of ordinary workspace tests. Client conformance CI runs both at Java 21.
+`NERVIX_CLIENT_JVM_TEST_ARTIFACTS` points embedded tests at the prepared Java artifacts; just exports
+the configured build root's path so instrumented Rust builds use the same jar and fixtures.
+
 The Python package builds with maturin, which `just build-client-python` runs as
 `uvx --from maturin==1.16.0 maturin`, into an abi3 wheel for CPython 3.12 and later under
 `target/client-conformance/wheels`. The recipe installs the wheel and `pyarrow`, the probe's test

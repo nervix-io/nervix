@@ -2532,6 +2532,13 @@ chain as its message. The shared C binding classifies a failure from the current
 backup download from the `BackupDownloadError` beneath it, and returns the whole chain as the
 error's message.
 
+The Java 21 JNI library consumes that same classified host failure. It throws one
+`Nervix.ClientException` subclass per `FailureKind`, preserving the complete message, optional
+execution reference and typed open refusal. It never reclassifies by message text or treats a
+command disposition as a thrown operation error. A JNI library error stays at JNI's foreign
+boundary; an already pending Java exception is preserved. Checked native exports contain Rust
+unwinds at that boundary. Restoration events expose the shared client's message and retry wait.
+
 Resource archive construction returns its first I/O failure beneath `BuildUploadArchive`.
 Failure and cancellation abandon the partial temporary archive; they perform no destructor
 finalization that could replace the cause, panic, or start asynchronous cleanup. If the enclosing

@@ -1508,7 +1508,7 @@ jobs:
             target/coverage-full/summary.md
           if-no-files-found: warn
 
-  # The cross-language client probes: C, C++, Java and Ruby over the shared Rust binding's C ABI,
+  # The cross-language client probes: C, C++ and Ruby through the C ABI, Java through JNI,
   # CPython over its Python package, and independent Go and TypeScript implementations on Node.js and
   # Bun. They need toolchains the suite job does not install and run a feature of their own, so they
   # are a job of their own beside the suite rather than minutes added to its critical path. They run
@@ -1578,12 +1578,12 @@ jobs:
           sudo dpkg -i /tmp/tinygo.deb
           tinygo version
 
-      # The Foreign Function and Memory API the Java probe uses is final from Java 22.
+      # The JNI library is compiled and exercised at its Java 21 floor.
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "25"
+          java-version: "21"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -1662,6 +1662,9 @@ jobs:
 
       - name: Publish kache report after the build
         run: python3 scripts/publish_kache_report.py --phase build "${RUNNER_TEMP}/kache-build-report"
+
+      - name: JVM binding boundary and embedded properties
+        run: just test-client-jvm
 
       - name: Client conformance
         run: just test-client-conformance-run

@@ -334,9 +334,10 @@ the supported signatures, errors and examples.
 
 ### Shared C Binding And Buffer Lifetimes
 
-C, C++, Java and Ruby hosts use the existing Rust binding through
+C, C++ and Ruby hosts use the existing Rust binding through
 [`nervix_client.h`](https://github.com/nervix-io/nervix/blob/main/crates/client-ffi/include/nervix_client.h),
-and CPython hosts through its Python package, `nervix_client`. Both forward through the host session
+CPython hosts through its Python package, `nervix_client`, and JVM hosts through the Java 21 JNI
+classes in `crates/client-jvm`. All forward through the host session
 runtime to the same Rust handles and recovery owner. Its blocking calls belong on application
 threads, never a thread driving a Tokio runtime. Native data access is bulk column access or
 canonical IPC, without per-value language callbacks or row-map payloads.
@@ -354,6 +355,13 @@ canonical IPC, without per-value language callbacks or row-map payloads.
 | `nx_delivery_ack` / `retry` / `reject` | Settle through the delivering attachment and await the server's settlement result |
 | Delivery/batch retain and release | Keep borrowed views alive; releasing storage never settles a delivery |
 | `nx_producer_close`, `nx_consumer_close`, handle free | End attachments and fence late restoration; an abandoned close continues cleanup |
+
+The JNI edge leases every input before a blocking host call, then releases the Java handle's
+monitor. Cleaner cleanup and explicit `close()` release each allocation once; retained leases keep
+an in-flight call valid. Java arrays copy whole column levels. A read-only direct buffer holds a
+native owner lease through its root; slices and duplicates retain that root, so closing a Java
+handle cannot invalidate a buffer. Field snapshots preserve order, all type levels, nullability and
+sensitivity. No Java thread implements endpoint recovery, and native runtime threads never call Java.
 
 A field list or builder is used from one thread at a time. Producers, consumers, deliveries and
 batches support the header's concurrent-use contract; delivery and batch references may be released

@@ -307,6 +307,7 @@ members = [
   "crates/client-core",
   "crates/client-ffi",
   "crates/client-host",
+  "crates/client-jvm",
   "crates/client-python",
   "crates/client-wire",
   "crates/columnar-json",
@@ -506,6 +507,7 @@ jaq-core = "3"
 jaq-fmts = "0.1"
 jaq-json = "2"
 jaq-std = "3"
+jni = "0.22.4"
 # The VM resolves time zone names only against the IANA database `jiff-tzdb` bundles, never against
 # the host, so every node running one build computes the same local times.
 jiff = { version = "0.2.35", default-features = false, features = ["std"] }
@@ -743,6 +745,7 @@ toml = "0.8"
 tower-service = "0.3"
 # Keep tonic/build on 0.13 for the workspace's Prost 0.13 API while selecting AWS-LC TLS.
 any_spawner = "0.3.0"
+nkeys = "0.4.5"
 tonic = { version = "0.13", features = ["tls-aws-lc", "tls-webpki-roots"] }
 tracing = "0.1"
 tracing-opentelemetry = "0.32"
@@ -768,6 +771,7 @@ wasmtime = { version = "49.0.0", default-features = false, features = [
 web-sys = "0.3"
 webpki-roots = "1"
 x509-parser = "0.18"
+zeroize = "1.9"
 zeromq = "0.4"
 
 [patch.crates-io]

@@ -75,7 +75,8 @@ over the interconnect, and that node encodes Row frames for its own sessions.
 | Data plane | Relay subscription fan-out | The subscribers of one relay, the definition they were attached under, and ending every subscriber before a batch of another definition can reach it. |
 | Edges | The Rust client, `nervix-client-core` | Connecting, TLS selection, the dispatcher that pairs replies with requests, execution identity across retries, redirect and reconnect, transaction binding and previews, desired subscriptions and their restoration, followed domain clocks, uploads, and backup downloads verified against their summary. |
 | Edges | The host session runtime, `nervix-client-host` | What every binding shares: the session runtime a host's thread blocks on, cancellation and deadlines, the classification of every client failure by its report's context, subscription events with bulk column access to their verified frames, domain clock events and the clock of each followed domain with its projections, field descriptions, and the Rust client's producers and consumers with their typed outcomes, settlements and Arrow batches built and read one column level at a time. |
-| Edges | The C ABI, `nervix-client-ffi` | The C ABI through which C, C++, JVM and Ruby hosts drive the host session runtime: the handles a host holds, retains and releases, borrowed frame access, and bulk column copies into memory the host passes. |
+| Edges | The C ABI, `nervix-client-ffi` | The C ABI through which C, C++ and Ruby hosts drive the host session runtime: the handles a host holds, retains and releases, borrowed frame access, and bulk column copies into memory the host passes. |
+| Edges | The JVM library, `nervix-client-jvm` | Java 21 classes on JNI: Cleaner-owned handles, independent blocking leases, typed exceptions, owner-retaining read-only direct buffers, bulk column arrays and Arrow IPC. |
 | Edges | The Python package, `nervix-client-python` | `nervix_client`, through which CPython hosts drive the host session runtime on pyo3: objects whose lifetimes are Python's, waits that release the GIL, typed exceptions, connection options, columns read as Python values, and Arrow batches exchanged through the Arrow PyCapsule interface. |
 | Edges | The web console and the CLI | Consumers of the same protocol with bounded buffers of their own. The console speaks it over its WebSockets: the session, and one per backup download or restore stream, whose archive it verifies or measures itself; the CLI uses the Rust client. |
 
@@ -1954,10 +1955,10 @@ it restores them.
 ## Bindings For Other Hosts
 
 A host language reaches the protocol in one of two ways. It uses the shared Rust binding, or it
-implements the protocol itself from the schema. The binding is the supported path: C, C++, JVM and
+implements the protocol itself from the schema. The binding is the supported path: C, C++ and
 Ruby hosts load its C ABI, `nervix-client-ffi`, whose contract is
 `crates/client-ffi/include/nervix_client.h`, and CPython hosts import its Python package,
-`nervix_client`. Both drive the host session runtime every binding of the Rust client shares,
+`nervix_client`, while JVM hosts use the Java 21 JNI library in `crates/client-jvm`. All drive the host session runtime every binding of the Rust client shares,
 `nervix-client-host`, and through it the Rust client's own state machine, so request correlation,
 leader redirects, reconnection, execution identity across retries, and desired-subscription
 restoration are decided once, in the library, and a host never retries, reroutes, or reinterprets
@@ -2068,6 +2069,21 @@ host differs from a C one:
   event, in native byte order. A batch exports itself and a submission is imported through the
   Arrow PyCapsule interface, so pyarrow and polars read and build batches without a copy, and a
   rows event's rows export as one Arrow batch whose sensitive fields are nullable.
+
+A JVM host uses `io.nervix.client.Nervix` from the jar built by `just build-client-jvm`.
+The jar bundles its target's JNI library and extracts it to a private temporary directory when
+loaded; `-Dio.nervix.client.library=/absolute/path/to/library` selects an explicit library instead.
+A jar without a bundled library uses `System.loadLibrary`. Build an artifact for the host's native
+target; no Java preview feature or native-access flag is required on Java 21. Every handle is
+`AutoCloseable` with Cleaner fallback. A short call borrows under its handle's private monitor;
+a blocking call first takes an independent native lease and releases that monitor. Closing the
+original handle cannot invalidate that call, and another thread may trigger its `Cancel`.
+The library calls no Java from its own threads. A frame or IPC `ByteBuffer` is direct and read-only;
+its root retains the native event, batch or delivery through every slice and duplicate. Bulk
+column arrays and builder inputs are copied. Strings preserve UTF-8 bytes and embedded NUL;
+unsigned 64-bit values preserve their bits in `long`. Prepared executions, typed failure causes,
+completion edits, clocks, endpoint admission, recovery and settlement all remain the shared host's.
+`end(Cancel)` waits for endpoint closure; `close()` releases ownership without acknowledging data.
 
 Independent implementations exist as qualification clients rather than supported SDKs. The Go client
 speaks native gRPC with `flatc --go` output and `google.golang.org/grpc`, and the TypeScript client
