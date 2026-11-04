@@ -375,7 +375,7 @@ impl ShutdownDrainAnswer {
                 warn!(
                     node_id = %local_node_id,
                     leader = %leader,
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     "the leader did not answer the graceful shutdown drain of the local node"
                 );
                 ShutdownPhaseOutcome::Abandoned
@@ -409,7 +409,7 @@ impl ShutdownDrainAnswer {
                 warn!(
                     node_id = %local_node_id,
                     leader = %leader,
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     "the leader did not answer the release of the shutdown drain cordon"
                 );
                 ShutdownPhaseOutcome::Abandoned

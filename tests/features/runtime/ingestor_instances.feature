@@ -348,7 +348,7 @@ Feature: Ingestor instances are independent placement units
           'addr' = '{{pulsar_addr}}'
         };
       CREATE PULSAR TOPIC INGESTOR spread_source
-        FROM broker TOPIC 'instance_input_{{test_id}}' SUBSCRIPTION 'instance_group_{{test_id}}' PROVISIONED INSTANCES 3
+        FROM broker TOPIC 'instance_input_{{test_id}}' SUBSCRIPTION 'instance_group_{{test_id}}' PROVISIONED TYPE SHARED INSTANCES 3
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
@@ -623,6 +623,36 @@ Feature: Ingestor instances are independent placement units
       | 3     | SYSLOG LISTENER       | FROM broker                       |
       | 1     | CLIENT PRODUCER       | FROM SCHEMA event                 |
       | 3     | CLIENT PRODUCER       | FROM SCHEMA event                 |
+
+  Scenario Outline: Pulsar single-consumer types require one fixed instance
+    Given a 1 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event ( tenant STRING, seq I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
+      CREATE PULSAR CLIENT broker CONFIG { 'addr' = 'pulsar://127.0.0.1:6650' };
+      """
+    When these Plexus statements fail with "reads through one consumer, so it refuses INSTANCES"
+      """
+      CREATE PULSAR TOPIC INGESTOR spread_source
+        FROM broker TOPIC 'events' SUBSCRIPTION 'readers' PROVISIONED
+        TYPE <kind> INSTANCES <instances> MODE NO ACK ON QUIESCE SUSPEND
+        DECODE USING event_codec
+        TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+
+    Examples:
+      | kind      | instances     |
+      | FAILOVER  | 2             |
+      | EXCLUSIVE | 2             |
+      | FAILOVER  | PER PARTITION |
+      | EXCLUSIVE | PER PARTITION |
 
   Scenario Outline: Partition-following sources require one constructing branch contract
     Given a <nodes> node nervix cluster is started
@@ -969,7 +999,7 @@ Feature: Ingestor instances are independent placement units
           'addr' = '{{pulsar_addr}}'
         };
       CREATE PULSAR TOPIC INGESTOR spread_source
-        FROM broker TOPIC 'instance_input_{{test_id}}' SUBSCRIPTION 'instance_group_{{test_id}}' PROVISIONED INSTANCES PER PARTITION
+        FROM broker TOPIC 'instance_input_{{test_id}}' SUBSCRIPTION 'instance_group_{{test_id}}' PROVISIONED TYPE SHARED INSTANCES PER PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant

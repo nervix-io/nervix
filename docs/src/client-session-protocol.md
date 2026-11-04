@@ -340,7 +340,8 @@ names.
 | Message that is not a valid frame, or a frame of another call | `INTERNAL` | Close `1007` |
 | Text message | — | Close `1003` |
 | A second request on a download | — | Close `1008` |
-| The node began to stop, during a download or a restore | The call is cut | Close `1001` |
+| The node began to stop, during an upload | `UNAVAILABLE` | — |
+| The node began to stop, during a download or a restore | `UNAVAILABLE` | Close `1001` |
 | Frame without a valid request identity | `SessionEnding` with `ProtocolViolated`, then the end of the stream | The same `SessionEnding`, then a normal close |
 | Session ended by the server | The end of the stream, with status `OK` | A normal close |
 
@@ -956,14 +957,16 @@ recover the outcome later, within the retry validity.
 
 The Rust client bounds each connection attempt by `connect_timeout` (10 seconds by default), each
 request by `request_timeout` (120 seconds), and each public call, including all of its retries and
-redirects, by `retry_timeout` (120 seconds). Without keepalives, a request that outlives
-`request_timeout` is the client's only sign that its session may be dead, so it ends every request
-still waiting on that session, and the next request opens a new one. While an election converges it
-retries with a delay that starts at 100 milliseconds and doubles up to one second. When a call's
-deadline passes before a command's outcome is known, and the command may have been admitted, the
-call fails as uncertain and names the execution reference. The Rust client, the CLI, and the console
-never send `CancelRequest`: a caller that stops waiting only drops its waiter, and the reply, when
-it comes, is discarded.
+redirects, by `retry_timeout` (120 seconds). A `BACKUP` takes `backup_wait_timeout` in place of
+both: its replies and every redirect and reconnect it makes share that one deadline, so a backup
+keeps reconnecting through an outage longer than `retry_timeout`. Without keepalives, a request
+that outlives `request_timeout` is the client's only sign that its session may be dead, so it ends
+every request still waiting on that session, and the next request opens a new one. While an
+election converges it retries with a delay that starts at 100 milliseconds and doubles up to one
+second. When a call's deadline passes before a command's outcome is known, and the command may have
+been admitted, the call fails as uncertain and names the execution reference. The Rust client, the
+CLI, and the console never send `CancelRequest`: a caller that stops waiting only drops its waiter,
+and the reply, when it comes, is discarded.
 
 `nervix-cli backup --timeout` sets only each running domain's quiesce timeout; its request and
 retry budgets stay at their defaults, and `--backup-wait-timeout` bounds the overall command wait.
@@ -1107,7 +1110,12 @@ is a per-session counter that starts at 1, so a handle, the name together with i
 unique within its session only; a generation taken by a request that then failed is simply skipped.
 The visibility wait is what makes the reply meaningful: by the time a client reads
 `SubscriptionOpened`, every live node already routes the relay's batches to the subscriber's node,
-and an advertisement left over from before an earlier withdrawal cannot satisfy it.
+and an advertisement left over from before an earlier withdrawal cannot satisfy it. When a live node
+does not confirm the interest, the refusal names every such node and carries, beneath it, the first
+one's own cause: the interconnect failure that ended the request to it, such as its deadline or the
+node leaving the membership, or the node's own refusal. Like every failed command's message, it is
+the whole chain of the report, as [Errors And Diagnostics](./errors-and-diagnostics.md#rendering)
+describes.
 
 The reply carries the schema and precedes every row. Delivery is held back until the reply is queued
 on the control lane, which the transport always serves first. When the reply cannot be queued,
@@ -1881,15 +1889,20 @@ client sees at each ending and what it recovers.
 listeners and ends the sessions they carry. Every request a session had not yet admitted is decided
 cancelled before admission and never begins an effect. Work that was admitted keeps running and no
 reply follows for it: a transaction commit continues, and the node waits for it until its shutdown
-deadline. Subscriptions and domain clock attachments stop with their session, and an upload stream
-still waiting for its client ends at once. A console session receives `SessionEnding` with reason
-`ServerShuttingDown` after the control frames it had already queued, then a normal close. A backup
-download or a restore stream on a console WebSocket of its own ends at once with close code `1001`,
-and a restore admitted with its whole archive goes on without its call. A gRPC
-connection is cut when admission closes, so a native client sees its stream fail, as after any
-transport loss, rather than the ending frame. Either way the client reconnects to another node and
+deadline. Subscriptions and domain clock attachments stop with their session. Every session, native
+or console, receives `SessionEnding` with reason `ServerShuttingDown` after the control frames it
+had already queued; a native session's call then ends with status `OK`, and a console session's
+WebSocket with a normal close. An upload, a restore or a download call on the native listener ends
+at once with `UNAVAILABLE` and is not admitted, unless an upload's installation already began or a
+restore already had its whole archive; either goes on without its call. A backup download or a
+restore stream on a console WebSocket of its own ends at once with close code `1001`, and a restore
+admitted with its whole archive goes on without its call. The node keeps a gRPC connection open
+after admission closes only so that these endings reach the client: it takes no new call on it, and
+it cuts a connection still open two seconds after admission closed, which a native client that
+reads nothing sees as a transport loss. Either way the client reconnects to another node and
 repeats each outstanding command under its execution reference, which joins the admitted work or
-returns its retained outcome.
+returns its retained outcome, and sends again each upload, restore or download whose call did not
+answer.
 
 **Forced ending.** A repeated signal, an expired shutdown deadline, `SIGKILL`, or a crash ends the
 connection without warning. A command whose reply was not received may or may not have been

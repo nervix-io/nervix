@@ -333,8 +333,9 @@ publication and relocation.
 
 An ingestor start uses the scheduled source class, client configuration, codec, ACK boundary,
 and bound ordered routes from its entrypoint plan. A Pulsar plan retains the owned subscription's
-required creation position alongside its ownership; composition passes that typed choice to the
-connector without inventing a position for a provisioned cursor. A reingestor binds its source predicates and
+required creation position alongside its ownership, and the subscription's required type;
+composition passes those typed choices to the connector without inventing a position for a
+provisioned cursor. A reingestor binds its source predicates and
 incoming-branch materialized dependencies before attaching relay inputs. Initial build, entity
 swap, reassignment, memory-pressure resume, and Kafka domain-offset placement all use those
 typed contracts. Route plans decide whether output is unbranched, preserves an incoming key, or
@@ -356,7 +357,8 @@ and ownership transfer with an unchanged input preserve external sessions. For P
 owned input reaches retirement too: the connector compares the two resolved service endpoints,
 qualified topics and subscription names before deciding whether to remove the preceding
 subscription. An unchanged subscription is retained even when the replacement declares it
-`PROVISIONED`; replacing its routes, codec, mode or instance count does not remove its backlog.
+`PROVISIONED`; replacing its routes, codec, mode, type or instance count does not remove its
+backlog.
 
 The emitter plan pairs its ordered relay inputs with one typed emitter and its applicable client,
 codec, expression, flush, batching, and error contracts. A native `TO CLIENT` emitter has no

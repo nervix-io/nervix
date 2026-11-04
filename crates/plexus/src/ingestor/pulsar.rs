@@ -2,9 +2,9 @@
 //!
 //! Layer: language.
 //!
-//! - **Owns.** The body of a `PULSAR TOPIC` ingestor: its client, topic, subscription and who
-//!   owns it, instances, delivery mode and quiesce mode, and the delivery modes a Pulsar
-//!   subscription offers.
+//! - **Owns.** The body of a `PULSAR TOPIC` ingestor: its client, topic, subscription with who
+//!   owns it and the type it reads as, instances, delivery mode and quiesce mode, and the delivery
+//!   modes a Pulsar subscription offers.
 //! - **Depends on.** The shared ingestor clauses and the Pulsar vocabulary.
 //! - **Must not know.** The Pulsar driver or how a subscription is acknowledged, verified or
 //!   removed at run time.
@@ -17,7 +17,7 @@
 use chumsky::prelude::*;
 use nervix_models::{
     PulsarIngestMode, PulsarSubscription, PulsarSubscriptionName, PulsarSubscriptionOwnership,
-    PulsarTopicIngestor, PulsarTopicIngestorOperation, PulsarTopicName,
+    PulsarSubscriptionType, PulsarTopicIngestor, PulsarTopicIngestorOperation, PulsarTopicName,
 };
 
 use super::delivery::{
@@ -31,7 +31,7 @@ use crate::{
 
 /// `FROM <client> TOPIC '<topic>' SUBSCRIPTION '<subscription>'
 /// (OWNED BY INGESTOR START AT EARLIEST|LATEST)|PROVISIONED
-/// [INSTANCES <n>] MODE … ON QUIESCE SUSPEND`.
+/// TYPE SHARED|KEY_SHARED|FAILOVER|EXCLUSIVE [INSTANCES <n>] MODE … ON QUIESCE SUSPEND`.
 pub(super) fn topic_body<'src>()
 -> impl Parser<'src, &'src [Token], PulsarTopicIngestor, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
@@ -85,7 +85,8 @@ fn mode<'src>()
     ))
 }
 
-/// A subscription's name and ownership, with a required creation position when ingestor-owned.
+/// A subscription's name, ownership and type, with a required creation position when
+/// ingestor-owned.
 fn subscription<'src>()
 -> impl Parser<'src, &'src [Token], PulsarSubscription, extra::Err<ParseError<'src>>> + Clone {
     let ownership = choice((
@@ -97,8 +98,24 @@ fn subscription<'src>()
     kw(Identifier::Subscription)
         .ignore_then(external_name::<PulsarSubscriptionName>())
         .then(ownership)
-        .map(|(name, ownership)| PulsarSubscription { name, ownership })
+        .then(subscription_type())
+        .map(|((name, ownership), kind)| PulsarSubscription {
+            name,
+            ownership,
+            kind,
+        })
         .boxed()
+}
+
+/// `TYPE SHARED|KEY_SHARED|FAILOVER|EXCLUSIVE`.
+fn subscription_type<'src>()
+-> impl Parser<'src, &'src [Token], PulsarSubscriptionType, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Type).ignore_then(choice((
+        kw(Identifier::Shared).to(PulsarSubscriptionType::Shared),
+        kw(Identifier::KeyShared).to(PulsarSubscriptionType::KeyShared),
+        kw(Identifier::Failover).to(PulsarSubscriptionType::Failover),
+        kw(Identifier::Exclusive).to(PulsarSubscriptionType::Exclusive),
+    )))
 }
 
 pub(super) fn alteration<'src>()
@@ -108,6 +125,9 @@ pub(super) fn alteration<'src>()
         kw(Identifier::Set)
             .ignore_then(start_position())
             .map(|position| PulsarTopicIngestorOperation::SetStartAt { position }),
+        kw(Identifier::Set)
+            .ignore_then(subscription_type())
+            .map(|kind| PulsarTopicIngestorOperation::SetType { kind }),
         super::transport_operation(topic_body()).map(PulsarTopicIngestorOperation::Transport),
     ));
     super::alteration::<PulsarTopicIngestor, _, _>(operation)
@@ -137,9 +157,9 @@ mod start_position_tests {
     fn ingestor(ownership: &str) -> CreateIngestor {
         let text = format!(
             "CREATE PULSAR TOPIC INGESTOR events FROM broker TOPIC 'events' SUBSCRIPTION \
-             'readers' {ownership} MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec TO \
-             output INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR \
-             LOG"
+             'readers' {ownership} TYPE SHARED MODE NO ACK ON QUIESCE SUSPEND DECODE USING \
+             event_codec TO output INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON \
+             GENERAL ERROR LOG"
         );
         let Statement::Create(create) =
             crate::statement::parse_statement(&text).verified("the current Pulsar creation parses")
@@ -270,9 +290,9 @@ mod start_position_tests {
         ] {
             let statement = format!(
                 "CREATE PULSAR TOPIC INGESTOR events FROM broker TOPIC 'events' SUBSCRIPTION \
-                 'readers' {ownership} MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec TO \
-                 output INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
-                 ERROR LOG"
+                 'readers' {ownership} TYPE SHARED MODE NO ACK ON QUIESCE SUSPEND DECODE USING \
+                 event_codec TO output INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR \
+                 LOG ON GENERAL ERROR LOG"
             );
             assert!(refused(&statement), "{statement}");
         }
@@ -282,6 +302,187 @@ mod start_position_tests {
         ] {
             assert!(refused(statement), "{statement}");
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        harness,
+        reason = "tests current Pulsar subscription types through the composed grammar"
+    )
+)]
+mod subscription_type_tests {
+    //! Layer: test harness.
+    //! - **Owns.** Current subscription type parsing, alteration, refusal and completion examples.
+    //! - **Depends on.** The composed statement parser and its conformance checks.
+    //! - **Must not know.** Driver options, broker state or runtime lifecycle.
+    use meticulous::ResultExt as _;
+    use nervix_models::{
+        CreateIngestor, IngestorEntity, IngestorInput, Model, PulsarIngestor,
+        PulsarSubscriptionOwnership, PulsarSubscriptionType, Statement,
+    };
+    use rstest::rstest;
+    use strum::IntoEnumIterator as _;
+
+    use crate::conformance_support::{assert_offers_exactly, refused};
+
+    const TYPES: [&str; 4] = ["SHARED", "KEY_SHARED", "FAILOVER", "EXCLUSIVE"];
+
+    fn statement(subscription_type: &str) -> String {
+        format!(
+            "CREATE PULSAR TOPIC INGESTOR events FROM broker TOPIC 'events' SUBSCRIPTION \
+             'readers' PROVISIONED {subscription_type} MODE NO ACK ON QUIESCE SUSPEND DECODE \
+             USING event_codec TO output INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR \
+             LOG ON GENERAL ERROR LOG"
+        )
+    }
+
+    fn ingestor(subscription_type: &str) -> CreateIngestor {
+        let Statement::Create(create) =
+            crate::statement::parse_statement(&statement(subscription_type))
+                .verified("the current Pulsar creation parses")
+        else {
+            panic!("the statement creates a Model");
+        };
+        let Model::Ingestor(ingestor) = *create.body else {
+            panic!("the statement creates an ingestor");
+        };
+        ingestor
+    }
+
+    fn subscription(ingestor: &CreateIngestor) -> &nervix_models::PulsarSubscription {
+        let IngestorInput::Transport(input) = &ingestor.input else {
+            panic!("Pulsar is a transport");
+        };
+        let IngestorEntity::Pulsar(PulsarIngestor::Topic(source)) = &input.source else {
+            panic!("the source is Pulsar");
+        };
+        &source.subscription
+    }
+
+    fn alteration(text: &str) -> nervix_models::AlterIngestor {
+        let statement = crate::statement::parse_statement(text).verified("current ALTER parses");
+        let canonical = statement
+            .to_canonical_plexus()
+            .verified("current ALTER renders");
+        assert_eq!(
+            crate::statement::parse_statement(&canonical).verified("canonical ALTER parses"),
+            statement
+        );
+        let Statement::AlterIngestor(alter) = statement else {
+            panic!("the statement is an ingestor alteration");
+        };
+        alter
+    }
+
+    #[rstest]
+    #[case("TYPE SHARED", PulsarSubscriptionType::Shared)]
+    #[case("TYPE KEY_SHARED", PulsarSubscriptionType::KeyShared)]
+    #[case("TYPE FAILOVER", PulsarSubscriptionType::Failover)]
+    #[case("TYPE EXCLUSIVE", PulsarSubscriptionType::Exclusive)]
+    #[case("type key_shared", PulsarSubscriptionType::KeyShared)]
+    fn every_type_reaches_the_subscription(
+        #[case] written: &str,
+        #[case] kind: PulsarSubscriptionType,
+    ) {
+        assert_eq!(subscription(&ingestor(written)).kind, kind);
+    }
+
+    #[test]
+    fn the_grammar_spells_every_type_the_vocabulary_has() {
+        let spelled: Vec<String> = PulsarSubscriptionType::iter()
+            .map(|kind| kind.to_string())
+            .collect();
+        assert_eq!(spelled, TYPES);
+    }
+
+    #[test]
+    fn a_missing_or_unknown_type_is_refused() {
+        for subscription_type in ["", "TYPE", "TYPE ROUND_ROBIN", "SHARED", "TYPE 'SHARED'"] {
+            let statement = statement(subscription_type);
+            assert!(refused(&statement), "{statement}");
+        }
+    }
+
+    #[test]
+    fn the_type_follows_the_owner_and_is_written_once() {
+        for clauses in [
+            "TYPE SHARED PROVISIONED",
+            "PROVISIONED TYPE SHARED TYPE KEY_SHARED",
+        ] {
+            let statement = format!(
+                "CREATE PULSAR TOPIC INGESTOR events FROM broker TOPIC 'events' SUBSCRIPTION \
+                 'readers' {clauses} MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec TO \
+                 output INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
+                 ERROR LOG"
+            );
+            assert!(refused(&statement), "{statement}");
+        }
+    }
+
+    #[test]
+    fn alters_only_the_declared_type() {
+        for kind in PulsarSubscriptionType::iter() {
+            let mut model = ingestor("TYPE KEY_SHARED");
+            let before = subscription(&model).clone();
+            let alter = alteration(&format!(
+                "ALTER PULSAR TOPIC INGESTOR events SET TYPE {kind}"
+            ));
+            model.apply_alter(&alter).verified("the type changes");
+
+            let altered = subscription(&model);
+            assert_eq!(altered.kind, kind);
+            assert_eq!(altered.name, before.name);
+            assert_eq!(altered.ownership, before.ownership);
+        }
+    }
+
+    #[test]
+    fn type_and_start_position_alterations_keep_their_order() {
+        let mut model = ingestor("TYPE SHARED");
+        let alter = alteration(
+            "ALTER PULSAR TOPIC INGESTOR events SET TYPE FAILOVER, SET DECODE USING other_codec, \
+             SET TYPE EXCLUSIVE",
+        );
+        model.apply_alter(&alter).verified("mixed operations apply");
+        assert_eq!(subscription(&model).kind, PulsarSubscriptionType::Exclusive);
+        assert_eq!(
+            subscription(&model).ownership,
+            PulsarSubscriptionOwnership::Provisioned
+        );
+        assert_eq!(
+            model.input.codec().map(|codec| codec.as_str()),
+            Some("other_codec")
+        );
+    }
+
+    #[test]
+    fn set_type_belongs_to_the_pulsar_topic_ingestor() {
+        for statement in [
+            "ALTER PULSAR TOPIC INGESTOR events SET TYPE UNKNOWN",
+            "ALTER PULSAR TOPIC INGESTOR events SET TYPE",
+            "ALTER KAFKA TOPIC INGESTOR events SET TYPE SHARED",
+            "ALTER RABBITMQ QUEUE INGESTOR events SET TYPE SHARED",
+        ] {
+            assert!(refused(statement), "{statement}");
+        }
+    }
+
+    #[test]
+    fn completion_offers_the_type_after_the_owner_and_nowhere_else() {
+        assert_offers_exactly(
+            "CREATE PULSAR TOPIC INGESTOR events FROM broker TOPIC 'events' SUBSCRIPTION \
+             'readers' PROVISIONED ",
+            &["TYPE"],
+        );
+        assert_offers_exactly(
+            "CREATE PULSAR TOPIC INGESTOR events FROM broker TOPIC 'events' SUBSCRIPTION \
+             'readers' OWNED BY INGESTOR START AT LATEST TYPE ",
+            &TYPES,
+        );
+        assert_offers_exactly("ALTER PULSAR TOPIC INGESTOR events SET TYPE ", &TYPES);
     }
 }
 
@@ -319,7 +520,8 @@ mod tests {
         source
     }
 
-    const OWNED: &str = "SUBSCRIPTION 'Readers (eu)' OWNED BY INGESTOR START AT EARLIEST";
+    const OWNED: &str =
+        "SUBSCRIPTION 'Readers (eu)' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED";
 
     #[rstest]
     #[case("Orders-EU_1")]
@@ -343,7 +545,7 @@ mod tests {
         #[case] owner: &str,
         #[case] ownership: PulsarSubscriptionOwnership,
     ) {
-        let subscription = format!("SUBSCRIPTION 'Readers (eu)' {owner}");
+        let subscription = format!("SUBSCRIPTION 'Readers (eu)' {owner} TYPE SHARED");
         let source = created_source(&statement("orders", &subscription, "NO ACK"));
 
         assert_eq!(source.subscription.name.as_str(), "Readers (eu)");
@@ -412,8 +614,8 @@ mod tests {
     fn the_composed_grammar_refuses_a_subscription_without_its_owner() {
         for subscription in [
             "",
-            "SUBSCRIPTION 'readers'",
-            "OWNED BY INGESTOR START AT EARLIEST",
+            "SUBSCRIPTION 'readers' TYPE SHARED",
+            "OWNED BY INGESTOR START AT EARLIEST TYPE SHARED",
         ] {
             let statement = statement("orders", subscription, "NO ACK");
             assert!(
@@ -442,9 +644,10 @@ mod tests {
             );
         }
 
-        let subscription_too_long = format!("SUBSCRIPTION '{}' PROVISIONED", "s".repeat(256));
+        let subscription_too_long =
+            format!("SUBSCRIPTION '{}' PROVISIONED TYPE SHARED", "s".repeat(256));
         for subscription in [
-            "SUBSCRIPTION '' PROVISIONED",
+            "SUBSCRIPTION '' PROVISIONED TYPE SHARED",
             subscription_too_long.as_str(),
         ] {
             let statement = statement("orders", subscription, "NO ACK");

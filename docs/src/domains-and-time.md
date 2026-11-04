@@ -219,7 +219,7 @@ accelerates or slows them, and a stopped clock cannot silently turn any of them 
 wait. Each source relay and concrete branch owns its collection deadline; each concrete output
 branch owns its route deadline. A deadline starts only when data enters an empty buffer and is
 cleared when that buffer is released by time, size, force flush, shutdown, or error handling. For
-`COMMIT EACH` that buffer is the Iceberg emitter's staged files: its deadline starts when a flush
+`COMMIT EACH` that buffer is the Iceberg emitter's staged rows: its deadline starts when a flush
 stages rows while none are staged, not at the domain time those rows' batch was accepted at, and a
 retry or drain commits them without reading the clock.
 

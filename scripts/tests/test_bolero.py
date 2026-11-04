@@ -370,6 +370,7 @@ class InventoryTests(unittest.TestCase):
             "iceberg-nested-datetime-staging",
             "iceberg-table-projection",
             "iceberg-staged-file-encoding",
+            "iceberg-staging-file-spans",
             "sentry-prepared-envelopes",
             "sentry-event-models",
             "http-poll-response-headers",

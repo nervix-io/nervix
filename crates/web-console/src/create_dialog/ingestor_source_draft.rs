@@ -26,14 +26,15 @@ use nervix_models::{
     NatsIngestMode, NatsIngestorEntity, NatsQueueGroupName, NatsSubjectIngestor, NatsSubjectName,
     NodeRef, PayloadSizeLimit, PrometheusIngestMode, PrometheusIngestorEntity,
     PrometheusQueryIngestor, PulsarIngestMode, PulsarIngestorEntity, PulsarSubscription,
-    PulsarSubscriptionName, PulsarSubscriptionOwnership, PulsarTopicIngestor, PulsarTopicName,
-    RabbitMqIngestMode, RabbitMqIngestorEntity, RabbitMqQueueIngestor, RabbitMqQueueName,
-    RedisChannelName, RedisChannelPattern, RedisIngestorEntity, RedisPubSubIngestMode,
-    RedisPubSubIngestor, RedisSubscriptionTarget, RetryPolicy, SqsIngestMode, SqsIngestorEntity,
-    SqsQueueIngestor, SqsQueueName, SqsReceiveMax, SyslogIngestMode, SyslogIngestorEntity,
-    SyslogListenerIngestor, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
-    WebsocketsIngestMode, WebsocketsIngestorEntity, WebsocketsUpgradeHeader,
-    WebsocketsUpgradeHeaders, ZeroMqIngestMode, ZeroMqIngestorEntity, ZeroMqPullIngestor,
+    PulsarSubscriptionName, PulsarSubscriptionOwnership, PulsarSubscriptionType,
+    PulsarTopicIngestor, PulsarTopicName, RabbitMqIngestMode, RabbitMqIngestorEntity,
+    RabbitMqQueueIngestor, RabbitMqQueueName, RedisChannelName, RedisChannelPattern,
+    RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor, RedisSubscriptionTarget,
+    RetryPolicy, SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor, SqsQueueName, SqsReceiveMax,
+    SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor, WebsocketsConnectionIngestor,
+    WebsocketsEndpointIngestor, WebsocketsIngestMode, WebsocketsIngestorEntity,
+    WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders, ZeroMqIngestMode, ZeroMqIngestorEntity,
+    ZeroMqPullIngestor,
 };
 use strum::IntoEnumIterator as _;
 use thiserror::Error;
@@ -122,6 +123,7 @@ pub(super) struct IngestorEntityDraft {
     pub(super) queue_group: String,
     pub(super) subscription: String,
     pub(super) subscription_ownership: Option<PulsarSubscriptionOwnership>,
+    pub(super) subscription_type: Option<PulsarSubscriptionType>,
     pub(super) query: String,
     pub(super) method: String,
     pub(super) request_headers: Vec<RequestHeaderDraft>,
@@ -244,6 +246,7 @@ impl IngestorEntityDraft {
             "SUBSCRIPTION" => self
                 .subscription_ownership
                 .map(|ownership| ownership.keywords()),
+            "TYPE" => self.subscription_type.map(PulsarSubscriptionType::keyword),
             "OFFSET BY" => self.offset.map(OffsetChoice::name),
             _ => None,
         };
@@ -267,6 +270,10 @@ impl IngestorEntityDraft {
                 self.subscription_ownership = PulsarSubscriptionOwnership::CHOICES
                     .into_iter()
                     .find(|value| value.keywords() == choice)
+            }
+            "TYPE" => {
+                self.subscription_type =
+                    PulsarSubscriptionType::iter().find(|value| value.keyword() == choice)
             }
             "OFFSET BY" => {
                 self.offset = OffsetChoice::CHOICES
@@ -558,8 +565,8 @@ impl IngestorEntityDraft {
             .map_err(|_| Report::new(IngestorEntityDraftError::Every))
     }
 
-    /// The subscription a Pulsar source reads through, and who the draft says owns it, which
-    /// every statement declares.
+    /// The subscription a Pulsar source reads through, who the draft says owns it, and the type it
+    /// reads it as, which every statement declares.
     fn pulsar_subscription(
         &self,
     ) -> error_stack::Result<PulsarSubscription, IngestorEntityDraftError> {
@@ -568,7 +575,14 @@ impl IngestorEntityDraft {
         let Some(ownership) = self.subscription_ownership else {
             return Err(Report::new(IngestorEntityDraftError::SubscriptionOwnership));
         };
-        Ok(PulsarSubscription { name, ownership })
+        let Some(kind) = self.subscription_type else {
+            return Err(Report::new(IngestorEntityDraftError::SubscriptionType));
+        };
+        Ok(PulsarSubscription {
+            name,
+            ownership,
+            kind,
+        })
     }
 
     fn offset_mode(&self) -> error_stack::Result<KafkaOffsetMode, IngestorEntityDraftError> {
@@ -827,6 +841,8 @@ pub(super) enum IngestorEntityDraftError {
     Subscription,
     #[error("Choose whether the ingestor owns the subscription or an operator provisioned it")]
     SubscriptionOwnership,
+    #[error("Choose the subscription's TYPE")]
+    SubscriptionType,
     #[error("Enter a Prometheus query")]
     Query,
     #[error("Enter an HTTP request method")]
@@ -892,6 +908,7 @@ mod tests {
         RequestedResourceVersion, Statement, WebsocketsIngestorEntity,
     };
     use nervix_plexus::statement::parse_statement;
+    use strum::IntoEnumIterator as _;
 
     use super::{IngestorEntityDraft, IngestorEntityDraftError, OffsetChoice, RequestHeaderDraft};
     use crate::create_dialog::{
@@ -1023,6 +1040,7 @@ mod tests {
                 draft.instances = entity.instances.to_string();
                 draft.subscription = entity.subscription.name.to_string();
                 draft.subscription_ownership = Some(entity.subscription.ownership);
+                draft.subscription_type = Some(entity.subscription.kind);
             }
             IngestorEntity::Mqtt(MqttIngestor::Topic(entity)) => {
                 draft.topic = entity.topic.to_string();
@@ -1173,6 +1191,7 @@ mod tests {
         draft.queue_group = "workers".into();
         draft.subscription = "workers".into();
         draft.subscription_ownership = Some(PulsarSubscriptionOwnership::Provisioned);
+        draft.subscription_type = Some(nervix_models::PulsarSubscriptionType::Shared);
         draft.query = "up".into();
         draft.method = "GET".into();
         draft.every = "1s".into();
@@ -1361,6 +1380,29 @@ mod tests {
             };
             assert_eq!(source.subscription.ownership, ownership);
             assert_eq!(source.subscription.name.as_str(), "workers");
+        }
+    }
+
+    #[test]
+    fn a_pulsar_source_builds_only_once_its_subscription_type_is_chosen() {
+        let mut draft = complete(IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic));
+        draft.subscription_type = None;
+        let error = draft
+            .build()
+            .expect_err("a Pulsar source declares its subscription's type");
+        assert_eq!(
+            error.current_context(),
+            &super::IngestorEntityDraftError::SubscriptionType
+        );
+        for kind in nervix_models::PulsarSubscriptionType::iter() {
+            draft.choose_option("TYPE", kind.keyword());
+            assert_eq!(draft.chosen_option("TYPE"), Some(kind.keyword()));
+            let IngestorEntity::Pulsar(PulsarIngestor::Topic(source)) =
+                draft.build().assured("a complete Pulsar draft builds")
+            else {
+                panic!("a Pulsar draft builds a Pulsar topic source");
+            };
+            assert_eq!(source.subscription.kind, kind);
         }
     }
 

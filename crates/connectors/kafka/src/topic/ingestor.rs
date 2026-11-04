@@ -35,6 +35,7 @@ mod metadata_tests;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt,
     num::NonZeroUsize,
     time::Duration,
 };
@@ -51,8 +52,8 @@ use nervix_connector::{
 };
 use nervix_execution::Executor;
 use nervix_models::{
-    ClientConfigEntry, ConnectorKind, IngestStartPosition, KafkaPartitionSchedule, KafkaTopicName,
-    Timestamp, TimestampError,
+    ClientConfigEntry, ConnectorKind, IngestStartPosition, IngestorMetadataType,
+    KafkaPartitionSchedule, KafkaTopicName, Timestamp,
 };
 use nervix_primitives::{
     sync::{Arc, watch},
@@ -375,16 +376,6 @@ pub enum KafkaTopicIngestorError {
     ReadAssignment { topic: String },
     #[error("Kafka topic '{topic}' partition {partition} returned the maximum offset")]
     OffsetOverflow { topic: String, partition: i32 },
-    #[error(
-        "{connector} record in topic '{topic}' partition {partition} offset {offset} has a \
-         timestamp outside the signed Unix-nanosecond range",
-        connector = ConnectorKind::Kafka
-    )]
-    RecordTimestamp {
-        topic: String,
-        partition: i32,
-        offset: i64,
-    },
     #[error("Kafka batch timeout exceeds the monotonic clock range")]
     BatchDeadline,
 }
@@ -478,39 +469,71 @@ impl KafkaConsumerAssignment {
     }
 }
 
-/// The driver's unavailable time or one validated instant with its original timestamp kind.
+/// The driver's unavailable time, or the milliseconds a record carries with their original kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KafkaRecordTimestamp {
     Unavailable,
-    CreateTime(Timestamp),
-    LogAppendTime(Timestamp),
+    CreateTime(KafkaTimestampMillis),
+    LogAppendTime(KafkaTimestampMillis),
 }
 
-impl TryFrom<rdkafka::Timestamp> for KafkaRecordTimestamp {
-    type Error = Report<TimestampError>;
-
-    fn try_from(source: rdkafka::Timestamp) -> Result<Self, Self::Error> {
+impl From<rdkafka::Timestamp> for KafkaRecordTimestamp {
+    fn from(source: rdkafka::Timestamp) -> Self {
         // The driver's own conversion resolves Kafka's external unavailable encoding.
-        let Some(millis) = source.to_millis() else {
-            return Ok(Self::Unavailable);
+        let Some(unix_millis) = source.to_millis() else {
+            return Self::Unavailable;
         };
-        let nanos = millis
-            .checked_mul(i64::from(super::NANOS_PER_MILLI))
-            .ok_or_else(|| Report::new(TimestampError::ArithmeticOverflow))?;
-        let instant = Timestamp::from_unix_nanos(nanos);
-        let timestamp = match source {
+        let millis = KafkaTimestampMillis(unix_millis);
+        match source {
             rdkafka::Timestamp::NotAvailable => Self::Unavailable,
-            rdkafka::Timestamp::CreateTime(_) => Self::CreateTime(instant),
-            rdkafka::Timestamp::LogAppendTime(_) => Self::LogAppendTime(instant),
-        };
-        Ok(timestamp)
+            rdkafka::Timestamp::CreateTime(_) => Self::CreateTime(millis),
+            rdkafka::Timestamp::LogAppendTime(_) => Self::LogAppendTime(millis),
+        }
+    }
+}
+
+/// A Kafka record timestamp as Kafka writes it: a signed count of milliseconds since the Unix epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KafkaTimestampMillis(i64);
+
+impl KafkaTimestampMillis {
+    /// The instant these milliseconds name, or `None` before 1677-09-21 and after 2262-04-11,
+    /// outside the instants a signed count of nanoseconds holds.
+    fn instant(self) -> Option<Timestamp> {
+        let unix_nanos = self.0.checked_mul(i64::from(super::NANOS_PER_MILLI))?;
+        Some(Timestamp::from_unix_nanos(unix_nanos))
+    }
+
+    /// Hands these milliseconds over as the `DATETIME` they name, or as unrepresentable where no
+    /// `DATETIME` holds that instant, so that the record is refused only where a program reads it.
+    fn visit(self, values: &mut dyn IngestMetadataValues) {
+        match self.instant() {
+            Some(instant) => values.datetime(instant),
+            None => values.unrepresentable(IngestorMetadataType::Datetime, &self),
+        }
+    }
+}
+
+impl fmt::Display for KafkaTimestampMillis {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let distance = self.0.unsigned_abs();
+        if self.0 < 0 {
+            write!(
+                formatter,
+                "the Kafka timestamp {distance} milliseconds before the Unix epoch"
+            )
+        } else {
+            write!(
+                formatter,
+                "the Kafka timestamp {distance} milliseconds after the Unix epoch"
+            )
+        }
     }
 }
 
 pub struct KafkaTopicIngestorMessage {
     message: rdkafka::message::OwnedMessage,
     position: KafkaOffsetPosition,
-    timestamp: KafkaRecordTimestamp,
 }
 
 impl KafkaTopicIngestorMessage {
@@ -528,19 +551,7 @@ impl KafkaTopicIngestorMessage {
             partition: message.partition(),
             offset: next_offset,
         };
-        let timestamp =
-            KafkaRecordTimestamp::try_from(message.timestamp()).change_context_lazy(|| {
-                KafkaTopicIngestorError::RecordTimestamp {
-                    topic: message.topic().to_string(),
-                    partition: message.partition(),
-                    offset: message.offset(),
-                }
-            })?;
-        Ok(Self {
-            message,
-            position,
-            timestamp,
-        })
+        Ok(Self { message, position })
     }
 }
 
@@ -588,7 +599,8 @@ impl IngestorMessage for KafkaTopicIngestorMessage {
 }
 
 /// The values of the metadata `KAFKA TOPIC` declares, in its order: the record's topic, partition
-/// and offset, binary key, timestamp and kind, and whether its value is null.
+/// and offset, binary key, timestamp and kind, and whether its value is null. The timestamp is
+/// converted here, when the host visits the record's metadata, never when the record is read.
 impl IngestMessageMetadata for KafkaTopicIngestorMessage {
     fn visit_metadata(&self, values: &mut dyn IngestMetadataValues) {
         values.string(self.message.topic());
@@ -598,17 +610,17 @@ impl IngestMessageMetadata for KafkaTopicIngestorMessage {
             Some(key) => values.bytes(key),
             None => values.absent(),
         }
-        match self.timestamp {
+        match KafkaRecordTimestamp::from(self.message.timestamp()) {
             KafkaRecordTimestamp::Unavailable => {
                 values.absent();
                 values.absent();
             }
-            KafkaRecordTimestamp::CreateTime(instant) => {
-                values.datetime(instant);
+            KafkaRecordTimestamp::CreateTime(millis) => {
+                millis.visit(values);
                 values.string("create_time");
             }
-            KafkaRecordTimestamp::LogAppendTime(instant) => {
-                values.datetime(instant);
+            KafkaRecordTimestamp::LogAppendTime(millis) => {
+                millis.visit(values);
                 values.string("log_append_time");
             }
         }

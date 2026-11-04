@@ -692,7 +692,7 @@ impl SessionServiceImpl {
                             domain = release.domain.as_str(),
                             coordination = %release.coordination,
                             %node,
-                            error = %error,
+                            error = %format_args!("{error:#}"),
                             "entity gate release retry remains pending"
                         );
                     }
@@ -1037,7 +1037,7 @@ impl SessionServiceImpl {
                         if nervix_primitives::time::Instant::now() >= deadline {
                             warn!(
                                 domain = domain.as_str(),
-                                %node, error = %error, "failed to retrieve entity drain status"
+                                %node, error = %format_args!("{error:#}"), "failed to retrieve entity drain status"
                             );
                         }
                     }
@@ -1121,7 +1121,7 @@ impl SessionServiceImpl {
                 Err(error) => {
                     warn!(
                         domain = domain.as_str(),
-                        %node, error = %error, "failed to release entity gates; scheduling retry"
+                        %node, error = %format_args!("{error:#}"), "failed to release entity gates; scheduling retry"
                     );
                     self.broadcast_error(format!(
                         "failed to release entity gates on node '{node}' in domain '{}': {error}; \

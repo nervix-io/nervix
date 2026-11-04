@@ -308,7 +308,7 @@ impl SessionServiceImpl {
                         %owner,
                         domain = domain.as_str(),
                         relay = describe.relay.as_str(),
-                        error = %error,
+                        error = %format_args!("{error:#}"),
                         "timed out waiting for remote DESCRIBE RELAY response"
                     );
                 }
@@ -714,7 +714,11 @@ impl SessionServiceImpl {
                     {
                         Ok((summary, _)) => Some(summary),
                         Err(error) => {
-                            debug!(ingestor = ingestor.as_str(), error = %error, "could not read ingestor unit state");
+                            debug!(
+                                ingestor = ingestor.as_str(),
+                                error = %format_args!("{error:#}"),
+                                "could not read ingestor unit state"
+                            );
                             None
                         }
                     };

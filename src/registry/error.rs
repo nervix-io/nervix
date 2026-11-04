@@ -123,6 +123,15 @@ pub(crate) enum ConnectorDeclarationIssue {
         ConnectorKind::Sqs
     )]
     SqsStandardQueueDeduplication { queue: nervix_models::SqsQueueName },
+    #[error(
+        "{} subscription TYPE {kind} reads through one consumer, so it refuses INSTANCES \
+         {instances}",
+        ConnectorKind::Pulsar
+    )]
+    PulsarSingleConsumerType {
+        kind: nervix_models::PulsarSubscriptionType,
+        instances: nervix_models::IngestorInstances,
+    },
     #[error("VALUES requires at least one mapping")]
     EmptyValues,
     #[error("{entity} declares no direct value type contract")]

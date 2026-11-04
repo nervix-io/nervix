@@ -127,8 +127,8 @@ See [Domains And Time](domains-and-time.md) for the full clock split. The
 [Plexus Overview](plexus-overview.md) defines the `FLUSH IMMEDIATE` 100 µs minimum batching window.
 For most emitters the collected batch is encoded and published on the flush boundary. Iceberg
 additionally requires `COMMIT EACH <duration> MAX SIZE <bytes>` as part of its emitter clause: flush
-writes local Arrow IPC staging files, and commit writes their rows into Parquet data files and
-appends those files to the table in one catalog commit. `ON MESSAGE ERROR SEND TO`
+appends the batch's rows to a local Arrow IPC staging file, and commit writes their rows into
+Parquet data files and appends those files to the table in one catalog commit. `ON MESSAGE ERROR SEND TO`
 buffers failed-message error records separately and delivers them using the emitter's same `FLUSH`
 interval or maximum batch-size boundary. Which emitters gain from larger flush batches, and which
 publish per record regardless of batch size, is covered by the
@@ -1198,11 +1198,11 @@ Transport-specific expectations:
   [Redis Pub/Sub](#redis-pubsub).
 - `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`. A plaintext `mqtt://` address reads no TLS file, so `CREATE MQTT CLIENT` refuses all three with it.
 - `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
-- `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
-- `SQS`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file` and optional `timeout_ms`,
-  and `CREATE SQS CLIENT` refuses a `tls_ca_file` that holds no certificate it could trust. An SQS
-  connection presents no client certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and
-  `tls_key_file`.
+- `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file`, presents `tls_cert_file` with `tls_key_file` as its client certificate, and honors optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, all of which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address; see [Pulsar](./ingestors.md#pulsar).
+- `SQS`: use an `https://...` `endpoint`; Nervix trusts the platform's native roots, or only
+  `tls_ca_file` when it is set, and honors optional `timeout_ms`. `CREATE SQS CLIENT` refuses a
+  `tls_ca_file` that holds no certificate it could trust. An SQS connection presents no client
+  certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and `tls_key_file`.
 - `SENTRY`: the referenced `SENTRY CLIENT` carries an `https://...` `dsn`; its `tls_ca_file` adds
   trust roots beside Nervix's bundled Mozilla roots and the host's native roots, and
   `tls_cert_file` with `tls_key_file` presents
@@ -1474,9 +1474,10 @@ writes the times the first attempt wrote.
 The broker holds a delayed message back, and what it holds depends on the broker and on who reads
 the topic:
 
-- Only a shared subscription is held back, which is how every `PULSAR TOPIC` ingestor reads. A
-  message reaches an exclusive or failover subscription as soon as it is stored, and every
-  subscription of a broker with `delayedDeliveryEnabled=false`.
+- Only a `SHARED` or `KEY_SHARED` subscription is held back, so the `TYPE` a `PULSAR TOPIC`
+  ingestor declares decides whether it waits for a delayed message. A message reaches a `FAILOVER`
+  or `EXCLUSIVE` subscription as soon as it is stored, and every subscription of a broker with
+  `delayedDeliveryEnabled=false`.
 - A broker may hand a message over up to `delayedDeliveryTickTimeMillis` before its delivery time,
   one second by default, unless `isDelayedDeliveryDeliverAtTimeStrict` is set, so a delay no longer
   than that tick may not hold a message back at all.
@@ -1495,15 +1496,24 @@ Pulsar emitters use the same client config surface as Pulsar ingestors:
 - optional `'namespace'`: the tenant and namespace, written `'tenant/namespace'`, that a short
   topic name is placed in, so `TOPIC 'orders'` writes `persistent://<namespace>/orders`; defaults
   to `public/default`. Fully qualified topic names are sent as written.
-- optional `'tls_ca_file'`: PEM-encoded CA bundle for `pulsar+ssl://...` connections
-- optional `'tls_allow_insecure_connection'`: `true` or `false`; defaults to `false`
-- optional `'tls_hostname_verification_enabled'`: `true` or `false`; defaults to `true`
+- optional `'auth_token'`: the token the client authenticates with
+- optional `'tls_ca_file'`: PEM-encoded CA bundle a `pulsar+ssl://...` connection trusts beside the
+  bundled public roots and the host's trust store
+- optional `'tls_cert_file'` and `'tls_key_file'`: the PEM-encoded client certificate the client
+  presents and its private key, written together
+- optional `'tls_allow_insecure_connection'`: `true` accepts any certificate a broker presents;
+  defaults to `false`
+- optional `'tls_hostname_verification_enabled'`: `false` accepts a certificate from a trusted
+  authority whatever address it names; defaults to `true`
 
-As the [ingestor manual](ingestors.md#pulsar) states, `CREATE PULSAR CLIENT` refuses the three TLS
-keys with a plaintext `pulsar://...` address and a `namespace` that is not exactly a tenant and a
-namespace.
+The [ingestor manual](ingestors.md#pulsar) states what each credential authenticates as and what
+each TLS key relaxes, and `CREATE PULSAR CLIENT` refuses the five TLS keys with a plaintext
+`pulsar://...` address and a `namespace` that is not exactly a tenant and a namespace.
 
-Pulsar TLS currently supports server trust configuration only. Nervix does not yet expose Pulsar client certificate authentication.
+The Pulsar driver makes one attempt at a connection or an operation, and the host owns every retry
+on the emitter's `RETRY POLICY`. An emitter whose client cannot connect shows why as its transient
+error, as in `the PULSAR broker refused the connection with AuthenticationError: ...`, and opens
+again on that policy.
 
 ### RabbitMQ
 
@@ -2181,13 +2191,17 @@ See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sq
 `-` and `_`, a FIFO queue's `.fifo` suffix included, preserved exactly as written. The
 `SQS CLIENT` it names declares the keys the [SQS ingestion section](ingestors.md#sqs) lists.
 
-`SEND` is the request shape, and every statement writes it. `SEND SINGLE` issues one `SendMessage`
-request per message. `SEND BATCH` groups messages into `SendMessageBatch` requests within SQS's
-fixed limit of ten entries and 1 MiB per request. Both shapes publish in `MODE ACK`, the mode every
-request/response emitter uses: requests are issued sequentially, and a record is acknowledged once
-the service accepts it. Per-entry transient failures retry only those entries, while invalid
-entries and a message larger than 1 MiB, counting its attributes and FIFO message group, follow
-`ON MESSAGE ERROR` individually. Nervix checks what SQS refuses before sending: a body that is not
+`SEND` is the request shape, and every statement writes it. It belongs to emission alone, as the
+parallel receive belongs to ingestion, and it is independent of the [batching clause](#batching),
+as [Broker and message emitters](#broker-and-message-emitters) describes. `SEND SINGLE` issues one
+`SendMessage` request per message. `SEND BATCH` groups messages into `SendMessageBatch` requests
+within SQS's fixed limit of ten entries and 1 MiB per request. Both shapes publish in `MODE ACK`,
+the mode every request/response emitter uses: requests are issued sequentially, and a record is
+acknowledged once the service accepts it. A record whose contents the service refuses, and a
+message larger than 1 MiB, counting its attributes and FIFO message group, follow
+`ON MESSAGE ERROR` individually. A request or a batch entry that fails for any other reason ends
+the write: the retry resends that record and every record the write had not yet sent, never one
+the service accepted or refused. Nervix checks what SQS refuses before sending: a body that is not
 UTF-8, a body or attribute value holding a character SQS forbids, more than ten attributes, an
 attribute name SQS does not allow, an empty attribute value, and an invalid FIFO message group. A
 later `write_header` of a name replaces the earlier value, so the ten are counted after repeated
@@ -2226,8 +2240,9 @@ Set the SQS client's optional `timeout_ms` CONFIG key to bound each request, the
 start and every send, as both the complete service operation and its single SDK attempt. Nervix
 disables the AWS SDK's internal retries in both directions, so a request that runs out of
 `timeout_ms` returns to the emitter, which `DESCRIBE EMITTER` shows as
-`an SQS send did not finish within timeout_ms 5s`, and the mode's declared `RETRY POLICY` owns all
-retry pacing.
+`an SQS send did not finish within timeout_ms 5s`, or under `SEND BATCH` as
+`an SQS batch send did not finish within timeout_ms 5s`, and the mode's declared `RETRY POLICY`
+owns all retry pacing.
 
 The client resolves the host of its `endpoint` through the node's asynchronous resolver each time it
 opens a connection, and tries the answers in order; a literal IPv4 or IPv6 address is dialled as
@@ -3172,9 +3187,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
-| Network waits | pool checkout (including connection and handshake), initial validation, and each insert: `timeout_ms`; unbounded when omitted |
-| Driver limits | Without timeout_ms, pool checkout, connection validation and inserts have no deadline.<br>TLS identity keys use the driver's RSA PKCS#1 private-key format.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |
-| Stalled-peer checks | `STALLED PEER timeout_ms` |
+| Network waits | pool checkout, including connection and authentication; timeout_ms also applies when shorter: `pool_acquire_timeout_ms`; when omitted, the client's declared pool_acquire_timeout_ms default<br>initial validation and each insert; also bounds each pool checkout when shorter: `timeout_ms`; unbounded when omitted |
+| Driver limits | Without timeout_ms, initial validation after checkout and inserts have no operation deadline.<br>Maximum connection age is checked on reuse, return and the driver's idle scan; active inserts are not interrupted.<br>TLS identity keys use the driver's RSA PKCS#1 private-key format.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER pool_acquire_timeout_ms` |
 
 See the [MYSQL TABLE capability and mirror reference](connector-capabilities.md#mysql-table-emit).
 <!-- connector-matrix:emit-mysql-table:end -->
@@ -3232,27 +3247,27 @@ verification choices. For mutual TLS, set `tls_cert_file` and `tls_key_file` tog
 driver reads a PEM certificate chain and an RSA PKCS#1 private key; for a PEM key this is the
 `RSA PRIVATE KEY` form, which OpenSSL can produce with `openssl rsa -traditional`.
 
-The current client CONFIG keys are required `addr` and optional `timeout_ms`, `tls_ca_file`,
-`tls_cert_file` and `tls_key_file`. The address must
-be a `mysql://` URL accepted by the driver's offline parser. Declare capacity with
-`POOL SIZE MIN ... MAX ...`. Nervix installs those bounds on default driver pool options;
-[Database Client Connection Pools](database-client-pools.md) details the resulting URL lifetime settings.
-Pool-size query parameters such as `pool_min` and `pool_max` are refused before the client is
-committed, including their percent-encoded spellings and ASCII case variants. Unknown standalone
-CONFIG keys are refused rather than ignored. The generated [MYSQL client key reference](connector-capabilities.md#mysql-client)
-lists each key's presence, type and confidentiality; it does not expose additional pool-lifetime
-keys. The [pool minimum](database-client-pools.md#how-each-client-type-keeps-its-minimum) keeper waits
-one second before each pass, counting idle and checked-out connections together.
+The client requires `addr` and declares the pool acquire, idle lifetime, maximum-age and minimum
+maintenance keys documented in [Database Client Connection Pools](database-client-pools.md#connection-lifetimes).
+Its optional operation bound is `timeout_ms`; TLS files are `tls_ca_file`, `tls_cert_file` and
+`tls_key_file`. The address must be a `mysql://` URL accepted by the driver's offline parser.
+Declare capacity with `POOL SIZE MIN ... MAX ...`. Pool-size query parameters such as `pool_min`
+and `pool_max` are refused before commit, including percent-encoded spellings and ASCII case
+variants. Unknown standalone CONFIG keys are refused. The generated
+[MYSQL client key reference](connector-capabilities.md#mysql-client) lists every key's presence,
+type and confidentiality. `DESCRIBE CLIENT` shows effective defaults; `SHOW CREATE CLIENT`
+preserves authored configuration.
 
-`timeout_ms` is a positive, schedulable whole number of milliseconds. It bounds opening and
-validating the pool's first connection, each subsequent pool checkout (including connection
-establishment and authentication), and each insert. The minimum keeper uses the same checkout
-bound. Each of these is a separate operation; an insert's bound starts after checkout, and an
-isolated row's insert receives its own bound. Omitting the key leaves these waits unbounded.
-An elapsed bound is an infrastructure failure, reported with `timeout_ms` and its duration, and
-the emitter retries its pending rows on its declared policy. The driver discards a connection
-whose in-flight command was cancelled. A timeout does not establish whether the server committed
-an insert; use a stable key and an appropriate `ON CONFLICT` action where retries must converge.
+`pool_acquire_timeout_ms` bounds each checkout, including connection establishment and
+authentication, and defaults to 30 seconds. `timeout_ms`, when configured, also bounds checkout,
+initial validation and each insert as separate operations. Checkout uses the shorter applicable
+bound, including in the minimum keeper. An insert's operation bound starts after checkout, and
+an isolated row's insert gets its own bound. Omitting `timeout_ms` leaves validation after checkout
+and inserts without an operation deadline; it never removes the acquire deadline.
+An elapsed bound is an infrastructure failure naming its key and duration, and the emitter
+retries pending rows on its declared policy. The driver discards a connection whose in-flight
+command was cancelled. A timeout does not establish whether the server committed an insert;
+use a stable key and an appropriate `ON CONFLICT` action where retries must converge.
 
 ### MongoDB
 
@@ -3726,13 +3741,17 @@ altered.
 
 #### Iceberg staging and commits
 
-Iceberg uses two explicit boundaries. `FLUSH` collects typed in-memory batches and writes them to
-local Arrow IPC files under the runtime temporary-file root. `COMMIT EACH <duration> MAX SIZE
-<bytes>` reads the staged Arrow IPC files back, writes their rows into Parquet data files, and
-appends every one of those data files to the Iceberg table in one catalog commit. The commit
+Iceberg uses two explicit boundaries. `FLUSH` collects typed in-memory batches and appends each
+batch's mapped rows to a local Arrow IPC staging file under the runtime temporary-file root.
+Every flush appends to the same staging file until a commit begins, so the root holds one staging
+file for each commit, however many batches, source relays and branches its flushes carried; rows
+staged while a commit is in progress, such as during its retry backoff, start a staging file of
+their own, which the commit after it publishes. `COMMIT EACH <duration> MAX SIZE <bytes>` reads the
+staged rows back, writes them into Parquet data files, and appends every one of those data files
+to the Iceberg table in one catalog commit. The commit
 duration starts when a flush stages rows while none are staged, and rows later flushes stage join
 that commit without moving it, so a row waits at most `FLUSH EACH` in memory and then at most
-`COMMIT EACH` after it is staged. Staged files that reach `MAX SIZE` are committed at once. Both
+`COMMIT EACH` after it is staged. Staged rows that reach `MAX SIZE` are committed at once. Both
 durations are domain-logical, so a paced domain's `TIME RATE` moves the flush and commit boundaries
 together; the maximum batch and commit sizes, the commit retry backoff, and a drain remain
 independent of domain pace. The temporary-file root defaults to `/tmp` and can be changed with
@@ -3747,8 +3766,8 @@ continue to staging. The file's actual size and row count are checked before the
 If the table schema changes between staging and commit so that a staged segment no longer fits,
 the commit fails and retains its staged rows for retry rather than appending an over-limit file.
 Without `BATCH`, the Parquet writer uses its 512 MiB rollover target; `DESCRIBE EMITTER` prints
-`data file target: 512MiB` alongside `batch: none`. The commit's `MAX SIZE` continues to count
-the sum of local staged Arrow IPC file bytes, independently of each Parquet file's bound.
+`data file target: 512MiB` alongside `batch: none`. The commit's `MAX SIZE` counts the Arrow IPC
+bytes of the staged batches, independently of each Parquet file's bound.
 
 The emitter completion point for `MODE ACK` is the successful catalog commit. Local staging is not an
 ACK boundary. Record-level expression and construction errors, and a row too large for its own
@@ -3756,29 +3775,29 @@ Parquet file, are attributed through `ON MESSAGE ERROR` before staging. See [ACK
 Delivery](#ack-semantics-and-effective-delivery) for attachment and fan-out behavior.
 
 A commit holds the rows it reads back in memory until it has written them into data files, so it
-charges them to the node's bulk memory class, which holds 32 MiB. It reads the staged files in
-groups, each the run of consecutive files the class can hold together. Before it reads a group it
-charges every byte of the group's files, and once their rows are in data files it returns the
-charge before it reads the next group; the data files of every group are appended in the one
-catalog commit. It takes a charge only when the class has room for it now rather than waiting in
+charges them to the node's bulk memory class, which holds 32 MiB. It reads the staged batches back
+in groups, each the run of consecutive staged batches the class can hold together, whichever
+staging files hold them. Before it reads a group it charges every Arrow IPC byte of the group's
+staged batches, and once their rows are in data files it returns the charge before it reads the
+next group; the data files of every group are appended in the one catalog commit. It takes a charge only when the class has room for it now rather than waiting in
 the class's queue, where a commit's charge would take every byte the class frees and hold the
-node's other bulk work behind it. When the class has no room, the commit keeps its staged files and
+node's other bulk work behind it. When the class has no room, the commit keeps its staged rows and
 their acknowledgements, `DESCRIBE EMITTER` shows `Iceberg commit waits for room in the bulk memory
 class for <bytes> staged bytes` as the emitter's transient error, and the emitter retries the
-commit on its declared retry policy. A single staged file holds one input carrier's mapped rows,
-or one bounded segment of them when `BATCH` is declared. Without `BATCH` it can be larger than the
-class when a route on the same node flushes batches above 32 MiB.
-Such a file is read alone once the whole class is free, charged with the whole class: that is every
+commit on its declared retry policy. A staged batch holds one input carrier's mapped rows, or one
+bounded segment of them when `BATCH` is declared. Without `BATCH` it can be larger than the class
+when a route on the same node flushes batches above 32 MiB.
+Such a batch is read alone once the whole class is free, charged with the whole class: that is every
 byte of it the class can account for, and it leaves no room for other bulk work beside the read.
 Until then `DESCRIBE EMITTER` shows `Iceberg commit waits for the whole bulk memory class of
-<capacity> bytes for a staged file of <bytes> bytes`, and the emitter retries the commit as before.
+<capacity> bytes for a staged batch of <bytes> bytes`, and the emitter retries the commit as before.
 
 #### Iceberg data files
 
 Every commit writes Parquet data files, whatever the table's `write.format.default` property says,
 with the Parquet library's default writer properties: uncompressed pages, dictionary encoding,
 page-level statistics and row groups of at most 1,048,576 rows. The table's `write.parquet.*`
-properties do not apply. Without `BATCH`, a commit writes each group of staged files it reads back
+properties do not apply. Without `BATCH`, a commit writes each group of staged batches it reads back
 together into data files of their own, rolling to a new file once the current one reaches 512 MiB
 whatever the table's `write.target-file-size-bytes` property says. With `BATCH`, each staged
 segment becomes one data file, as [Iceberg staging and commits](#iceberg-staging-and-commits)
@@ -3812,7 +3831,7 @@ The emitter writes nothing else:
   client, and through no other catalog implementation.
 
 A commit writes its data files to object storage before it appends them, and a retry reuses the
-files an earlier attempt finished writing for a whole group of staged files. Files no snapshot comes
+files an earlier attempt finished writing for a whole group of staged batches. Files no snapshot comes
 to reference stay in object storage until an orphan-file cleanup of the table removes them: those
 of a group whose writing failed partway, which the retry writes again, and those of a commit that
 never succeeds because the emitter ends before a retry does.
@@ -3876,15 +3895,16 @@ declared policy and backpressure. While a failed
 commit waits for its retry, the emitter takes no new input from its relays: a row that reaches a
 relay during the backoff waits upstream, unless a stop drains the relays. The rows a flush stages
 before the retry are therefore input the emitter's `COLLECT FOR` policy held, which comes due
-during the backoff, and the relay input a stop drains. A commit publishes the staged files it found
-when it began, so those rows are not in its data files: the retry first appends what the commit
-began with and then commits the newer rows in a commit of their own. A retry still publishes
+during the backoff, and the relay input a stop drains. A commit publishes the rows staged when it
+began, so those rows are not in its data files: they start a staging file of their own, and the
+retry first appends what the commit began with and then commits the newer rows in a commit of
+their own. A retry still publishes
 everything staged, and acknowledges only rows a catalog commit holds.
 
 Each commit names its append with an identity it records in the snapshot it adds. A commit whose
 catalog answer fails or is lost reloads the table, and the commit and every retry of it look for
 that identity in the current snapshot's history before appending, so a retry never appends the
-same staged files twice. Rows are still appended again when their source redelivers them: after a
+same staged rows twice. Rows are still appended again when their source redelivers them: after a
 lost upstream ACK, after an attached sibling emitter fails, or after the emitter ends before a
 retry learns whether the catalog applied its commit, because it ended without acknowledging the
 rows it still held staged. Iceberg appends are not idempotent.
@@ -3965,7 +3985,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | Pulsar | `ACK` retry after an ambiguous broker receipt; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` does not expose broker failures after producer acceptance; retention and durability remain broker policy | None |
 | NATS | JetStream retry after an ambiguous `PubAck`; Core `NO ACK` retry after a timed-out write or a connection change, including records the server may already have received; either mode after a lost upstream ACK or attached sibling failure | Core NATS `NO ACK` confirms a local drain and flush on the write's connection, without durable stream acknowledgement; a connection failure after that completion can lose what the server has not read | None |
 | RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; `NO ACK` retry after its channel or connection is lost before a write's round trip completes; either mode after a lost upstream ACK or attached sibling failure | Without `MANDATORY`, a message no binding routes is dropped by the broker and its record reported delivered; `NO ACK` can lose a record after the broker's channel has taken it; persistence requires PERSISTENT and a provisioned durable queue | None |
-| SQS | Retry after an ambiguous `SendMessage` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; SQS retains its own at-least-once behavior | None |
+| SQS | Retry after an ambiguous `SendMessage` or `SendMessageBatch` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; SQS retains its own at-least-once behavior | On a FIFO queue, `DEDUPLICATION ID` or the queue's content-based deduplication: SQS does not deliver again a message whose id, or body, it accepted within the previous five minutes. A retry carries the id and body its first attempt carried, and an id computed from the record's own fields also covers its redelivery within that interval |
 | MQTT | QoS 1 or 2 retry after an ambiguous handshake; any mode after a lost upstream ACK or attached sibling failure | QoS 0 can lose a record after client acceptance; later delivery follows the configured broker and session guarantees | None |
 | Redis Pub/Sub | Retry after a `PUBLISH` whose answer missed the driver's 500 ms or was lost with its connection, which Redis may already have delivered; retry after Redis accepts `PUBLISH` but the Nervix ACK is lost, or after attached sibling failure | Any failure after detached relay acceptance; subscribers that are absent or disconnected miss the message | None |
 | ZeroMQ | Retry after socket send acceptance followed by lost ACK or attached sibling failure | Any failure after detached relay acceptance; socket send does not establish durable receiver storage | None |

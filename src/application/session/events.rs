@@ -159,7 +159,7 @@ impl SessionShared {
         match notice.encode(self.limits()) {
             Ok(frame) => self.send_event(frame).await,
             Err(error) => {
-                warn!(error = %error, "a server notice does not fit a session frame");
+                warn!(error = %format_args!("{error:#}"), "a server notice does not fit a session frame");
                 true
             }
         }
@@ -188,7 +188,7 @@ impl SessionShared {
         match observed.encode(self.limits()) {
             Ok(frame) => self.send_event(frame).await,
             Err(error) => {
-                warn!(error = %error, "a leadership observation does not fit a session frame");
+                warn!(error = %format_args!("{error:#}"), "a leadership observation does not fit a session frame");
                 true
             }
         }
@@ -201,7 +201,7 @@ impl SessionShared {
         match observed.encode(self.limits()) {
             Ok(frame) => self.send_event(frame).await,
             Err(error) => {
-                warn!(error = %error, "the domain list does not fit a session frame");
+                warn!(error = %format_args!("{error:#}"), "the domain list does not fit a session frame");
                 true
             }
         }
@@ -232,7 +232,9 @@ impl SessionShared {
                     return false;
                 }
             }
-            Err(error) => warn!(error = %error, "a cluster summary does not fit a session frame"),
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "a cluster summary does not fit a session frame")
+            }
         }
         let snapshot = self.service.domain_snapshot(&domain, *self.limits()).await;
         match snapshot {
@@ -319,7 +321,7 @@ impl SessionServiceImpl {
         let reservation = match executor.reserve(MemoryClass::Bulk, chunk_bytes).await {
             Ok(reservation) => reservation,
             Err(error) => {
-                debug!(domain = domain.as_str(), error = %error, "a domain snapshot was skipped");
+                debug!(domain = domain.as_str(), error = %format_args!("{error:#}"), "a domain snapshot was skipped");
                 return None;
             }
         };
@@ -344,7 +346,7 @@ impl SessionServiceImpl {
                 None
             }
             Err(error) => {
-                debug!(domain = domain.as_str(), error = %error, "a domain snapshot was skipped");
+                debug!(domain = domain.as_str(), error = %format_args!("{error:#}"), "a domain snapshot was skipped");
                 None
             }
         }

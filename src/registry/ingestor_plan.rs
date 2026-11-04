@@ -1313,6 +1313,7 @@ mod tests {
             ownership: PulsarSubscriptionOwnership::Ingestor {
                 start_at: nervix_models::IngestStartPosition::Earliest,
             },
+            kind: nervix_models::PulsarSubscriptionType::Shared,
         }
     }
 

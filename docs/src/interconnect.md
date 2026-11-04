@@ -2093,7 +2093,9 @@ Application shutdown has three ordered phases. A server process issues the stop 
 starts them when it receives its first `SIGINT` or `SIGTERM`, and one shutdown deadline measured
 from that request bounds all three. The stop request first marks the local process incarnation as
 terminating and then closes admission on its public gRPC, connector, observability, and console
-listeners, closing the client connections they had accepted. Its interconnect listener and
+listeners, closing the client connections they had accepted; a gRPC connection closes once its
+calls have ended, its sessions after delivering their endings, and is cut if it is still open two
+seconds later. Its interconnect listener and
 registered handlers remain available on that live node throughout the drain-support phase. They
 continue carrying queued and active relay payloads, admission and record acknowledgements,
 runtime-state replication and checkpoints, ownership-handoff coordination, domain-clock progress,

@@ -482,16 +482,17 @@ Larger batches genuinely pay only at boundaries that do work per batch rather th
 
 - OTEL emitters send one export request per batch, so batch size sets request count and the
   compression ratio.
-- Iceberg emitters write one staging file per flush and one commit per `COMMIT EACH ... MAX SIZE`
-  boundary, so batch and commit sizes set file counts and Parquet file sizes.
+- Iceberg emitters append every flush to one staging file per commit and make one commit per
+  `COMMIT EACH ... MAX SIZE` boundary, so commit sizes set file counts and Parquet file sizes.
 - Inferencers whose tensor shapes declare a batch dimension run one model invocation per batch.
 - WASM processors serialize one Arrow IPC payload per batch, and cluster interconnect sends one
   frame per batch, with a fixed 8 MiB frame limit.
 
 Broker emitters — Kafka, Pulsar, NATS, RabbitMQ, MQTT, Redis, ZeroMQ, Sentry, and syslog — encode
 and publish one record at a time whatever the batch size; wire batching there belongs to the
-client, such as Kafka's `linger.ms` and `batch.size`. SQS `BATCH` groups at most ten records per
-request, and database emitters split every flush into statements of at most the
+client, such as Kafka's `linger.ms` and `batch.size`. SQS `SEND BATCH` sends at most ten records,
+within 1 MiB, in each `SendMessageBatch` request, and database emitters split every flush into
+statements of at most the
 [batching clause's](emitters.md#batching) `MAX MESSAGES` records. On such routes a larger
 `MAX BATCH SIZE` or a longer interval buys only fewer flush
 cycles, at the cost of latency, memory, and coarser failure and retry granularity: prefer the
