@@ -11,6 +11,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -339,7 +340,10 @@ class RecipeTests(unittest.TestCase):
             self.assertIn(f'/llvm-cov-target/debug/{binary}"', shard)
             self.assertIn(f'"${{suite}}/{binary}"', build)
         self.assertIn('"${suite}/nervix-plexus-format"', build)
-        self.assertIn('"${suite}/libnervix_client.so"', build)
+        package = tomllib.loads((shards.ROOT / "crates/client-python/Cargo.toml").read_text())
+        library = package["lib"].get("name", package["package"]["name"].replace("-", "_"))
+        self.assertIn(f'"${{tools}}/paced-simulation/debug/lib{library}.so"', build)
+        self.assertIn(f'"${{suite}}/lib{library}.so"', build)
         self.assertIn('NERVIX_PACED_SIMULATION_PYTHON=', shard)
         self.assertIn('install-paced-simulation-python', self.recipe("test-scenarios-coverage-unpack"))
 

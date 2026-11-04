@@ -1385,7 +1385,7 @@ test-scenarios-coverage-build: build-deps coverage-clean-workspace (run-with-job
     install -m 755 "${tools}/cli/debug/nervix-cli" "${suite}/nervix-cli"
     install -m 755 "${tools}/deadlock-report/debug/nervix-deadlock-report" "${suite}/nervix-deadlock-report"
     install -m 755 "${tools}/paced-simulation/debug/nervix-paced-simulation" "${suite}/nervix-paced-simulation"
-    install -m 755 "${tools}/paced-simulation/debug/libnervix_client.so" "${suite}/libnervix_client.so"
+    install -m 755 "${tools}/paced-simulation/debug/libnervix_client_python.so" "${suite}/libnervix_client_python.so"
     install -m 755 "${tools}/paced-simulation/debug/libnervix_client_ffi.so" "${suite}/libnervix_client_ffi.so"
 
 [private, parallel]

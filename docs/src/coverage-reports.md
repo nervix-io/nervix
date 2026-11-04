@@ -68,7 +68,8 @@ the downloaded artifact:
 
 The Python paced driver runs with the wheel installed in its own CPython 3.12 environment.
 Scenario coverage builds its Rust extension with the same LLVM flags as the Rust driver, keeps
-the extension beside the suite for object discovery, and carries the wheel in the scenario archive.
+Cargo's `libnervix_client_python.so` beside the suite for object discovery, and carries the wheel
+with its `nervix_client` module in the scenario archive.
 The restore recipe and prepared-suite runner install that wheel and the Python coverage runtime
 before scenarios start, preserving the extension's instrumentation. The existing
 `target/paced-simulation/python.lcov` remains an ordinary Python coverage input; Rust
