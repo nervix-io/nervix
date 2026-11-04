@@ -735,7 +735,10 @@ fn emitter_declaration(kind: EmitterEntityKind) -> EmitterDeclaration {
         EmitterEntityKind::Redis(RedisEmitterEntity::PubSub)
         | EmitterEntityKind::ZeroMq(ZeroMqEmitterEntity::Push)
         | EmitterEntityKind::Syslog(SyslogEmitterEntity::Collector) => codec(None, &["NoAck"]),
-        EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => codec(None, &["NoAck", "BrokerAck"]),
+        EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => codec(
+            Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+            &["NoAck", "BrokerAck"],
+        ),
         EmitterEntityKind::Nats(NatsEmitterEntity::Subject) => codec(
             Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
             &["NoAck", "NatsJetStream"],

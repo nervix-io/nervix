@@ -8,8 +8,8 @@
 use meticulous::ResultExt as _;
 use nervix_models::{
     AckMode, AckWindow, Assignment, AssignmentTarget, ClientConsumerEmitter, ClientEmitter,
-    EmitterBody, ErrorPolicies, Expression, Float64Literal, Literal, ParseAsType, ProcessorInputs,
-    RetryPolicy, RouteConstruction,
+    DEFAULT_CLIENT_CONSUMER_SESSION_BYTES, EmitterBody, ErrorPolicies, Expression, Float64Literal,
+    Literal, ParseAsType, ProcessorInputs, RetryPolicy, RouteConstruction,
 };
 
 use super::*;
@@ -76,15 +76,21 @@ impl Default for EndpointFixture {
 fn an_interrupted_open_releases_its_session_reservation() {
     let consumers = SessionConsumers::default();
     let first = consumers
-        .reserve(CLIENT_CONSUMER_SESSION_BYTES)
+        .reserve(
+            DEFAULT_CLIENT_CONSUMER_SESSION_BYTES,
+            DEFAULT_CLIENT_CONSUMER_SESSION_BYTES,
+        )
         .assured("the empty session can reserve its full capacity");
     assert!(matches!(
-        consumers.reserve(1),
+        consumers.reserve(1, DEFAULT_CLIENT_CONSUMER_SESSION_BYTES),
         Err(EmitterOpenRefusal::SessionCapacityExhausted)
     ));
     drop(first);
     let replacement = consumers
-        .reserve(CLIENT_CONSUMER_SESSION_BYTES)
+        .reserve(
+            DEFAULT_CLIENT_CONSUMER_SESSION_BYTES,
+            DEFAULT_CLIENT_CONSUMER_SESSION_BYTES,
+        )
         .assured("dropping the sole reservation releases the session's full capacity");
     drop(replacement);
     assert_eq!(consumers.state.lock().held_count, 0);

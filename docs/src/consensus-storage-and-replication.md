@@ -469,8 +469,9 @@ mode, the quality of service an MQTT TOPIC emitter writes beside its publishing 
 header holds a literal or names a client secret. It identifies the current statement shape as well,
 which the statements a transaction keeps are stored in: an `ALTER INGESTOR` or `ALTER EMITTER`
 operation that changes one part of its entity's body, an envelope clause or the properties, or one
-part of a construction where it stands. Its state metadata requires the current
-`RestoredLifecycle` encoding, including the durable restore installation gate and the unit-keyed
+part of a construction where it stands. Its state metadata requires the current `ClusterState`
+encoding, including committed cluster parameters, the durable restore installation gate and the
+unit-keyed
 committed schedule. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
 are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery
 and snapshot installation therefore retain their complete magnitudes. See
@@ -626,3 +627,20 @@ cross that boundary. The current state encoding requires these records and rejec
 whose encoding does not match, requiring recreation under the alpha persistence contract. The current encoding also requires a restore's explicit lifecycle policy and its
 installed-state effect's clock. RESUME changes the domain to running and removes its complete-set
 installation gate in that single applied effect; it preserves the archived generation and mapping.
+
+## Cluster Parameter Publication
+
+Current state metadata includes the optional committed cluster parameter record; absence is only
+the unseeded bootstrap state. The first bootstrap submits the complete seed through Raft. Later
+parameter commands atomically compare their policy/model/resource snapshot, replace the record
+and record durable command progress. Their apply advances the coherent runtime revision and its
+existing schedule notification. Model planning inputs include the parameter record. Every new
+model or schedule publication compares that complete record, including its revision, inside the
+serialized state-machine application before changing the graph. A parameter publication that
+applies first therefore conflicts with a plan captured before it, even if another publication
+restores the same values. Transaction commit admission, new step effects, and rollback use this
+same fence; an idempotent retry only rejoins retained progress and never reapplies its effect.
+
+The metadata encoding has one current identity. Data from a different stored shape fails decoding
+with a typed error asking for node-state recreation. Parameter durations and numeric bounds are
+validated on archive recovery as well as construction. No migration or second decoder is present.

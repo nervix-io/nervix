@@ -262,6 +262,7 @@ fn a_named_setting_replaces_only_its_own_value() {
     assert_eq!(
         NodeSettings {
             scheduling: defaults.scheduling,
+            parameter_seeds: defaults.parameter_seeds,
             ..settings
         },
         defaults

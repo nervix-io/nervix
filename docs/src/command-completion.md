@@ -425,3 +425,11 @@ The public behavior is specified in
 [Plexus command completion](https://github.com/nervix-io/nervix/blob/main/docs/specifications/plexus-command-completion.md).
 The corresponding public scenario inventory is maintained in the repository's command-completion
 acceptance ledger.
+
+## Parameter Changes
+
+`ALTER CLUSTER SET` uses ordinary durable command admission and exact recovery. Its effect records
+the applied parameter revision in the same replicated write as the publication, before a terminal
+result. Recovery waits for current runtime readiness rather than repeating a published change.
+The successful response covers the live participants of the existing readiness barrier; unavailable
+nodes adopt the current live publication when they return.
