@@ -193,7 +193,7 @@ Feature: Altering ingestors
       | 3            |
 
   @set_ingestor_quiesce
-  Scenario Outline: SET QUIESCE changes only to a mode supported by the current source
+  Scenario Outline: SET QUIESCE changes only to a mode the source's entity declares and its delivery mode honors
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -229,9 +229,29 @@ Feature: Altering ingestors
       """
       ON QUIESCE REJECT RETRY AFTER 7s
       """
-    When these Plexus commands fail with "HTTP ENDPOINT ingestors do not support ON QUIESCE SUSPEND"
+    When these Plexus commands fail with "found SUSPEND"
       """
       ALTER HTTP ENDPOINT INGESTOR quiesce_source SET QUIESCE SUSPEND;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      ALTER HTTP ENDPOINT INGESTOR quiesce_source SET MODE ACK MAX 8 ACK TIMEOUT 5s;
+      """
+    And these Plexus commands fail with "HTTP ENDPOINT ingestors do not support ON QUIESCE BUFFER"
+      """
+      ALTER HTTP ENDPOINT INGESTOR quiesce_source SET QUIESCE BUFFER MAX SIZE 1MiB;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      SHOW CREATE INGESTOR quiesce_source;
+      """
+    Then the last command output contains
+      """
+      MODE ACK MAX 8 ACK TIMEOUT 5s
+      """
+    And the last command output contains
+      """
+      ON QUIESCE REJECT RETRY AFTER 7s
       """
 
     Examples:

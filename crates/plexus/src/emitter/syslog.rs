@@ -35,6 +35,16 @@ pub(super) fn collector_body<'src>(
     )
 }
 
+/// `SET MODE <mode>`: the one part of a `SYSLOG COLLECTOR` body an `ALTER` changes on its own.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], SyslogCollectorEmitterChange, extra::Err<ParseError<'src>>> + Clone
+{
+    kw_phrase2(Identifier::Set, Identifier::Mode)
+        .ignore_then(mode())
+        .map(SyslogCollectorEmitterChange::Mode)
+        .boxed()
+}
+
 #[cfg(test)]
 mod tests {
     use nervix_models::{

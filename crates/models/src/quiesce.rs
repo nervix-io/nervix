@@ -2004,12 +2004,9 @@ mod tests {
                     let crate::IngestorInput::Transport(input) = &mut candidate.input else {
                         panic!("the fixture ingestor reads an endpoint");
                     };
-                    input
-                        .source
-                        .set_quiesce(crate::IngestQuiesceMode::Reject {
-                            retry_after: "7s".to_string(),
-                        })
-                        .expect("endpoint must accept REJECT quiesce mode");
+                    input.source.set_quiesce(crate::IngestQuiesceMode::Reject {
+                        retry_after: "7s".to_string(),
+                    });
                     candidate
                 },
                 ModelChangeAspect::IngestorSource,

@@ -59,3 +59,22 @@ pub(super) fn request_body<'src>(
         );
     choice((encoded, absent)).boxed()
 }
+
+/// `SET METHOD <expression>`, `SET PATH <expression>` or `SET MODE <mode>`: one part of an
+/// `HTTP REQUEST` body.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], HttpRequestEmitterChange, extra::Err<ParseError<'src>>> + Clone
+{
+    let method = kw(Identifier::Method)
+        .ignore_then(embedded_expression("string_expression"))
+        .map(HttpRequestEmitterChange::Method);
+    let path = kw(Identifier::Path)
+        .ignore_then(embedded_expression("string_expression"))
+        .map(HttpRequestEmitterChange::Path);
+    let publishing = kw(Identifier::Mode)
+        .ignore_then(mode())
+        .map(HttpRequestEmitterChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((method, path, publishing)))
+        .boxed()
+}

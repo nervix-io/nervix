@@ -13,7 +13,7 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{SyslogIngestMode, SyslogListenerIngestor};
+use nervix_models::{SyslogIngestMode, SyslogListenerIngestor, SyslogListenerIngestorChange};
 
 use super::delivery::{flexible_quiesce_clause, no_ack};
 use crate::{
@@ -33,6 +33,17 @@ pub(super) fn listener_body<'src>()
             mode,
             quiesce,
         })
+        .boxed()
+}
+
+/// `SET MODE`: the one part of a `SYSLOG LISTENER` body beside its client.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], SyslogListenerIngestorChange, extra::Err<ParseError<'src>>> + Clone
+{
+    kw(Identifier::Set)
+        .ignore_then(kw(Identifier::Mode))
+        .ignore_then(no_ack().to(SyslogIngestMode::NoAck))
+        .map(SyslogListenerIngestorChange::Mode)
         .boxed()
 }
 
