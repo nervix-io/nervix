@@ -762,7 +762,7 @@ impl Runtime {
                     domain = domain.as_str(),
                     relay = owned.relay.as_str(),
                     unit = ?owned.unit,
-                    reason = %reason,
+                    reason = %format_args!("{reason:#}"),
                     "relay owner task did not stop cleanly"
                 );
             }
@@ -774,7 +774,7 @@ impl Runtime {
                     domain = domain.as_str(),
                     relay = owned.relay.as_str(),
                     unit = ?owned.unit,
-                    reason = %reason,
+                    reason = %format_args!("{reason:#}"),
                     "relay state task did not stop cleanly"
                 );
             }

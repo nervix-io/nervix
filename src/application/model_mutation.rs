@@ -1064,7 +1064,7 @@ impl SessionServiceImpl {
                         Err(err) => {
                             warn!(
                                 domain = domain.as_str(),
-                                error = %err,
+                                error = %format_args!("{err:#}"),
                                 "failed to plan model mutation batch"
                             );
                             return create_registry_error_response(
@@ -1484,7 +1484,7 @@ impl SessionServiceImpl {
                         if let RegistryError::ConcurrentMutation { .. } = err.current_context() {
                             error!(
                                 domain = domain.as_str(),
-                                error = %err,
+                                error = %format_args!("{err:#}"),
                                 "registry base-model CAS fired while the exclusive domain ALTER \
                                  lock was held"
                             );
@@ -1502,7 +1502,7 @@ impl SessionServiceImpl {
                         };
                         warn!(
                             domain = domain.as_str(),
-                            error = %err,
+                            error = %format_args!("{err:#}"),
                             "failed to apply model mutation batch"
                         );
                         if let Some(resume_error) = resume_error {

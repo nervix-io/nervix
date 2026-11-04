@@ -607,6 +607,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER pool_acquire_timeout_ms"
+entity = "MYSQL TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mysql_pool_keys.feature", scenario = "MySQL emitters report the configured pool acquire deadline on <nodes> nodes" },
+]
+
+[[capability]]
 capability = "MODE ACK"
 entity = "MYSQL TABLE EMITTER"
 scenarios = [
@@ -1065,6 +1072,34 @@ capability = "SUBSCRIPTION PROVISIONED"
 entity = "PULSAR TOPIC INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/pulsar_subscriptions.feature", scenario = "A provisioned Pulsar subscription outlives its dropped ingestor and keeps what arrives meanwhile" },
+]
+
+[[capability]]
+capability = "TYPE SHARED"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_subscription_types.feature", scenario = "A Pulsar ingestor reads its subscription as the declared TYPE <type> under MODE <delivery>" },
+]
+
+[[capability]]
+capability = "TYPE KEY_SHARED"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_subscription_types.feature", scenario = "KEY_SHARED instances keep each key's messages in publication order" },
+]
+
+[[capability]]
+capability = "TYPE FAILOVER"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_subscription_types.feature", scenario = "A FAILOVER subscription hands over to its standby when the active ingestor stops" },
+]
+
+[[capability]]
+capability = "TYPE EXCLUSIVE"
+entity = "PULSAR TOPIC INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_subscription_types.feature", scenario = "A subscription another consumer holds is the ingestor's transient status until it leaves" },
 ]
 
 [[capability]]

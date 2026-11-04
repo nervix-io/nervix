@@ -3,10 +3,10 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The Pulsar client an ingestor configuration declares, its TLS options, topic
-//!   qualification, the shared-subscription consumer each instance reads through and the name it
-//!   registers under, the check that a provisioned subscription exists, the removal of a
-//!   subscription its ingestor owned, checked message metadata and ordered properties,
-//!   acknowledgements the broker answers, redelivery requests, and the classification of an
+//!   qualification, the consumer of the declared subscription type each instance reads through and
+//!   the name it registers under, the check that a provisioned subscription exists, the removal of
+//!   a subscription its ingestor owned, checked message metadata and ordered properties,
+//!   acknowledgements the broker answers, redelivery requests, and the classification of a join, an
 //!   acknowledgement or a redelivery request that did not take effect.
 //! - **Depends on.** The connector contract, typed client configuration entries, `error-stack`,
 //!   the recovery vocabulary, Tokio and `pulsar`.
@@ -38,17 +38,20 @@ use nervix_connector::{
 };
 use nervix_models::{
     ClientConfigEntry, ConnectorKind, PulsarSubscription, PulsarSubscriptionName,
-    PulsarSubscriptionOwnership, PulsarTopicName, Timestamp,
+    PulsarSubscriptionOwnership, PulsarSubscriptionType, PulsarTopicName, Timestamp,
 };
 use nervix_primitives::time::{Instant, sleep_until, timeout};
 use nervix_recovery::Reported as _;
 use pulsar::{
     ConnectionRetryOptions as PulsarConnectionRetryOptions, Consumer as PulsarConsumer,
     ConsumerBuilder as PulsarConsumerBuilder, ConsumerOptions as PulsarConsumerOptions,
-    Error as PulsarError, Pulsar, SubType as PulsarSubType, TlsOptions as PulsarTlsOptions,
-    TokioExecutor,
+    Error as PulsarError, OperationRetryOptions as PulsarOperationRetryOptions, Pulsar,
+    SubType as PulsarSubType, TlsOptions as PulsarTlsOptions, TokioExecutor,
     consumer::{InitialPosition as PulsarInitialPosition, Message as PulsarMessage},
-    error::{ConnectionError as PulsarConnectionError, ConsumerError as PulsarConsumerError},
+    error::{
+        ConnectionError as PulsarConnectionError, ConsumerError as PulsarConsumerError,
+        ServiceDiscoveryError as PulsarServiceDiscoveryError,
+    },
     message::proto::ServerError as PulsarServerError,
     proto::MessageIdData,
 };
@@ -73,6 +76,37 @@ const DURABLE_SUBSCRIPTION_EXISTS: &str = "Durable subscription with the same na
 pub struct PulsarRefusal {
     pub error: Option<PulsarServerError>,
     pub reason: Option<String>,
+}
+
+impl PulsarRefusal {
+    /// What the broker refused a join with, when `error` says it refused the subscribe or the
+    /// topic lookup before it, and did not fail in some other way.
+    fn of_join(error: &PulsarError) -> Option<Self> {
+        let (code, reason) = match error {
+            PulsarError::Connection(PulsarConnectionError::PulsarError(code, reason))
+            | PulsarError::Consumer(PulsarConsumerError::Connection(
+                PulsarConnectionError::PulsarError(code, reason),
+            ))
+            | PulsarError::ServiceDiscovery(PulsarServiceDiscoveryError::Query(code, reason)) => {
+                (code, reason)
+            }
+            _ => return None,
+        };
+        Some(Self {
+            error: *code,
+            reason: reason.clone(),
+        })
+    }
+
+    /// Whether the broker refused for what holds right now rather than for what the statement
+    /// declares, so the same join can pass later: another consumer holds the subscription, or the
+    /// broker has not yet loaded the topic.
+    fn holds_only_for_now(&self) -> bool {
+        matches!(
+            self.error,
+            Some(PulsarServerError::ConsumerBusy | PulsarServerError::ServiceNotReady)
+        )
+    }
 }
 
 impl fmt::Display for PulsarRefusal {
@@ -143,6 +177,17 @@ pub enum PulsarTopicIngestorError {
     Connect,
     #[error("failed to subscribe to Pulsar topic '{topic}'")]
     Subscribe { topic: String },
+    /// The broker refused a consumer of the subscription, such as one another consumer holds.
+    #[error(
+        "the {connector} broker refused a consumer of subscription '{subscription}' of topic \
+         '{topic}' with {refusal}",
+        connector = ConnectorKind::Pulsar
+    )]
+    SubscriptionRefused {
+        subscription: PulsarSubscriptionName,
+        topic: String,
+        refusal: PulsarRefusal,
+    },
     #[error("failed to receive a Pulsar message")]
     Receive,
     #[error("{connector} message {position} on '{topic}' has an unsupported publish_time", connector = ConnectorKind::Pulsar, topic = .position.topic)]
@@ -248,6 +293,14 @@ impl PulsarTopicIngestorError {
         Report::new(error).change_context(Self::Acknowledge)
     }
 
+    /// Whether this failure is a refusal a later join of the same subscription can pass.
+    fn holds_only_for_now(&self) -> bool {
+        match self {
+            Self::SubscriptionRefused { refusal, .. } => refusal.holds_only_for_now(),
+            _ => false,
+        }
+    }
+
     /// What a failed redelivery request means: a request the consumer could not confirm sending,
     /// or a failure this ingestor does not classify, which keeps the client's error beneath it.
     fn unsent_redelivery_request(error: PulsarConsumerError) -> Report<Self> {
@@ -284,7 +337,7 @@ impl PulsarAckReceipts {
 }
 
 /// What one Pulsar ingestor subscribes with: its resolved client entries, the topic it reads, the
-/// shared subscription it joins and who owns it, the name its consumers register under, and
+/// subscription it joins with who owns it and its type, the name its consumers register under, and
 /// whether acknowledging waits for the broker.
 pub struct PulsarTopicIngestorSettings<'a> {
     pub config: &'a [ClientConfigEntry],
@@ -297,8 +350,8 @@ pub struct PulsarTopicIngestorSettings<'a> {
 }
 
 impl PulsarTopicIngestorSettings<'_> {
-    /// Whether both inputs read the same broker subscription. Consumer policy and declared
-    /// ownership do not change that identity. Configuration is resolved by the host first;
+    /// Whether both inputs read the same broker subscription. Consumer policy, declared ownership
+    /// and declared type do not change that identity. Configuration is resolved by the host first;
     /// comparison opens no connection and performs no DNS lookup.
     pub fn reads_same_subscription(&self, replacement: &Self) -> PulsarTopicIngestorResult<bool> {
         let previous = self.service_url()?;
@@ -334,7 +387,7 @@ impl PulsarTopicIngestorSettings<'_> {
     }
 }
 
-/// One Pulsar ingestor's client and the shared subscription every instance consumes from.
+/// One Pulsar ingestor's client and the subscription every instance consumes from.
 ///
 /// The client is connected once and shared by the instances, which each open their own consumer.
 #[derive(Clone)]
@@ -372,7 +425,8 @@ impl PulsarTopicIngestorPlan {
     ) -> PulsarTopicIngestorResult<Pulsar<TokioExecutor>> {
         let addr = client_config_value(config, "addr", "Pulsar")
             .change_context(PulsarTopicIngestorError::ClientConfig)?;
-        let mut builder = Pulsar::builder(addr, TokioExecutor);
+        let mut builder = Pulsar::builder(addr, TokioExecutor)
+            .with_operation_retry_options(Self::operation_retries());
         if let Some(tls_options) = Self::tls_options_from_config(config)? {
             if let Some(certificate_chain) = tls_options.certificate_chain {
                 builder = builder.with_certificate_chain(certificate_chain);
@@ -386,6 +440,16 @@ impl PulsarTopicIngestorPlan {
         builder.build().await.map_err(|source| {
             Report::new(PulsarTopicIngestorError::Connect).attach_printable(source.to_string())
         })
+    }
+
+    /// The driver makes one attempt at an operation. It would otherwise repeat a subscribe the
+    /// broker refuses because another consumer holds the subscription, without limit and without
+    /// reporting it, so what fails reaches the host, which alone decides when to try again.
+    fn operation_retries() -> PulsarOperationRetryOptions {
+        PulsarOperationRetryOptions {
+            max_retries: Some(0),
+            ..Default::default()
+        }
     }
 
     fn tls_options_from_config(
@@ -449,12 +513,36 @@ impl PulsarTopicIngestorPlan {
         self.consumer_builder(consumer_name, options)
             .build()
             .await
-            .map_err(|source| {
-                Report::new(PulsarTopicIngestorError::Subscribe {
-                    topic: self.topic.clone(),
-                })
-                .attach_printable(source.to_string())
-            })
+            .map_err(|error| self.join_failure(error))
+    }
+
+    /// What a failed join means: the refusal the broker answered with, or a failure this ingestor
+    /// does not classify, which keeps the client's error beneath it.
+    fn join_failure(&self, error: PulsarError) -> Report<PulsarTopicIngestorError> {
+        if let Some(refusal) = PulsarRefusal::of_join(&error) {
+            return Report::new(PulsarTopicIngestorError::SubscriptionRefused {
+                subscription: self.subscription.name.clone(),
+                topic: self.topic.clone(),
+                refusal,
+            });
+        }
+        Report::new(error).change_context(PulsarTopicIngestorError::Subscribe {
+            topic: self.topic.clone(),
+        })
+    }
+
+    /// The consumer an instance of an owned subscription opens with, absent when the broker refused
+    /// the join for what holds right now. The instance joins again in its first resume, where the
+    /// refusal is the ingestor's transient status rather than a failure that keeps it from starting.
+    async fn consumer_at_open(
+        &self,
+        instance_index: u64,
+    ) -> PulsarTopicIngestorResult<Option<PulsarConsumer<Vec<u8>, TokioExecutor>>> {
+        match self.consumer(instance_index).await {
+            Ok(consumer) => Ok(Some(consumer)),
+            Err(failure) if failure.current_context().holds_only_for_now() => Ok(None),
+            Err(failure) => Err(failure),
+        }
     }
 
     /// The creation position shared by data consumers and the durable removal consumer.
@@ -470,8 +558,8 @@ impl PulsarTopicIngestorPlan {
         }
     }
 
-    /// A consumer of this ingestor's topic on its shared subscription, registered under
-    /// `consumer_name`.
+    /// A consumer of this ingestor's topic on its subscription, as the subscription's declared
+    /// type, registered under `consumer_name`.
     fn consumer_builder(
         &self,
         consumer_name: String,
@@ -482,8 +570,18 @@ impl PulsarTopicIngestorPlan {
             .with_topic(self.topic.as_str())
             .with_consumer_name(consumer_name)
             .with_subscription(self.subscription.name.as_str())
-            .with_subscription_type(PulsarSubType::Shared)
+            .with_subscription_type(self.subscription_type())
             .with_options(options)
+    }
+
+    /// The driver's spelling of the subscription's declared type.
+    fn subscription_type(&self) -> PulsarSubType {
+        match self.subscription.kind {
+            PulsarSubscriptionType::Shared => PulsarSubType::Shared,
+            PulsarSubscriptionType::KeyShared => PulsarSubType::KeyShared,
+            PulsarSubscriptionType::Failover => PulsarSubType::Failover,
+            PulsarSubscriptionType::Exclusive => PulsarSubType::Exclusive,
+        }
     }
 
     /// Checks that the subscription an operator provisioned exists before an instance joins it.
@@ -526,15 +624,10 @@ impl PulsarTopicIngestorPlan {
     /// Whether the broker refused a non-durable subscribe because a durable subscription of the
     /// same name exists.
     fn refused_for_a_durable_subscription(error: &PulsarError) -> bool {
-        let (PulsarError::Connection(refusal)
-        | PulsarError::Consumer(PulsarConsumerError::Connection(refusal))) = error
-        else {
-            return false;
-        };
-        let PulsarConnectionError::PulsarError(
-            Some(PulsarServerError::NotAllowedError),
-            Some(reason),
-        ) = refusal
+        let Some(PulsarRefusal {
+            error: Some(PulsarServerError::NotAllowedError),
+            reason: Some(reason),
+        }) = PulsarRefusal::of_join(error)
         else {
             return false;
         };
@@ -756,7 +849,7 @@ impl IngestorMessage for PulsarTopicIngestorMessage {
     }
 }
 
-/// One Pulsar ingestor instance: its consumer on the shared subscription, absent while suspended.
+/// One Pulsar ingestor instance: its consumer on the subscription, absent while suspended.
 pub struct PulsarTopicIngestor {
     plan: PulsarTopicIngestorPlan,
     instance_index: u64,
@@ -787,13 +880,10 @@ impl IngestorConnector for PulsarTopicIngestor {
     /// the ingestor's transient status rather than a failure that keeps the ingestor from starting.
     async fn open(plan: &Self::Plan, instance_index: u64) -> IngestorResult<Self> {
         let consumer = match plan.subscription.ownership {
-            PulsarSubscriptionOwnership::Ingestor { .. } => {
-                let consumer = plan
-                    .consumer(instance_index)
-                    .await
-                    .change_context(IngestorError::Open { connector: PULSAR })?;
-                Some(consumer)
-            }
+            PulsarSubscriptionOwnership::Ingestor { .. } => plan
+                .consumer_at_open(instance_index)
+                .await
+                .change_context(IngestorError::Open { connector: PULSAR })?,
             PulsarSubscriptionOwnership::Provisioned => None,
         };
         Ok(Self {
@@ -945,9 +1035,10 @@ impl BrokerIngestorConnector for PulsarTopicIngestor {
         Ok(())
     }
 
-    /// A rejected message is negatively acknowledged, which asks the broker to redeliver it on the
-    /// shared subscription. Rejecting returns once the consumer sent the request; the broker does
-    /// not answer it.
+    /// A rejected message is negatively acknowledged, which asks the broker to redeliver it. A
+    /// `FAILOVER` or `EXCLUSIVE` subscription takes no message of its own back: the broker rewinds
+    /// the consumer to what it has not acknowledged, so what follows the message comes again too.
+    /// Rejecting returns once the consumer sent the request; the broker does not answer it.
     async fn reject(&mut self, positions: &[Self::Position]) -> IngestorResult<()> {
         let Some(consumer) = self.consumer.as_mut() else {
             return Err(Report::new(PulsarTopicIngestorError::ConsumerClosed)

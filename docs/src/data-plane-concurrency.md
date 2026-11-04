@@ -494,8 +494,9 @@ scenario exercises the real driver and database; these external asynchronous wai
 Deloxide's tracked locks and the model checkers' coverage.
 
 A MySQL pool keeps its `POOL SIZE MIN` with one keeper task, which the pool's handle stops. The
-keeper holds no lock and waits on no notification: once a second it reads the driver's count of
-established connections and, below the minimum, awaits the driver's checkouts one at a time,
+keeper holds no lock and waits on no notification: after each `pool_maintenance_interval_ms`
+delay (one second by default), it reads the driver's count of established connections and, below
+the minimum, awaits the driver's checkouts one at a time,
 holding each until its pass ends, so every connection it opens is one the driver accounts against
 the maximum. These external asynchronous waits are outside Deloxide's tracked locks and the model
 checkers' coverage; unit tests drive the production keeper over a stand-in pool on a paused clock.
@@ -709,13 +710,17 @@ and Deloxide's lock detector; the ordinary connector and retirement regressions 
 one-/three-node stalled-broker and retirement scenarios own that evidence.
 
 Kafka record metadata stays with its owning message until the host has projected the fields its
-programs read. Keys are borrowed, timestamps are typed at the transport boundary, and metadata
-visits add no lock or shared state. The `kafka-record-metadata` Bolero property holds the complete
-row and its retained replay to the source record. The registered `scenario.kafka-record-*` and
-`stress.kafka-record-*` workloads read all new fields in every ACK mode, distinguish tombstones
-from empty values, and drive event time through two branch windows beside tracked ingestion and
-lifecycle locks. Driver polling and metadata conversion remain outside Deloxide's lock detector;
-the ingestor-host Shuttle checks retain their existing intake and settlement scope.
+programs read. Keys are borrowed, timestamps are typed when a visit hands them over, and metadata
+visits add no lock or shared state. A timestamp no `DATETIME` holds is handed over as
+unrepresentable, which the ingest group refuses through the message-error path its other admission
+refusals use. The `kafka-record-metadata` Bolero property holds the complete row, out-of-range
+timestamps included, and its retained replay to the source record. The registered
+`scenario.kafka-record-*` and `stress.kafka-record-*` workloads read all new fields in every ACK
+mode, distinguish tombstones from empty values, drive event time through two branch windows, and
+refuse a record whose timestamp no `DATETIME` holds only where a route or `TIMESTAMP AT` reads it,
+beside tracked ingestion, refusal, acknowledgement and lifecycle locks. Driver polling and metadata
+conversion remain outside Deloxide's lock detector; the ingestor-host Shuttle checks retain their
+existing intake and settlement scope.
 
 RabbitMQ delivery metadata stays with its delivery in the same way. The visit borrows the envelope
 and every basic property, adds no lock or shared state, and hands a timestamp no `DATETIME` holds

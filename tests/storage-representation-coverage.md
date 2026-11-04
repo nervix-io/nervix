@@ -27,8 +27,9 @@ Plexus properties preserve the metadata source distinctly from a payload field o
 and the same signature and namespace fence that shape.
 
 Pulsar subscription generators draw both required owned creation positions, `EARLIEST` and
-`LATEST`, and provisioned subscriptions without a position. Statement generators mix typed
-`SET START AT` with shared ingestor operations. The Model, registry and consensus properties
+`LATEST`, provisioned subscriptions without a position, and all four subscription types, with one
+instance for a type that reads through one consumer. Statement generators mix typed `SET START AT`
+and `SET TYPE` with shared ingestor operations. The Model, registry and consensus properties
 preserve those complete values.
 
 KAFKA TOPIC ingestor generators draw domain-owned offsets, with no position, and a consumer group
@@ -164,7 +165,9 @@ dot-separated namespace, the storage backend and location, catalog reference and
 commit-size limit. Registry and Model archive properties compare those fields with the complete
 Model. The vocabulary owner separately checks namespace JSON/archive equality and backend
 conversions in `models-iceberg-declarations`; `client-config-schema` covers ordered owned and
-delegated configuration values through JSON/archive equality and public inspection.
+delegated configuration values through JSON/archive equality and public inspection. The same property
+includes MySQL pool keys with nonnegative idle milliseconds, whole-second maximum ages,
+defaulted acquire/maintenance intervals, and complete authored-value preservation.
 
 ## Client Configuration And Inspection
 
