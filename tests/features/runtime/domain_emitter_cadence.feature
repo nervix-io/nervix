@@ -267,7 +267,7 @@ Feature: Domain-paced emitter cadence
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-      CREATE ICEBERG TABLE EMITTER iceberg_cadence FROM notifications TO s3_main TABLE 'cadence_notifications_{{test_id}}' NAMESPACE '{{domain}}' LOCATION 's3://nervix-iceberg/tables/cadence_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 40s MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 40s MAX BATCH SIZE 1MiB
+      CREATE ICEBERG TABLE EMITTER iceberg_cadence FROM notifications TO s3_main TABLE 'cadence_notifications_{{test_id}}' NAMESPACE '{{domain}}' LOCATION 's3://nervix-iceberg/tables/cadence_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 40s MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'user_id' = input.user_id, 'action' = input.action } <batch> FLUSH EACH 40s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       START AT '2000-01-01T00:00:00Z' TIME RATE 20.0;
@@ -279,16 +279,19 @@ Feature: Domain-paced emitter cadence
     # At TIME RATE 20 each 40s boundary lasts two physical seconds. The flush stages the row two
     # seconds after it arrives and its commit cadence starts there, so the row reaches the table no
     # sooner than four seconds after it was posted, and long before the 80 seconds the two
-    # boundaries would take on the physical clock.
+    # boundaries would take on the physical clock. BATCH divides the staged rows into data files
+    # and leaves both boundaries where they are.
     Then within "30s" the Iceberg table "cadence_notifications_{{test_id}}" contains a row no sooner than "4s" after it was published
       """
       {"user_id":11,"action":"paced"}
       """
 
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | batch                              |
+      | 1            |                                    |
+      | 3            |                                    |
+      | 1            | BATCH MAX MESSAGES 2 MAX SIZE 1MiB |
+      | 3            | BATCH MAX MESSAGES 2 MAX SIZE 1MiB |
 
   @domain_emitter_cadence
   Scenario Outline: A stalled emitter keeps its upstream acknowledgement alive on the physical clock
