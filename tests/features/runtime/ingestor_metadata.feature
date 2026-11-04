@@ -72,7 +72,7 @@ Feature: Typed ingestor metadata
     When these Plexus statements fail with "ingestor 'pulsar_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but PULSAR TOPIC ingestors declare only metadata.topic, metadata.message_id, metadata.publish_time, metadata.event_time, metadata.key, metadata.ordering_key, metadata.producer_name, metadata.sequence_id and metadata.redelivery_count"
       """
       CREATE PULSAR TOPIC INGESTOR pulsar_source
-        FROM pulsar_main TOPIC 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' OWNED BY INGESTOR START AT EARLIEST
+        FROM pulsar_main TOPIC 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
@@ -94,7 +94,7 @@ Feature: Typed ingestor metadata
         TO events INHERIT ALL SET tag = metadata.missing UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'mqtt_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but MQTT TOPIC ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'mqtt_source' in domain '{{domain}}' reads metadata.missing in its route to 'events', but MQTT TOPIC ingestors declare only metadata.topic, metadata.retain, metadata.qos, metadata.duplicate, metadata.content_type, metadata.response_topic, metadata.correlation_data and metadata.message_expiry"
       """
       CREATE MQTT TOPIC INGESTOR mqtt_source
         FROM mqtt_main TOPIC 'devices/+/Orders' SESSION PERSISTENT QOS 1
@@ -228,7 +228,7 @@ Feature: Typed ingestor metadata
         TIMESTAMP AT metadata.status
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "ingestor 'mqtt_time' in domain '{{domain}}' takes its TIMESTAMP AT metadata.polled_at, but MQTT TOPIC ingestors declare no metadata field"
+    When these Plexus statements fail with "ingestor 'mqtt_time' in domain '{{domain}}' takes its TIMESTAMP AT metadata.polled_at, but MQTT TOPIC ingestors declare only metadata.topic, metadata.retain, metadata.qos, metadata.duplicate, metadata.content_type, metadata.response_topic, metadata.correlation_data and metadata.message_expiry"
       """
       CREATE MQTT TOPIC INGESTOR mqtt_time
         FROM mqtt_main TOPIC 'devices/+/Orders' SESSION PERSISTENT QOS 1

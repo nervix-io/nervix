@@ -11,7 +11,6 @@ import re
 import shlex
 import shutil
 import signal
-import sqlite3
 import stat
 import subprocess
 import sys
@@ -169,7 +168,7 @@ class KacheWorkflowTests(unittest.TestCase):
         manifest_keys = []
         for path in WORKFLOWS:
             workflow = path.read_text()
-            self.assertIn('KACHE_VERSION: "1.2.2"', workflow_env(workflow))
+            self.assertIn('KACHE_VERSION: "2.0.0"', workflow_env(workflow))
             self.assertIn('KACHE_REMOTE_KEY_LISTING: "false"', workflow_env(workflow))
             self.assertIn(
                 f'KACHE_AUTO_RECOVER_MIN_FREE_BYTES: "{CACHE_RECOVERY_BYTES}"', workflow_env(workflow)
@@ -408,18 +407,19 @@ class KacheWorkflowTests(unittest.TestCase):
         # Without a configuration kache reads none either, so no remote is named.
         self.assertEqual(publish_kache_report.Redaction.from_environment({}).apply(doctor), doctor)
 
-    def test_the_report_says_where_the_index_lives(self) -> None:
+    def test_the_report_names_the_configured_index_mode(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            cache = Path(directory) / "cache"
-            cache.mkdir()
-            (cache / "index.db").write_text("")
-            on_disk = publish_kache_report.index_location({"KACHE_CACHE_DIR": str(cache)})
-            (cache / "index.db").unlink()
-            (cache / "index.db").symlink_to("/dev/shm/kache-index/index.db")
-            in_memory = publish_kache_report.index_location({"KACHE_CACHE_DIR": str(cache)})
-        self.assertEqual(on_disk, "Index: on disk, in the cache directory.")
-        self.assertEqual(in_memory, "Index: in memory, at /dev/shm/kache-index/index.db.")
-        self.assertIsNone(publish_kache_report.index_location({}))
+            configuration = Path(directory) / "kache.toml"
+            configuration.write_text(LocalStore(max_size_gib=5).configuration())
+            configured = publish_kache_report.index_mode({"KACHE_CONFIG": str(configuration)})
+            configuration.write_text('[cache]\nlocal_max_size = "5GiB"\n')
+            default = publish_kache_report.index_mode({"KACHE_CONFIG": str(configuration)})
+            configuration.write_text("[cache\n")
+            unreadable = publish_kache_report.index_mode({"KACHE_CONFIG": str(configuration)})
+        self.assertEqual(configured, "Index mode: `off`, from the job's kache configuration.")
+        self.assertEqual(default, "Index mode: kache's default, which synchronizes the index with the disk.")
+        self.assertIsNone(unreadable)
+        self.assertIsNone(publish_kache_report.index_mode({}))
 
     def test_a_build_report_names_its_phase(self) -> None:
         self.assertEqual(publish_kache_report.heading("tests", "build"), "## Kache: tests, after the build")
@@ -440,9 +440,9 @@ class KacheWorkflowTests(unittest.TestCase):
             self.assertIn(f'--build-arg "{name}=${{{name}}}"', justfile)
             self.assertIn(f'"${{{name}:?{name} is required}}"', justfile)
             self.assertIn(f"ARG {name}\n", dockerfile)
-        self.assertIn('--build-arg "KACHE_VERSION=${KACHE_VERSION:-1.2.2}"', justfile)
+        self.assertIn('--build-arg "KACHE_VERSION=${KACHE_VERSION:-2.0.0}"', justfile)
 
-        self.assertIn("ARG KACHE_VERSION=1.2.2", dockerfile)
+        self.assertIn("ARG KACHE_VERSION=2.0.0", dockerfile)
         self.assertIn("COPY scripts/kache_remote.py ./scripts/kache_remote.py", dockerfile)
         self.assertIn("COPY scripts/publish_kache_report.py ./scripts/publish_kache_report.py", dockerfile)
         self.assertIn("ENV RUSTC_WRAPPER=kache", dockerfile)
@@ -452,18 +452,6 @@ class KacheWorkflowTests(unittest.TestCase):
         configure = dockerfile.index('python3 scripts/kache_remote.py configure "${KACHE_CONFIG}"')
         daemon = dockerfile.index("kache daemon start")
         self.assertLess(configure, daemon)
-        # The store's index lives in the build step's tmpfs while the daemon runs, and returns to the
-        # cache mount, which outlives the step, once the daemon stops.
-        self.assertIn("--mount=type=tmpfs,target=/kache-index", dockerfile)
-        prepare = dockerfile.index("python3 scripts/kache_remote.py prepare-index --memory /kache-index")
-        self.assertLess(configure, prepare)
-        self.assertLess(prepare, daemon)
-        trap = re.search(r"trap '([^']*)' EXIT", dockerfile)
-        assert trap is not None
-        self.assertLess(
-            trap.group(1).index("kache daemon stop"),
-            trap.group(1).index("python3 scripts/kache_remote.py restore-index"),
-        )
         jobs = workflow_jobs(workflow)
         for build in ("build-arch", "build-diagnostic"):
             with self.subTest(job=build):
@@ -504,6 +492,10 @@ class KacheWorkflowTests(unittest.TestCase):
             extraction = image_build.builder_stage.index(f"tar -xzf /tmp/{tool}.tar.gz")
             self.assertLess(check, extraction)
             self.assertIn(f'test "$({tool} --version)" = "{tool} ${{{argument}_VERSION}}"', image_build.builder_stage)
+        # Kache's client runs only with the engine of its own release, so both leave the archive.
+        self.assertIn("tar -xzf /tmp/kache.tar.gz -C /tmp/release-tools kache kache-engine", image_build.builder_stage)
+        self.assertIn("/tmp/release-tools/kache-engine /tmp/release-tools/trunk /usr/local/bin/", image_build.builder_stage)
+        self.assertIn('test "$(kache-engine --version)" = "kache ${KACHE_VERSION}"', image_build.builder_stage)
         self.assertIn("amd64) tool_arch=x86_64;", image_build.builder_stage)
         self.assertIn("arm64) tool_arch=aarch64;", image_build.builder_stage)
 
@@ -605,6 +597,7 @@ class RemoteConfigurationTests(unittest.TestCase):
             {
                 "cache": {
                     "local_max_size": f"{budget}GiB",
+                    "index_mode": "off",
                     "remote": {
                         "type": "s3",
                         "bucket": "kache-ci",
@@ -624,7 +617,9 @@ class RemoteConfigurationTests(unittest.TestCase):
         self.assertEqual(LocalStore.for_volume(4 * 42 * gib + 4 * gib // 2), LocalStore(max_size_gib=43))
         self.assertEqual(LocalStore.for_volume(4 * 42 * gib + 4 * gib // 2 - 4), LocalStore(max_size_gib=42))
         self.assertEqual(LocalStore.for_volume(16 * gib), LocalStore(max_size_gib=5))
-        self.assertEqual(LocalStore(max_size_gib=70).configuration(), '[cache]\nlocal_max_size = "70GiB"\n')
+        self.assertEqual(
+            LocalStore(max_size_gib=70).configuration(), '[cache]\nlocal_max_size = "70GiB"\nindex_mode = "off"\n'
+        )
 
     def test_the_store_is_measured_where_kache_keeps_it(self) -> None:
         self.assertEqual(
@@ -1276,8 +1271,6 @@ class StorePreparationTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
         self.cache = self.root / "home" / ".cache" / "kache"
-        self.memory = self.root / "shm"
-        self.memory.mkdir()
         self.bin = self.root / "bin"
         self.bin.mkdir()
         install_fake(self.bin, "findmnt", FAKE_FINDMNT)
@@ -1300,62 +1293,16 @@ class StorePreparationTests(unittest.TestCase):
             return []
         return [json.loads(line) for line in self.sudo_log.read_text().splitlines()]
 
-    def test_the_index_moves_into_memory_with_the_files_sqlite_keeps_beside_it(self) -> None:
-        self.cache.mkdir(parents=True)
-        for name, content in (("index.db", "pages"), ("index.db-wal", "log"), ("index.db-shm", "shared")):
-            (self.cache / name).write_text(content)
-        line = kache_remote.keep_index_in_memory(self.cache, self.memory)
-        directory = self.memory / "kache-index"
-        self.assertEqual(line, f"kache's index and its write-ahead log live in memory, in {directory}.")
-        self.assertTrue((self.cache / "index.db").is_symlink())
-        self.assertEqual(os.readlink(self.cache / "index.db"), str(directory / "index.db"))
-        self.assertEqual(sorted(path.name for path in self.cache.iterdir()), ["index.db"])
-        self.assertEqual((directory / "index.db-wal").read_text(), "log")
-        self.assertEqual((directory / "index.db-shm").read_text(), "shared")
-        self.assertEqual((self.cache / "index.db").read_text(), "pages")
-        self.assertEqual(
-            kache_remote.keep_index_in_memory(self.cache, self.memory),
-            f"kache's index already lives at {directory / 'index.db'}.",
-        )
-
-    def test_sqlite_keeps_a_symlinked_index_and_its_log_in_memory(self) -> None:
-        kache_remote.keep_index_in_memory(self.cache, self.memory)
-        database = sqlite3.connect(self.cache / "index.db")
-        self.addCleanup(database.close)
-        database.execute("PRAGMA journal_mode=WAL")
-        database.execute("CREATE TABLE entries (cache_key TEXT PRIMARY KEY)")
-        database.execute("INSERT INTO entries VALUES ('key')")
-        database.commit()
-        directory = self.memory / "kache-index"
-        self.assertEqual(sorted(path.name for path in directory.iterdir()), ["index.db", "index.db-shm", "index.db-wal"])
-        self.assertEqual(sorted(path.name for path in self.cache.iterdir()), ["index.db"])
-
-    def test_the_store_moves_its_index_into_a_tmpfs_and_remounts_an_ext4_volume(self) -> None:
-        mounts = [
-            [str(self.memory), {"target": "/dev/shm", "fstype": "tmpfs", "options": "rw,nosuid,nodev"}],
-            ["/", {"target": "/", "fstype": "ext4", "options": "rw,relatime", "remounted": "rw,noatime,nobarrier"}],
-        ]
-        lines = kache_remote.prepare_store(self.environment(mounts), memory=self.memory)
-        self.assertEqual(
-            lines,
-            [
-                f"kache's index and its write-ahead log live in memory, in {self.memory / 'kache-index'}.",
-                f"The volume holding {self.cache}, /, is remounted with rw,noatime,nobarrier.",
-            ],
-        )
+    def test_the_store_remounts_an_ext4_volume(self) -> None:
+        mounts = [["/", {"target": "/", "fstype": "ext4", "options": "rw,relatime", "remounted": "rw,noatime,nobarrier"}]]
+        lines = kache_remote.prepare_store(self.environment(mounts))
+        self.assertEqual(lines, [f"The volume holding {self.cache}, /, is remounted with rw,noatime,nobarrier."])
         self.assertEqual(self.sudo_calls(), [["--non-interactive", "mount", "-o", "remount,noatime,barrier=0", "/"]])
 
-    def test_a_store_without_a_tmpfs_or_an_ext4_volume_keeps_kaches_defaults(self) -> None:
+    def test_a_store_without_an_ext4_volume_keeps_its_options(self) -> None:
         mounts = [["/", {"target": "/", "fstype": "xfs", "options": "rw,relatime"}]]
-        lines = kache_remote.prepare_store(self.environment(mounts), memory=self.memory)
-        self.assertEqual(
-            lines,
-            [
-                f"kache's index stays on disk: {self.memory} is not a tmpfs.",
-                f"The volume holding {self.cache}, /, is xfs, so it was not remounted.",
-            ],
-        )
-        self.assertFalse((self.cache / "index.db").exists())
+        lines = kache_remote.prepare_store(self.environment(mounts))
+        self.assertEqual(lines, [f"The volume holding {self.cache}, /, is xfs, so it was not remounted."])
         self.assertEqual(self.sudo_calls(), [])
 
     def test_a_refused_remount_keeps_the_volume_as_it_was(self) -> None:
@@ -1367,43 +1314,9 @@ class StorePreparationTests(unittest.TestCase):
             "keeps its options.",
         )
 
-    def test_the_index_returns_to_the_cache_directory_once_no_daemon_has_it_open(self) -> None:
-        self.cache.mkdir(parents=True)
-        (self.cache / "index.db").write_text("pages")
-        (self.cache / "index.db-wal").write_text("log")
-        kache_remote.keep_index_in_memory(self.cache, self.memory)
-        self.assertEqual(kache_remote.restore_index(self.cache), f"kache's index is back in {self.cache}.")
-        self.assertFalse((self.cache / "index.db").is_symlink())
-        self.assertEqual((self.cache / "index.db").read_text(), "pages")
-        self.assertEqual((self.cache / "index.db-wal").read_text(), "log")
-        self.assertEqual(list((self.memory / "kache-index").iterdir()), [])
-        self.assertEqual(kache_remote.restore_index(self.cache), "kache's index is already in the cache directory.")
-
-    def test_an_index_whose_memory_is_gone_leaves_kache_to_start_a_new_one(self) -> None:
-        self.cache.mkdir(parents=True)
-        (self.cache / "index.db").symlink_to(self.memory / "gone" / "index.db")
-        line = kache_remote.restore_index(self.cache)
-        self.assertEqual(
-            line, f"kache's index in memory, {self.memory / 'gone' / 'index.db'}, is gone; kache starts a new one in {self.cache}."
-        )
-        self.assertFalse((self.cache / "index.db").exists() or (self.cache / "index.db").is_symlink())
-
-    def test_the_command_line_prepares_restores_and_lightens(self) -> None:
-        mounts = [
-            [str(self.memory), {"target": "/kache-index", "fstype": "tmpfs", "options": "rw"}],
-            ["/", {"target": "/", "fstype": "ext4", "options": "rw,relatime", "remounted": "rw,noatime,nobarrier"}],
-        ]
-        environment = self.environment(mounts)
-        prepared = run_cli(["prepare-index", "--memory", str(self.memory)], environment)
-        self.assertEqual(prepared.returncode, 0, prepared.stderr)
-        self.assertIn("live in memory", prepared.stdout)
-        self.assertTrue((self.cache / "index.db").is_symlink())
-        # The daemon creates the index where the symlink points.
-        (self.memory / "kache-index" / "index.db").write_text("pages")
-        restored = run_cli(["restore-index"], environment)
-        self.assertEqual(restored.returncode, 0, restored.stderr)
-        self.assertEqual(restored.stdout.strip(), f"kache's index is back in {self.cache}.")
-        lightened = run_cli(["lighten-volume", str(self.root)], environment)
+    def test_the_command_line_lightens_a_volume(self) -> None:
+        mounts = [["/", {"target": "/", "fstype": "ext4", "options": "rw,relatime", "remounted": "rw,noatime,nobarrier"}]]
+        lightened = run_cli(["lighten-volume", str(self.root)], self.environment(mounts))
         self.assertEqual(lightened.returncode, 0, lightened.stderr)
         self.assertEqual(lightened.stdout.strip(), f"The volume holding {self.root}, /, is remounted with rw,noatime,nobarrier.")
 

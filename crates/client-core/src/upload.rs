@@ -7,13 +7,13 @@
 //! - **Must not know.** How the server installs a resource.
 
 use std::{
-    num::NonZeroU64,
+    num::{NonZeroU32, NonZeroU64},
     path::{Path, PathBuf},
 };
 
 use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     EncodedFrame, RequestId, UploadChunk, UploadDisposition, UploadFrame, UploadReply,
     UploadReplyFrame, UploadStart, VerifiedFrame,
@@ -29,9 +29,10 @@ use tokio::{
 };
 use tokio_tar::{Builder as AsyncTarBuilder, EntryType, Header, HeaderMode};
 use tonic::{Request, Response, Status, codegen::http::uri::PathAndQuery, transport::Channel};
+use tracing::debug;
 
 use crate::{
-    client::{Client, RecoveryMode, SessionRecovery},
+    client::{Client, RecoveryDeadline, RecoveryMode, SessionRecovery},
     connection::GrpcConnector,
     error::{ClientError, RequestKind},
     exchange::SESSION_LIMITS,
@@ -55,6 +56,13 @@ const ARCHIVE_BUFFER_BYTES: usize = 1024 * 1024;
 /// The request identity of an upload's start frame. Every attempt is a stream of its own that
 /// exactly one reply answers, so the identity only has to be non-zero.
 const UPLOAD_REQUEST_ID: RequestId = RequestId::new(NonZeroU64::MIN);
+
+// An upload opens at most one call per leader routing attempt, and its outcome counts the calls
+// it opened in a `u32`: every attempt number below the bound fits one.
+const _: () = assert!(
+    Client::MAX_LEADER_ROUTING_ATTEMPTS.ilog2() < u32::BITS,
+    "the calls an upload opens fit the u32 its outcome counts them in"
+);
 
 impl Client {
     pub async fn upload_resource_from_directory(
@@ -95,8 +103,11 @@ impl Client {
         let archive = UploadArchive::build(directory.as_ref()).await?;
         let result =
             nervix_primitives::time::timeout(self.inner.connector.retry_timeout(), async {
+                // How many calls the upload opened, the one under way included.
+                let mut calls = NonZeroU32::MIN;
                 for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
                     nervix_primitives::task::consume_budget().await;
+                    calls = Self::upload_calls_opened(attempt);
                     let start = UploadStart {
                         request_id: UPLOAD_REQUEST_ID,
                         domain: domain.clone(),
@@ -131,7 +142,20 @@ impl Client {
                             if upload_status_is_retryable(&status)
                                 && Self::await_retry(attempt).await =>
                         {
-                            match self.recover_session(RecoveryMode::Replace).await? {
+                            debug!(
+                                upload_identity = %upload_identity,
+                                calls = calls.get(),
+                                %status,
+                                "a resource upload call ended before its reply arrived, so the \
+                                 upload opens another with the same identity and archive"
+                            );
+                            match self
+                                .recover_session(
+                                    RecoveryMode::Replace,
+                                    RecoveryDeadline::RetryBudget,
+                                )
+                                .await?
+                            {
                                 SessionRecovery::Ready => continue,
                                 SessionRecovery::Unavailable => {
                                     return Err(Report::new(ClientError::UploadResource(status)));
@@ -168,10 +192,28 @@ impl Client {
                             received: received.clone(),
                         }));
                     }
-                    let outcome = CommandOutcome::from_upload(reply, upload_identity.clone());
+                    let outcome =
+                        CommandOutcome::from_upload(reply, upload_identity.clone(), calls);
                     match outcome.routing() {
-                        Routing::Redirect(leader) => self.follow_leader(leader).await?,
-                        Routing::AwaitElection if Self::await_retry(attempt).await => {}
+                        Routing::Redirect(leader) => {
+                            debug!(
+                                upload_identity = %upload_identity,
+                                calls = calls.get(),
+                                %leader,
+                                "a resource upload call was redirected, so the upload opens \
+                                 another at the leader with the same identity and archive"
+                            );
+                            self.follow_leader(leader, RecoveryDeadline::RetryBudget)
+                                .await?;
+                        }
+                        Routing::AwaitElection if Self::await_retry(attempt).await => {
+                            debug!(
+                                upload_identity = %upload_identity,
+                                calls = calls.get(),
+                                "a resource upload call found no leader, so the upload opens \
+                                 another with the same identity and archive"
+                            );
+                        }
                         _ => return Ok(outcome),
                     }
                 }
@@ -183,6 +225,7 @@ impl Client {
                     version: None,
                     origin: None,
                     failure: None,
+                    calls,
                 });
                 Ok(exhausted)
             })
@@ -201,6 +244,18 @@ impl Client {
                 }))
             }
         }
+    }
+
+    /// How many calls an upload has opened once it opened the call of its zero-based `attempt`.
+    fn upload_calls_opened(attempt: usize) -> NonZeroU32 {
+        let earlier = u32::try_from(attempt).assured(
+            "an upload makes fewer attempts than MAX_LEADER_ROUTING_ATTEMPTS, which a const \
+             assertion keeps within u32",
+        );
+        NonZeroU32::MIN.checked_add(earlier).assured(
+            "the calls before this one number fewer than MAX_LEADER_ROUTING_ATTEMPTS, so counting \
+             this one as well stays within u32",
+        )
     }
 }
 

@@ -506,9 +506,9 @@ mod tests {
             "KAFKA TOPIC INGESTOR i FROM c TOPIC 't' OFFSET BY DOMAIN MODE NO ACK ON QUIESCE \
              SUSPEND",
             "PULSAR TOPIC INGESTOR i FROM c TOPIC 't' SUBSCRIPTION 's' OWNED BY INGESTOR START AT \
-             EARLIEST MODE NO ACK ON QUIESCE SUSPEND",
-            "PULSAR TOPIC INGESTOR i FROM c TOPIC 't' SUBSCRIPTION 's' PROVISIONED MODE NO ACK ON \
-             QUIESCE SUSPEND",
+             EARLIEST TYPE SHARED MODE NO ACK ON QUIESCE SUSPEND",
+            "PULSAR TOPIC INGESTOR i FROM c TOPIC 't' SUBSCRIPTION 's' PROVISIONED TYPE EXCLUSIVE \
+             MODE NO ACK ON QUIESCE SUSPEND",
             "RABBITMQ QUEUE INGESTOR i FROM c QUEUE 'q' MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY \
              POLICY BACKOFF 1s MAX 2s ON QUIESCE SUSPEND",
             "SQS QUEUE INGESTOR i FROM c QUEUE 'q' MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY \
@@ -570,7 +570,7 @@ mod tests {
             ),
             (
                 "PULSAR TOPIC INGESTOR i FROM c TOPIC 'public/default/orders' SUBSCRIPTION 's' \
-                 PROVISIONED MODE NO ACK ON QUIESCE SUSPEND",
+                 PROVISIONED TYPE SHARED MODE NO ACK ON QUIESCE SUSPEND",
                 "invalid pulsar_topic 'public/default/orders': holds '/' without naming its \
                  domain, one of persistent, non-persistent",
             ),
@@ -1107,7 +1107,7 @@ mod tests {
     fn parses_create_ingestor_pulsar_ack_sequential() {
         let input = r#"
             CREATE PULSAR TOPIC INGESTOR pulsar_notifications
-              FROM pulsar_main TOPIC 'notifications' SUBSCRIPTION 'nervix_subscription' OWNED BY INGESTOR START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s
+              FROM pulsar_main TOPIC 'notifications' SUBSCRIPTION 'nervix_subscription' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED MODE ACK SEQUENTIAL ACK TIMEOUT 15s RETRY POLICY BACKOFF 250ms MAX 8s
               ON QUIESCE SUSPEND DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
@@ -1130,6 +1130,7 @@ mod tests {
                     ownership: PulsarSubscriptionOwnership::Ingestor {
                         start_at: nervix_models::IngestStartPosition::Earliest
                     },
+                    kind: nervix_models::PulsarSubscriptionType::Shared,
                 },
                 instances: nonzero!(1u64),
                 mode: PulsarIngestMode::AckSequential {
@@ -1297,7 +1298,7 @@ mod tests {
     #[test]
     fn pulsar_mode_context_does_not_offer_kafka_offset_keywords() {
         let input = "CREATE PULSAR TOPIC INGESTOR i FROM p TOPIC 'top' SUBSCRIPTION 'sub' OWNED \
-                     BY INGESTOR START AT EARLIEST MODE ";
+                     BY INGESTOR START AT EARLIEST TYPE SHARED MODE ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"ACK".to_string()));
         assert!(suggestions.contains(&"NO ACK".to_string()));
@@ -1334,7 +1335,7 @@ mod tests {
         ] {
             let source = format!(
                 "PULSAR TOPIC INGESTOR i FROM c TOPIC 'orders' SUBSCRIPTION 'Readers' {ownership} \
-                 INSTANCES 2 MODE NO ACK ON QUIESCE SUSPEND"
+                 TYPE SHARED INSTANCES 2 MODE NO ACK ON QUIESCE SUSPEND"
             );
             let parsed = parse_create_ingestor(&ingestor_with_source(&source))
                 .unwrap_or_else(|error| panic!("`{source}` should parse: {error:?}"));
@@ -1365,7 +1366,7 @@ mod tests {
         ] {
             let source = format!(
                 "PULSAR TOPIC INGESTOR i FROM c TOPIC 'orders' SUBSCRIPTION 'readers' {ownership} \
-                 MODE NO ACK ON QUIESCE SUSPEND"
+                 TYPE SHARED MODE NO ACK ON QUIESCE SUSPEND"
             );
             let error = parse_create_ingestor(&ingestor_with_source(&source)).expect_err(&format!(
                 "`{source}` declares no single ownership of its subscription"
@@ -1392,17 +1393,21 @@ mod tests {
     }
 
     #[test]
-    fn pulsar_ownership_is_followed_by_the_instances_and_the_mode() {
+    fn pulsar_ownership_is_followed_by_the_type_and_then_the_instances_and_the_mode() {
         for ownership in ["OWNED BY INGESTOR START AT EARLIEST", "PROVISIONED"] {
-            let input = format!(
+            let owned = format!(
                 "CREATE PULSAR TOPIC INGESTOR i FROM p TOPIC 'top' SUBSCRIPTION 'sub' {ownership} "
             );
-            let suggestions = suggest_create_ingestor(&input, input.len());
-            assert!(suggestions.contains(&"INSTANCES".to_string()), "{input}");
-            assert!(suggestions.contains(&"MODE".to_string()), "{input}");
+            let suggestions = suggest_create_ingestor(&owned, owned.len());
+            assert_eq!(suggestions, ["TYPE"], "{owned}");
+
+            let typed = format!("{owned}TYPE FAILOVER ");
+            let suggestions = suggest_create_ingestor(&typed, typed.len());
+            assert!(suggestions.contains(&"INSTANCES".to_string()), "{typed}");
+            assert!(suggestions.contains(&"MODE".to_string()), "{typed}");
             assert!(
                 !suggestions.contains(&"PROVISIONED".to_string()),
-                "{input}: {suggestions:?}"
+                "{typed}: {suggestions:?}"
             );
         }
     }
@@ -1420,7 +1425,7 @@ mod tests {
         "#;
 
         parse_create_ingestor_tokens(&to_tokens(input))
-            .expect_err("Pulsar subscription type is not part of the public grammar");
+            .expect_err("a Pulsar subscription's TYPE follows its owner");
     }
 
     #[test]

@@ -2712,6 +2712,7 @@ fn alter_emitter_operation_to_plexus(
             "SET {}",
             commit_policy_to_plexus(commit_each, max_commit_size)
         )),
+        AlterEmitterOperation::AlterEnvelope { alteration } => alteration.to_canonical_plexus(),
     }
 }
 
@@ -3058,7 +3059,7 @@ fn envelope_clauses(
     if !envelope.properties.is_empty() {
         clauses.push(Clause::braced(
             "PROPERTIES",
-            envelope_property_items(envelope)?,
+            envelope_property_items(&envelope.properties)?,
         ));
     }
     Ok(clauses)
@@ -3092,10 +3093,10 @@ fn envelope_clause_texts(
 
 /// Each property an envelope sets, as `'<key>' = <expression>`, in written order.
 fn envelope_property_items(
-    envelope: &EmitterEnvelope,
+    properties: &[crate::EnvelopeProperty],
 ) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
-    let mut items = Vec::with_capacity(envelope.properties.len());
-    for property in &envelope.properties {
+    let mut items = Vec::with_capacity(properties.len());
+    for property in properties {
         items.push(format!(
             "{} = {}",
             string_literal(&property.name),
@@ -3112,10 +3113,30 @@ impl EmitterEnvelope {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut parts = envelope_clause_texts(self)?;
         if !self.properties.is_empty() {
-            let items = envelope_property_items(self)?;
+            let items = envelope_property_items(&self.properties)?;
             parts.push(format!("PROPERTIES {{{}}}", items.join(", ")));
         }
         Ok(parts.join(" "))
+    }
+}
+
+impl crate::EmitterEnvelopeAlteration {
+    /// The declaration-gated targeted edit as canonical Plexus.
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        match self {
+            Self::SetPersistent => Ok("SET PERSISTENT".to_owned()),
+            Self::DropPersistent => Ok("DROP PERSISTENT".to_owned()),
+            Self::SetTimestamp { expression } => Ok(format!(
+                "SET TIMESTAMP {}",
+                expression_to_plexus(expression)?
+            )),
+            Self::DropTimestamp => Ok("DROP TIMESTAMP".to_owned()),
+            Self::SetProperties { properties } => Ok(format!(
+                "SET PROPERTIES {{{}}}",
+                envelope_property_items(properties)?.join(", ")
+            )),
+            Self::DropProperties => Ok("DROP PROPERTIES".to_owned()),
+        }
     }
 }
 
@@ -3371,14 +3392,15 @@ mod tests {
         PlacementPolicy, PostgresConflictAction, PostgresEmitter, PostgresTableEmitter,
         PostgresValueMapping, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
         PrometheusConfigEntry, PrometheusIngestMode, PrometheusQueryIngestor, PulsarEmitter,
-        PulsarIngestMode, PulsarSubscription, PulsarSubscriptionOwnership, PulsarTopicEmitter,
-        PulsarTopicIngestor, RabbitMqEmitter, RabbitMqExchangeEmitter, RabbitMqIngestMode,
-        RabbitMqQueueEmitter, RabbitMqQueueIngestor, RedisEmitter, RedisPubSubEmitter,
-        RedisPubSubIngestMode, RedisPubSubIngestor, RelayBranching, RetryPolicy, RouteConstruction,
-        SchemaField, SentryConfigEntry, SentryEmitter, SentryEventEmitter, SignalingProtobufConfig,
-        SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsEmitter, SqsIngestMode,
-        SqsQueueEmitter, SqsQueueIngestor, SyslogCollectorEmitter, SyslogEmitter, SyslogIngestMode,
-        SyslogListenerIngestor, UdfArgument, UdfLanguage, UdfReturn, WebsocketsConnectionIngestor,
+        PulsarIngestMode, PulsarSubscription, PulsarSubscriptionOwnership, PulsarSubscriptionType,
+        PulsarTopicEmitter, PulsarTopicIngestor, RabbitMqEmitter, RabbitMqExchangeEmitter,
+        RabbitMqIngestMode, RabbitMqQueueEmitter, RabbitMqQueueIngestor, RedisEmitter,
+        RedisPubSubEmitter, RedisPubSubIngestMode, RedisPubSubIngestor, RelayBranching,
+        RetryPolicy, RouteConstruction, SchemaField, SentryConfigEntry, SentryEmitter,
+        SentryEventEmitter, SignalingProtobufConfig, SignalingStep, SignalingWaitStep,
+        SignalingWireFormat, SqsEmitter, SqsIngestMode, SqsQueueEmitter, SqsQueueIngestor,
+        SyslogCollectorEmitter, SyslogEmitter, SyslogIngestMode, SyslogListenerIngestor,
+        UdfArgument, UdfLanguage, UdfReturn, WebsocketsConnectionIngestor,
         WebsocketsEndpointIngestor, WebsocketsIngestMode, WindowBound, WindowStateLimit,
         WireSchemaField, ZeroMqEmitter, ZeroMqIngestMode, ZeroMqPullIngestor, ZeroMqPushEmitter,
         expression_to_plexus,
@@ -4895,6 +4917,7 @@ mod tests {
                         subscription: PulsarSubscription {
                             name: named("Readers"),
                             ownership: PulsarSubscriptionOwnership::Provisioned,
+                            kind: PulsarSubscriptionType::KeyShared,
                         },
                         instances: nonzero!(1u64),
                         mode: PulsarIngestMode::NoAck,
@@ -4902,8 +4925,8 @@ mod tests {
                     }),
                 ),
                 "CREATE PULSAR TOPIC INGESTOR pulsar_ingestor\n  FROM pulsar_main TOPIC \
-                 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' PROVISIONED MODE NO \
-                 ACK ON QUIESCE SUSPEND",
+                 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' PROVISIONED TYPE \
+                 KEY_SHARED MODE NO ACK ON QUIESCE SUSPEND",
             ),
             (
                 orders_ingestor(

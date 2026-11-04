@@ -1140,8 +1140,8 @@ Feature: Iceberg emission
       """
       {"user_id":44,"action":"STAGED"}
       """
-    Then the temp directory eventually contains an Iceberg Arrow IPC staged batch
-    And the temp directory does not contain an Iceberg Parquet staged batch
+    Then the temp directory eventually contains an Iceberg staging file
+    And the temp directory does not contain an Iceberg Parquet staging file
     And the Iceberg table "temp_notifications_{{test_id}}" does not contain a row within "500ms"
       """
       {"user_id":44,"action":"STAGED"}
@@ -1226,7 +1226,7 @@ Feature: Iceberg emission
       """
       {"user_id":46,"action":"SHUTDOWN_STAGED"}
       """
-    Then the temp directory eventually contains an Iceberg Arrow IPC staged batch
+    Then the temp directory eventually contains an Iceberg staging file
     And the Iceberg table "shutdown_notifications_{{test_id}}" does not contain a row within "500ms"
       """
       {"user_id":46,"action":"SHUTDOWN_STAGED"}
@@ -1464,7 +1464,7 @@ Feature: Iceberg emission
       """
       {"user_id":61,"action":"held"}
       """
-    Then the temp directory eventually contains an Iceberg Arrow IPC staged batch
+    Then the temp directory eventually contains an Iceberg staging file
     # The row is staged and its commit comes due 30 seconds later. Loading the staged file charges
     # every byte of it, and the commit takes that charge only when the class has room for it now.
     When bulk memory on every node keeps only "64" bytes free
@@ -1557,7 +1557,7 @@ Feature: Iceberg emission
     # The retry comes no sooner than its backoff, and it staged the other branch's row before it
     # commits again: the file the refused commit began with and the newer one are both staged.
     And within "120s" the Iceberg catalog gate holds a commit no sooner than "10s" after it refused one
-    And the temp directory holds 2 Iceberg Arrow IPC staged batches
+    And the temp directory holds 2 Iceberg staging files
     And batch "rows" remains pending for "1s"
     # The retried commit appends only what it began with. The newer row waits for a commit of its
     # own, and the batch that carries it stays unacknowledged until the catalog holds that row too.
@@ -1580,7 +1580,7 @@ Feature: Iceberg emission
       | 3            |
 
   @iceberg_commit_whole_class @slots_2
-  Scenario Outline: An Iceberg staged file larger than the bulk memory class commits only once the whole class is free
+  Scenario Outline: An Iceberg staged batch larger than the bulk memory class commits only once the whole class is free
     Given Iceberg dependencies are running
     And a <cluster_size> node nervix cluster is started
     And Iceberg table "oversized_messages_{{test_id}}" exists at "s3://nervix-iceberg/tables/oversized_messages_{{test_id}}" with columns
@@ -1590,7 +1590,7 @@ Feature: Iceberg emission
       """
     # Each payload reaches the emitter as a relay batch of its own, below the 32 MiB a relay frame
     # carries between nodes. The emitter collects both on its own node into one input batch, which
-    # it stages as one file larger than the 32 MiB bulk memory class.
+    # it stages as one staged batch larger than the 32 MiB bulk memory class.
     And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -1628,16 +1628,98 @@ Feature: Iceberg emission
       START;
       """
     # The scenario holds half of every node's bulk memory class before any row arrives, so the
-    # commit can read the staged file only once the scenario gives that half back.
+    # commit can read the staged batch only once the scenario gives that half back.
     When bulk memory on every node keeps only "16777216" bytes free
     And http payload with value 81 and a 17825792 byte message is posted to host "iceberg-oversized-{{test_id}}.example.com" path "/messages"
     And http payload with value 82 and a 17825792 byte message is posted to host "iceberg-oversized-{{test_id}}.example.com" path "/messages"
-    Then within "120s" DESCRIBE EMITTER "iceberg_oversized" on the leader node reports an Iceberg commit waiting for the whole bulk memory class, whose staged file bytes are saved as placeholder "staged_bytes"
+    Then within "120s" DESCRIBE EMITTER "iceberg_oversized" on the leader node reports an Iceberg commit waiting for the whole bulk memory class, whose staged batch bytes are saved as placeholder "staged_bytes"
     And the Iceberg table "oversized_messages_{{test_id}}" holds 0 rows
     When bulk memory on every node is released
     Then within "120s" the Iceberg table "oversized_messages_{{test_id}}" holds 2 rows
     And within "30s" DESCRIBE EMITTER "iceberg_oversized" on the leader node reports "bytes_total" "sent" relay "large_messages" totalling "{{staged_bytes}}"
     And within "30s" every node reserves only the bulk memory the scenario holds
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @iceberg_staging_file
+  Scenario Outline: Iceberg appends every batch one commit publishes to one staging file, across flushes and branches
+    Given Iceberg dependencies are running
+    And temporary files use a custom temp directory
+    And a <cluster_size> node nervix cluster is started
+    And Iceberg table "one_staging_file_{{test_id}}" exists at "s3://nervix-iceberg/tables/one_staging_file_{{test_id}}" with columns
+      """
+      user_id I64
+      action STRING
+      """
+    And the Iceberg REST catalog is reached through a gate that holds every commit to table "one_staging_file_{{test_id}}"
+    # Each user is a branch of its own, so each submitted batch reaches the emitter as one released
+    # batch per user. Both submissions are staged long before the commit cadence, measured from the
+    # first staged rows, begins the commit that publishes all five of them.
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA notification (user_id I64, action STRING);
+      CREATE SCHEMA user_key (user_id I64);
+      CREATE BRANCH by_user SCHEMA user_key TTL 5m;
+      CREATE RELAY notifications SCHEMA notification BRANCHED BY by_user;
+      CREATE CLIENT PRODUCER INGESTOR notifications_in
+        FROM SCHEMA notification
+          MODE ACK PARALLEL MAX 4 ACK TIMEOUT 10m RETRY POLICY BACKOFF 100ms MAX 1s
+          ON QUIESCE SUSPEND
+        TIMESTAMP NOW
+        TO notifications
+          INHERIT ALL
+          BRANCHED BY by_user SET user_id = message.user_id
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE S3 CLIENT s3_main
+        CONFIG {
+          'endpoint' = '{{rustfs_addr}}',
+          'region' = 'us-east-1',
+          'access_key_id' = 'rustfsadmin',
+          'secret_access_key' = 'rustfsadmin',
+          'path_style_access' = true
+        };
+      CREATE ICEBERG_REST CLIENT iceberg_catalog
+        CONFIG {
+          'uri' = '{{iceberg_catalog_gate}}',
+          'warehouse' = 's3://nervix-iceberg/warehouse'
+        };
+      CREATE ICEBERG TABLE EMITTER iceberg_one_staging_file FROM notifications
+        TO s3_main TABLE 'one_staging_file_{{test_id}}' NAMESPACE '{{domain}}' LOCATION 's3://nervix-iceberg/tables/one_staging_file_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 20s MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 1s MAX 10s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And client "app" is connected to node "node-1"
+    When client "app" opens producer "input" on ingestor "notifications_in" expecting fields "user_id I64, action STRING"
+    And producer "input" submits batch "first" with rows
+      | user_id | action |
+      | 81      | open   |
+      | 82      | open   |
+      | 83      | open   |
+    And producer "input" submits batch "second" with rows
+      | user_id | action |
+      | 84      | close  |
+      | 85      | close  |
+    # The gate holds the commit once it has begun, which seals the staging file it publishes.
+    Then within "90s" the Iceberg catalog gate holds a commit
+    And the temp directory holds 1 Iceberg staging files
+    When the Iceberg catalog gate passes every commit
+    Then batch "first" completes
+    And batch "second" completes
+    And within "60s" the Iceberg table "one_staging_file_{{test_id}}" holds exactly these rows
+      """
+      {"user_id":81,"action":"open"}
+      {"user_id":82,"action":"open"}
+      {"user_id":83,"action":"open"}
+      {"user_id":84,"action":"close"}
+      {"user_id":85,"action":"close"}
+      """
 
     Examples:
       | cluster_size |

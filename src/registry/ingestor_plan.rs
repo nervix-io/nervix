@@ -1291,6 +1291,7 @@ mod tests {
             ownership: PulsarSubscriptionOwnership::Ingestor {
                 start_at: nervix_models::IngestStartPosition::Earliest,
             },
+            kind: nervix_models::PulsarSubscriptionType::Shared,
         }
     }
 
@@ -1422,7 +1423,7 @@ mod tests {
                     mode: MqttIngestMode::NoAck,
                 },
             )),
-            reads_headers: false,
+            reads_headers: true,
         }
     }
 

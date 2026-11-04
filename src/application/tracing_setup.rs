@@ -386,11 +386,17 @@ impl io::Write for SharedFileWriter {
 /// waited out a refused restoration, the serving node refused or forwarded the open, or the
 /// executing endpoint never assigned the batch. Their decisions are logged at `debug`, once per
 /// open, refusal, attachment and attempt, so a scenario with endpoints costs a few dozen lines.
+///
+/// A native resource upload says at `debug` why it opens another call for the same identity: the
+/// status of the call that ended before its reply arrived, the leader a reply redirected it to, or
+/// that no leader was known. Without those lines an upload that recovered the version its own
+/// earlier call installed reads like one that found another upload's, and an upload that repeats
+/// nothing costs nothing.
 const TEST_TRACE_FILTER: &str =
     "nervix_interconnect=debug,nervix_consensus::replication=debug,\
-     nervix_client_core::restoration=debug,nervix_server::application=debug,\
-     nervix_client_core::consumer=debug,nervix_client_core::producer=debug,\
-     nervix_server::application::session::consumers=debug,\
+     nervix_client_core::restoration=debug,nervix_client_core::upload=debug,\
+     nervix_server::application=debug,nervix_client_core::consumer=debug,\
+     nervix_client_core::producer=debug,nervix_server::application::session::consumers=debug,\
      nervix_server::application::session::producers=debug,\
      nervix_server::application::client_consumers=debug,\
      nervix_server::application::client_producers=debug,\

@@ -74,7 +74,9 @@ over the interconnect, and that node encodes Row frames for its own sessions.
 | Control plane | Subscription delivery | The delivery of one subscription generation to its session, and the interest lease it holds on its relay. |
 | Data plane | Relay subscription fan-out | The subscribers of one relay, the definition they were attached under, and ending every subscriber before a batch of another definition can reach it. |
 | Edges | The Rust client, `nervix-client-core` | Connecting, TLS selection, the dispatcher that pairs replies with requests, execution identity across retries, redirect and reconnect, transaction binding and previews, desired subscriptions and their restoration, followed domain clocks, uploads, and backup downloads verified against their summary. |
-| Edges | The shared binding, `nervix-client-ffi` | The C ABI through which C, C++, Python, JVM and Ruby hosts drive the Rust client's state machine, with borrowed frame access, bulk column copies, retained domain clock events, retained reads of the clock of each followed domain with its projections, and the Rust client's producers and consumers with their typed outcomes, settlements and Arrow batches built and read one column level at a time. |
+| Edges | The host session runtime, `nervix-client-host` | What every binding shares: the session runtime a host's thread blocks on, cancellation and deadlines, the classification of every client failure by its report's context, subscription events with bulk column access to their verified frames, domain clock events and the clock of each followed domain with its projections, field descriptions, and the Rust client's producers and consumers with their typed outcomes, settlements and Arrow batches built and read one column level at a time. |
+| Edges | The C ABI, `nervix-client-ffi` | The C ABI through which C, C++, JVM and Ruby hosts drive the host session runtime: the handles a host holds, retains and releases, borrowed frame access, and bulk column copies into memory the host passes. |
+| Edges | The Python package, `nervix-client-python` | `nervix_client`, through which CPython hosts drive the host session runtime on pyo3: objects whose lifetimes are Python's, waits that release the GIL, typed exceptions, connection options, columns read as Python values, and Arrow batches exchanged through the Arrow PyCapsule interface. |
 | Edges | The web console and the CLI | Consumers of the same protocol with bounded buffers of their own. The console speaks it over its WebSockets: the session, and one per backup download or restore stream, whose archive it verifies or measures itself; the CLI uses the Rust client. |
 
 The server is the composition root: it is the only crate that names the wire crate, the command
@@ -334,7 +336,8 @@ names.
 | Message that is not a valid frame, or a frame of another call | `INTERNAL` | Close `1007` |
 | Text message | — | Close `1003` |
 | A second request on a download | — | Close `1008` |
-| The node began to stop, during a download or a restore | The call is cut | Close `1001` |
+| The node began to stop, during an upload | `UNAVAILABLE` | — |
+| The node began to stop, during a download or a restore | `UNAVAILABLE` | Close `1001` |
 | Frame without a valid request identity | `SessionEnding` with `ProtocolViolated`, then the end of the stream | The same `SessionEnding`, then a normal close |
 | Session ended by the server | The end of the stream, with status `OK` | A normal close |
 
@@ -950,14 +953,16 @@ recover the outcome later, within the retry validity.
 
 The Rust client bounds each connection attempt by `connect_timeout` (10 seconds by default), each
 request by `request_timeout` (120 seconds), and each public call, including all of its retries and
-redirects, by `retry_timeout` (120 seconds). Without keepalives, a request that outlives
-`request_timeout` is the client's only sign that its session may be dead, so it ends every request
-still waiting on that session, and the next request opens a new one. While an election converges it
-retries with a delay that starts at 100 milliseconds and doubles up to one second. When a call's
-deadline passes before a command's outcome is known, and the command may have been admitted, the
-call fails as uncertain and names the execution reference. The Rust client, the CLI, and the console
-never send `CancelRequest`: a caller that stops waiting only drops its waiter, and the reply, when
-it comes, is discarded.
+redirects, by `retry_timeout` (120 seconds). A `BACKUP` takes `backup_wait_timeout` in place of
+both: its replies and every redirect and reconnect it makes share that one deadline, so a backup
+keeps reconnecting through an outage longer than `retry_timeout`. Without keepalives, a request
+that outlives `request_timeout` is the client's only sign that its session may be dead, so it ends
+every request still waiting on that session, and the next request opens a new one. While an
+election converges it retries with a delay that starts at 100 milliseconds and doubles up to one
+second. When a call's deadline passes before a command's outcome is known, and the command may have
+been admitted, the call fails as uncertain and names the execution reference. The Rust client, the
+CLI, and the console never send `CancelRequest`: a caller that stops waiting only drops its waiter,
+and the reply, when it comes, is discarded.
 
 `nervix-cli backup --timeout` sets only each running domain's quiesce timeout; its request and
 retry budgets stay at their defaults, and `--backup-wait-timeout` bounds the overall command wait.
@@ -1101,7 +1106,12 @@ is a per-session counter that starts at 1, so a handle, the name together with i
 unique within its session only; a generation taken by a request that then failed is simply skipped.
 The visibility wait is what makes the reply meaningful: by the time a client reads
 `SubscriptionOpened`, every live node already routes the relay's batches to the subscriber's node,
-and an advertisement left over from before an earlier withdrawal cannot satisfy it.
+and an advertisement left over from before an earlier withdrawal cannot satisfy it. When a live node
+does not confirm the interest, the refusal names every such node and carries, beneath it, the first
+one's own cause: the interconnect failure that ended the request to it, such as its deadline or the
+node leaving the membership, or the node's own refusal. Like every failed command's message, it is
+the whole chain of the report, as [Errors And Diagnostics](./errors-and-diagnostics.md#rendering)
+describes.
 
 The reply carries the schema and precedes every row. Delivery is held back until the reply is queued
 on the control lane, which the transport always serves first. When the reply cannot be queued,
@@ -1634,6 +1644,14 @@ finalizing in a destructor or spawning cleanup work. The command deadline may ca
 and retains its typed deadline outcome. Once construction succeeds, every transport attempt reads
 the same complete archive and keeps the same upload identity.
 
+The Rust client opens another call for the same upload when a call fails in transport or passes
+its request deadline before a reply arrives, when a reply redirects it to the leader, and when a
+reply says no leader is known. The upload's outcome carries the origin of the call that answered
+and how many calls the upload opened. A repeated call finds recorded what an earlier call of the
+same upload installed, so an upload that opened more than one call can report `Recovered` for its
+own installation. An upload whose identity nothing used before, answered by the only call it
+opened, reports `Executed`.
+
 An upload is identified by its upload identity, not by an execution reference. The identity is
 chosen by the client, at most 128 bytes of ASCII letters, digits, `-`, `_`, and `.`, and is durable
 under the key of the authenticated user, the domain, and the resource. The first complete body
@@ -1867,15 +1885,20 @@ client sees at each ending and what it recovers.
 listeners and ends the sessions they carry. Every request a session had not yet admitted is decided
 cancelled before admission and never begins an effect. Work that was admitted keeps running and no
 reply follows for it: a transaction commit continues, and the node waits for it until its shutdown
-deadline. Subscriptions and domain clock attachments stop with their session, and an upload stream
-still waiting for its client ends at once. A console session receives `SessionEnding` with reason
-`ServerShuttingDown` after the control frames it had already queued, then a normal close. A backup
-download or a restore stream on a console WebSocket of its own ends at once with close code `1001`,
-and a restore admitted with its whole archive goes on without its call. A gRPC
-connection is cut when admission closes, so a native client sees its stream fail, as after any
-transport loss, rather than the ending frame. Either way the client reconnects to another node and
+deadline. Subscriptions and domain clock attachments stop with their session. Every session, native
+or console, receives `SessionEnding` with reason `ServerShuttingDown` after the control frames it
+had already queued; a native session's call then ends with status `OK`, and a console session's
+WebSocket with a normal close. An upload, a restore or a download call on the native listener ends
+at once with `UNAVAILABLE` and is not admitted, unless an upload's installation already began or a
+restore already had its whole archive; either goes on without its call. A backup download or a
+restore stream on a console WebSocket of its own ends at once with close code `1001`, and a restore
+admitted with its whole archive goes on without its call. The node keeps a gRPC connection open
+after admission closes only so that these endings reach the client: it takes no new call on it, and
+it cuts a connection still open two seconds after admission closed, which a native client that
+reads nothing sees as a transport loss. Either way the client reconnects to another node and
 repeats each outstanding command under its execution reference, which joins the admitted work or
-returns its retained outcome.
+returns its retained outcome, and sends again each upload, restore or download whose call did not
+answer.
 
 **Forced ending.** A repeated signal, an expired shutdown deadline, `SIGKILL`, or a crash ends the
 connection without warning. A command whose reply was not received may or may not have been
@@ -1918,15 +1941,18 @@ it restores them.
 
 ## Bindings For Other Hosts
 
-A host language reaches the protocol in one of two ways. It loads the shared Rust binding,
-`nervix-client-ffi`, whose C ABI is `crates/client-ffi/include/nervix_client.h`, or it implements
-the protocol itself from the schema. The binding is the supported path for C, C++, Python, JVM, and
-Ruby hosts. It drives the Rust client's own state machine, so request correlation, leader redirects,
-reconnection, execution identity across retries, and desired-subscription restoration are decided
-once, in the library, and a host never retries, reroutes, or reinterprets an outcome on its own. A
-separate SDK per language would have to reimplement each of those decisions and be qualified again.
+A host language reaches the protocol in one of two ways. It uses the shared Rust binding, or it
+implements the protocol itself from the schema. The binding is the supported path: C, C++, JVM and
+Ruby hosts load its C ABI, `nervix-client-ffi`, whose contract is
+`crates/client-ffi/include/nervix_client.h`, and CPython hosts import its Python package,
+`nervix_client`. Both drive the host session runtime every binding of the Rust client shares,
+`nervix-client-host`, and through it the Rust client's own state machine, so request correlation,
+leader redirects, reconnection, execution identity across retries, and desired-subscription
+restoration are decided once, in the library, and a host never retries, reroutes, or reinterprets
+an outcome on its own. A separate SDK per language would have to reimplement each of those
+decisions and be qualified again.
 
-The binding's lifecycle follows from that choice:
+The C ABI's lifecycle follows from that choice:
 
 - **Handles.** A host opens a session with `nx_session_connect` and releases it with
   `nx_session_free`; outcomes, events and batches read from a session stay valid after it is freed,
@@ -1993,7 +2019,7 @@ The binding's lifecycle follows from that choice:
   `BackupDownloadError` beneath that context, never by text, and `nx_error_message` returns the
   report's whole chain.
 
-The binding connects with the Rust client's default options. It exposes no seeds, timeouts, or
+The C ABI connects with the Rust client's default options. It exposes no seeds, timeouts, or
 certificate authority, so it reaches a node over plaintext and connects to it directly. It exposes
 commands, completion, subscriptions and their events, domain clock events and attached clocks,
 bulk row access, and producers and consumers of client endpoints with their batches, but not the
@@ -2006,13 +2032,42 @@ scalar, string, and bytes fields; a list field of a subscription reports its lev
 are read from the borrowed frame with generated code, while an endpoint batch's lists are read one
 level at a time.
 
+A CPython host imports the Python package instead, `nervix_client`, which `crates/client-python`
+builds on pyo3 for CPython 3.12 and later with the stable ABI. It drives the same host session
+runtime, so every decision above is the C ABI's, and it differs from the C ABI only where a Python
+host differs from a C one:
+
+- **Lifetimes.** An object owns its share of the session and releases it when Python collects it;
+  no application retain or release call exists. A producer, a consumer and a delivery keep their
+  session running until they are collected, and a `memoryview` of an event's frame or a batch's or
+  delivery's stream keeps that object alive.
+- **Threads.** Every call that waits runs on the calling Python thread with the GIL released for
+  as long as it waits, and the library never calls Python from a thread of its own. A `Cancel`
+  triggered from another thread ends a wait with `CancelledError`, and one created with a deadline
+  ends it with `DeadlineError`.
+- **Failures.** A failure raises the exception class of its kind, under `ClientError`, classified
+  by the report's context exactly as the C ABI classifies it, with the whole chain as its message,
+  the command's execution reference on `execution_reference` and an open's refusal on
+  `open_refusal`.
+- **Connection options.** A session takes the Rust client's TLS requirement, certificate
+  authority, seed servers and timeouts, and the message and wait of a refused restoration are read
+  from the event that reports it.
+- **Data.** Columns of an event or a batch read as Python values, one level at a time, or, for an
+  event, in native byte order. A batch exports itself and a submission is imported through the
+  Arrow PyCapsule interface, so pyarrow and polars read and build batches without a copy, and a
+  rows event's rows export as one Arrow batch whose sensitive fields are nullable.
+
 Independent implementations exist as qualification clients rather than supported SDKs. The Go client
 speaks native gRPC with `flatc --go` output and `google.golang.org/grpc`, and the TypeScript client
 speaks the console WebSocket with `flatc --ts` output, unchanged under Node.js and Bun. They
 correlate replies by request identity, follow a leader redirect with the same execution reference,
-and fail rather than report success when an outcome is unknown. Neither restores subscriptions or
-domain clock attachments after reconnection; that recovery belongs to the Rust client and, through
-it, to every binding host. The FlatBuffers runtimes for Go and TypeScript have no verifier, so those
+and fail rather than report success when an outcome is unknown. Their three-node row-conformance
+examples start on a confirmed follower and create an otherwise unused schema to require the leader.
+They compare the original, repeated and terminal-outcome references with the UUIDv7 reference
+supplied by the harness. Go follows a command reply's redirect; TypeScript follows the console's `SessionEnding{LeaderRedirect}` and opens its subscription on the
+replacement session. One-node examples provide direct-connection controls. Neither restores
+subscriptions or domain clock attachments after reconnection; that recovery belongs to the Rust
+client and, through it, to every binding host. The FlatBuffers runtimes for Go and TypeScript have no verifier, so those
 clients check each frame's identifier and every union discriminant and required value they read, and
 the Rust verifier remains the only full structural verification. [Conformance
 Evidence](./client-implementation-manual.md#conformance-evidence) lists the probes, the runtimes
@@ -2021,8 +2076,21 @@ they cover, and how to run them.
 ## Measured Costs
 
 [Client Wire 16](https://app.clickup.com/t/86bc1ahz3) retains the performance report, raw samples,
-reproduction commands, tested revisions and regression alarms. Measurements qualify their recorded
-workload, build profile and host; they do not establish throughput guarantees for another revision.
+reproduction commands, tested revisions and regression alarms, and
+[Client Wire 18](https://app.clickup.com/t/86bc8cx3h) the command preparation and transport report
+with its paired samples. Measurements qualify their recorded workload, build profile and host; they
+do not establish throughput guarantees for another revision.
+
+Before it sends a command, a native client classifies the statements by parsing them with the
+client statement grammar. Building that grammar constructs the parser of every Plexus statement
+and allocates about a megabyte and a half, which costs far more than parsing a command with it,
+and releasing it costs about as much again. The Rust client therefore builds the grammar once on
+each thread that prepares a command and keeps it for the life of the thread. The execution
+identity and the request frame cost little beside the parse. `just client-wire-command-cost`
+measures each of these stages, and `just client-wire-tls-cost` compares the same command and fresh
+connections over plaintext and TLS in alternating pairs against two release servers. A TLS session
+pays most of what TLS costs in its handshake, when it connects; an established TLS session adds a
+few percent to a command's round trip.
 
 The cost model follows the protocol boundaries: the server writes Arrow column values directly
 into FlatBuffers tables, verification runs once per frame, and later views borrow that frame.

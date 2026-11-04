@@ -387,6 +387,7 @@ fn EntityOptionEditor(signals: CreateSignals, option: OptionDeclaration) -> impl
     let class = match keywords {
         "OFFSET BY" => "create-ingestor-offset",
         "SUBSCRIPTION" => "create-ingestor-subscription-ownership",
+        "TYPE" => "create-ingestor-subscription-type",
         "SESSION" => "create-ingestor-mqtt-session",
         "QOS" => "create-ingestor-mqtt-qos",
         _ => "create-ingestor-option",

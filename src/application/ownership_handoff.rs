@@ -367,7 +367,7 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
                 self.reset_every_move(current, target, OwnershipStateResetCause::InvalidCheckpoint);
                 warn!(
                     domain = current.domain.as_str(),
-                    error = %reason,
+                    error = %format_args!("{reason:#}"),
                     "forced ownership recovery could not fingerprint the committed schedule"
                 );
                 return;
@@ -379,7 +379,7 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
                 self.reset_every_move(current, target, OwnershipStateResetCause::InvalidCheckpoint);
                 warn!(
                     domain = current.domain.as_str(),
-                    error = %reason,
+                    error = %format_args!("{reason:#}"),
                     "forced ownership recovery could not fingerprint the target schedule"
                 );
                 return;
@@ -504,7 +504,7 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
                         name = moved.entity.identifier.as_str(),
                         source = %moved.former_owner,
                         destination = %moved.destination,
-                        error = %reason,
+                        error = %format_args!("{reason:#}"),
                         "forced ownership recovery is publishing with recreated runtime state"
                     );
                 }
@@ -1504,7 +1504,7 @@ impl SessionServiceImpl {
                     Err(error) => {
                         debug!(
                             %node,
-                            error = %error,
+                            error = %format_args!("{error:#}"),
                             "ownership handoff participant confirmation is waiting for interconnect"
                         );
                         sleep(ENTITY_GATE_RELEASE_RETRY_INTERVAL).await;
@@ -1660,7 +1660,7 @@ impl SessionServiceImpl {
                         destination = %moved.destination,
                         coordination = %preparations.coordination,
                         operation_id = preparations.operation_id,
-                        error = %error,
+                        error = %format_args!("{error:#}"),
                         "durable ownership handoff preparation discard remains pending"
                     );
                 }
@@ -1697,7 +1697,7 @@ impl SessionServiceImpl {
                         domain = cleanup.domain.as_str(),
                         coordination = %cleanup.coordination,
                         operation_id = cleanup.operation_id,
-                        error = %error,
+                        error = %format_args!("{error:#}"),
                         "could not allocate an authority for ambiguous ownership handoff cleanup"
                     );
                     return;
@@ -1713,7 +1713,7 @@ impl SessionServiceImpl {
                     domain = cleanup.domain.as_str(),
                     coordination = %cleanup.coordination,
                     operation_id = cleanup.operation_id,
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     "ambiguous ownership handoff cleanup passed to the surviving authority"
                 );
                 return;
@@ -1740,7 +1740,7 @@ impl SessionServiceImpl {
                                 domain = cleanup.domain.as_str(),
                                 coordination = %cleanup.coordination,
                                 operation_id = cleanup.operation_id,
-                                error = %error,
+                                error = %format_args!("{error:#}"),
                                 "could not classify an ambiguous durable ownership handoff \
                                  preparation"
                             );
@@ -1778,7 +1778,7 @@ impl SessionServiceImpl {
                             destination = %moved.destination,
                             coordination = %cleanup.coordination,
                             operation_id = cleanup.operation_id,
-                            error = %error,
+                            error = %format_args!("{error:#}"),
                             "durable ownership handoff preparation discard retry remains pending"
                         );
                     }
@@ -1994,7 +1994,7 @@ impl SessionServiceImpl {
             if let Err(error) = result {
                 debug!(
                     %node,
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     "ownership handoff preparation reconciliation remains pending"
                 );
                 if failure.is_none() {
@@ -2050,7 +2050,7 @@ impl SessionServiceImpl {
                         }
                         Err(error) => {
                             debug!(
-                                error = %error,
+                                error = %format_args!("{error:#}"),
                                 "ownership handoff preparation reconciliation will retry"
                             );
                         }

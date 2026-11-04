@@ -127,8 +127,8 @@ See [Domains And Time](domains-and-time.md) for the full clock split. The
 [Plexus Overview](plexus-overview.md) defines the `FLUSH IMMEDIATE` 100 µs minimum batching window.
 For most emitters the collected batch is encoded and published on the flush boundary. Iceberg
 additionally requires `COMMIT EACH <duration> MAX SIZE <bytes>` as part of its emitter clause: flush
-writes local Arrow IPC staging files, and commit writes their rows into Parquet data files and
-appends those files to the table in one catalog commit. `ON MESSAGE ERROR SEND TO`
+appends the batch's rows to a local Arrow IPC staging file, and commit writes their rows into
+Parquet data files and appends those files to the table in one catalog commit. `ON MESSAGE ERROR SEND TO`
 buffers failed-message error records separately and delivers them using the emitter's same `FLUSH`
 interval or maximum batch-size boundary. Which emitters gain from larger flush batches, and which
 publish per record regardless of batch size, is covered by the
@@ -491,6 +491,9 @@ An `HTTP CLIENT` means the same transport for HTTP polling and for the HTTP emit
 HTTP through maintained implementations, Reqwest for polling and hyper for the emitter, over
 HTTP/2 when the endpoint's TLS negotiates it and HTTP/1.1 otherwise, and:
 
+- Both directions trust the Mozilla roots Nervix ships plus the host's native roots. Every PEM
+  certificate in `tls_ca_file` adds to that set, and `tls_cert_file` with `tls_key_file` supplies
+  the client identity. An empty or unreadable native store leaves the bundled roots available.
 - `timeout_ms` is the one deadline of a request and every redirect it follows. A poll's request
   runs within it until the whole response body has been read, and an emitted request until its
   final response headers are complete, as [HTTP requests](#http-requests) describes.
@@ -1122,10 +1125,16 @@ the registry refuses it again in a Model that reaches it another way. The
 declares, and each entity's section below says what its transport does with them. `KAFKA TOPIC`
 declares `TIMESTAMP`, which [Kafka](#kafka) writes as each record's create time, `PULSAR TOPIC`
 declares `TIMESTAMP` and `DELIVER AFTER`, which [Pulsar](#pulsar) writes as each message's event
-time and delivery time, `SQS QUEUE` declares `DELAY` and `DEDUPLICATION ID`, which [SQS](#sqs)
-sends with each message, and the two [RabbitMQ](#rabbitmq) entities declare `MANDATORY`. No entity
-declares another clause or a property yet, and every emitter refuses each clause its entity does
-not declare.
+time and delivery time, `SQS QUEUE`
+declares `DELAY` and `DEDUPLICATION ID`, which [SQS](#sqs) sends with each message, and the two
+[RabbitMQ](#rabbitmq) entities declare `PERSISTENT`, `MANDATORY`, `TIMESTAMP` and their AMQP
+`PROPERTIES` below. Every emitter refuses clauses and keys its entity does not declare.
+
+For the forms its entity declares, `ALTER` offers `SET PERSISTENT` and `DROP PERSISTENT`,
+`SET TIMESTAMP <expression>` and `DROP TIMESTAMP`, and `SET PROPERTIES { … }` and `DROP PROPERTIES`.
+`SET PROPERTIES` replaces the complete nonempty property set. Each targeted operation preserves
+the envelope fields it does not name. Inside a property set, completion offers the declared keys
+that have not yet been written.
 
 | Clause | Written with | Value every record carries |
 | --- | --- | --- |
@@ -1191,20 +1200,24 @@ Transport-specific expectations:
   [Redis Pub/Sub](#redis-pubsub).
 - `MQTT`: use `mqtts://...` in `addr`; Nervix requires `tls_ca_file` and supports `tls_cert_file` plus `tls_key_file`. A plaintext `mqtt://` address reads no TLS file, so `CREATE MQTT CLIENT` refuses all three with it.
 - `NATS`: use `tls://...` in `addr`; Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
-- `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file` and optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address. Pulsar client certificate authentication is not currently exposed.
-- `SQS`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file` and optional `timeout_ms`,
-  and `CREATE SQS CLIENT` refuses a `tls_ca_file` that holds no certificate it could trust. An SQS
-  connection presents no client certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and
-  `tls_key_file`.
+- `PULSAR`: use `pulsar+ssl://...` in `addr`; Nervix honors `tls_ca_file`, presents `tls_cert_file` with `tls_key_file` as its client certificate, and honors optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, all of which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address; see [Pulsar](./ingestors.md#pulsar).
+- `SQS`: use an `https://...` `endpoint`; Nervix trusts the platform's native roots, or only
+  `tls_ca_file` when it is set, and honors optional `timeout_ms`. `CREATE SQS CLIENT` refuses a
+  `tls_ca_file` that holds no certificate it could trust. An SQS connection presents no client
+  certificate, so `CREATE SQS CLIENT` refuses `tls_cert_file` and `tls_key_file`.
 - `SENTRY`: the referenced `SENTRY CLIENT` carries an `https://...` `dsn`; its `tls_ca_file` adds
-  a trust root beside the platform's native roots, and `tls_cert_file` with `tls_key_file` presents
+  trust roots beside Nervix's bundled Mozilla roots and the host's native roots, and
+  `tls_cert_file` with `tls_key_file` presents
   a client certificate.
 - `OTEL`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file`, `tls_cert_file`, and
   `tls_key_file` for both OTLP/gRPC and OTLP/HTTP-protobuf. `tls_ca_file` adds a server trust root,
   and TLS file keys with an `http://` endpoint are refused; see [OTEL](#otel).
 - `CLICKHOUSE`: use an `https://...` `addr` with mounted `tls_ca_file` and required positive
   `timeout_ms`; HTTP addresses refuse TLS file keys.
-- `POSTGRES`: use `sslmode=verify-full` in the `addr` URL; Nervix honors `tls_ca_file`, `tls_cert_file`, and `tls_key_file`. `sslmode=disable` is the only other accepted policy.
+- `POSTGRES`: use `sslmode=verify-full` in the `addr` URL. It trusts the Mozilla roots its driver
+  bundles, not the host's trust store, together with the certificates in `tls_ca_file`, and
+  presents `tls_cert_file` with `tls_key_file` as its client certificate. `sslmode=disable` is the
+  only other accepted policy; see [Postgres](#postgres).
 - `MYSQL`: enable TLS with `require_ssl=true` in `addr` or with mounted TLS files. Nervix honors `tls_ca_file` and paired `tls_cert_file`/`tls_key_file` client identity files; see [MySQL](#mysql) for the URL verification policy.
 - `MONGODB`: Nervix honors `tls_ca_file`, and `tls_cert_file` with `tls_key_file` as its client
   certificate; any of them enables TLS without `tls=true` in `addr`, and an `addr` with `tls=false`
@@ -1463,9 +1476,10 @@ writes the times the first attempt wrote.
 The broker holds a delayed message back, and what it holds depends on the broker and on who reads
 the topic:
 
-- Only a shared subscription is held back, which is how every `PULSAR TOPIC` ingestor reads. A
-  message reaches an exclusive or failover subscription as soon as it is stored, and every
-  subscription of a broker with `delayedDeliveryEnabled=false`.
+- Only a `SHARED` or `KEY_SHARED` subscription is held back, so the `TYPE` a `PULSAR TOPIC`
+  ingestor declares decides whether it waits for a delayed message. A message reaches a `FAILOVER`
+  or `EXCLUSIVE` subscription as soon as it is stored, and every subscription of a broker with
+  `delayedDeliveryEnabled=false`.
 - A broker may hand a message over up to `delayedDeliveryTickTimeMillis` before its delivery time,
   one second by default, unless `isDelayedDeliveryDeliverAtTimeStrict` is set, so a delay no longer
   than that tick may not hold a message back at all.
@@ -1484,15 +1498,24 @@ Pulsar emitters use the same client config surface as Pulsar ingestors:
 - optional `'namespace'`: the tenant and namespace, written `'tenant/namespace'`, that a short
   topic name is placed in, so `TOPIC 'orders'` writes `persistent://<namespace>/orders`; defaults
   to `public/default`. Fully qualified topic names are sent as written.
-- optional `'tls_ca_file'`: PEM-encoded CA bundle for `pulsar+ssl://...` connections
-- optional `'tls_allow_insecure_connection'`: `true` or `false`; defaults to `false`
-- optional `'tls_hostname_verification_enabled'`: `true` or `false`; defaults to `true`
+- optional `'auth_token'`: the token the client authenticates with
+- optional `'tls_ca_file'`: PEM-encoded CA bundle a `pulsar+ssl://...` connection trusts beside the
+  bundled public roots and the host's trust store
+- optional `'tls_cert_file'` and `'tls_key_file'`: the PEM-encoded client certificate the client
+  presents and its private key, written together
+- optional `'tls_allow_insecure_connection'`: `true` accepts any certificate a broker presents;
+  defaults to `false`
+- optional `'tls_hostname_verification_enabled'`: `false` accepts a certificate from a trusted
+  authority whatever address it names; defaults to `true`
 
-As the [ingestor manual](ingestors.md#pulsar) states, `CREATE PULSAR CLIENT` refuses the three TLS
-keys with a plaintext `pulsar://...` address and a `namespace` that is not exactly a tenant and a
-namespace.
+The [ingestor manual](ingestors.md#pulsar) states what each credential authenticates as and what
+each TLS key relaxes, and `CREATE PULSAR CLIENT` refuses the five TLS keys with a plaintext
+`pulsar://...` address and a `namespace` that is not exactly a tenant and a namespace.
 
-Pulsar TLS currently supports server trust configuration only. Nervix does not yet expose Pulsar client certificate authentication.
+The Pulsar driver makes one attempt at a connection or an operation, and the host owns every retry
+on the emitter's `RETRY POLICY`. An emitter whose client cannot connect shows why as its transient
+error, as in `the PULSAR broker refused the connection with AuthenticationError: ...`, and opens
+again on that policy.
 
 ### RabbitMQ
 
@@ -1503,7 +1526,9 @@ CREATE RABBITMQ QUEUE EMITTER <name>
   TO <client> QUEUE 'orders'
     MODE <mode>
     ENCODE USING <codec>
+    [PERSISTENT]
     [MANDATORY]
+    [TIMESTAMP occurred_at]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
@@ -1524,8 +1549,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
 | Batch transformation required | no |
-| Envelope | MANDATORY |
-| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Envelope | PERSISTENT<br>MANDATORY<br>TIMESTAMP occurred_at |
+| PROPERTIES keys and exact types | content_type: STRING<br>content_encoding: STRING<br>message_id: STRING<br>correlation_id: STRING<br>reply_to: STRING<br>expiration: STRING<br>priority: U8<br>type: STRING<br>app_id: STRING<br>user_id: STRING |
 | Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>messages the broker returns unrouted under MANDATORY, until the write that published them reads them: set by the messages of one write; when full, holds back what fills it |
 | Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open, confirm select and the queue check: `connect_timeout_ms`; 30s when omitted<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: `timeout_ms`; unbounded when omitted |
 | Driver limits | A frame above the negotiated frame_max ends the connection. |
@@ -1542,7 +1567,9 @@ CREATE RABBITMQ EXCHANGE EMITTER <name>
   (ROUTING KEY input.category)
     MODE <mode>
     ENCODE USING <codec>
+    [PERSISTENT]
     [MANDATORY]
+    [TIMESTAMP occurred_at]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
@@ -1563,8 +1590,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
 | Batch transformation required | no |
-| Envelope | MANDATORY |
-| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Envelope | PERSISTENT<br>MANDATORY<br>TIMESTAMP occurred_at |
+| PROPERTIES keys and exact types | content_type: STRING<br>content_encoding: STRING<br>message_id: STRING<br>correlation_id: STRING<br>reply_to: STRING<br>expiration: STRING<br>priority: U8<br>type: STRING<br>app_id: STRING<br>user_id: STRING |
 | Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>messages the broker returns unrouted under MANDATORY, until the write that published them reads them: set by the messages of one write; when full, holds back what fills it |
 | Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open, confirm select and the exchange check: `connect_timeout_ms`; 30s when omitted<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: `timeout_ms`; unbounded when omitted |
 | Driver limits | A frame above the negotiated frame_max ends the connection.<br>A routing key longer than the 255 bytes an AMQP short string carries is not sent; its record is rejected. |
@@ -1597,6 +1624,54 @@ the key. Records whose keys differ never share a [batch payload](#batch-payloads
 message carries the one key its members share. `SHOW CREATE EMITTER` retains the exchange's name
 and the routing key's expression.
 
+Both RabbitMQ entities accept `PERSISTENT`, then `MANDATORY`, then `TIMESTAMP <expression>`
+and `PROPERTIES { … }`, after `ENCODE USING` and before construction. `PERSISTENT` writes AMQP
+`delivery_mode = 2`; without it the message is transient. Persistence requires an externally
+provisioned durable queue and publisher confirms to establish broker acceptance. It does not
+create a queue or make a transient queue durable, and it does not remove the duplicate window after
+a lost confirmation.
+
+`TIMESTAMP` computes a non-null `DATETIME`, encoded as a whole unsigned Unix second. A timestamp
+before the Unix epoch or with a fractional second rejects its record without sending it; Nervix
+never truncates or clamps it. The Unix epoch itself is a valid timestamp, distinct from an omitted
+property. RabbitMQ preserves this application-provided time rather than generating one.
+
+| `PROPERTIES` key | Exact non-null type | AMQP property |
+| --- | --- | --- |
+| `content_type`, `content_encoding` | `STRING` | MIME type and encoding |
+| `message_id`, `correlation_id` | `STRING` | Application message and correlation identifiers |
+| `reply_to` | `STRING` | Reply address |
+| `expiration` | `STRING` | Broker message TTL, written as decimal milliseconds |
+| `priority` | `U8` | Message priority; the provisioned queue determines priority scheduling |
+| `type`, `app_id` | `STRING` | Application message type and application identifier |
+| `user_id` | `STRING` | Creating user, which the broker validates against the authenticated user |
+
+Every string property must fit AMQP's 255-byte short string, including every UTF-8 byte; an
+oversized property rejects only its record and names the property and its byte count without
+printing its value. The registry checks exact types, nullability and sensitivity at `CREATE` and
+`ALTER`. Property expressions follow the [envelope scope](#envelope-clauses), and every retry
+carries the original evaluated properties and timestamp. `write_header` remains separate: writing
+a header named `content_type` sets an AMQP table entry, not the basic `content_type` property.
+
+```plexus,ignore
+CREATE RABBITMQ QUEUE EMITTER notifications FROM events
+  TO broker QUEUE 'notifications'
+  MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s
+  ENCODE USING event_codec
+  PERSISTENT
+  TIMESTAMP input.occurred_at
+  PROPERTIES { 'content_type' = 'application/json', 'message_id' = input.id,
+               'priority' = 5 AS U8 }
+  INHERIT ALL
+  FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+```
+
+`ALTER RABBITMQ QUEUE EMITTER notifications SET PERSISTENT` and `DROP PERSISTENT` change the flag;
+`SET TIMESTAMP <expression>` and `DROP TIMESTAMP` change the timestamp; `SET PROPERTIES { … }`
+replaces the whole property set and `DROP PROPERTIES` clears it. Each operation preserves the other
+envelope fields. The same operations apply to an `EXCHANGE` emitter. `SHOW CREATE EMITTER` and
+`DESCRIBE EMITTER` show the configured envelope.
+
 Nervix never declares an exchange or a binding. When an exchange emitter opens, it checks that its
 exchange exists with a passive declaration; while it is missing, the emitter stays unavailable with
 `RabbitMQ exchange '<name>' does not exist` as its transient error, confirms nothing, so its input
@@ -1615,7 +1690,7 @@ collects that window's answers, and attributes every return before refilling the
 reporting a mandatory record delivered. Each message retains its original `ACK TIMEOUT`.
 Under `NO ACK` the return precedes the answer to the round trip that ends the write, so the emitter
 reads every return of the write once that answer arrives. A return names the message's exchange,
-routing key, properties and body, not its Nervix record. It rejects the first matching
+routing key, complete AMQP properties and body, not its Nervix record. It rejects the first matching
 message in publication order: within the current confirmation window under `ACK`, or the write
 under `NO ACK`. Identical transport messages therefore take returns in that order. A return never
 changes a record settled by an earlier window.
@@ -1791,7 +1866,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | TOPIC 'devices/Orders' (mqtt_topic) |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 0)<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 1 or 2) |
 | Options in statement order | `QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |
-| Headers | Not offered: Subscription options select the session and inbound QoS, and the emitter's QOS option its outbound QoS. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation. |
+| Headers | Not offered: A publication carries its topic, payload and quality of service; this implementation writes no MQTT 5 user property on it. |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
@@ -2168,13 +2243,17 @@ See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sq
 `-` and `_`, a FIFO queue's `.fifo` suffix included, preserved exactly as written. The
 `SQS CLIENT` it names declares the keys the [SQS ingestion section](ingestors.md#sqs) lists.
 
-`SEND` is the request shape, and every statement writes it. `SEND SINGLE` issues one `SendMessage`
-request per message. `SEND BATCH` groups messages into `SendMessageBatch` requests within SQS's
-fixed limit of ten entries and 1 MiB per request. Both shapes publish in `MODE ACK`, the mode every
-request/response emitter uses: requests are issued sequentially, and a record is acknowledged once
-the service accepts it. Per-entry transient failures retry only those entries, while invalid
-entries and a message larger than 1 MiB, counting its attributes and FIFO message group, follow
-`ON MESSAGE ERROR` individually. Nervix checks what SQS refuses before sending: a body that is not
+`SEND` is the request shape, and every statement writes it. It belongs to emission alone, as the
+parallel receive belongs to ingestion, and it is independent of the [batching clause](#batching),
+as [Broker and message emitters](#broker-and-message-emitters) describes. `SEND SINGLE` issues one
+`SendMessage` request per message. `SEND BATCH` groups messages into `SendMessageBatch` requests
+within SQS's fixed limit of ten entries and 1 MiB per request. Both shapes publish in `MODE ACK`,
+the mode every request/response emitter uses: requests are issued sequentially, and a record is
+acknowledged once the service accepts it. A record whose contents the service refuses, and a
+message larger than 1 MiB, counting its attributes and FIFO message group, follow
+`ON MESSAGE ERROR` individually. A request or a batch entry that fails for any other reason ends
+the write: the retry resends that record and every record the write had not yet sent, never one
+the service accepted or refused. Nervix checks what SQS refuses before sending: a body that is not
 UTF-8, a body or attribute value holding a character SQS forbids, more than ten attributes, an
 attribute name SQS does not allow, an empty attribute value, and an invalid FIFO message group. A
 later `write_header` of a name replaces the earlier value, so the ten are counted after repeated
@@ -2213,8 +2292,9 @@ Set the SQS client's optional `timeout_ms` CONFIG key to bound each request, the
 start and every send, as both the complete service operation and its single SDK attempt. Nervix
 disables the AWS SDK's internal retries in both directions, so a request that runs out of
 `timeout_ms` returns to the emitter, which `DESCRIBE EMITTER` shows as
-`an SQS send did not finish within timeout_ms 5s`, and the mode's declared `RETRY POLICY` owns all
-retry pacing.
+`an SQS send did not finish within timeout_ms 5s`, or under `SEND BATCH` as
+`an SQS batch send did not finish within timeout_ms 5s`, and the mode's declared `RETRY POLICY`
+owns all retry pacing.
 
 The client resolves the host of its `endpoint` through the node's asynchronous resolver each time it
 opens a connection, and tries the answers in order; a literal IPv4 or IPv6 address is dialled as
@@ -2317,7 +2397,7 @@ Nervix owns every key of a `SENTRY CLIENT` and refuses a key it does not declare
 | --- | --- | --- |
 | `dsn` | Yes | The project DSN, `<scheme>://<public-key>[:<secret-key>]@<host>[:<port>]/[<path>/]<project-id>`, with an `http` or `https` scheme. It is confidential, and client inspection redacts it. |
 | `timeout_ms` | Yes | A positive whole number of milliseconds that bounds each envelope request, as [Client Deadlines](#client-deadlines) defines. |
-| `tls_ca_file` | No | A PEM certificate authority that HTTPS trusts in addition to the platform's native roots. |
+| `tls_ca_file` | No | PEM certificate authorities that HTTPS trusts in addition to the Mozilla roots Nervix ships and the host's native roots. |
 | `tls_cert_file`, `tls_key_file` | No | The PEM certificate and private key HTTPS presents as the client's identity, supplied together. |
 
 `CREATE CLIENT` checks the complete DSN with Sentry's own parser, including rendered template
@@ -2593,8 +2673,8 @@ The TLS file keys need an `https` endpoint on either protocol, and `tls_cert_fil
 `tls_key_file` go together; `CREATE CLIENT` and `ALTER CLIENT` check both before reading a file or
 opening a transport. Mount the files as resources. The certificate and key are the emitter's client
 identity. `tls_ca_file` adds a trust root rather than replacing the built-in ones: `grpc` trusts the
-bundled WebPKI roots and the file, and `http/protobuf` trusts the platform's trust store and the
-file.
+bundled WebPKI roots and the file, and `http/protobuf` trusts Nervix's bundled Mozilla roots, the
+host's native roots and the file.
 
 Opening an emitter reads its TLS files and builds its transport, but contacts no endpoint: the
 `grpc` channel connects when an export first needs a connection, and the `http/protobuf` client
@@ -2911,16 +2991,29 @@ CREATE POSTGRES TABLE EMITTER to_pg
 Postgres emitters use `VALUES` expressions and insert batches with `INSERT ... SELECT ... FROM
 unnest(...)`. The [batching clause](#batching) is required: each insert carries at most
 `MAX MESSAGES` records, and its statement text and bound arrays measure at most `MAX SIZE` bytes, as
-[Database writes](#database-writes) describes. The insert result acknowledges those records. On the
-poison-isolation path, tables without an idempotent `ON CONFLICT` policy may observe duplicates when
-healthy records are re-executed.
+[Database writes](#database-writes) describes. The insert result acknowledges those records. An
+insert names only the mapped columns, so every other column of the row takes its table default.
+
+Each run of rows a flush hands the emitter, and each retry of the rows a run left unresolved, starts
+with one catalog query that reads the declared type of every mapped column. It runs on the
+connection the run's first insert then uses and adds one round trip to every run, and a change to
+the table's columns applies from the next run.
+
+An insert is one statement, so an insert Postgres refuses stores none of its rows. When Postgres
+refuses one for its rows, the emitter writes them again one at a time on the same connection: each
+row Postgres accepts is stored once, and only the rows it refuses follow `ON MESSAGE ERROR`. A
+duplicate needs an insert whose answer never arrived, which the emitter retries as
+[Database writes](#database-writes) describes; use an `ON CONFLICT` policy against a stable key
+where duplicates matter.
 
 `TABLE` names a table, or a schema and its table, as one or two nonempty parts separated by `.`:
-`TABLE 'Orders'` or `TABLE 'sales.Orders'`, each part on the table identifier alphabet and the whole
-name within 128 bytes. Nervix sends each part as its own quoted identifier with its case kept, so
-`'sales.Orders'` is the relation `"sales"."Orders"`, and the insert and the lookup of the table's
-column types name that same relation. A one-part name resolves through the connection's
-`search_path`. An empty part or a third part is refused at `CREATE`.
+`TABLE 'Orders'` or `TABLE 'sales.Orders'`. The complete name uses 1–128 ASCII bytes from letters,
+digits, `_`, `-`, `~` and the separating dot. Nervix sends each part as its own quoted identifier
+with its case kept, so `'sales.Orders'` is the relation `"sales"."Orders"`, and the insert and the
+catalog query name that same relation. A one-part name resolves through the connection's
+`search_path`. An empty part or a third part is refused at `CREATE`. Each `VALUES` key names one
+column and is sent as one quoted identifier with its case kept: the key `createdAt` writes the
+column `"createdAt"`, and a dot in a key belongs to the column's name.
 
 Each mapped value is bound as text, in the one text array its column binds, and the statement casts
 it to the column's declared type:
@@ -2935,9 +3028,18 @@ it to the column's declared type:
 | `DATETIME` | RFC 3339 timestamp text at UTC offset `+00:00` |
 | `ARRAY<T>`, `VEC<T>` | Recursive JSON text; `BYTES` elements are padded base64 and non-finite floats are `null` |
 
-A typed null binds as a `NULL` element. A mapping without a supported concrete column type is
-refused at `CREATE` and `ALTER`; an untyped `NULL` cannot infer one. A value the column's type cannot
-read from its text, such as `U64` above a `bigint`'s range, is a row Postgres rejects with its SQLSTATE.
+A typed null binds as a `NULL` element, and so does a non-finite float, which a `NOT NULL` column
+then refuses. A mapping without a supported concrete column type is refused at `CREATE` and
+`ALTER`; an untyped `NULL` cannot infer one.
+
+The cast names the column's type without its modifiers, and storing the cast value applies them as
+any insert does: a `varchar(n)` column refuses longer text, and a `numeric(p, s)` column rounds to
+its scale. A timestamp column keeps at most microseconds, so a `DATETIME`'s nanoseconds are rounded
+to the nearest microsecond; a `timestamp with time zone` column stores the instant, and a
+`timestamp` column stores its UTC wall-clock time. An `ARRAY` or `VEC` value is JSON text, which a
+`json`, `jsonb` or `text` column reads; a native Postgres array column, such as `integer[]`, refuses
+it as a malformed array literal. A value the column cannot read from its text, such as `U64` above a
+`bigint`'s range or `true` for an `integer` column, is a row Postgres rejects.
 
 Postgres emitters may include an insert conflict policy after `VALUES`:
 
@@ -2972,7 +3074,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
-| Network waits | a pool checkout: the wait for the pool, name resolution, connection, TLS, authentication and the borrow test: `pool_acquire_timeout_ms`; 30s when omitted<br>each catalog query and each insert: `timeout_ms`; unbounded when omitted<br>closing an interrupted query connection: driver default, SQLx close-on-drop timeout, 5 s |
+| Network waits | a pool checkout: the wait for the pool, name resolution, connection, TLS, authentication and the borrow test: `pool_acquire_timeout_ms`; 30s when omitted<br>each catalog query and each insert: `timeout_ms`; unbounded when omitted<br>closing an interrupted query connection: driver default, SQLx close-on-drop timeout, 5 s<br>testing a connection returned to the pool, which keeps its place until the server answers: unbounded |
 | Driver limits | timeout_ms accepts at most 2147483647 milliseconds, PostgreSQL's statement_timeout maximum.<br>Without timeout_ms, catalog queries and inserts have no Nervix response deadline. |
 | Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER pool_acquire_timeout_ms` |
 
@@ -2981,11 +3083,28 @@ See the [POSTGRES TABLE capability and mirror reference](connector-capabilities.
 
 `DO UPDATE` updates every mapped `VALUES` column except the conflict target columns, so it requires
 a conflict target and at least one mapped column outside it. `DO NOTHING` may be used with or
-without a target; without one, it skips a row that conflicts on any unique constraint. Target
-columns are nonempty names of the table's unique index columns, in written order, and need not be
-mapped. A clause that breaks these rules is refused at `CREATE`. Postgres refuses a `DO UPDATE`
-insert that carries one conflict key twice, so such an insert is written again one record at a time,
-and the later record updates the earlier one.
+without a target; without one, it skips a row that conflicts on any unique constraint. A skipped
+row is acknowledged like a stored one. Target columns are nonempty column names, sent with their
+case kept, and need not be mapped. A clause that breaks these rules is refused at `CREATE`.
+Postgres matches the target, in any column order, to a unique index the table already has, such as
+the one behind its primary key or a unique constraint. A partial unique index matches no target,
+because the clause writes no `WHERE`. Postgres refuses a `DO UPDATE` insert that carries one
+conflict key twice, so such an insert is written again one record at a time, and the later record
+updates the earlier one.
+
+Postgres answers a refused statement with a SQLSTATE. The emitter treats an insert as refused for
+its rows when the SQLSTATE's class is `21` (cardinality violation), `22` (data exception, such as a
+value its column cannot read) or `23` (integrity constraint violation, such as a `NOT NULL`,
+`CHECK`, unique or foreign-key violation), and writes its rows again one at a time. A row Postgres
+still refuses on its own follows `ON MESSAGE ERROR`, named by its SQLSTATE only, such as
+`Postgres rejected record with SQLSTATE 23505`, because the server's message can quote a value.
+Every other answer leaves the insert's rows unresolved for `RETRY POLICY` as a transient publish
+failure: a lost connection, an expired `timeout_ms`, any other SQLSTATE, such as
+`Postgres request failed with SQLSTATE 42P10`, and a missing table or mapped column, which the
+catalog query reports as `Postgres table '<table>' has no column '<column>'`, naming the first
+mapped column when the table itself is missing. A failure no retry cures until the table or the
+statement changes is retried the same way, such as a conflict target no unique index matches
+(`42P10`), a missing privilege (`42501`) or a value mapped to a generated column (`428C9`).
 
 Postgres clients declare their connection-pool bounds and connect with a `postgres://` or
 `postgresql://` URL. Nervix owns the URL's scheme and its TLS policy: the URL sets `sslmode`
@@ -2993,10 +3112,8 @@ exactly once, under that name or the driver's `ssl-mode`, to one of two policies
 for an unencrypted connection, or `sslmode=verify-full` for TLS with certificate-chain and hostname
 verification. There is no opportunistic fallback and no encrypted connection without peer
 verification. `CREATE CLIENT` refuses another scheme, a missing, repeated or other `sslmode`, and
-TLS files without `sslmode=verify-full`, each naming the key and the rule rather than the URL. The
-driver reads the URL's other query options, and its parser checks them before the client is
-committed. See [Database Client Connection Pools](database-client-pools.md) for the accepted
-pool counts:
+TLS files without `sslmode=verify-full`, each naming the key and the rule rather than the URL. See
+[Database Client Connection Pools](database-client-pools.md) for the accepted pool counts:
 
 ```plexus
 CREATE POSTGRES CLIENT pg
@@ -3006,13 +3123,30 @@ CREATE POSTGRES CLIENT pg
   };
 ```
 
+The driver reads the rest of the URL: its user, password, host, port and database, and the query
+options `host`, where a path that starts with `/` names a Unix-domain socket, `hostaddr`, `port`,
+`dbname`, `user`, `password`, `application_name`, `options` with startup options such as
+`-c search_path=sales`, `options[<name>]`, `statement-cache-capacity`, and the TLS files
+`sslrootcert`, `sslcert` and `sslkey`, which it also reads as `ssl-root-cert` or `ssl-ca`,
+`ssl-cert` and `ssl-key`. `CREATE CLIENT` refuses a value the driver cannot read for one of these
+options. The driver ignores any other query option, logging a warning that names the option and its
+value wherever it reads the URL, so a misspelled option changes nothing and is not refused.
+
+Where the URL leaves a part out, the driver takes it from the node it runs on: the port from
+`PGPORT`, else `5432`; the user from `PGUSER`, else the operating-system user Nervix runs as; the
+password from `PGPASSWORD`, else the node's password file, `PGPASSFILE` or `~/.pgpass`; and the
+database from `PGDATABASE`, else the server's default, the user's name. The node's `PGAPPNAME`,
+`PGOPTIONS`, `PGSSLROOTCERT`, `PGSSLCERT` and `PGSSLKEY` apply too: the URL's `application_name`
+and TLS file options replace them, and its `options` follow `PGOPTIONS`. Write every part in `addr`,
+so that every node the client is used on connects in the same way.
+
 The optional client key `timeout_ms` bounds each catalog query and each INSERT separately. It is a
 positive whole number of milliseconds from `1` through `2147483647`, the maximum PostgreSQL accepts
 for `statement_timeout`; `CREATE CLIENT` refuses a value outside that range. Nervix sets that server
 option on every connection and also bounds the local wait for each query's response, so a peer
 that stops answering still ends the attempt. The key takes precedence over a `statement_timeout`
-in the URL's startup options, preserving its other driver options. Omitting the key sets no Nervix
-statement or response deadline.
+among the startup options of the URL or of `PGOPTIONS`, preserving their other options. Omitting
+the key sets no Nervix statement or response deadline.
 
 The independent `pool_acquire_timeout_ms` bounds checkout before a query starts. Each isolated
 row's INSERT gets its own statement bound; `timeout_ms` is not a deadline for the entire flush or
@@ -3022,7 +3156,14 @@ than returning a pending response to the idle pool; SQLx retains its pool permit
 close of at most five seconds. A lost response does not prove an INSERT was not applied, so use a
 suitable idempotent conflict policy when retries must not duplicate rows.
 
-For TLS connections, use `sslmode=verify-full`, mount a TLS resource, and set `'tls_ca_file'` to the mounted CA path. `'tls_cert_file'` and `'tls_key_file'` supply a client identity and must be given together. TLS files require `sslmode=verify-full`.
+`sslmode=verify-full` trusts the Mozilla root certificates its driver bundles, not the host's trust
+store, together with every certificate in `tls_ca_file`: the file adds trust roots and does not
+replace them. For a server whose certificate a private certificate authority signs, mount a TLS
+resource and set `'tls_ca_file'` to the mounted CA path. `'tls_cert_file'` and `'tls_key_file'`
+supply a client identity and must be given together. TLS files require `sslmode=verify-full`. The
+three keys take precedence over the URL's `sslrootcert`, `sslcert` and `sslkey` and over the node's
+`PGSSLROOTCERT`, `PGSSLCERT` and `PGSSLKEY`, which set the same files where a client leaves its keys
+out.
 
 Four more Nervix-owned keys set how the client's pool treats a connection.
 `pool_acquire_timeout_ms`, 30 seconds by default, bounds each checkout, independent of how long an
@@ -3098,9 +3239,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
-| Network waits | pool checkout (including connection and handshake), initial validation, and each insert: `timeout_ms`; unbounded when omitted |
-| Driver limits | Without timeout_ms, pool checkout, connection validation and inserts have no deadline.<br>TLS identity keys use the driver's RSA PKCS#1 private-key format.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |
-| Stalled-peer checks | `STALLED PEER timeout_ms` |
+| Network waits | pool checkout, including connection and authentication; timeout_ms also applies when shorter: `pool_acquire_timeout_ms`; when omitted, the client's declared pool_acquire_timeout_ms default<br>initial validation and each insert; also bounds each pool checkout when shorter: `timeout_ms`; unbounded when omitted |
+| Driver limits | Without timeout_ms, initial validation after checkout and inserts have no operation deadline.<br>Maximum connection age is checked on reuse, return and the driver's idle scan; active inserts are not interrupted.<br>TLS identity keys use the driver's RSA PKCS#1 private-key format.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |
+| Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER pool_acquire_timeout_ms` |
 
 See the [MYSQL TABLE capability and mirror reference](connector-capabilities.md#mysql-table-emit).
 <!-- connector-matrix:emit-mysql-table:end -->
@@ -3158,27 +3299,27 @@ verification choices. For mutual TLS, set `tls_cert_file` and `tls_key_file` tog
 driver reads a PEM certificate chain and an RSA PKCS#1 private key; for a PEM key this is the
 `RSA PRIVATE KEY` form, which OpenSSL can produce with `openssl rsa -traditional`.
 
-The current client CONFIG keys are required `addr` and optional `timeout_ms`, `tls_ca_file`,
-`tls_cert_file` and `tls_key_file`. The address must
-be a `mysql://` URL accepted by the driver's offline parser. Declare capacity with
-`POOL SIZE MIN ... MAX ...`. Nervix installs those bounds on default driver pool options;
-[Database Client Connection Pools](database-client-pools.md) details the resulting URL lifetime settings.
-Pool-size query parameters such as `pool_min` and `pool_max` are refused before the client is
-committed, including their percent-encoded spellings and ASCII case variants. Unknown standalone
-CONFIG keys are refused rather than ignored. The generated [MYSQL client key reference](connector-capabilities.md#mysql-client)
-lists each key's presence, type and confidentiality; it does not expose additional pool-lifetime
-keys. The [pool minimum](database-client-pools.md#how-each-client-type-keeps-its-minimum) keeper waits
-one second before each pass, counting idle and checked-out connections together.
+The client requires `addr` and declares the pool acquire, idle lifetime, maximum-age and minimum
+maintenance keys documented in [Database Client Connection Pools](database-client-pools.md#connection-lifetimes).
+Its optional operation bound is `timeout_ms`; TLS files are `tls_ca_file`, `tls_cert_file` and
+`tls_key_file`. The address must be a `mysql://` URL accepted by the driver's offline parser.
+Declare capacity with `POOL SIZE MIN ... MAX ...`. Pool-size query parameters such as `pool_min`
+and `pool_max` are refused before commit, including percent-encoded spellings and ASCII case
+variants. Unknown standalone CONFIG keys are refused. The generated
+[MYSQL client key reference](connector-capabilities.md#mysql-client) lists every key's presence,
+type and confidentiality. `DESCRIBE CLIENT` shows effective defaults; `SHOW CREATE CLIENT`
+preserves authored configuration.
 
-`timeout_ms` is a positive, schedulable whole number of milliseconds. It bounds opening and
-validating the pool's first connection, each subsequent pool checkout (including connection
-establishment and authentication), and each insert. The minimum keeper uses the same checkout
-bound. Each of these is a separate operation; an insert's bound starts after checkout, and an
-isolated row's insert receives its own bound. Omitting the key leaves these waits unbounded.
-An elapsed bound is an infrastructure failure, reported with `timeout_ms` and its duration, and
-the emitter retries its pending rows on its declared policy. The driver discards a connection
-whose in-flight command was cancelled. A timeout does not establish whether the server committed
-an insert; use a stable key and an appropriate `ON CONFLICT` action where retries must converge.
+`pool_acquire_timeout_ms` bounds each checkout, including connection establishment and
+authentication, and defaults to 30 seconds. `timeout_ms`, when configured, also bounds checkout,
+initial validation and each insert as separate operations. Checkout uses the shorter applicable
+bound, including in the minimum keeper. An insert's operation bound starts after checkout, and
+an isolated row's insert gets its own bound. Omitting `timeout_ms` leaves validation after checkout
+and inserts without an operation deadline; it never removes the acquire deadline.
+An elapsed bound is an infrastructure failure naming its key and duration, and the emitter
+retries pending rows on its declared policy. The driver discards a connection whose in-flight
+command was cancelled. A timeout does not establish whether the server committed an insert;
+use a stable key and an appropriate `ON CONFLICT` action where retries must converge.
 
 ### MongoDB
 
@@ -3652,13 +3793,17 @@ altered.
 
 #### Iceberg staging and commits
 
-Iceberg uses two explicit boundaries. `FLUSH` collects typed in-memory batches and writes them to
-local Arrow IPC files under the runtime temporary-file root. `COMMIT EACH <duration> MAX SIZE
-<bytes>` reads the staged Arrow IPC files back, writes their rows into Parquet data files, and
-appends every one of those data files to the Iceberg table in one catalog commit. The commit
+Iceberg uses two explicit boundaries. `FLUSH` collects typed in-memory batches and appends each
+batch's mapped rows to a local Arrow IPC staging file under the runtime temporary-file root.
+Every flush appends to the same staging file until a commit begins, so the root holds one staging
+file for each commit, however many batches, source relays and branches its flushes carried; rows
+staged while a commit is in progress, such as during its retry backoff, start a staging file of
+their own, which the commit after it publishes. `COMMIT EACH <duration> MAX SIZE <bytes>` reads the
+staged rows back, writes them into Parquet data files, and appends every one of those data files
+to the Iceberg table in one catalog commit. The commit
 duration starts when a flush stages rows while none are staged, and rows later flushes stage join
 that commit without moving it, so a row waits at most `FLUSH EACH` in memory and then at most
-`COMMIT EACH` after it is staged. Staged files that reach `MAX SIZE` are committed at once. Both
+`COMMIT EACH` after it is staged. Staged rows that reach `MAX SIZE` are committed at once. Both
 durations are domain-logical, so a paced domain's `TIME RATE` moves the flush and commit boundaries
 together; the maximum batch and commit sizes, the commit retry backoff, and a drain remain
 independent of domain pace. The temporary-file root defaults to `/tmp` and can be changed with
@@ -3673,8 +3818,8 @@ continue to staging. The file's actual size and row count are checked before the
 If the table schema changes between staging and commit so that a staged segment no longer fits,
 the commit fails and retains its staged rows for retry rather than appending an over-limit file.
 Without `BATCH`, the Parquet writer uses its 512 MiB rollover target; `DESCRIBE EMITTER` prints
-`data file target: 512MiB` alongside `batch: none`. The commit's `MAX SIZE` continues to count
-the sum of local staged Arrow IPC file bytes, independently of each Parquet file's bound.
+`data file target: 512MiB` alongside `batch: none`. The commit's `MAX SIZE` counts the Arrow IPC
+bytes of the staged batches, independently of each Parquet file's bound.
 
 The emitter completion point for `MODE ACK` is the successful catalog commit. Local staging is not an
 ACK boundary. Record-level expression and construction errors, and a row too large for its own
@@ -3682,29 +3827,29 @@ Parquet file, are attributed through `ON MESSAGE ERROR` before staging. See [ACK
 Delivery](#ack-semantics-and-effective-delivery) for attachment and fan-out behavior.
 
 A commit holds the rows it reads back in memory until it has written them into data files, so it
-charges them to the node's bulk memory class, which holds 32 MiB. It reads the staged files in
-groups, each the run of consecutive files the class can hold together. Before it reads a group it
-charges every byte of the group's files, and once their rows are in data files it returns the
-charge before it reads the next group; the data files of every group are appended in the one
-catalog commit. It takes a charge only when the class has room for it now rather than waiting in
+charges them to the node's bulk memory class, which holds 32 MiB. It reads the staged batches back
+in groups, each the run of consecutive staged batches the class can hold together, whichever
+staging files hold them. Before it reads a group it charges every Arrow IPC byte of the group's
+staged batches, and once their rows are in data files it returns the charge before it reads the
+next group; the data files of every group are appended in the one catalog commit. It takes a charge only when the class has room for it now rather than waiting in
 the class's queue, where a commit's charge would take every byte the class frees and hold the
-node's other bulk work behind it. When the class has no room, the commit keeps its staged files and
+node's other bulk work behind it. When the class has no room, the commit keeps its staged rows and
 their acknowledgements, `DESCRIBE EMITTER` shows `Iceberg commit waits for room in the bulk memory
 class for <bytes> staged bytes` as the emitter's transient error, and the emitter retries the
-commit on its declared retry policy. A single staged file holds one input carrier's mapped rows,
-or one bounded segment of them when `BATCH` is declared. Without `BATCH` it can be larger than the
-class when a route on the same node flushes batches above 32 MiB.
-Such a file is read alone once the whole class is free, charged with the whole class: that is every
+commit on its declared retry policy. A staged batch holds one input carrier's mapped rows, or one
+bounded segment of them when `BATCH` is declared. Without `BATCH` it can be larger than the class
+when a route on the same node flushes batches above 32 MiB.
+Such a batch is read alone once the whole class is free, charged with the whole class: that is every
 byte of it the class can account for, and it leaves no room for other bulk work beside the read.
 Until then `DESCRIBE EMITTER` shows `Iceberg commit waits for the whole bulk memory class of
-<capacity> bytes for a staged file of <bytes> bytes`, and the emitter retries the commit as before.
+<capacity> bytes for a staged batch of <bytes> bytes`, and the emitter retries the commit as before.
 
 #### Iceberg data files
 
 Every commit writes Parquet data files, whatever the table's `write.format.default` property says,
 with the Parquet library's default writer properties: uncompressed pages, dictionary encoding,
 page-level statistics and row groups of at most 1,048,576 rows. The table's `write.parquet.*`
-properties do not apply. Without `BATCH`, a commit writes each group of staged files it reads back
+properties do not apply. Without `BATCH`, a commit writes each group of staged batches it reads back
 together into data files of their own, rolling to a new file once the current one reaches 512 MiB
 whatever the table's `write.target-file-size-bytes` property says. With `BATCH`, each staged
 segment becomes one data file, as [Iceberg staging and commits](#iceberg-staging-and-commits)
@@ -3738,7 +3883,7 @@ The emitter writes nothing else:
   client, and through no other catalog implementation.
 
 A commit writes its data files to object storage before it appends them, and a retry reuses the
-files an earlier attempt finished writing for a whole group of staged files. Files no snapshot comes
+files an earlier attempt finished writing for a whole group of staged batches. Files no snapshot comes
 to reference stay in object storage until an orphan-file cleanup of the table removes them: those
 of a group whose writing failed partway, which the retry writes again, and those of a commit that
 never succeeds because the emitter ends before a retry does.
@@ -3802,15 +3947,16 @@ declared policy and backpressure. While a failed
 commit waits for its retry, the emitter takes no new input from its relays: a row that reaches a
 relay during the backoff waits upstream, unless a stop drains the relays. The rows a flush stages
 before the retry are therefore input the emitter's `COLLECT FOR` policy held, which comes due
-during the backoff, and the relay input a stop drains. A commit publishes the staged files it found
-when it began, so those rows are not in its data files: the retry first appends what the commit
-began with and then commits the newer rows in a commit of their own. A retry still publishes
+during the backoff, and the relay input a stop drains. A commit publishes the rows staged when it
+began, so those rows are not in its data files: they start a staging file of their own, and the
+retry first appends what the commit began with and then commits the newer rows in a commit of
+their own. A retry still publishes
 everything staged, and acknowledges only rows a catalog commit holds.
 
 Each commit names its append with an identity it records in the snapshot it adds. A commit whose
 catalog answer fails or is lost reloads the table, and the commit and every retry of it look for
 that identity in the current snapshot's history before appending, so a retry never appends the
-same staged files twice. Rows are still appended again when their source redelivers them: after a
+same staged rows twice. Rows are still appended again when their source redelivers them: after a
 lost upstream ACK, after an attached sibling emitter fails, or after the emitter ends before a
 retry learns whether the catalog applied its commit, because it ended without acknowledging the
 rows it still held staged. Iceberg appends are not idempotent.
@@ -3890,8 +4036,8 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | Kafka | `ACK` retry after an ambiguous delivery report or timeout; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` can lose a record after local producer-queue admission; broker durability follows Kafka client and topic configuration | None; Kafka producer idempotence is pass-through client configuration |
 | Pulsar | `ACK` retry after an ambiguous broker receipt; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` does not expose broker failures after producer acceptance; retention and durability remain broker policy | None |
 | NATS | JetStream retry after an ambiguous `PubAck`; Core `NO ACK` retry after a timed-out write or a connection change, including records the server may already have received; either mode after a lost upstream ACK or attached sibling failure | Core NATS `NO ACK` confirms a local drain and flush on the write's connection, without durable stream acknowledgement; a connection failure after that completion can lose what the server has not read | None |
-| RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; `NO ACK` retry after its channel or connection is lost before a write's round trip completes; either mode after a lost upstream ACK or attached sibling failure | Without `MANDATORY`, a message no binding routes is dropped by the broker and its record reported delivered; `NO ACK` can lose a record after the broker's channel has taken it; queue durability and message persistence remain broker policy | None |
-| SQS | Retry after an ambiguous `SendMessage` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; SQS retains its own at-least-once behavior | None |
+| RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; `NO ACK` retry after its channel or connection is lost before a write's round trip completes; either mode after a lost upstream ACK or attached sibling failure | Without `MANDATORY`, a message no binding routes is dropped by the broker and its record reported delivered; `NO ACK` can lose a record after the broker's channel has taken it; persistence requires PERSISTENT and a provisioned durable queue | None |
+| SQS | Retry after an ambiguous `SendMessage` or `SendMessageBatch` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; SQS retains its own at-least-once behavior | On a FIFO queue, `DEDUPLICATION ID` or the queue's content-based deduplication: SQS does not deliver again a message whose id, or body, it accepted within the previous five minutes. A retry carries the id and body its first attempt carried, and an id computed from the record's own fields also covers its redelivery within that interval |
 | MQTT | QoS 1 or 2 retry after an ambiguous handshake; any mode after a lost upstream ACK or attached sibling failure | QoS 0 can lose a record after client acceptance; later delivery follows the configured broker and session guarantees | None |
 | Redis Pub/Sub | Retry after a `PUBLISH` whose answer missed the driver's 500 ms or was lost with its connection, which Redis may already have delivered; retry after Redis accepts `PUBLISH` but the Nervix ACK is lost, or after attached sibling failure | Any failure after detached relay acceptance; subscribers that are absent or disconnected miss the message | None |
 | ZeroMQ | Retry after socket send acceptance followed by lost ACK or attached sibling failure | Any failure after detached relay acceptance; socket send does not establish durable receiver storage | None |

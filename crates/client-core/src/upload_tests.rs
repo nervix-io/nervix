@@ -137,6 +137,15 @@ enum ArchiveContent {
 }
 
 #[test]
+fn a_call_its_stopping_node_ended_is_sent_again_under_its_identity() {
+    // A node that closes admission ends an upload or a restore it has not answered with
+    // UNAVAILABLE. Its outcome is then uncertain, so the client sends the same identity again.
+    let ended = tonic::Status::unavailable("the node is shutting down");
+
+    assert!(super::upload_status_is_retryable(&ended));
+}
+
+#[test]
 fn bolero_upload_archives_preserve_the_complete_tree_and_deterministic_bytes() {
     let runtime = nervix_primitives::runtime::Builder::new_current_thread()
         .enable_all()

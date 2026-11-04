@@ -41,8 +41,8 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Emitter transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
 | Emitter envelope clauses and `PROPERTIES`: timestamps, flags, delays, reply targets and message identities a transport carries beside each payload | `Emitters` → `Envelope clauses`, then `Connector Capabilities` |
 | MongoDB collection names and the lookup before each write, BSON field-name admission, native widths/date precision, conflict filters and upserts, write-concern outcomes, client URL configuration, the client database, paired TLS identity files, pool waits and driver deadlines | `Emitters` → `MongoDB`, `Database Client Connection Pools`, then `Connector Capabilities` |
-| MySQL table path parts, exact value bindings, duplicate-key actions, placeholder and packet limits, operation deadlines, TLS verification and identity file formats, URL lifetime settings and maintained pool minimums | `Emitters` → `MySQL`, `Database Client Connection Pools`, then `Connector Capabilities` → `MYSQL client` |
-| Postgres table path parts, conflict rules, the `sslmode` policy, TLS identity files, statement versus checkout deadlines, connection lifetimes and the borrow test | `Emitters` → `Postgres`, and `Database Client Connection Pools` |
+| MySQL table path parts, exact value bindings, duplicate-key actions, placeholder and packet limits, operation deadlines, TLS verification and identity file formats, the declared checkout budget, connection lifetimes and maintained pool minimums | `Emitters` → `MySQL`, `Database Client Connection Pools`, then `Connector Capabilities` → `MYSQL client` |
+| Postgres table path parts, the catalog query before each write, value bindings and the column types that read them, conflict rules, which SQLSTATEs reject a row and which retry, the `sslmode` policy and TLS trust, URL options and the node defaults the driver fills in, statement versus checkout deadlines, connection lifetimes, the borrow and return tests, and prepared statements behind a pooler | `Emitters` → `Postgres`, `Database Client Connection Pools`, then `Connector Capabilities` → `POSTGRES client` |
 | Sentry platform options, event defaults and limit, batch transformations, strict DSN/timeout configuration, the inherited HTTP transport, rejected versus retried statuses and retry hints | `Emitters` → `Sentry`, then `Connector Capabilities` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
@@ -336,8 +336,8 @@ current connection, retry and deadline limits.
 - Size an Iceberg emitter's worst-case latency as `FLUSH EACH` plus `COMMIT EACH`: the commit
   duration starts when a flush stages rows while none are staged, not when the rows arrived.
 - Keep `MAX BATCH SIZE` well below 32 MiB on routes that feed an Iceberg emitter. A commit charges
-  its staged files to the node's 32 MiB bulk memory class and reads a larger staged batch only once
-  the whole class is free; `DESCRIBE EMITTER` shows a commit waiting for that memory as its
+  its staged batches to the node's 32 MiB bulk memory class and reads a larger staged batch only
+  once the whole class is free; `DESCRIBE EMITTER` shows a commit waiting for that memory as its
   transient error while the emitter retries.
 - Provision Iceberg table columns with names and types matching the emitter's `VALUES`. A
   required `NAMESPACE` names the catalog namespace independently of the Nervix domain; provision
@@ -446,6 +446,9 @@ current connection, retry and deadline limits.
   retire; ordinary stop retains a persistent session. Read `Ingestors` → `MQTT` for identities,
   session lifetime, the separate raw-frame and admitted-publish bounds, oversized-payload counts
   and cleanup failures, and `Emitters` → `MQTT` for emitter identities.
+- For MQTT publish metadata, user properties through `read_header`, and what `metadata.retain` and
+  `metadata.message_expiry` can read, follow `Ingestors` → `MQTT`; convert
+  `metadata.correlation_data` explicitly before using it as text.
 - An `MQTT TOPIC` emitter writes its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, `NO ACK` only at
   `QOS 0` and `ACK` only at `QOS 1` or `QOS 2`. `SET MODE` stays within the written quality of
   service, and `SET TO` changes it. Read `Emitters` → `MQTT` for what each level completes on and
@@ -471,17 +474,23 @@ current connection, retry and deadline limits.
   meanwhile, and an emitter retries a `PUBLISH` answered later than the driver's 500 ms, which a
   subscriber can then receive twice. The Redis sections of `Ingestors` and `Emitters` state each
   window.
-- An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL` with `ON QUIESCE SUSPEND`. An emitter writes
-  its request shape, `SEND SINGLE` or `SEND BATCH`, before `MODE ACK RETRY POLICY ...`. Treat
-  `QUEUE` as a literal, case-preserving SQS name, and check `SQS CLIENT` keys against `Ingestors` →
-  `SQS`: `endpoint`, `region`, `access_key_id` and `secret_access_key` are required, and it
-  declares no proxy or client certificate keys. After `ENCODE USING`, an emitter may write
-  `DELAY <whole seconds from 1s to 900s>` for a standard queue or `DEDUPLICATION ID <string_expression>`
-  for a `.fifo` queue. Its `write_header` values may be `STRING`, an integer type or `BYTES`, sent
-  as `String`, `Number` and `Binary` attributes; read `Emitters` → `SQS`.
+- An `SQS QUEUE` ingestor uses `MODE ACK SEQUENTIAL`, or `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT
+  ...` with `n` at most 10, with `ON QUIESCE SUSPEND`; a rejected batch returns on its
+  `RETRY POLICY`, and a queue visibility timeout shorter than `ACK TIMEOUT` can hand a message still
+  awaiting its acknowledgement to another receive. An emitter writes its request shape,
+  `SEND SINGLE` or `SEND BATCH`, before `MODE ACK RETRY POLICY ...`; `SEND BATCH` is independent
+  of the `BATCH` clause. Treat `QUEUE` as a literal, case-preserving SQS name, and check
+  `SQS CLIENT` keys against `Ingestors` → `SQS`: `endpoint`, `region`, `access_key_id` and
+  `secret_access_key` are required, `tls_ca_file` replaces the platform's roots rather than adding
+  to them, and it declares no proxy or client certificate keys. After `ENCODE USING`, an emitter may
+  write `DELAY <whole seconds from 1s to 900s>` for a standard queue or
+  `DEDUPLICATION ID <string_expression>` for a `.fifo` queue. Its `write_header` values may be
+  `STRING`, an integer type or `BYTES`, sent as `String`, `Number` and `Binary` attributes; read
+  `Emitters` → `SQS`.
   For source identity, redelivery routing and event time, read the metadata table in `Ingestors` →
   `SQS`; use its exact field types and `TIMESTAMP AT metadata.sent_at` where appropriate. User
-  message attributes remain transport headers.
+  message attributes remain transport headers, which an ingestor reads as text, so a `Binary`
+  attribute that is not UTF-8 does not survive the read.
 - `NATS SUBJECT` ingestors use `NO ACK` with a required `QUEUE GROUP` and `INSTANCES`, and
   `BUFFER` or `DROP` quiesce. Write NATS wildcards only in an ingestor's `SUBJECT`, as whole
   tokens with `>` last; a `NATS SUBJECT` emitter uses `MODE NO ACK` and one literal subject.
@@ -510,9 +519,12 @@ current connection, retry and deadline limits.
 - Every `PULSAR TOPIC` ingestor states who owns its subscription after the subscription's name:
   `OWNED BY INGESTOR START AT EARLIEST` when Nervix may create it and should remove it when the ingestor or its
   domain is dropped, or `PROVISIONED` when an operator provisions it, which Nervix only verifies and
-  the operator must create before the ingestor reads. Consumers register as
-  `<domain>~<ingestor>-<instance>`. Read `Ingestors` → `Pulsar` for missing subscriptions, removal
-  failures and which subscription `ALTER` retains or removes. Changing only consumer policy or
+  the operator must create before the ingestor reads. The owner is followed by a required
+  `TYPE SHARED|KEY_SHARED|FAILOVER|EXCLUSIVE`; `FAILOVER` and `EXCLUSIVE` read through one consumer,
+  so they refuse more than one instance. Consumers register as
+  `<domain>~<ingestor>-<instance>`. Read `Ingestors` → `Pulsar` for what each type delivers, missing
+  and held subscriptions, removal failures and which subscription `ALTER` retains or removes.
+  Changing only consumer policy, including `SET TYPE`, or
   handing the same subscription to `PROVISIONED` preserves its backlog; a changed broker, qualified
   topic or subscription name retires the preceding owned subscription best-effort.
 - A `PULSAR TOPIC` ingestor exposes `metadata.topic`, `message_id`, `key` and `producer_name` as
@@ -526,7 +538,8 @@ current connection, retry and deadline limits.
   transport headers. Read `Ingestors` → `Pulsar` for identity formatting and conversion bounds.
 - A `PULSAR CLIENT`'s `namespace` is exactly `'tenant/namespace'` (default `public/default`), and
   its TLS keys require a `pulsar+ssl://` `addr`; check both against `Ingestors` → `Pulsar` before
-  generating a client.
+  generating a client. A client authenticates with a confidential `auth_token`, a paired
+  `tls_cert_file` and `tls_key_file`, or both, the same way in both directions.
 - Every client ingestor is a `CLIENT PRODUCER INGESTOR` whose source is `FROM SCHEMA <schema> MODE
   ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d> ON QUIESCE
   SUSPEND` and nothing else: no external connector client, codec, `DECODE USING`, headers, or `NO ACK`. The
@@ -561,7 +574,7 @@ current connection, retry and deadline limits.
   nothing. A `gzip`, `deflate` or `br` response arrives decompressed and without its
   `content-encoding` and `content-length` headers. Read `Ingestors` → `HTTP REQUEST` for the
   request, responses, failures and the shared client keys, and `Emitters` → `HTTP client transport`
-  for redirects and proxies.
+  for redirects, proxies and the common TLS trust policy used by polling and emitting.
 - Every `PROMETHEUS CLIENT` sets `addr` to the API root, an `http` or `https` URL without a
   query string or fragment, and a positive `timeout_ms`. It sets no key beyond `tls_ca_file` and
   the paired `tls_cert_file` and `tls_key_file`; `CREATE PROMETHEUS CLIENT` refuses any other. It
@@ -656,7 +669,8 @@ Choose checks relevant to the configured graph:
 - `SHOW CREATE <kind> <name>;` confirms the stored canonical definition.
 - `DESCRIBE RELAY <relay>;` reports the relay owner and optional materialized-state replicas;
   `DESCRIBE RELAY <relay> WHERE (...);` is owner-authoritative for concrete branch state.
-- `SHOW RELAY <relay> MATERIALIZED STATE;` inspects materialized data and placement.
+- `SHOW RELAY <relay> MATERIALIZED STATE;` inspects materialized data and placement, masking
+  `SENSITIVE` payload fields and branch-key fields on both the owner and other nodes.
 - `DESCRIBE INGESTOR`, `DESCRIBE JUNCTION`, other processor-specific `DESCRIBE` commands, and
   `DESCRIBE EMITTER` inspect runtime state and edge metrics. `SHOW INGESTORS;` lists every ingestor
   with the connector and entity it reads (`from=<CONNECTOR> <ENTITY>`), its owner and state, and a

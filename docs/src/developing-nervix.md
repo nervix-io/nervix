@@ -37,6 +37,17 @@ Install:
 - Rust via `rustup`
 - `just` (latest release)
 - `zellij`
+- `uv`, which runs the repository's Python tools, and the CPython headers and shared library
+  (`python3-dev` on Debian and Ubuntu, or any CPython that `uv python install` provides), which
+  the tests of the Python package, `crates/client-python`, embed
+
+The Python package builds with maturin, which `just build-client-python` runs as
+`uvx --from maturin==1.16.0 maturin`, into an abi3 wheel for CPython 3.12 and later under
+`target/client-conformance/wheels`. The recipe installs the wheel and `pyarrow`, the probe's test
+dependency, into a CPython 3.12 environment at `target/client-conformance/python`, which uv
+downloads when no CPython 3.12 is installed. The package's own tests run with `cargo test` and embed
+the CPython that pyo3 finds on `PATH`, with its library's directory as the tests' run path, so an
+interpreter outside the loader's default path, such as pyenv's, runs them too.
 
 `just build-web-console` builds the console the server embeds. trunk uses a `wasm-bindgen` CLI
 from `PATH` when its version equals the one `Cargo.lock` locks, and otherwise downloads it from
@@ -68,8 +79,9 @@ minutes to compile. cargo-auditable and cargo-sonic compile with `cargo install 
 the lockfile each crate published, so a later compatible release of one of their dependencies can
 neither change them nor stop them compiling. Moving a tool to another version changes its version
 pin and, for an archive, the checksum of each build architecture; an archive that does not match
-its checksum fails the build. The kache pin is the `KACHE_VERSION` that CI's kache-backed jobs
-install, which the recipes pass to the build.
+its checksum fails the build. Kache's archive holds its client and the engine the client runs only
+with, and the builder installs both and checks that each reports the pinned version. The kache pin
+is the `KACHE_VERSION` that CI's kache-backed jobs install, which the recipes pass to the build.
 
 `Dockerfile.debian` has two complete image targets: `cpu` (the default) and `cuda`. The recipes
 select them with `--target cpu` and `--target cuda`, respectively. Both targets copy the same
@@ -295,30 +307,36 @@ count, such as `just validate 2`, or use `just --jobs 2 validate` to select anot
 `JUST_JOBS` also supplies the default. Validation runs the product and compiler tooling Clippy
 recipes in one invocation, so they share the same limit. In `just validate-ci` the lints and the
 other validations run beside each other, each building in directories of its own, so none waits for
-another's directory lock, and the typed ratchet runs once they have finished. CI's `checks` job
-passes four as well, because memory limits it rather than CPUs: each recipe's Cargo already uses
+another's directory lock, and the typed ratchet runs once they have finished. `just validate-ci
+<jobs> 1/2` and `just validate-ci <jobs> 2/2` each run one part of those checks, and together they
+are every check: the first checks formatting, the ordinary, Turmoil and Deloxide lints and the
+source, dependency and documentation validations, and the second lints the Shuttle and Loom modes and
+the compiler tooling and runs the typed ratchet once its own lints have finished. CI's `checks` job
+runs the two parts as the shards `checks (1 of 2)` and `checks (2 of 2)` on two Boat runners, and the
+second also runs the script tests with the ratchet tools it built. Each passes four jobs, because
+memory limits it rather than CPUs: each recipe's Cargo already uses
 every CPU, and in Check 41126961308, which compiled the server cold, one recipe per CPU overlapped
 enough Clippy compilations to pass the runner's 32 GB and one was killed. The typed ratchet's
 admission queue admits its server analyses as if nothing else ran: beside the lints, the kernel's
 out-of-memory killer ended the ratchet's Shuttle analysis of the server in Check 41066649586.
 
-Each package and configuration is a separate parallel dependency of one shared Clippy recipe.
-The `[parallel]` groups map package lists onto that recipe, including the packages checked with
-`--all-features` and the compiler tooling packages. Feature, target, profile and compiler selections
-stay separate, so mutually exclusive execution modes never share a Cargo invocation.
-
-Clippy builds in sixteen directories, `clippy/0` to `clippy/f` beneath `CARGO_TARGET_DIR`, or the
-repository's `target` directory when that variable is unset. The last hexadecimal digit of the
-SHA-256 of a configuration's package, Cargo arguments and toolchain selects its directory, so each
-run of a configuration returns to the directory that holds its artifacts. The configurations in a
-directory share the dependencies they build, build scripts included, and Cargo keeps the artifacts
-of different features, profiles, targets and flags, and of the stable and nightly compilers, apart
-there. Configurations in the same directory take turns on its build directory lock, so two of them
-selected at once run one after the other; sixteen directories let up to sixteen build at once, where
-four left a 16-CPU runner mostly idle behind the server's long compilations. Nothing deletes these
-directories, locally or on CI: the sixteen of them bound what a lint leaves on disk. `just
-cargo-clippy-package <package> [arguments ...]` runs a focused check of all targets through the same
-recipe. The compiler driver builds keep their separate `typed-ratchet/driver` directory. All builds
+Each package and configuration is a dependency of one shared Clippy recipe, and the configurations
+run in lanes. A lane holds the configurations that can reuse one another's build artifacts: one
+execution mode, one target and compiler, and packages that share most of their dependency graph,
+such as the Plexus language and its clients, the vocabulary and engines below them, the server with
+the cluster's network stack, the connectors of HTTP and database services, and those of message
+brokers. Mutually exclusive execution modes never share a Cargo invocation or a lane. A lane runs
+its configurations one after another in its own directory beneath `CARGO_TARGET_DIR`, or the
+repository's `target` directory when that variable is unset, at `clippy/<lane>`, so each finds fresh
+what the configurations before it compiled alike, build scripts included. Lanes run in parallel, as
+many at once as the job limit allows, and no configuration waits for another lane's build directory
+lock or holds a job slot while it waits. The longest lane bounds a run, so a family too large for one
+lane splits into numbered sublanes of at most eight configurations, `clippy/<lane>-<n>`, closer
+packages together, trading the reuse between sublanes for parallelism. Nothing deletes these directories, locally or on CI:
+the lanes bound what a lint leaves on disk. `just cargo-clippy-package <package> [arguments ...]`
+runs a focused check of all targets through the same recipe, in a `clippy/package` directory that
+repeated focused checks share. The compiler driver builds keep their separate `typed-ratchet/driver`
+directory, and the compiler tooling's own Clippy lane builds on the analysis nightly. All builds
 retain the configured kache wrapper. Cargo's compiler job limit applies separately within each
 invocation.
 
@@ -332,6 +350,20 @@ For test runs:
 ```bash
 just test
 ```
+
+To run one named scenario, quote its name or regular expression as one shell argument:
+
+```bash
+just test-scenarios --input tests/features/tools/cli_session.feature \
+    --name '^CLI completion uses UTF-8 byte edits after Unicode text$' --concurrency 4 --retry 0
+```
+
+`test-scenarios` and `test-scenarios-reuse` forward each argument unchanged. Quote an input glob
+such as `'tests/features/runtime/{first,second}.feature'` so the scenario runner expands it.
+Pass each option and its value separately; a quoted string containing several options stays one
+argument. `test-scenarios-reuse` accepts the same selections and keeps dependency containers for
+the next run. `just test-scenario-arguments` checks both recipes without compiling Rust or
+starting services.
 
 For representation properties and sanitizer fuzzing, see
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md). The focused entry points are
@@ -361,7 +393,7 @@ just test-connectors <filter>
 Each CI job's `runs-on` label picks one of three kinds of machine.
 
 GitHub's own hosted runners, which are free for a public repository, run the jobs that coordinate a
-run or need little of a machine: the test selection, the PR title check, the image metadata and
+run or need little of a machine: the test selection, the unit tests, the PR title check, the image metadata and
 manifest, the chaos plans and verdicts, the Bolero gate and the combination of its shards, the
 benchmark comment, the coverage merges, the book and the deployment checks. They also run the chaos
 shards, on the workers the suites were qualified on. `ubuntu-24.04` has 4 CPUs, 16 GB of memory and
@@ -373,7 +405,7 @@ inspection or stop took 8 to 29 seconds against the chaos suite's 30-second boun
 operation, and three of fourteen soak shards failed their network qualification.
 
 [Boat](https://boat.dev) machines, which the boat CI GitHub App starts for every job whose `runs-on`
-names a Boat size, run every other job but the three that run on Blacksmith. Each gets a fresh
+names a Boat size, run every other job but those that run on Blacksmith. Each gets a fresh
 x86_64 Ubuntu 24.04 virtual machine with Docker, deleted when the job ends.
 `.github/actionlint.yaml` declares the Boat labels to `just validate-workflows`. Boat runs a public
 repository's jobs only for the GitHub users its account setting lists, and only when both a run's
@@ -383,7 +415,7 @@ minute, hour and day. A job's size follows the memory and disk its builds use ra
 since a Boat machine has only 2 GB of memory per CPU, with 4 GB of swap beside it:
 
 - `boat-xlarge`, with 16 CPUs, 32 GB and 251 GB of disk, runs validation, the diagnostic evidence,
-  the unit tests, the scenario shards, the extra checks, Shuttle, Loom, the Deloxide
+  the extra checks, Shuttle, Loom, the Deloxide
   lane, the Bolero randomized properties, the image builds and the benchmarks. In October 2026 the
   extra checks used about 95 GiB of disk and the amd64 image build lost its runner on a 16 GB
   machine.
@@ -408,11 +440,22 @@ needs more than Boat's 32 GB, even with eight compilers. The other two are compi
 Check run 40991534806 kache's downloads spent most of their time waiting for the lock of its local
 store, 1.8 to 4.6 seconds each against 0.4 seconds on Blacksmith, the Loom qualification shards
 reached their two-hour limit after about 107 minutes of compiling, and the client conformance build
-took 49 of its job's 60 minutes. `.github/actionlint.yaml` declares the Blacksmith labels as well.
+took 49 of its job's 60 minutes.
+
+The scenario shards are timing sensitive, and they run on Blacksmith's
+`blacksmith-8vcpu-ubuntu-2404`, with 8 CPUs, 32 GB and 160 GB of disk. On `boat-xlarge` a shard
+lost on average a tenth of its CPU to its host and up to 58% at peaks, and its failures followed
+that loss. The unit tests run on GitHub's hosted `ubuntu-24.04`, whose 150 GB disk had about
+84 GiB free, room for their 5.1 GiB archive and the 32 GiB it restores: on Boat, on 3 November 2026,
+downloading the archive took 18 minutes and restoring it another 10, so the job reached its
+30-minute limit before any test ran. `.github/actionlint.yaml` declares the Blacksmith labels as
+well.
 
 An archive restores only at the checkout path it was built in, and it checks that path before it
-restores any file. The scenario build runs on Blacksmith and publishes its path, so the `tests` job
-and the shards on Boat bind-mount their checkout there, and restore and run from that path.
+restores any file. The scenario build and the scenario shards run on Blacksmith, whose runners
+check a repository out at the same path, so each shard restores and runs from its own checkout.
+GitHub's hosted runner checks out at another path, so the build publishes its path, and the `tests`
+job bind-mounts its checkout there, and restores and runs from that path.
 
 A kache-backed job uses the cache bucket in its runner's region: the EU bucket on Boat's European
 machines, and the US bucket on GitHub's hosted runners and on Blacksmith's US runners.

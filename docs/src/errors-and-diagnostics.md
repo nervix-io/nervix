@@ -335,6 +335,15 @@ alternate `Display` (`{error:#}`), including report-bearing tracing fields. A fa
 message, a runtime event, a negative acknowledgement's reason, a domain's instantiation error, the
 CLI's text and JSON reports and the C binding's error message are that chain.
 
+A tracing field records a report as `error = %format_args!("{error:#}")`. The `%error` sigil, and a
+`display` field written out, record the report's plain `Display`, which is its outermost context
+alone: a warning that a maintenance proposal failed would then say only that a consensus proposal
+failed, and not whether the leader could not confirm its lease, lost its leadership, found its log
+saturated or could not store the entry. The compiler architecture gate refuses such a field, as
+[The Reported-Error Guard](#the-reported-error-guard) describes. The transaction maintenance pass
+and the command-history reclamation report a failed commit resume, inactive-transaction expiry,
+tombstone removal or history reclamation with that whole chain.
+
 Reports remain typed until these reporting decisions; sensitivity rules continue to apply to every
 context. A boundary renders a failure once and reuses the text: a failed dead-letter dispatch
 renders its report once and uses that chain in both its runtime event and its negative
@@ -442,7 +451,11 @@ requested names when an alteration targets another Model. An ingestor alteration
 another connector and entity than the stored ingestor reads is refused with both typed kinds, which
 its message renders as their phrases, such as `the stored ingestor reads HTTP ENDPOINT, so ALTER
 KAFKA TOPIC INGESTOR cannot alter it`. A Pulsar `SET START AT` on a provisioned subscription is a
-typed vocabulary alteration refusal; the existing definition and broker cursor are unchanged.
+typed vocabulary alteration refusal; the existing definition and broker cursor are unchanged. A
+Pulsar subscription `TYPE` that reads through one consumer with more than one instance is the
+registry's typed `ConnectorDeclarationIssue::PulsarSingleConsumerType`, which `CREATE` and every
+alteration reach through the same source validation, so `SET TYPE` and `SET FROM` also leave the
+stored definition unchanged.
 An input, route, or dependency operation
 that junctions, deduplicators, reorderers, and reingestors share is reported in the altered
 processor's own error where it is detected, so the report begins at the failure rather than at a
@@ -745,10 +758,14 @@ absent TLS peer and produces no failure.
 A MySQL pool is kept at its `POOL SIZE MIN` by a task no caller waits on, so that task is the only
 witness of a pass that ends below the minimum. It reports `PoolMinimumError::NotRestored`, naming
 the minimum, above the failed checkout's `PoolMinimumError::CheckOut` and the driver's error, at
-`debug`, returns the connections the pass held, and passes again a second later. An emitter that
+`debug`, returns the connections the pass held, and passes again after the declared maintenance interval. An emitter that
 needs a connection meanwhile reports its own failed checkout. The shared MySQL pool retains
-`ConfiguredDeadline` for `timeout_ms`, when present, and every checkout, validation and insert
-keeps a typed `DeadlineElapsed` on expiry. Driver checkout and validation errors retain their
+the effective `ConfiguredDeadline` for `pool_acquire_timeout_ms` and optional `timeout_ms`.
+Checkout uses the shorter applicable bound, and every expired checkout, validation or insert
+keeps a typed `DeadlineElapsed` naming the key that ended it. An unusable lifetime or maintenance
+value keeps its vocabulary `ClientConfigSchemaError` beneath the connector's
+`MySqlPoolPolicyError::InvalidKey` and the initialization context; public CREATE validation uses
+that same declared value rule. Driver checkout and validation errors retain their
 typed causes through the open/write contexts. The emitter's pool-borrow context adds no rendered
 copy of the report. Its deadline report also attaches the safe operation, key and duration for
 the host's public emitter diagnostic. MySQL initialization changes context on the shared-client
@@ -961,7 +978,8 @@ for its `idle_timeout_ms`, ends with `DeadlineElapsed` beneath the listener's co
 That failure closes only the connection and is logged at debug level; it is never the ingestor's
 transient error. A Syslog client that sets a deadline key its direction and protocol never wait on
 is refused as `SyslogConfigError::InapplicableDeadlineKey`, naming the key and the clients it
-applies to.
+applies to. When several keys are inapplicable, the first refusal follows the shared deadline-key
+order, independently of the order of the client's entries.
 
 An MQTT client configuration the vocabulary cannot carry is refused as an
 `MqttClientConfigError`, which names the key without its value: an empty or NUL-bearing identity, a
@@ -1039,7 +1057,11 @@ from any failure to start the replacement. A provisioned
 subscription that does not exist is `PulsarTopicIngestorError::MissingSubscription` beneath the source's
 resume context, which the ingestor's transient status shows by its subscription and topic; a check
 that could not learn whether the subscription exists is `VerifySubscription` above the driver's
-error.
+error. A join the broker refuses is `SubscriptionRefused`, which holds the subscription, the topic
+and the typed `PulsarRefusal` with no driver error beneath it, so the ingestor's transient status
+shows the broker's server error and reason. `ConsumerBusy` and `ServiceNotReady` hold only for now,
+so at open they leave the instance to its first resume, which reports them; any other refusal fails
+the open. A join that fails without a refusal is `Subscribe` above the driver's error.
 
 A Kafka emitter keeps librdkafka's `KafkaError` beneath `EmitterWriteError::Publish` when a producer
 failure ends admission or a delivery report leaves a confirmed publish's record unresolved.
@@ -1080,12 +1102,15 @@ client accepts under one name, such as `metadata.broker.list` for `bootstrap.ser
 librdkafka's `topic.` prefix is `ClientConfigSchemaError::DriverPrefix`, naming the key and the
 prefix. Both refusals sit beneath the same client context and carry no configured value.
 
-A Kafka record timestamp outside the signed Unix-nanosecond range retains
-`TimestampError::ArithmeticOverflow` beneath `KafkaTopicIngestorError::RecordTimestamp`, naming
-the topic, partition and offset, beneath `IngestorError::Read`. It is a source read failure, not
-a codec rejection, and never becomes a wrapped or absent metadata instant. When a later record
-in a collected read fails that conversion, the source returns the valid gathered prefix first and
-keeps exactly one report for its next admitted read. A cancelled read leaves that report pending.
+A Kafka record timestamp outside the instants a `DATETIME` holds is not a source failure. The
+message hands it over as an unrepresentable `metadata.timestamp` value described by its
+milliseconds, never as a wrapped or absent instant, and the host refuses the record as a message
+error with code `validation` and operation `admit` only where a route or `TIMESTAMP AT` reads that
+field. A record at the last offset Kafka's signed offsets reach has no next position, which is
+`KafkaTopicIngestorError::OffsetOverflow`, naming the topic and partition, beneath
+`IngestorError::Read`: a source read failure, not a codec rejection. When a later record in a
+collected read fails that way, the source returns the valid gathered prefix first and keeps
+exactly one report for its next admitted read. A cancelled read leaves that report pending.
 
 A Kafka source keeps librdkafka's `KafkaError` beneath `KafkaTopicIngestorError::CommitOffset`, which names
 the consumer group, when the group's coordinator refuses an offset commit. A commit the coordinator
@@ -1210,6 +1235,17 @@ client failure the source does not classify keeps the driver's error as the type
 `Acknowledge` or `NegativelyAcknowledge`. The innermost context is the reason `DESCRIBE INGESTOR`
 shows.
 
+Both Pulsar directions connect through one builder, whose `PulsarClientError` says why a client did
+not connect. `Configuration` keeps the client configuration or TLS cause beneath it. `Refused`
+carries the `PulsarRefusal` a broker answered the connection with, such as an `AuthenticationError`
+for a missing or rejected credential. `NotOpened` keeps the driver's `pulsar::Error` beneath it for
+a connection that never opened, including a TLS handshake that failed. A source reports it beneath
+`PulsarTopicIngestorError::Connect`. An emitter reports `Configuration` beneath
+`EmitterOpenError::InvalidConfiguration` and the others beneath `EmitterOpenError::Initialize`, and
+attaches the failure's whole chain, so its transient status reads
+`the PULSAR broker refused the connection with AuthenticationError: ...` or
+`no connection to the PULSAR broker opened: Connection error: ...`.
+
 A NATS source whose client loses its connection to the server reports
 `NatsSubjectIngestorError::ConnectionLost` beneath `IngestorError::Read` once it has handed over what the client
 received, and each reconnect that fails reports `NatsSubjectIngestorError::Connect` beneath
@@ -1309,6 +1345,10 @@ branch by the fingerprint of its key, as described under
 [Sensitive Data And Observability](#sensitive-data-and-observability), and unbranched work as
 `unbranched`. [Data Plane](./data-plane.md) owns branch execution and
 [Cluster Interconnect](./interconnect.md) owns snapshot exchange.
+
+Materialized-state inspection refuses a missing scheduled payload schema or resolved branch
+metadata with the observation owner's typed error. It never substitutes an empty sensitivity
+set. Local and remote report failures retain their complete cause chain at the command boundary.
 
 The materialized installation owner refuses a lower snapshot revision with
 `RuntimeStateOperationError::MaterializedSnapshotRevision { received, current }`, a snapshot from an
@@ -1640,16 +1680,20 @@ the declared `MAX SIZE` is instead a definitive per-row `validation` message err
 operation; `ON MESSAGE ERROR` routes it before the other rows are staged. A data file whose
 physical count or byte length violates a bound after a table schema change is a commit failure:
 the emitter does not append it and keeps the staged rows and acknowledgements for retry.
-Cleanup failures for incomplete staged files or a rejected data file are logged with their paths
-without replacing the original publish or commit failure.
+A failed staging append keeps the typed `StagingError` of the staging file beneath
+`EmitterWriteError::Publish`, and a failed read beneath `EmitterWriteError::Commit`, with the
+filesystem's, Arrow's or the cancellation's failure beneath it; the description the emitter shows
+names the staging file and that failure. Cleanup failures for a new staging file whose first append
+failed, for an append that could not be cut back off, or for a rejected data file are logged with
+their paths or noted on the report without replacing the original publish or commit failure.
 
-An Iceberg commit charges the bulk memory class for the staged files it reads back with
+An Iceberg commit charges the bulk memory class for the staged batches it reads back with
 `Executor::try_reserve`, so a charge the class has no room for is refused rather than queued. The
 refusal keeps the typed `AdmissionError` beneath `EmitterWriteError::Commit` and attaches the
 description the emitter shows as its transient error: `Iceberg commit waits for room in the bulk
 memory class for <bytes> staged bytes` when the class has no room now, and `Iceberg commit waits
-for the whole bulk memory class of <capacity> bytes for a staged file of <bytes> bytes` when one
-staged file is larger than the class, which charges the whole class and so waits until all of it
+for the whole bulk memory class of <capacity> bytes for a staged batch of <bytes> bytes` when one
+staged batch is larger than the class, which charges the whole class and so waits until all of it
 is free. The emitter retries either with its policy, and neither releases a staged record's
 acknowledgement.
 
@@ -1786,10 +1830,10 @@ failure. An error handler whose own construction fails does not recursively invo
 Paced ingest admission reports a rejected event timestamp as a message error with code
 `validation` and operation `admit`. A null declared timestamp has the same classification and
 names its field. So does a transport metadata value its connector hands over as unrepresentable,
-with a description of it, such as an AMQP timestamp after the last `DATETIME` instant, wherever
-the ingestor's programs or its `TIMESTAMP AT` read that field: the host refuses the message after
-`FILTER WHERE` and before event-time selection, and the message names `metadata.<field>` and that
-description, never a payload value.
+with a description of it, such as an AMQP or Kafka timestamp after the last `DATETIME` instant,
+wherever the ingestor's programs or its `TIMESTAMP AT` read that field: the host refuses the
+message after `FILTER WHERE` and before event-time selection, and the message names
+`metadata.<field>` and that description, never a payload value.
 The host keeps the rejected row's source metadata and ACK attached while each output route applies
 its message-error policy. Accepted rows from the same decoded group continue through their normal
 routes.
@@ -1897,6 +1941,12 @@ warning instead of inventing per-record rejections. An OTLP/gRPC export the rece
 retries, whatever code tonic reports for it. An answered status other than `INVALID_ARGUMENT`,
 `RESOURCE_EXHAUSTED` or a code the OTLP specification lists as retryable is a misconfiguration
 failure, which the host does not retry.
+
+The shared HTTP client builder adds `HttpClientConfigError::Tls` above the
+`TlsClientConfigError` the common rustls configuration owner returns. HTTP polling, Prometheus,
+Sentry and OTEL HTTP therefore retain that owner's CA-file or client-identity classification
+instead of rebuilding the TLS failure from text. Native-root loading remains the TLS owner's
+diagnostic; its bundled roots still permit client construction when the native store is empty.
 
 An HTTP polling request whose response exceeds `MAX BODY SIZE` fails that poll with a typed
 `ResponseTooLarge` cause. DNS, connection, TLS, response-body and timeout failures retain their
@@ -2851,15 +2901,16 @@ is the lowercase hexadecimal digest of the branch's canonical key text, the iden
 PROCESSOR` checkpoint lines and `DESCRIBE BACKUP` print and transaction-impact reports carry for
 the same branch, so an operator matches a failure to those reports by that text. The per-branch
 statistics the execution graph carries to sessions name each branch by the same fingerprint, and
-per-branch metric series are keyed by it. A session subscription, which masks sensitive key fields,
-is where a key's other field values are read.
+per-branch metric series are keyed by it. Session subscriptions and materialized-state inspection
+mask sensitive key fields while exposing the key's non-sensitive field values.
 
 The fingerprint is a plain digest of the key text, computed without a secret. It hides a key only
 as far as the key's values are hard to guess: someone who can guess a sensitive key value can
 compute its fingerprint and confirm the guess against a diagnostic. The rule also governs only text
 that names a branch in a failure, an event, a log or a statistic. A statement or an emitter that an
 operator directs at branch data follows its own contract: `SHOW RELAY <relay> MATERIALIZED STATE`
-prints each entry's key and payload ([Relay](./relay.md)), and an SQS emitter's `FROM BRANCH` group
+prints each entry's key and payload with their declared sensitive fields masked on both local and
+remote reads ([Relay](./relay.md)), and an SQS emitter's `FROM BRANCH` group
 is the record's branch key ([Emitters](./emitters.md)).
 
 ### Log Levels
@@ -2975,7 +3026,7 @@ records each failed implementation with its chain.
 
 `just validate-typed-errors`, run by `just validate`, rejects textual
 `Result<_, String>` in product code without a baseline. It remains a separate source rule,
-including inactive source. The compiler architecture gate, run by `just ratchet`, owns four
+including inactive source. The compiler architecture gate, run by `just ratchet`, owns five
 resolved Rust diagnostics:
 
 | Diagnostic | Contract it checks |
@@ -2984,6 +3035,7 @@ resolved Rust diagnostics:
 | `nervix::discarded_outcome` | A `let` wildcard, unused statement or resolved `drop` consuming a `Result`, report, owning collection or transparent wrapper states its handling or recovery class. |
 | `nervix::bare_panic` | A resolved inherent `Option` or `Result` `unwrap`/`expect` uses `meticulous` to state its guarantee. |
 | `nervix::replaced_error` | A resolved failure replacement retains its informative cause or declares an exact ordinary-outcome boundary. |
+| `nervix::partial_report_field` | A tracing field that records an `error_stack::Report`, directly or through a borrow, box or shared owner, renders its whole context chain instead of the report's plain `Display`. |
 
 The same driver emits the source-owned layer, Model, language, awaited cluster, identity and
 installation-state diagnostics described in
@@ -3064,6 +3116,12 @@ resolution; current API doctests pair supported calls with `compile_fail` exampl
 fallible site, a reviewer identifies the deciding layer, ordinary outcome or failure class,
 actionable fields, context across boundaries and the public diagnostic or recovery that ends the
 path. That classification preserves branch and sensitivity rules.
+
+The tracing field check resolves the `display` constructor that the `%` sigil names and the type
+of the value it records. A shorthand field, `%error` or `%self.error`, is named at the tokens it
+was written with, and a value an authored macro receives or owns is named where it was written. A
+debug field, a field that records a report's current context, and a value that only shares the
+report's name are not reports rendered by their plain `Display`.
 
 A recovered operation with no other witness uses `nervix_recovery::Reported::reported` at the
 decision that continues without its result. That record renders the complete context chain at
@@ -3342,3 +3400,12 @@ Connector terminology follows entity ownership: `IngestorError` and `EmitterOpen
 record. Renaming and grouping entity owners changes neither retry classification nor what is
 rendered at the boundary. The ingestor planner's input identity/kind errors cover client, endpoint
 and native schema references before composition.
+
+
+RabbitMQ emitter property preparation preserves a typed refusal until the per-record reporting
+boundary. A short-string failure keeps the driver's typed cause below the property name and byte
+count; a timestamp refusal names the requirement for nonnegative whole Unix seconds. Neither
+renders the property value. The publisher projects these reports into the record's message-error
+outcome before transport and continues with representable neighbours. A wrong property name or
+type at this connector boundary remains a typed contract refusal; normal statements are already
+checked against the entity's declaration and exact types at `CREATE` and `ALTER`.

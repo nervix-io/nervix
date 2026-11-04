@@ -99,6 +99,22 @@ pub(in crate::registry) fn validate_ingestor_source(
             }
         })?;
     }
+    if let Some(nervix_models::IngestorEntity::Pulsar(nervix_models::PulsarIngestor::Topic(source))) =
+        ingestor.input.transport_entity()
+        && !source.instances_fit_subscription()
+    {
+        return Err(Report::new(RegistryError::InvalidConnectorDeclaration {
+            domain: domain.clone(),
+            node: nervix_models::NodeRef::new(
+                nervix_models::ModelKind::Ingestor,
+                identifier.clone(),
+            ),
+            issue: ConnectorDeclarationIssue::PulsarSingleConsumerType {
+                kind: source.subscription.kind,
+                instances: source.instances,
+            },
+        }));
+    }
     if let Some(unmet) = ingestor.input.unmet_delivery() {
         return Err(Report::new(RegistryError::InvalidConnectorDeclaration {
             domain: domain.clone(),
@@ -2034,3 +2050,7 @@ pub(in crate::registry) fn validate_iceberg_client_pairing(
 #[cfg(test)]
 #[path = "connector_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "connector_pulsar_tests.rs"]
+mod pulsar_tests;

@@ -1,19 +1,28 @@
-//! What producers and consumers have in common as a host reads them: the state of an endpoint
-//! handle, why an open is refused or a handle has to be opened again, and an endpoint's
+//! What producers and consumers have in common as a host reads them: the state of an endpoint,
+//! why an open is refused or an endpoint has to be opened again, and an endpoint's
 //! acknowledgement window.
 //!
-//! - **Owns.** The endpoint states, open refusals, reopen reasons and acknowledgement windows the
-//!   header names, and how the Rust client's producer and consumer vocabulary reads as them.
+//! - **Owns.** The endpoint states, open refusals, reopen reasons and acknowledgement windows a
+//!   host reads, how the Rust client's producer and consumer vocabulary reads as them, the credit
+//!   a host asks for, and the nanoseconds of an endpoint's durations.
 //! - **Depends on.** The Rust client's producer and consumer vocabulary.
 //! - **Must not know.** How an endpoint is opened, restored or closed; the producer and consumer
-//!   handles decide that.
+//!   decide that.
 
+use std::{
+    num::{NonZeroU32, NonZeroU64},
+    time::Duration,
+};
+
+use meticulous::ResultExt as _;
 use nervix_client_core::{
     AckWindow, ClientProducerRefusal, ConsumerConnection, ConsumerReopenReason, ProducerConnection,
     ProducerReopenReason, wire::EmitterOpenRefusal,
 };
 
-/// Whether an endpoint handle is attached, with the header's values.
+use crate::failure::Failure;
+
+/// Whether an endpoint handle is attached, with its stable values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum EndpointState {
@@ -48,7 +57,7 @@ impl From<ConsumerConnection> for EndpointState {
     }
 }
 
-/// Why the server refused to open a producer or a consumer, with the header's values. A producer
+/// Why the server refused to open a producer or a consumer, with its stable values. A producer
 /// and a consumer are refused for the same reasons, each about its own kind of endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
@@ -102,7 +111,7 @@ impl From<EmitterOpenRefusal> for OpenRefusal {
     }
 }
 
-/// Why a handle has to be opened again, with the header's values.
+/// Why a handle has to be opened again, with its stable values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum ReopenReason {
@@ -171,7 +180,7 @@ impl From<&ConsumerReopenReason> for Reopen {
     }
 }
 
-/// How an endpoint's acknowledgements may be outstanding, with the header's values.
+/// How an endpoint's acknowledgements may be outstanding, with its stable values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum WindowKind {
@@ -200,4 +209,21 @@ impl From<AckWindow> for Window {
             },
         }
     }
+}
+
+/// The credit one endpoint asks for: how many batches and bytes may be outstanding at once.
+pub fn credit(batches: u32, bytes: u64) -> Result<(NonZeroU32, NonZeroU64), Failure> {
+    let Some(batches) = NonZeroU32::new(batches) else {
+        return Err(Failure::invalid_argument("batches", "must be positive"));
+    };
+    let Some(bytes) = NonZeroU64::new(bytes) else {
+        return Err(Failure::invalid_argument("bytes", "must be positive"));
+    };
+    Ok((batches, bytes))
+}
+
+/// A duration the wire carried, in nanoseconds.
+pub fn nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos())
+        .verified("the wire carries every endpoint duration as u64 nanoseconds")
 }

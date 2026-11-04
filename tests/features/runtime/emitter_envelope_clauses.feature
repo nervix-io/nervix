@@ -2,11 +2,10 @@ Feature: Emitters write envelope clauses only where their entity declares them
 
   An emitter's envelope clauses follow its payload and set what its transport carries beside each
   payload. A clause or PROPERTIES key the emitter's entity does not declare is refused where it is
-  written. KAFKA TOPIC declares TIMESTAMP, PULSAR TOPIC declares TIMESTAMP and DELIVER AFTER, SQS
-  QUEUE declares DELAY and DEDUPLICATION ID, the RabbitMQ entities declare MANDATORY, and no entity
-  declares another clause or a property, so a node refuses each clause form on every entity that
-  does not declare it, and a declared clause refuses a value that is not exactly the type it
-  carries.
+  written. KAFKA TOPIC declares TIMESTAMP, PULSAR TOPIC declares TIMESTAMP and DELIVER AFTER, SQS QUEUE declares DELAY and DEDUPLICATION ID, and the
+  RabbitMQ entities declare PERSISTENT, MANDATORY, TIMESTAMP and their AMQP properties. A node
+  refuses each clause form on an entity that does not declare it, and a declared clause refuses
+  a value that is not exactly the type it carries.
 
   @emitter_envelope
   Scenario Outline: Every emitter entity refuses the envelope clauses it does not declare

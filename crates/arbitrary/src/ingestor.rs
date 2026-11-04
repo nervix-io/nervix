@@ -1,6 +1,6 @@
 //! Ingestors: the transport or client source they read, and the routes that build their records.
 
-use std::num::{NonZeroU16, NonZeroUsize};
+use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
@@ -15,10 +15,10 @@ use nervix_models::{
     PulsarIngestorEntity, PulsarSubscription, PulsarSubscriptionOwnership, PulsarTopicIngestor,
     RabbitMqIngestMode, RabbitMqIngestorEntity, RabbitMqQueueIngestor, RedisIngestorEntity,
     RedisPubSubIngestMode, RedisPubSubIngestor, RedisSubscriptionTarget, RetryPolicy,
-    SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor, SyslogIngestMode, SyslogIngestorEntity,
-    SyslogListenerIngestor, TransportIngestorInput, WebsocketsConnectionIngestor,
-    WebsocketsEndpointIngestor, WebsocketsIngestMode, WebsocketsIngestorEntity, ZeroMqIngestMode,
-    ZeroMqIngestorEntity, ZeroMqPullIngestor,
+    SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor, SqsReceiveMax, SyslogIngestMode,
+    SyslogIngestorEntity, SyslogListenerIngestor, TransportIngestorInput,
+    WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
+    WebsocketsIngestorEntity, ZeroMqIngestMode, ZeroMqIngestorEntity, ZeroMqPullIngestor,
 };
 
 use crate::{
@@ -223,7 +223,7 @@ impl Arbitrary<'_> {
     }
 
     /// A Pulsar topic read through a subscription that the ingestor owns or an operator
-    /// provisioned.
+    /// provisioned, in any type, by the instances that type can serve.
     pub fn pulsar_topic_source(&mut self) -> PulsarTopicIngestor {
         let client = self.name();
         let topic = self.pulsar_topic_name();
@@ -234,11 +234,21 @@ impl Arbitrary<'_> {
         } else {
             PulsarSubscriptionOwnership::Provisioned
         };
+        let kind = self.pulsar_subscription_type();
+        let instances = if kind.reads_through_one_consumer() {
+            NonZeroU64::MIN
+        } else {
+            self.positive_u64()
+        };
         let source = PulsarTopicIngestor {
             client,
             topic,
-            subscription: PulsarSubscription { name, ownership },
-            instances: self.positive_u64(),
+            subscription: PulsarSubscription {
+                name,
+                ownership,
+                kind,
+            },
+            instances,
             mode: self.pulsar_mode(),
             quiesce: IngestQuiesceMode::Suspend,
         };
@@ -251,6 +261,16 @@ impl Arbitrary<'_> {
             nervix_models::IngestStartPosition::Earliest
         } else {
             nervix_models::IngestStartPosition::Latest
+        }
+    }
+
+    /// The declared type of a Pulsar subscription.
+    pub fn pulsar_subscription_type(&mut self) -> nervix_models::PulsarSubscriptionType {
+        match self.entropy.byte() % 4 {
+            0 => nervix_models::PulsarSubscriptionType::Shared,
+            1 => nervix_models::PulsarSubscriptionType::KeyShared,
+            2 => nervix_models::PulsarSubscriptionType::Failover,
+            _ => nervix_models::PulsarSubscriptionType::Exclusive,
         }
     }
 
@@ -380,10 +400,7 @@ impl Arbitrary<'_> {
             client: self.name(),
             queue: self.sqs_queue_name(),
             instances: self.positive_u64(),
-            mode: SqsIngestMode::AckSequential {
-                timeout: self.duration(),
-                retry_policy: self.retry_policy(),
-            },
+            mode: self.sqs_mode(),
             quiesce: IngestQuiesceMode::Suspend,
         };
         self.quiescing_as_supported(source)
@@ -525,6 +542,26 @@ impl Arbitrary<'_> {
                 retry_policy: self.retry_policy(),
             },
             _ => PulsarIngestMode::NoAck,
+        }
+    }
+
+    fn sqs_mode(&mut self) -> SqsIngestMode {
+        if self.entropy.flag() {
+            return SqsIngestMode::AckSequential {
+                timeout: self.duration(),
+                retry_policy: self.retry_policy(),
+            };
+        }
+        let value = self
+            .entropy
+            .boundary_biased(1..=u64::from(SqsReceiveMax::MAX));
+        let max = SqsReceiveMax::try_from(value)
+            .verified("the sampled range is the receive window's whole range");
+        SqsIngestMode::AckParallel {
+            max,
+            batch_timeout: self.duration(),
+            timeout: self.duration(),
+            retry_policy: self.retry_policy(),
         }
     }
 

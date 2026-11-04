@@ -183,7 +183,9 @@ tunnel, the redirects its client follows, transport-generated fields, response p
 `timeout_ms` come from the client transport the HTTP connector's polling ingestor reads too, and
 the declared proxy from the shared `HttpClientConfig`, so one `HTTP CLIENT` means the same
 transport on both sides, as [HTTP client transport](./connector-contract.md#http-client-transport)
-describes. It sees neither graph branches nor upstream ACKs. The [connector chapter's HTTP emitter boundary](./connector-contract.md#emitter-boundary)
+describes. Both directions also use `RustlsClientConfigProvider` for bundled Mozilla roots, native
+roots, additive CA files and the paired client identity; a missing native CA bundle does not
+prevent constructing either transport. It sees neither graph branches nor upstream ACKs. The [connector chapter's HTTP emitter boundary](./connector-contract.md#emitter-boundary)
 defines the shared contract and host loop in detail.
 
 One HTTP request is prepared for each eligible source record, even when `COLLECT FOR` or `FLUSH`

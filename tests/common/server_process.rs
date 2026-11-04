@@ -57,8 +57,8 @@ use tokio::process::{Child, Command};
 use super::{
     cluster::{
         InterconnectTestCa, TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestCertificateValidity,
-        TestSession, open_raw_session, publish_http_uri_with_headers, run_command_via_client,
-        test_basic_authorization,
+        TestSession, dev_tls_ca_path, open_raw_session, publish_http_uri_with_headers,
+        run_command_via_client, test_basic_authorization,
     },
     node_liveness::{ReadinessHistory, ReadinessProbeOutcome},
     node_startup::{NODE_START_ATTEMPTS, StartupPorts},
@@ -173,10 +173,13 @@ pub(crate) enum ServerProcessOption {
     /// An environment variable set exactly as the scenario gives it, whether or not the server
     /// can read it.
     Environment { variable: String, value: String },
+    /// `--grpc-mode https`, with the session listener on the port a plaintext one would use. The
+    /// node presents the development certificate, which the suite's clients trust.
+    GrpcTls,
 }
 
 impl ServerProcessOption {
-    fn apply_to(&self, command: &mut Command, node_id: &str) {
+    fn apply_to(&self, command: &mut Command, node_id: &str, grpc_port: u16) {
         match self {
             Self::Dns(configuration) => {
                 command
@@ -229,7 +232,42 @@ impl ServerProcessOption {
             Self::Environment { variable, value } => {
                 command.env(variable, value);
             }
+            Self::GrpcTls => {
+                command
+                    .arg("--grpc-mode")
+                    .arg("https")
+                    .arg("--grpc-https-listen-addr")
+                    .arg(loopback(grpc_port))
+                    .arg("--grpc-https-advertise-addr")
+                    .arg(loopback(grpc_port));
+            }
         }
+    }
+}
+
+/// What a server process's session listener speaks.
+#[derive(Clone, Debug)]
+enum GrpcTransport {
+    Plaintext,
+    /// TLS with the development certificate, issued by the authority at `authority`.
+    Tls {
+        authority: PathBuf,
+    },
+}
+
+impl GrpcTransport {
+    /// The transport `options` select, generating the development certificate when it is TLS.
+    /// The options are the handful one scenario passes, so finding the one that selects TLS reads
+    /// each of them once.
+    fn of(options: &[ServerProcessOption]) -> io::Result<Self> {
+        let tls = options
+            .iter()
+            .any(|option| matches!(option, ServerProcessOption::GrpcTls));
+        if !tls {
+            return Ok(Self::Plaintext);
+        }
+        let authority = dev_tls_ca_path()?;
+        Ok(Self::Tls { authority })
     }
 }
 
@@ -398,6 +436,7 @@ async fn close_every_connection(listener: TcpListener) {
 struct ServerProcessConfiguration {
     launch: ServerProcessLaunch,
     options: Vec<ServerProcessOption>,
+    grpc_transport: GrpcTransport,
     ports: ServerProcessPorts,
     node_id: String,
     bootstrap_host: Option<String>,
@@ -470,7 +509,7 @@ impl ServerProcessConfiguration {
         command.env_remove("RUST_LOG");
         // Options go last, so a variable a scenario sets survives the removal above.
         for option in &self.options {
-            option.apply_to(&mut command, &self.node_id);
+            option.apply_to(&mut command, &self.node_id, self.ports.grpc);
         }
         command.spawn()
     }
@@ -677,9 +716,11 @@ impl ServerProcess {
             }
             None => None,
         };
+        let grpc_transport = GrpcTransport::of(options)?;
         let configuration = ServerProcessConfiguration {
             launch,
             options: options.to_vec(),
+            grpc_transport,
             ports,
             node_id: node_id.to_string(),
             bootstrap_host: bootstrap_host.map(str::to_string),
@@ -974,9 +1015,15 @@ impl ServerProcess {
     }
 
     pub(crate) fn status_endpoint(&self) -> StatusEndpoint {
+        let transport = match &self.configuration.grpc_transport {
+            GrpcTransport::Plaintext => StatusTransport::Plaintext,
+            GrpcTransport::Tls { authority } => StatusTransport::Tls {
+                authority: authority.clone(),
+            },
+        };
         StatusEndpoint::new(
             SocketAddr::from((Ipv4Addr::LOCALHOST, self.configuration.ports.grpc)),
-            StatusTransport::Plaintext,
+            transport,
             test_basic_authorization(),
         )
     }
@@ -1274,7 +1321,7 @@ impl ServerProcess {
         };
         Ok(HeldResourceUpload {
             _body: body,
-            _response: response,
+            response,
             _connection: connection,
         })
     }
@@ -1312,7 +1359,11 @@ impl ServerProcess {
     }
 
     pub(crate) fn grpc_uri(&self) -> String {
-        format!("http://{}", loopback(self.configuration.ports.grpc))
+        let scheme = match &self.configuration.grpc_transport {
+            GrpcTransport::Plaintext => "http",
+            GrpcTransport::Tls { .. } => "https",
+        };
+        format!("{scheme}://{}", loopback(self.configuration.ports.grpc))
     }
 
     pub(crate) fn interconnect_endpoint(&self) -> String {
@@ -1480,8 +1531,36 @@ async fn run_http_load(
 /// An accepted upload stream kept open until it is dropped.
 pub(crate) struct HeldResourceUpload {
     _body: HeldUploadBody,
-    _response: h2::client::ResponseFuture,
+    response: h2::client::ResponseFuture,
     _connection: AbortOnDropHandle<()>,
+}
+
+impl HeldResourceUpload {
+    /// How the server ended the held upload's call: the gRPC status its response carries. A call
+    /// whose HTTP/2 stream failed instead, as it does when its connection is cut, ends with that
+    /// stream's failure.
+    pub(crate) async fn ending(self) -> Result<tonic::Status, h2::Error> {
+        let response = self.response.await?;
+        if let Some(status) = tonic::Status::from_header_map(response.headers()) {
+            return Ok(status);
+        }
+        let mut body = response.into_body();
+        while let Some(data) = body.data().await {
+            nervix_primitives::task::consume_budget().await;
+            data?;
+        }
+        let trailers = body.trailers().await?;
+        let status = match trailers {
+            Some(trailers) => tonic::Status::from_header_map(&trailers),
+            None => None,
+        };
+        match status {
+            Some(status) => Ok(status),
+            None => Ok(tonic::Status::unknown(
+                "the upload's response carried no gRPC status",
+            )),
+        }
+    }
 }
 
 /// The client half of a held upload's request stream.

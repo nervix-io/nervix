@@ -14,7 +14,7 @@ use nervix_server::DomainResumeBoundary;
 
 use super::{
     ScenarioWorld, command_execution_reference,
-    common::{cluster::node_name, raw_session::WireOutcome as _},
+    common::{cluster::node_name, command_probe::CommandPause, raw_session::WireOutcome as _},
     current_leader_node, docstring, expand_placeholders,
 };
 
@@ -30,9 +30,14 @@ fn resume_boundary(boundary: &str) -> DomainResumeBoundary {
 async fn arm_resume_pause(world: &mut ScenarioWorld, node: String, boundary: String) {
     let node = node_name(&expand_placeholders(world, &node));
     let domain = DomainName::parse(&world.domain).assured("the scenario domain is valid");
+    let boundary = resume_boundary(&boundary);
+    world.command_probes.arm_pause(
+        node.clone(),
+        CommandPause::DomainResume(domain.clone(), boundary),
+    );
     world
         .fault_injection
-        .pause_domain_resume(node, domain, resume_boundary(&boundary));
+        .pause_domain_resume(node, domain, boundary);
 }
 
 #[then(expr = "domain resume on node {string} reaches its {word} boundary")]
@@ -55,9 +60,13 @@ async fn observe_resume_pause(world: &mut ScenarioWorld, node: String, boundary:
 async fn release_resume_pause(world: &mut ScenarioWorld, node: String, boundary: String) {
     let node = node_name(&expand_placeholders(world, &node));
     let domain = DomainName::parse(&world.domain).assured("the scenario domain is valid");
+    let boundary = resume_boundary(&boundary);
+    world
+        .command_probes
+        .release_pause(&node, CommandPause::DomainResume(domain.clone(), boundary));
     world
         .fault_injection
-        .release_domain_resume_pause(&node, &domain, resume_boundary(&boundary));
+        .release_domain_resume_pause(&node, &domain, boundary);
 }
 
 #[when(

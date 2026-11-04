@@ -127,6 +127,7 @@ use crate::common::{
         ATTACHED_LINE, ClientProbe, OPENED_LINE, ProbeExercise, ProbeRuntime, ProbeTarget,
         SUBSCRIBED_LINE, corpus_report,
     },
+    client_wire_tls_cost::TransportCostServers,
     cluster::{
         AcknowledgedHttpPublisher, BrokerMessage, BrokerObserver, BrokerRecordTime, Cluster,
         CommandHold, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT, HttpsPublishLoopOutcome,
@@ -139,6 +140,7 @@ use crate::common::{
         publish_kafka_record_through, publish_sqs,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
+    command_probe::{CommandPause, CommandProbe, CommandProbes, ProbeReply},
     command_recovery::{LeaderRoutes, LearnedOutcome, NodeSession},
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, CollectorSignal, CollectorWait, DependencyEndpoints,
@@ -172,8 +174,8 @@ use crate::common::{
     },
     rabbitmq_confirm_order::RabbitMqConfirmOrder,
     raw_session::{
-        SessionScope, TestSubscriptionEvent, TestUpload, TestUploadPart, WireOutcome as _,
-        command_output, fresh_execution_reference, outcome_awaits_leader,
+        PreparedCommand, TestSubscriptionEvent, TestUpload, TestUploadPart, WireOutcome as _,
+        command_output, fresh_execution_reference,
     },
     runner_lag::{RunnerLagObserver, purge_freed_memory_in_the_background},
     runner_observation::ArrivalObservation,
@@ -219,7 +221,9 @@ mod http_transport;
 mod iceberg_delivery;
 mod ingestion_time;
 mod kafka_metadata;
+mod materialized_state_inspection;
 mod mqtt_fixtures;
+mod mqtt_properties;
 mod mqtt_sessions;
 mod mqtt_subscription_refusal;
 mod mysql_isolation;
@@ -233,7 +237,9 @@ mod pulsar_delivery;
 mod pulsar_emission;
 mod pulsar_metadata;
 mod pulsar_readiness;
+mod pulsar_subscription_types;
 mod pulsar_subscriptions;
+mod rabbitmq_envelope;
 mod rabbitmq_properties;
 mod restarted_voter;
 mod session_protocol;
@@ -414,8 +420,18 @@ struct SubscriptionReceipt {
     event: TestSubscriptionEvent,
 }
 
+/// Consensus connectivity a scenario blocked for one node until another node leads.
+struct BlockedConsensusConnectivity {
+    blocked_node_id: String,
+    leader_node_id: String,
+    /// Ends once the connectivity is restored: after the leader led, or after its wait expired.
+    restored: AbortOnDropHandle<std::io::Result<()>>,
+}
+
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
+    rabbitmq_envelope_broker:
+        Option<nervix_test_environment::restartable_rabbitmq::RestartableRabbitMq>,
     mqtt_fixture_publication: Option<mqtt_fixtures::Publication>,
     postgres_fixture_locks: Option<postgres_fixtures::HeldLocks>,
     postgres_fixture_observations: Option<postgres_fixtures::Observations>,
@@ -441,7 +457,7 @@ struct ScenarioWorld {
     /// Rows a named client received and a step has not taken yet, as the client displays them.
     client_subscription_rows: BTreeMap<String, VecDeque<String>>,
     /// Requests the active session sent under names a scenario gave them.
-    session_requests: BTreeMap<String, nervix_client_wire::RequestId>,
+    session_requests: BTreeMap<String, session_protocol::NamedRequest>,
     /// The session a scenario attaches to domain clocks with. Steps that replace the active
     /// session leave it attached.
     clock_session: Option<TestSession>,
@@ -457,6 +473,8 @@ struct ScenarioWorld {
     last_backup: Option<backup::TestBackup>,
     /// A CLI backup paused at its quiesced cut while the scenario exercises other operations.
     background_backup: Option<AbortOnDropHandle<std::process::Output>>,
+    /// A native client's backup running while the scenario interrupts its session.
+    background_native_backup: Option<backup::BackgroundNativeBackup>,
     /// The exact CLI child started by the background-backup step, for cancellation assertions.
     background_backup_pid: Option<nix::unistd::Pid>,
     /// How the last backup download a scenario shaped itself ended.
@@ -475,6 +493,8 @@ struct ScenarioWorld {
     restore_inspection_capacity: Option<backup::client_inspection::FilesystemHold>,
     /// A leadership move a scenario armed underneath the next durably admitted command.
     leadership_move: Option<AbortOnDropHandle<std::io::Result<()>>>,
+    /// Consensus connectivity a scenario blocked for one node until another node leads.
+    blocked_consensus_connectivity: Option<BlockedConsensusConnectivity>,
     /// The restore step pause a scenario armed and has not released.
     restore_step_pause: Option<backup::restore::ArmedRestorePause>,
     /// What the last measured CLI backup's memory sampler observed, until a step checks it.
@@ -591,6 +611,7 @@ struct ScenarioWorld {
     avro_http_field_order: Vec<String>,
     avro_http_optional_fields: BTreeSet<String>,
     fault_injection: FaultInjection,
+    command_probes: CommandProbes,
     consensus_commit_delays: BTreeMap<String, Duration>,
     burst_raft_retention_peak: Option<nervix_consensus::RaftLogRetention>,
     saved_raft_log_heads: BTreeMap<String, Option<u64>>,
@@ -623,6 +644,8 @@ struct ScenarioWorld {
     background_http_publish: Option<AbortOnDropHandle<std::io::Result<()>>>,
     background_https_publish: Option<BackgroundHttpsPublish>,
     stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
+    /// Consumers the scenario holds on Pulsar subscriptions beside its ingestors, by name.
+    held_pulsar_consumers: BTreeMap<String, BrokerObserver>,
     /// The Kafka broker this scenario owns, which it can make refuse writes without touching the
     /// shared test broker.
     kafka_mock_broker: Option<KafkaMockBroker>,
@@ -656,6 +679,8 @@ struct ScenarioWorld {
     last_interconnect_attempt_error: Option<String>,
     server_process: Option<ServerProcess>,
     server_process_cluster: Option<ServerProcessCluster>,
+    /// The plaintext and TLS release servers the client-wire transport cost compares.
+    client_wire_transport_servers: Option<TransportCostServers>,
     /// The listeners whose ports another socket is to hold from the moment the next server process,
     /// or the bootstrap member of the next real-process cluster, draws them.
     server_process_held_ports: Option<StartupPorts>,
@@ -796,6 +821,10 @@ impl fmt::Debug for ScenarioWorld {
                 &self.last_interconnect_attempt_error,
             )
             .field("server_process", &self.server_process)
+            .field(
+                "client_wire_transport_servers",
+                &self.client_wire_transport_servers,
+            )
             .field("server_process_held_ports", &self.server_process_held_ports)
             .field("server_process_http_load", &self.server_process_http_load)
             .field("held_resource_upload", &self.held_resource_upload.is_some())
@@ -1223,6 +1252,17 @@ async fn given_pulsar_is_running(world: &mut ScenarioWorld) {
         .start_pulsar(&world.test_id)
         .await
         .expect("Pulsar test container should start");
+    refresh_dependency_configuration(world);
+}
+
+#[given("Pulsar with authentication is running")]
+async fn given_pulsar_with_authentication_is_running(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    world
+        .dependencies
+        .start_pulsar_auth(&world.test_id)
+        .await
+        .expect("the authenticating Pulsar test container should start");
     refresh_dependency_configuration(world);
 }
 
@@ -4493,6 +4533,29 @@ async fn given_authenticated_resource_upload_is_held_open(
     world.held_resource_upload = Some(upload);
 }
 
+#[then(expr = "the held resource upload ended with status {string}")]
+async fn then_held_resource_upload_ended_with_status(world: &mut ScenarioWorld, expected: String) {
+    let upload = world
+        .held_resource_upload
+        .take()
+        .verified("the preceding step held a resource upload open");
+    // The node already exited, so the call's ending is either buffered on the client or lost.
+    let ending = nervix_primitives::time::timeout(Duration::from_secs(30), upload.ending()).await;
+    let status = match ending {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => panic!(
+            "the held upload's call failed with its HTTP/2 stream instead of ending with a \
+             status: {error}"
+        ),
+        Err(_) => panic!("the held upload's call had not ended 30 seconds after its node exited"),
+    };
+    assert_eq!(
+        format!("{:?}", status.code()),
+        expected,
+        "the held upload's call ended with {status:?}"
+    );
+}
+
 #[when(expr = "the server process receives {word}")]
 async fn when_server_process_receives_signal(world: &mut ScenarioWorld, signal: String) {
     let signal = signal
@@ -4639,14 +4702,33 @@ fn then_client_wire_baseline_artifact_exists(world: &mut ScenarioWorld) {
     );
 }
 
-#[when("the client-wire command transport cost is captured")]
-async fn when_client_wire_command_transport_cost_is_captured(world: &mut ScenarioWorld) {
-    let leader = current_leader_node(world).await;
-    let grpc_uri = world
-        .cluster()
-        .grpc_uri(&leader)
-        .expect("failed to resolve leader gRPC URI");
-    let artifact = crate::common::client_wire_tls_cost::capture(&grpc_uri, &world.domain)
+#[given(
+    "plaintext and TLS release nervix-server processes are started for the client-wire transport \
+     cost"
+)]
+async fn given_plaintext_and_tls_release_servers_are_started_for_client_wire_transport_cost(
+    world: &mut ScenarioWorld,
+) {
+    assert!(
+        world.client_wire_transport_servers.is_none(),
+        "a scenario starts one pair of transport cost servers"
+    );
+    let executable = std::env::var_os("NERVIX_CLIENT_WIRE_TLS_SERVER")
+        .verified("the client-wire TLS cost recipe supplies its release server executable");
+    initialize_scenario_identity(world);
+    let servers = TransportCostServers::start(PathBuf::from(executable))
+        .await
+        .unwrap_or_else(|error| panic!("{error:#}"));
+    world.client_wire_transport_servers = Some(servers);
+}
+
+#[when("the paired client-wire transport cost is captured")]
+async fn when_paired_client_wire_transport_cost_is_captured(world: &mut ScenarioWorld) {
+    let servers = world
+        .client_wire_transport_servers
+        .as_ref()
+        .verified("the preceding step started the transport cost servers");
+    let artifact = crate::common::client_wire_tls_cost::capture(servers)
         .await
         .unwrap_or_else(|error| panic!("client-wire transport cost failed: {error:#}"));
     world.placeholders.insert(
@@ -4696,6 +4778,7 @@ fn client_probe_target(
         username: TEST_AUTH_USERNAME.to_string(),
         password: TEST_AUTH_PASSWORD.to_string(),
         domain: world.domain.clone(),
+        execution_reference: Uuid::now_v7().to_string(),
         exercise,
     }
 }
@@ -4722,27 +4805,50 @@ async fn start_client_probe(
 }
 
 #[when(
-    expr = "the {string} client probe subscribes as {string} to relay {string} on node {string} \
-            expecting {int} rows"
+    expr = "the {string} client probe subscribes as {string} to relay {string} on a follower when \
+            available expecting {int} rows"
 )]
 async fn when_client_probe_subscribes(
     world: &mut ScenarioWorld,
     runtime: String,
     subscription: String,
     relay: String,
-    node_id: String,
     rows: usize,
 ) {
     let runtime: ProbeRuntime = runtime
         .parse()
         .expect("the step names a known probe runtime");
-    let node_id = expand_placeholders(world, &node_id);
+    let leader = current_leader_node(world).await;
+    // This fixture runs with one or three nodes; select a follower from that bounded topology.
+    let follower = world
+        .cluster()
+        .node_ids()
+        .into_iter()
+        .find(|node| node != &leader);
+    let node_id = match follower {
+        Some(follower) => follower,
+        None => leader.clone(),
+    };
+    append_cucumber_log_line(&format!(
+        "client probe {runtime:?}: observed_leader={leader} initial_node={node_id} follower={}",
+        node_id != leader
+    ));
     let exercise = ProbeExercise::Subscription {
         relay: expand_placeholders(world, &relay),
         subscription: expand_placeholders(world, &subscription),
         rows,
     };
     let target = client_probe_target(world, &node_id, exercise);
+    let redirect_report = if runtime.implements_protocol() && node_id != leader {
+        let reference = &target.execution_reference;
+        format!("REDIRECT original={reference} repeated={reference} outcome={reference}")
+    } else {
+        // This is empty report content for the direct and binding controls, not a redirect state.
+        String::new()
+    };
+    world
+        .placeholders
+        .insert("client_probe_redirect_report".to_string(), redirect_report);
     start_client_probe(world, runtime, &node_id, target, SUBSCRIBED_LINE).await;
 }
 
@@ -4860,6 +4966,7 @@ async fn then_client_probe_reports(world: &mut ScenarioWorld, within: String, #[
     report
         .check(&expected)
         .unwrap_or_else(|error| panic!("{error}"));
+    append_cucumber_log_line(&format!("client probe report verified: {report:?}"));
 }
 
 #[then(expr = "the server process exits with status {int}")]
@@ -7990,15 +8097,10 @@ async fn await_covered_log_purge(
 async fn when_leadership_is_transferred_to_node(world: &mut ScenarioWorld, to_node_id: String) {
     let to_node_id = expand_placeholders(world, &to_node_id);
     let leader = running_leader_node(world).await;
-    // A leader asked to hand leadership to itself stops its heartbeats as any transferring leader
-    // does, and then the first follower whose election timeout passes takes over. A node that
-    // already leads therefore keeps leading without a transfer.
-    if leader != to_node_id {
-        world.cluster().transfer_leadership(&leader, &to_node_id);
-    }
+    // A target that already leads keeps leading: the move never asks it to transfer to itself.
     world
         .cluster()
-        .wait_for_leader(&to_node_id, Some(&to_node_id))
+        .move_leadership(&leader, &to_node_id)
         .await
         .unwrap_or_else(|error| panic!("leadership did not move to '{to_node_id}': {error}"));
 }
@@ -9380,6 +9482,55 @@ async fn given_sqs_answer_hold(world: &mut ScenarioWorld) {
     world.sqs_answer_hold = Some(hold);
 }
 
+#[then(expr = "SQS queue {string} eventually has {int} messages in flight")]
+async fn then_sqs_queue_eventually_has_messages_in_flight(
+    world: &mut ScenarioWorld,
+    queue: String,
+    in_flight: u64,
+) {
+    let queue = expand_placeholders(world, &queue);
+    world
+        .cluster()
+        .wait_for_sqs_messages_in_flight(&queue, in_flight)
+        .await
+        .expect("the SQS queue did not reach the expected count of messages in flight");
+}
+
+#[then(expr = "SQS queue {string} eventually holds no messages")]
+async fn then_sqs_queue_eventually_holds_no_messages(world: &mut ScenarioWorld, queue: String) {
+    let queue = expand_placeholders(world, &queue);
+    world
+        .cluster()
+        .wait_for_sqs_queue_empty(&queue)
+        .await
+        .expect("the SQS queue still holds messages");
+}
+
+/// The forwarder carried at least one request naming the SQS action `carried` and none naming
+/// `absent`. The step follows the outcome those requests produced, so every request it counts has
+/// already passed the forwarder.
+#[then(expr = "the SQS forwarder carried {string} requests and no {string} request")]
+fn then_the_sqs_forwarder_carried_requests_and_no_request(
+    world: &mut ScenarioWorld,
+    carried: String,
+    absent: String,
+) {
+    let forwarder = world
+        .sqs_answer_hold
+        .as_ref()
+        .expect("a forwarder in front of the SQS service must be configured first");
+    let requests = forwarder.requests_by_action();
+    assert!(
+        forwarder.requests_naming(&carried) > 0,
+        "the SQS forwarder carried no {carried} request; it carried {requests:?}"
+    );
+    assert_eq!(
+        forwarder.requests_naming(&absent),
+        0,
+        "the SQS forwarder carried {absent} requests; it carried {requests:?}"
+    );
+}
+
 /// From now on the forwarder holds the first answer whose bytes carry `text`: the service took the
 /// message it carries off the queue for a receive the client still waits on.
 #[when(expr = "the SQS forwarder holds the answer that carries {string}")]
@@ -9575,6 +9726,32 @@ async fn when_the_tcp_forwarder_stops(world: &mut ScenarioWorld, address: String
         .stop(address)
         .await
         .unwrap_or_else(|error| panic!("the forwarder at {address} could not stop: {error}"));
+}
+
+/// Stops the TCP forwarder at `address` and starts it again `seconds` later. Every session through
+/// it ends when it stops, and no client can open another through it until it starts again.
+#[when(expr = "the TCP forwarder at {string} stays stopped for {int} seconds and then restarts")]
+async fn when_the_tcp_forwarder_stays_stopped(
+    world: &mut ScenarioWorld,
+    address: String,
+    seconds: u64,
+) {
+    let address = address
+        .parse::<std::net::IpAddr>()
+        .assured("the scenario names a TCP forwarder address");
+    let forwarders = world
+        .tcp_forwarders
+        .as_mut()
+        .verified("the scenario started TCP forwarders");
+    forwarders
+        .stop(address)
+        .await
+        .unwrap_or_else(|error| panic!("the forwarder at {address} could not stop: {error}"));
+    nervix_primitives::time::sleep(Duration::from_secs(seconds)).await;
+    forwarders
+        .restart(address)
+        .await
+        .unwrap_or_else(|error| panic!("the forwarder at {address} could not restart: {error}"));
 }
 
 #[when(expr = "the TCP forwarder at {string} restarts")]
@@ -12334,12 +12511,81 @@ async fn when_gossip_exchanges_are_blocked(
     world.cluster().block_gossip_for_node(&node_id, delay);
 }
 
+#[when(expr = "node {string} refuses the next subscription interest visibility check it answers")]
+fn when_node_refuses_next_interest_visibility_check(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world.cluster().refuse_interest_visibility_on(&node_id);
+}
+
+#[then(expr = "node {string} refused a subscription interest visibility check")]
+fn then_node_refused_interest_visibility_check(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    assert!(
+        world
+            .cluster()
+            .interest_visibility_refusal_delivered(&node_id),
+        "node '{node_id}' never answered the subscription interest visibility check armed to be \
+         refused"
+    );
+}
+
 #[when(expr = "consensus connectivity for node {string} is blocked")]
 async fn when_consensus_connectivity_is_blocked(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
     world
         .fault_injection
         .block_consensus_connectivity(crate::common::cluster::node_name(&node_id));
+}
+
+#[given(expr = "consensus connectivity for node {string} is blocked until node {string} leads")]
+async fn given_consensus_connectivity_blocked_until_node_leads(
+    world: &mut ScenarioWorld,
+    blocked_node_id: String,
+    leader_node_id: String,
+) {
+    let blocked_node_id = expand_placeholders(world, &blocked_node_id);
+    let leader_node_id = expand_placeholders(world, &leader_node_id);
+    let restored = world
+        .cluster()
+        .block_consensus_connectivity_until_leading(&blocked_node_id, &leader_node_id);
+    world.blocked_consensus_connectivity = Some(BlockedConsensusConnectivity {
+        blocked_node_id,
+        leader_node_id,
+        restored,
+    });
+}
+
+#[then(expr = "consensus connectivity for node {string} was restored once node {string} led")]
+async fn then_consensus_connectivity_restored_once_node_led(
+    world: &mut ScenarioWorld,
+    blocked_node_id: String,
+    leader_node_id: String,
+) {
+    let blocked_node_id = expand_placeholders(world, &blocked_node_id);
+    let leader_node_id = expand_placeholders(world, &leader_node_id);
+    let blocked = world
+        .blocked_consensus_connectivity
+        .take()
+        .expect("a preceding step blocked consensus connectivity until a node leads");
+    assert_eq!(
+        (
+            blocked.blocked_node_id.as_str(),
+            blocked.leader_node_id.as_str()
+        ),
+        (blocked_node_id.as_str(), leader_node_id.as_str()),
+        "the step names the connectivity block a preceding step armed"
+    );
+    let ended = nervix_primitives::time::timeout(Duration::from_secs(60), blocked.restored)
+        .await
+        .expect("the connectivity block ends once its leader led or its wait expired");
+    ended
+        .expect("the connectivity block task runs to its end")
+        .unwrap_or_else(|error| {
+            panic!(
+                "node '{leader_node_id}' did not lead while node '{blocked_node_id}' was blocked: \
+                 {error}"
+            )
+        });
 }
 
 #[when(expr = "gossip exchanges involving node {string} are restored")]
@@ -12826,7 +13072,11 @@ async fn when_leadership_is_transferred_from_node_to_node(
     let to_node_id = expand_placeholders(world, &to_node_id);
     world
         .cluster()
-        .transfer_leadership(&from_node_id, &to_node_id);
+        .move_leadership(&from_node_id, &to_node_id)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("leadership did not move from '{from_node_id}' to '{to_node_id}': {error}")
+        });
 }
 
 #[given(
@@ -12896,6 +13146,10 @@ async fn given_command_admission_pause(world: &mut ScenarioWorld, node_id: Strin
     world
         .fault_injection
         .pause_command_admission_on(crate::common::cluster::node_name(&node_id));
+    world.command_probes.arm_pause(
+        crate::common::cluster::node_name(&node_id),
+        CommandPause::Admission,
+    );
 }
 
 #[then(expr = "the command admission pause on node {string} is reached")]
@@ -12948,6 +13202,10 @@ async fn when_command_admission_pause_is_released(world: &mut ScenarioWorld, nod
     world
         .fault_injection
         .release_command_admission_pause(&crate::common::cluster::node_name(&node_id));
+    world.command_probes.release_pause(
+        &crate::common::cluster::node_name(&node_id),
+        CommandPause::Admission,
+    );
 }
 
 #[given(expr = "command reference lookup on node {string} pauses before proposal")]
@@ -12956,6 +13214,10 @@ async fn given_command_reference_lookup_pause(world: &mut ScenarioWorld, node_id
     world
         .fault_injection
         .pause_command_reference_lookup_on(crate::common::cluster::node_name(&node_id));
+    world.command_probes.arm_pause(
+        crate::common::cluster::node_name(&node_id),
+        CommandPause::ReferenceLookup,
+    );
 }
 
 #[then(expr = "the command reference lookup pause on node {string} is reached")]
@@ -12991,6 +13253,10 @@ async fn when_command_reference_lookup_pause_is_released(
     world
         .fault_injection
         .release_command_reference_lookup_pause(&crate::common::cluster::node_name(&node_id));
+    world.command_probes.release_pause(
+        &crate::common::cluster::node_name(&node_id),
+        CommandPause::ReferenceLookup,
+    );
 }
 
 #[given(expr = "command execution on node {string} pauses after durable admission")]
@@ -12999,6 +13265,10 @@ async fn given_command_durable_admission_pause(world: &mut ScenarioWorld, node_i
     world
         .fault_injection
         .pause_command_after_durable_admission_on(crate::common::cluster::node_name(&node_id));
+    world.command_probes.arm_pause(
+        crate::common::cluster::node_name(&node_id),
+        CommandPause::DurableAdmission,
+    );
 }
 
 #[then(expr = "the durable command admission pause on node {string} is reached")]
@@ -13045,6 +13315,10 @@ async fn when_command_durable_admission_pause_is_released(
     world
         .fault_injection
         .release_command_durable_admission_pause(&crate::common::cluster::node_name(&node_id));
+    world.command_probes.release_pause(
+        &crate::common::cluster::node_name(&node_id),
+        CommandPause::DurableAdmission,
+    );
 }
 
 #[given(expr = "command finalization on node {string} pauses before its outcome is recorded")]
@@ -13053,6 +13327,10 @@ async fn given_command_finalization_pause(world: &mut ScenarioWorld, node_id: St
     world
         .fault_injection
         .pause_command_finalization_on(crate::common::cluster::node_name(&node_id));
+    world.command_probes.arm_pause(
+        crate::common::cluster::node_name(&node_id),
+        CommandPause::Finalization,
+    );
 }
 
 #[then(expr = "the command finalization pause on node {string} is reached")]
@@ -13090,6 +13368,10 @@ async fn when_command_finalization_pause_is_released(world: &mut ScenarioWorld, 
     world
         .fault_injection
         .release_command_finalization_pause(&crate::common::cluster::node_name(&node_id));
+    world.command_probes.release_pause(
+        &crate::common::cluster::node_name(&node_id),
+        CommandPause::Finalization,
+    );
 }
 
 #[given(expr = "relocation publication for domain {string} pauses after planning")]
@@ -13144,6 +13426,10 @@ async fn given_command_response_delivery_pause(world: &mut ScenarioWorld, node_i
     world
         .fault_injection
         .pause_command_response_delivery_on(crate::common::cluster::node_name(&node_id));
+    world.command_probes.arm_pause(
+        crate::common::cluster::node_name(&node_id),
+        CommandPause::ResponseDelivery,
+    );
 }
 
 #[then(expr = "the command response delivery pause on node {string} is reached")]
@@ -13171,6 +13457,10 @@ async fn when_command_response_delivery_pause_is_released(
     world
         .fault_injection
         .release_command_response_delivery_pause(&crate::common::cluster::node_name(&node_id));
+    world.command_probes.release_pause(
+        &crate::common::cluster::node_name(&node_id),
+        CommandPause::ResponseDelivery,
+    );
 }
 
 #[given("command response delivery on every node pauses after execution")]
@@ -13179,6 +13469,10 @@ async fn given_command_response_delivery_pause_on_every_node(world: &mut Scenari
         world
             .fault_injection
             .pause_command_response_delivery_on(crate::common::cluster::node_name(&node_id));
+        world.command_probes.arm_pause(
+            crate::common::cluster::node_name(&node_id),
+            CommandPause::ResponseDelivery,
+        );
     }
 }
 
@@ -13218,6 +13512,10 @@ async fn when_command_response_delivery_pause_is_released_on_every_node(world: &
         world
             .fault_injection
             .release_command_response_delivery_pause(&crate::common::cluster::node_name(&node_id));
+        world.command_probes.release_pause(
+            &crate::common::cluster::node_name(&node_id),
+            CommandPause::ResponseDelivery,
+        );
     }
 }
 
@@ -13297,6 +13595,28 @@ async fn then_refused_resource_publication_was_taken_up(
         Some(true),
         "node '{node_id}' must refuse an uploaded version's publication and its reconciliation \
          must take that upload up"
+    );
+}
+
+#[given(expr = "node {string} loses the reply to its next installed resource upload")]
+async fn given_installed_resource_upload_reply_loss(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .lose_next_installed_resource_upload_reply_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "node {string} lost the reply to the resource upload it installed")]
+async fn then_installed_resource_upload_reply_was_lost(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let lost = world
+        .fault_injection
+        .lost_installed_resource_upload_reply(&crate::common::cluster::node_name(&node_id));
+    assert_eq!(
+        lost,
+        Some(true),
+        "node '{node_id}' must install an uploaded version and lose the reply to the call that \
+         installed it"
     );
 }
 
@@ -15639,24 +15959,23 @@ async fn execute_command_document_on_node(
     Ok(session)
 }
 
-/// Learns the outcome of `command`, whose attempt under `reference` on a session of `scope` returned
-/// `first`, from the node that leads now, and logs which node answered.
+/// Learns a prepared request's outcome, retaining its identity and logging the answering node.
 async fn learn_command_outcome(
     routes: &LeaderRoutes,
-    scope: &SessionScope,
-    command: &str,
-    reference: &str,
+    command: &PreparedCommand,
     first: nervix_client_wire::CommandOutcome,
+    probe: Option<&mut CommandProbe>,
 ) -> LearnedOutcome {
+    let reference = command.reference();
     append_cucumber_log_line(&format!(
         "execution reference {reference} awaits the current leader ({}); sending it to the nodes",
         first.message
     ));
-    let learned = routes.learn_outcome(scope, command, reference, first).await;
+    let learned = routes.learn_outcome(command, first, probe).await;
     match &learned.answered_on {
         Some(answered) => append_cucumber_log_line(&format!(
-            "node {} answered execution reference {reference}: {:?}",
-            answered.node, learned.outcome.disposition
+            "node {} answered execution reference {reference}: {:?}: {}",
+            answered.node, learned.outcome.disposition, learned.outcome.message
         )),
         None => {
             append_cucumber_log_line(&format!("no node answered execution reference {reference}"))
@@ -15665,27 +15984,41 @@ async fn learn_command_outcome(
     learned
 }
 
-/// Runs `command` on `session`, which stays where it is because it may hold subscriptions or a
-/// transaction. When the node it reached does not lead, or leadership moved before the outcome was
-/// known, another session of the same user learns the outcome from the node that leads now,
-/// provided the command leaves what `session` holds alone. Returns the command's messages when it
-/// completed, and otherwise the failure a raw session reports.
+struct HeldCommandOutcome {
+    outcome: nervix_client_wire::CommandOutcome,
+    moved_to: Option<String>,
+}
+
+impl HeldCommandOutcome {
+    fn output(self) -> Result<String, String> {
+        command_output(&self.outcome).map_err(|error| error.to_string())
+    }
+}
+
+/// Retains the original request before sending it. Recovery keeps the answering binding while
+/// preserving any exchange that owns observations or unread requests.
 async fn run_command_on_held_session(
     routes: &LeaderRoutes,
     session: &mut TestSession,
     command: &str,
-) -> Result<String, String> {
+) -> Result<HeldCommandOutcome, String> {
     let reference = fresh_execution_reference();
-    let mut outcome = session
-        .run_command_result_with_reference(command, &reference)
+    let prepared = session
+        .held_command_session(command)
+        .prepare_command(command, &reference);
+    let mut outcome = prepared
+        .run(session.held_command_session(command))
         .await
         .map_err(|error| error.to_string())?;
-    if outcome_awaits_leader(&outcome) && session.outcome_learnable_elsewhere(command) {
-        let scope = session.scope();
-        let learned = learn_command_outcome(routes, &scope, command, &reference, outcome).await;
+    let mut moved_to = None;
+    if prepared.awaits_recovery(&outcome) {
+        let learned = learn_command_outcome(routes, &prepared, outcome, None).await;
         outcome = learned.outcome;
+        if let Some(answered) = learned.answered_on {
+            moved_to = session.retain_recovered_binding(&prepared, answered.node, answered.session);
+        }
     }
-    command_output(&outcome).map_err(|error| error.to_string())
+    Ok(HeldCommandOutcome { outcome, moved_to })
 }
 
 /// Runs `commands` on the current leader in one session, and returns that session and the node it
@@ -15694,8 +16027,8 @@ async fn run_command_on_held_session(
 /// When leadership moves before a command reached the leader, or after the leader admitted it and
 /// before its outcome was known, the step learns the outcome by sending the command again with the
 /// same execution reference to the node that leads now, as the client protocol requires. While the
-/// session holds no subscription and no transaction, it moves to that node with the command and
-/// the step goes on there. Once it holds one it stays where it is, as
+/// session holds no observations or unread work, binding recovery moves it to that node. A held
+/// observer retains its original exchange alongside the recovered command binding, as
 /// [`run_command_on_held_session`] describes.
 async fn execute_plexus_commands_on_leader(
     world: &mut ScenarioWorld,
@@ -15735,21 +16068,22 @@ async fn execute_command_document_on_leader(
             current.node
         ));
         if session_bound {
-            let output =
+            let mut ran =
                 run_command_on_held_session(&routes, &mut current.session, &command).await?;
-            world.last_command_output = Some(output);
+            if let Some(node) = ran.moved_to.take() {
+                current.node = node;
+            }
+            world.last_command_output = Some(ran.output()?);
             continue;
         }
         let reference = fresh_execution_reference();
-        let mut outcome = current
-            .session
-            .run_command_result_with_reference(&command, &reference)
+        let prepared = current.session.prepare_command(&command, &reference);
+        let mut outcome = prepared
+            .run(&mut current.session)
             .await
             .map_err(|error| error.to_string())?;
-        if outcome_awaits_leader(&outcome) {
-            let scope = current.session.scope();
-            let learned =
-                learn_command_outcome(&routes, &scope, &command, &reference, outcome).await;
+        if prepared.awaits_recovery(&outcome) {
+            let learned = learn_command_outcome(&routes, &prepared, outcome, None).await;
             outcome = learned.outcome;
             if let Some(answered) = learned.answered_on {
                 current = answered;
@@ -15837,11 +16171,79 @@ async fn when_these_plexus_commands_begin_executing_in_the_background(
             let mut last_output = String::new();
             for command in statements {
                 nervix_primitives::task::consume_budget().await;
-                last_output = run_command_on_held_session(&routes, &mut session, &command).await?;
+                last_output = run_command_on_held_session(&routes, &mut session, &command)
+                    .await?
+                    .output()?;
             }
             Ok(last_output)
         },
     )));
+}
+
+fn command_probe(world: &ScenarioWorld, reference: &str) -> Option<CommandProbe> {
+    let reference = nervix_models::CommandExecutionReference::parse(reference)
+        .assured("scenario references are UUIDv7 execution references");
+    world
+        .command_probes
+        .for_command(&reference, world.fault_injection.clone())
+}
+
+/// A raw probe keeps the answer after its intended boundary. Only earlier unresolved attempts
+/// are recovered; this must not turn the interrupted outcome the scenario asserts into success.
+async fn background_command_outcome(
+    routes: LeaderRoutes,
+    mut session: TestSession,
+    query: String,
+    reference: String,
+    node: Option<String>,
+    mut probe: Option<CommandProbe>,
+) -> std::io::Result<nervix_client_wire::CommandOutcome> {
+    let node = session
+        .held_command_node(&query)
+        .map(str::to_string)
+        .or(node);
+    let prepared = session
+        .held_command_session(&query)
+        .prepare_command(&query, &reference);
+    if let Some(probe) = &mut probe
+        && probe.reached().await
+    {
+        append_cucumber_log_line(&format!(
+            "probe already reached before request {reference} on {node:?}"
+        ));
+    }
+    append_cucumber_log_line(&format!(
+        "background request {reference} on {node:?}, original position {:?}",
+        prepared.expected_position()
+    ));
+    let outcome = match &mut probe {
+        Some(probe) => match probe
+            .observe(prepared.run(session.held_command_session(&query)))
+            .await?
+        {
+            ProbeReply::AfterBoundary(outcome) => {
+                append_cucumber_log_line(&format!(
+                    "background request {reference} on {node:?} after its armed boundary: {:?}: {}",
+                    outcome.disposition, outcome.message
+                ));
+                return Ok(outcome);
+            }
+            ProbeReply::BeforeBoundary(outcome) => outcome,
+        },
+        None => prepared.run(session.held_command_session(&query)).await?,
+    };
+    append_cucumber_log_line(&format!(
+        "background request {reference} on {node:?}: {:?}: {}",
+        outcome.disposition, outcome.message
+    ));
+    let Some(probe) = &mut probe else {
+        return Ok(outcome);
+    };
+    if !prepared.awaits_recovery(&outcome) {
+        return Ok(outcome);
+    }
+    let learned = learn_command_outcome(&routes, &prepared, outcome, Some(probe)).await;
+    Ok(learned.outcome)
 }
 
 #[when("this Plexus command request begins executing in the background on the leader node")]
@@ -15852,13 +16254,16 @@ async fn when_command_request_begins_in_background(world: &mut ScenarioWorld, #[
     );
     let query = expand_placeholders(world, docstring(step));
     let leader = current_leader_node(world).await;
-    let mut session = world
+    let session = world
         .cluster()
         .open_session(&leader, &world.domain)
         .await
         .unwrap_or_else(|error| panic!("failed to open the background command session: {error}"));
+    let reference = fresh_execution_reference();
+    let probe = command_probe(world, &reference);
+    let routes = world.cluster().leader_routes();
     world.background_command_result = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
-        async move { session.run_command_result(&query).await },
+        background_command_outcome(routes, session, query, reference, Some(leader), probe),
     )));
 }
 
@@ -15878,17 +16283,22 @@ async fn when_referenced_command_request_begins_in_background(
     let query = expand_placeholders(world, docstring(step));
     let execution_reference = command_execution_reference(world, &execution_reference);
     let leader = current_leader_node(world).await;
-    let mut session = world
+    let session = world
         .cluster()
         .open_session(&leader, &world.domain)
         .await
         .unwrap_or_else(|error| panic!("failed to open the background command session: {error}"));
+    let probe = command_probe(world, &execution_reference);
+    let routes = world.cluster().leader_routes();
     world.background_command_result = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
-        async move {
-            session
-                .run_command_result_with_reference(&query, &execution_reference)
-                .await
-        },
+        background_command_outcome(
+            routes,
+            session,
+            query,
+            execution_reference,
+            Some(leader),
+            probe,
+        ),
     )));
 }
 
@@ -15943,18 +16353,16 @@ async fn when_active_session_referenced_command_begins_in_background(
     );
     let query = expand_placeholders(world, docstring(step));
     let execution_reference = command_execution_reference(world, &execution_reference);
-    let mut session = world
+    let session = world
         .active_session
         .take()
         .verified("the preceding setup created an active session");
-    world.active_session_node = None;
+    let node = world.active_session_node.take();
     world.active_session_has_subscription = false;
+    let probe = command_probe(world, &execution_reference);
+    let routes = world.cluster().leader_routes();
     world.background_command_result = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
-        async move {
-            session
-                .run_command_result_with_reference(&query, &execution_reference)
-                .await
-        },
+        background_command_outcome(routes, session, query, execution_reference, node, probe),
     )));
 }
 
@@ -16097,17 +16505,16 @@ async fn execute_command_request_with_reference_on_leader(
         .open_session(&leader, &world.domain)
         .await
         .unwrap_or_else(|error| panic!("failed to open the resumed command session: {error}"));
-    let mut result = session
-        .run_command_result_with_reference(&query, execution_reference)
+    let prepared = session.prepare_command(&query, execution_reference);
+    let mut result = prepared
+        .run(&mut session)
         .await
         .unwrap_or_else(|error| panic!("resumed command request failed: {error}"));
-    if outcome_awaits_leader(&result) {
+    if prepared.awaits_recovery(&result) {
         // The step's session holds nothing and ends with the step, so whichever session learns the
         // outcome stands in for it.
         let routes = world.cluster().leader_routes();
-        let scope = session.scope();
-        let learned =
-            learn_command_outcome(&routes, &scope, &query, execution_reference, result).await;
+        let learned = learn_command_outcome(&routes, &prepared, result, None).await;
         result = learned.outcome;
     }
     world.last_command_disposition = Some(result.disposition.clone());
@@ -16514,8 +16921,11 @@ async fn run_plexus_commands_on_active_session(
             .active_session
             .as_mut()
             .expect("an active session must exist");
-        let output = run_command_on_held_session(&routes, session, &command).await?;
-        world.last_command_output = Some(output);
+        let mut ran = run_command_on_held_session(&routes, session, &command).await?;
+        if let Some(node) = ran.moved_to.take() {
+            world.active_session_node = Some(node);
+        }
+        world.last_command_output = Some(ran.output()?);
         world.active_session_has_subscription =
             command_updates_subscription_state(world.active_session_has_subscription, &command);
     }
@@ -17214,11 +17624,12 @@ async fn when_named_client_uploads_resource_with_identity(
     world.last_client_outcome = Some(outcome);
 }
 
-fn assert_last_client_upload(
+/// The resource upload the last client upload step reported, once the version it reports is
+/// checked against `version`.
+fn last_client_upload_of_version(
     world: &ScenarioWorld,
     version: u64,
-    origin: nervix_client_core::OutcomeOrigin,
-) {
+) -> &nervix_client_core::ResourceUploadOutcome {
     let outcome = world
         .last_client_outcome
         .as_ref()
@@ -17233,21 +17644,54 @@ fn assert_last_client_upload(
         Some(version),
         "unexpected upload version: {upload:?}"
     );
-    assert_eq!(
-        upload.origin,
-        Some(origin),
-        "unexpected upload origin: {upload:?}"
-    );
+    upload
 }
 
+/// The upload's identity was unused before it, so whichever of its calls installed the version,
+/// the upload did. A call reports the origin it saw: the only call an upload opened installed the
+/// version itself, while a call the upload repeated, after an earlier one lost its reply or was
+/// redirected, finds recorded what that earlier call installed.
 #[then(expr = "the last client upload installed version {int}")]
 async fn then_last_client_upload_installed_version(world: &mut ScenarioWorld, version: u64) {
-    assert_last_client_upload(world, version, nervix_client_core::OutcomeOrigin::Executed);
+    let upload = last_client_upload_of_version(world, version);
+    let Some(origin) = upload.origin else {
+        panic!("the upload reported no installed version: {upload:?}");
+    };
+    if upload.calls == std::num::NonZeroU32::MIN {
+        assert_eq!(
+            origin,
+            nervix_client_core::OutcomeOrigin::Executed,
+            "an upload answered by the only call it opened installed its version with that call: \
+             {upload:?}"
+        );
+    }
+}
+
+#[then(expr = "the last client upload repeated its call and recovered version {int}")]
+async fn then_last_client_upload_repeated_and_recovered_version(
+    world: &mut ScenarioWorld,
+    version: u64,
+) {
+    let upload = last_client_upload_of_version(world, version);
+    assert!(
+        upload.calls > std::num::NonZeroU32::MIN,
+        "the upload must open another call after its first: {upload:?}"
+    );
+    assert_eq!(
+        upload.origin,
+        Some(nervix_client_core::OutcomeOrigin::Recovered),
+        "the repeated call must find the version an earlier call installed: {upload:?}"
+    );
 }
 
 #[then(expr = "the last client upload recovered version {int} from an earlier upload")]
 async fn then_last_client_upload_recovered_version(world: &mut ScenarioWorld, version: u64) {
-    assert_last_client_upload(world, version, nervix_client_core::OutcomeOrigin::Recovered);
+    let upload = last_client_upload_of_version(world, version);
+    assert_eq!(
+        upload.origin,
+        Some(nervix_client_core::OutcomeOrigin::Recovered),
+        "unexpected upload origin: {upload:?}"
+    );
 }
 
 #[when(
@@ -18246,19 +18690,47 @@ async fn then_only_transaction_id_is_saved_as_placeholder(
     world: &mut ScenarioWorld,
     placeholder: String,
 ) {
+    save_only_transaction_id(world, placeholder, None);
+}
+
+#[then(expr = "the only open transaction id is saved as placeholder {string}")]
+async fn then_only_open_transaction_id_is_saved_as_placeholder(
+    world: &mut ScenarioWorld,
+    placeholder: String,
+) {
+    save_only_transaction_id(world, placeholder, Some("OPEN"));
+}
+
+fn save_only_transaction_id(
+    world: &mut ScenarioWorld,
+    placeholder: String,
+    expected_state: Option<&str>,
+) {
     let output = world
         .last_command_output
         .as_deref()
         .verified("the preceding SHOW TRANSACTIONS command produced output");
-    let ids = output
-        .lines()
-        .filter_map(|line| line.split_whitespace().next())
-        .filter_map(|field| field.strip_prefix("id="))
-        .collect::<Vec<_>>();
+    let state_field = expected_state.map(|state| format!("state={state}"));
+    let mut ids = Vec::new();
+    for line in output.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(first_field) = fields.next() else {
+            continue;
+        };
+        let Some(id) = first_field.strip_prefix("id=") else {
+            continue;
+        };
+        if let Some(state_field) = &state_field
+            && !fields.any(|field| field == state_field)
+        {
+            continue;
+        }
+        ids.push(id);
+    }
     assert_eq!(
         ids.len(),
         1,
-        "expected exactly one transaction, got output:\n{output}"
+        "expected exactly one transaction (state filter {expected_state:?}), got output:\n{output}"
     );
     world.placeholders.insert(placeholder, ids[0].to_string());
 }
@@ -19603,8 +20075,8 @@ impl UnacknowledgedSourceFixture {
             }
             Self::Pulsar => {
                 "FROM unacknowledged_client TOPIC 'unacknowledged_{{test_id}}'
-          SUBSCRIPTION 'unacknowledged_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST INSTANCES \
-                 1 MODE NO ACK
+          SUBSCRIPTION 'unacknowledged_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST TYPE \
+                 SHARED INSTANCES 1 MODE NO ACK
         ON QUIESCE SUSPEND"
             }
             Self::RedisPubSub => {
@@ -25820,6 +26292,18 @@ async fn given_pulsar_topic_is_observed(world: &mut ScenarioWorld, topic: String
     );
 }
 
+#[given(expr = "authenticated Pulsar topic {string} is observed")]
+async fn given_authenticated_pulsar_topic_is_observed(world: &mut ScenarioWorld, topic: String) {
+    let topic = expand_placeholders(world, &topic);
+    world.broker_observer = Some(
+        world
+            .cluster()
+            .observe_pulsar_auth(&topic)
+            .await
+            .expect("failed to observe the authenticated pulsar topic"),
+    );
+}
+
 #[given(expr = "Pulsar TLS topic {string} is observed")]
 async fn given_pulsar_tls_topic_is_observed(world: &mut ScenarioWorld, topic: String) {
     let topic = expand_placeholders(world, &topic);
@@ -27212,6 +27696,21 @@ async fn when_pulsar_message_is_published(
         .expect("failed to publish pulsar message");
 }
 
+#[when(expr = "authenticated Pulsar message is published to topic {string}")]
+async fn when_authenticated_pulsar_message_is_published(
+    world: &mut ScenarioWorld,
+    topic: String,
+    #[step] step: &Step,
+) {
+    let topic = expand_placeholders(world, &topic);
+    let payload = expand_placeholders(world, docstring(step));
+    world
+        .cluster()
+        .publish_pulsar_auth(&topic, &payload)
+        .await
+        .expect("failed to publish the authenticated pulsar message");
+}
+
 #[when(expr = "Pulsar TLS message is published to topic {string}")]
 async fn when_pulsar_tls_message_is_published(
     world: &mut ScenarioWorld,
@@ -27317,6 +27816,29 @@ async fn when_sqs_message_is_published(
     publish_sqs(world.dependencies.endpoints(), &queue, &payload)
         .await
         .expect("failed to publish sqs message");
+}
+
+/// Sends every message of the step's JSON array to `queue`, in batch requests, so the messages of
+/// one request become receivable together.
+#[when(expr = "SQS messages are published to queue {string}")]
+async fn when_sqs_messages_are_published(
+    world: &mut ScenarioWorld,
+    queue: String,
+    #[step] step: &Step,
+) {
+    let queue = expand_placeholders(world, &queue);
+    let payload = expand_placeholders(world, docstring(step));
+    let messages: Vec<serde_json::Value> =
+        serde_json::from_str(&payload).expect("the fixture lists messages as a JSON array");
+    let mut payloads = Vec::with_capacity(messages.len());
+    for message in messages {
+        payloads.push(message.to_string());
+    }
+    world
+        .cluster()
+        .publish_sqs_messages(&queue, &payloads)
+        .await
+        .expect("the SQS service accepts each explicitly published message");
 }
 
 #[when(expr = "TLS SQS message is published to queue {string}")]
@@ -33010,8 +33532,8 @@ async fn then_iceberg_table_metadata_does_not_contain(
     }
 }
 
-#[then("the temp directory eventually contains an Iceberg Arrow IPC staged batch")]
-async fn then_temp_directory_contains_iceberg_arrow_ipc_staged_batch(world: &mut ScenarioWorld) {
+#[then("the temp directory eventually contains an Iceberg staging file")]
+async fn then_temp_directory_contains_iceberg_staging_file(world: &mut ScenarioWorld) {
     let temp_root = world
         .temp_root
         .as_ref()
@@ -33019,24 +33541,24 @@ async fn then_temp_directory_contains_iceberg_arrow_ipc_staged_batch(world: &mut
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         nervix_primitives::task::consume_budget().await;
-        if path_contains_staged_iceberg_arrow_ipc_batch(temp_root.path()) {
+        if path_contains_iceberg_staging_file(temp_root.path()) {
             append_cucumber_log_line(&format!(
-                "observed Iceberg Arrow IPC staged batch under {}",
+                "observed Iceberg staging file under {}",
                 temp_root.path().display()
             ));
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for Iceberg Arrow IPC staged batch under {}",
+            "timed out waiting for an Iceberg staging file under {}",
             temp_root.path().display()
         );
         nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
-#[then("the temp directory does not contain an Iceberg Parquet staged batch")]
-async fn then_temp_directory_does_not_contain_iceberg_parquet_staged_batch(
+#[then("the temp directory does not contain an Iceberg Parquet staging file")]
+async fn then_temp_directory_does_not_contain_iceberg_parquet_staging_file(
     world: &mut ScenarioWorld,
 ) {
     let temp_root = world
@@ -33044,8 +33566,8 @@ async fn then_temp_directory_does_not_contain_iceberg_parquet_staged_batch(
         .as_ref()
         .expect("temp root must be configured by the scenario");
     assert!(
-        !path_contains_staged_iceberg_parquet_batch(temp_root.path()),
-        "observed local Iceberg Parquet staged batch under {}",
+        !path_contains_iceberg_parquet_staging_file(temp_root.path()),
+        "observed a local Iceberg Parquet staging file under {}",
         temp_root.path().display()
     );
 }
@@ -33060,15 +33582,15 @@ async fn then_object_storage_path_does_not_exist(world: &mut ScenarioWorld, path
     assert!(!exists, "object storage path {path} exists");
 }
 
-fn path_contains_staged_iceberg_arrow_ipc_batch(root: &Path) -> bool {
-    staged_iceberg_arrow_ipc_batches(root) > 0
+fn path_contains_iceberg_staging_file(root: &Path) -> bool {
+    iceberg_staging_files(root) > 0
 }
 
-/// How many complete Arrow IPC batches Iceberg emitters staged under `root`: files a staging
-/// write finished, which hold at least one record batch.
-fn staged_iceberg_arrow_ipc_batches(root: &Path) -> usize {
+/// How many Arrow IPC staging files Iceberg emitters keep under `root`: files that hold at least
+/// one staged batch after their schema.
+fn iceberg_staging_files(root: &Path) -> usize {
     staged_iceberg_batches(root, |path, name| {
-        if !name.starts_with("batch-") || !name.ends_with(".arrow") {
+        if !name.starts_with("staging-") || !name.ends_with(".arrow") {
             return false;
         }
         let Ok(file) = std::fs::File::open(path) else {
@@ -33084,9 +33606,9 @@ fn staged_iceberg_arrow_ipc_batches(root: &Path) -> usize {
     })
 }
 
-fn path_contains_staged_iceberg_parquet_batch(root: &Path) -> bool {
+fn path_contains_iceberg_parquet_staging_file(root: &Path) -> bool {
     let staged = staged_iceberg_batches(root, |_path, name| {
-        name.starts_with("batch-") && name.ends_with(".parquet")
+        name.starts_with("staging-") && name.ends_with(".parquet")
     });
     staged > 0
 }
@@ -35038,11 +35560,27 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 let scenario_ports = std::mem::take(&mut world.scenario_ports);
                 crate::common::port_pool::release_test_ports(&scenario_ports);
 
+                let rabbitmq_cleanup =
+                    if let Some(mut broker) = world.rabbitmq_envelope_broker.take() {
+                        Some(broker.shutdown().await)
+                    } else {
+                        None
+                    };
+                if let Some(Err(error)) = &rabbitmq_cleanup {
+                    append_cucumber_log_line(&format!(
+                        "scenario teardown failed: isolated RabbitMQ: {error}"
+                    ));
+                }
                 world.enter_phase(
                     ScenarioPhase::Finished,
                     &format!("body={body} {cluster_cleanup}"),
                 );
                 world.scenario_admission = None;
+                if let Some(cleanup) = rabbitmq_cleanup {
+                    cleanup.assured(
+                        "the scenario-owned RabbitMQ broker is removed after all other cleanup",
+                    );
+                }
             })
         })
         .with_writer(writer)

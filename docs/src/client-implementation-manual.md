@@ -9,11 +9,12 @@ value, publish batches through producers, upload resources, and download backups
 the system behaves this way. This manual does not repeat those reasons, and the chapter does not
 repeat these rules.
 
-The Rust client, `nervix-client-core`, is the reference implementation. The shared binding,
-`nervix-client-ffi`, exposes it to C, C++, Python, JVM, and Ruby hosts, and a host that loads the
-binding inherits every rule below from it except those in [Using The Shared
-Binding](#using-the-shared-binding). An implementation that speaks the protocol itself, as the Go
-and TypeScript conformance clients do, follows all of it.
+The Rust client, `nervix-client-core`, is the reference implementation. The shared binding exposes
+it through the C ABI of `nervix-client-ffi` to C, C++, JVM, and Ruby hosts and through the Python
+package `nervix_client` to CPython hosts, and a host that uses the binding inherits every rule
+below from it except those in [Using The Shared Binding](#using-the-shared-binding) and [Using The
+Python Package](#using-the-python-package). An implementation that speaks the protocol itself, as
+the Go and TypeScript conformance clients do, follows all of it.
 
 The Rust reference implementation's execution modes and native/browser capability boundaries are
 specified in [Execution Primitives](./execution-primitives.md). Those repository build and
@@ -164,6 +165,10 @@ archive; see [Restore Streams](#restore-streams).
   endpoint.
 - **T-8.** A client MUST NOT rely on keepalives or an idle timeout, since neither side sends
   keepalives, and MUST bound every wait with a deadline of its own.
+- **T-9.** A client MUST treat an upload, restore or download call that ends with `UNAVAILABLE`
+  before its reply or its last frame as a call that failed in transport. A node that stops ends
+  every such call it has not answered that way, and the call's outcome is then uncertain as U-5,
+  W-5 and A-6 describe.
 
 ## Requests, Replies, And Cancellation
 
@@ -653,6 +658,11 @@ payload, infinity, and nullable and sensitive branch key fields.
 - **U-5.** When a call fails in transport, or its deadline passes, before a reply arrives, the
   upload's outcome is uncertain. A client MUST send the whole archive again under the same identity
   to learn it, and MUST NOT create a new identity for it.
+- **U-6.** A call repeated under U-4 or U-5 reports `Recovered` when an earlier call of the same
+  upload already installed the version. That origin describes the call that answered, and the
+  version is still the upload's own. A client that reports one outcome for every call of an upload
+  SHOULD also report how many calls it made, so that its caller can tell such an installation from
+  one that an earlier upload under the same identity made.
 
 ## Backup Downloads
 
@@ -743,8 +753,8 @@ payload, infinity, and nullable and sensitive branch key fields.
 
 ## Using The Shared Binding
 
-A host of `nervix-client-ffi` follows the contract in `crates/client-ffi/include/nervix_client.h`
-and these rules:
+A host of the C ABI, `nervix-client-ffi`, follows the contract in
+`crates/client-ffi/include/nervix_client.h` and these rules:
 
 - **B-1.** A host MUST prepare each logical command once with `nx_session_prepare`, and MUST execute
   the same `nx_execution` again after `NX_ERROR_UNCERTAIN`, `NX_ERROR_CANCELLED`, or
@@ -819,6 +829,41 @@ and these rules:
   read before it can be settled, and what they carried is delivered again. It MUST treat
   `NX_ERROR_REOPEN_REQUIRED` as the end of the handle, read why with the handle's reopen reason,
   and open a new one only after checking the endpoint it now expects.
+
+## Using The Python Package
+
+A CPython host imports `nervix_client`, the package `crates/client-python` builds on pyo3. It
+drives the same host session runtime as the C ABI, so B-1, B-7, B-8, B-10, B-12, B-14, B-15 and
+B-16 hold for it with the package's names: a prepared `Execution` for `nx_execution`,
+`Session.execute` for `nx_session_execute`, an exception class for each `NX_ERROR_*` kind, and the
+same enumeration members without their prefix. The rules that exist only because a C host owns
+retain and release, B-2 to B-4, B-6 and the release clauses of B-9, B-11 and B-15, do not apply to
+it. A CPython host follows these rules instead:
+
+- **N-1.** A host MUST let Python own every object the package returns. An object releases its
+  share of the session when Python collects it, a producer, consumer or delivery keeps its session
+  running until it is collected, and a `memoryview` of an event's frame, a batch's stream or a
+  delivery's stream keeps that object alive for as long as the view exists. A host MUST NOT expect
+  collecting a delivery to settle it.
+- **N-2.** A host MAY call the package from any Python thread, and MAY use one object from several
+  threads at once, except a `Fields` list or a `BatchBuilder`, which one thread builds at a time.
+  Every call that waits releases the GIL until it returns, and the package never calls Python from
+  a thread of its own, so a host MAY cancel a waiting call by triggering its `Cancel` from another
+  thread.
+- **N-3.** A host MUST branch on a failure by its exception class or its `kind`, never by its
+  message, which is the report's whole chain. It MUST read the execution reference of an uncertain,
+  cancelled or timed-out command from the exception's `execution_reference`, and an open's refusal
+  from its `open_refusal`, and MUST then follow B-1 and B-12.
+- **N-4.** A host MUST read a field or a cause that an object's kind does not carry only after it
+  checked that kind: a clock event's `generation`, `state`, `paced`, `tick` and `end_reason`, an
+  event's `schema`, `frame` and columns, and a submission outcome's `refusal`, `defect`, `failure`
+  and `uncertainty` raise `TypeMismatchError` otherwise.
+- **N-5.** A host that exchanges Arrow data through the PyCapsule interface MUST give a submission
+  the producer's field names in order, exactly its types, `timestamp[ns, tz=+00:00]` for a
+  `DATETIME`, and no null in a required field or in any list element. The package refuses anything
+  else with `InvalidArgumentError` before it sends a batch. A rows event's Arrow export marks every
+  sensitive field nullable and reads a withheld value as a null; a host MUST read `states` to tell a
+  withheld value from a null.
 
 ## Required State Machines
 
@@ -915,10 +960,11 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | Rules | Executable evidence |
 | --- | --- |
 | F-1 to F-7 | `the_checked_in_corpus_is_what_the_encoder_writes_and_reads`, the frame and transfer tests of `nervix-client-wire` such as `a_union_discriminant_without_its_member_is_refused`, `parts_must_belong_to_the_transfer_and_arrive_in_order`, and `corrupting_a_row_batch_never_panics`; the scenario `A <runtime> client reads every frame of the conformance corpus the Rust encoder wrote` for Go, Node.js, and Bun |
-| F-8, D-6 | `a_frame_the_contract_does_not_describe_ends_the_exchange` and `a_session_ending_frame_closes_the_waiters_of_its_exchange` in `nervix-client-core` |
+| F-8, D-6 | `a_frame_the_contract_does_not_describe_ends_the_exchange` and `a_session_ending_frame_closes_the_waiters_of_its_exchange` in `nervix-client-core`; `A native session is told its node is shutting down before its call ends` in `session_protocol.feature` |
 | T-1 to T-6 | `Authentication, framing and protocol failures end a native session with their status` and `The console WebSocket closes a connection that sends something other than a session frame` in `session_protocol.feature`; `non_frame_messages_end_the_connection_with_a_close_code` |
 | T-3a | Every scenario of `backup_restore.feature` in the web console suite; `a_console_download_answers_its_request_and_closes_normally`, `a_console_restore_is_answered_once_its_declared_bytes_arrived`, `a_console_restore_whose_client_leaves_early_is_not_answered`, `a_second_request_on_a_console_download_breaks_the_call`, `a_console_download_stops_at_its_client_close_while_frames_remain`, and the shutdown cases in `nervix-server`; `each_console_websocket_refuses_the_frames_of_another_call` in `nervix-client-wire` |
 | T-7 | `Web console opened on a follower connects to the leader` and `Web console reconnects after leader switchover` in `connection_status.feature` |
+| T-9 | `Graceful shutdown cancels an accepted resource upload <progress>` in `shutdown_deadline.feature`; `a_call_its_stopping_node_ended_is_sent_again_under_its_identity` in `nervix-client-core` |
 | C-1 to C-7 | `request_identities_start_at_one_and_are_never_reused`, `response_reordering_cannot_take_another_requests_waiter`, `a_reply_no_request_waits_for_is_dropped`, `saturated_event_consumer_cannot_block_a_command_reply`, and `replies_reach_their_requests_in_whatever_order_they_arrive` in `nervix-client-core`; `untracked_domain_push_cannot_discard_a_pending_websocket_request` and `ordered_requests_beyond_the_in_flight_limit_wait_in_order_for_earlier_replies` in the console; `Web console refuses a command past its outstanding requests and recovers once they complete` in `plexus_repl.feature` |
 | C-8 | `A malformed request is refused with a typed rejection and the session keeps serving` in `session_protocol.feature`; `a_rejected_request_surfaces_as_a_typed_error` |
 | C-9, C-10 | `A long command leaves the session responsive and a waiter cancelled before admission admits nothing` and `Cancelling a durably admitted command ends only the wait for it` in `session_protocol.feature`; `cancelling_a_command_releases_its_pending_reply` |
@@ -937,14 +983,15 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | K-1 to K-5 | `A domain clock attachment reply precedes its frames, a detach reply follows them, and a transaction refuses both` in `session_protocol.feature`; the state, tick, and client pacing outlines in `domain_clock_attachment.feature`; the owner-loss case in `domain_clock_contract.feature`; `The CLI follows a domain clock across a cluster restart` in `cli_session.feature`; `A <runtime> client reads the running domain clock it attached to before its ticks and keeps its generations apart` in `client_conformance.feature` for every binding host; `an_attach_answers_once_its_node_has_installed_the_committed_domains`, `an_ended_exchange_interrupts_its_attachments_until_a_new_exchange_attaches_them`, `an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_clock`, `a_refused_clock_restoration_is_repeated_on_the_same_session`, `a_clock_restoration_answered_already_attached_follows_the_new_session`, `a_clock_restoration_that_reaches_no_server_is_tried_again_by_the_next_read`, `an_attachment_moved_before_its_old_session_ends_keeps_the_tick_it_reported`, `a_detach_sent_while_a_refused_restoration_waits_releases_the_clock_for_good`, `a_detach_the_old_session_answers_during_a_reconnect_stays_released_on_the_new_session`, `a_restoration_left_unanswered_past_the_request_timeout_wakes_the_waiting_reader`, `a_detach_refused_during_a_reconnect_leaves_the_clock_restored_on_the_new_session`, `a_clock_attached_while_a_reconnect_opens_its_exchange_is_attached_again_on_it`, `an_attachment_moved_while_its_exchange_holds_it_keeps_the_tick_of_an_unchanged_clock`, `a_detach_waits_for_the_attaches_decided_before_it_and_holds_off_later_ones`, `ticks_coalesce_per_domain_and_follow_their_generations_state`, the Shuttle check `shuttle_a_detach_racing_a_restoration_leaves_no_attachment_of_its_clock`, and the `server_domain_clock_ticked.nxsm` conformance frame |
 | P-1 to P-8 | Every scenario of `client_ingestors.feature` and of `client_ingestor_process_faults.feature`, including the socket loss, full restart, relocation, and forwarding node death cases retaining one producer; `a_lost_exchange_leaves_sent_batches_unknown_and_restores_the_producer`, `a_batch_waiting_for_admission_when_the_session_ends_is_definitely_unsent`, `a_new_domain_generation_requires_a_new_producer_open`, and `closing_a_producer_during_restoration_releases_its_late_open` in `nervix-client-core`; `every_open_refusal_round_trips`, `every_submission_outcome_round_trips`, `producer_events_round_trip_and_name_no_request`, and `the_largest_submitted_batch_fits_a_frame_and_one_byte_more_does_not` in `nervix-client-wire`; the `client_open_ingestor.nxcm`, `client_submit_batch.nxcm`, `server_ingestor_opened.nxsm`, `server_submission_*.nxsm`, and `server_producer_*.nxsm` conformance frames |
 | E-1 to E-6 (emitter consumers) | The saturated producer and concurrent consumer and clock restart, generation change, and emitter relocation cases in `client_emitters.feature`; `a_consumer_reports_a_gap_then_reads_through_a_fresh_attachment`, `an_ended_consumer_attachment_reopens_when_its_contract_is_unchanged`, `a_changed_consumer_contract_or_generation_requires_a_new_open`, `temporary_consumer_capacity_refusal_retries_the_same_desired_contract`, `a_delivery_from_a_lost_exchange_cannot_ack_a_replacement`, `a_settlement_sent_before_the_session_lost_its_answer_is_unknown`, `a_read_whose_caller_stopped_waiting_is_taken_over_by_the_next_read`, `a_close_whose_caller_stopped_waiting_still_releases_the_attachment`, and `closing_during_restoration_releases_the_late_attachment` in `nervix-client-core`; `consumer_replies_round_trip_with_retained_arrow_body` and the `server_emitter_opened.nxsm` conformance frame in `nervix-client-wire` |
-| U-1 to U-5 | `An upload stream the protocol does not allow is refused with a typed failure and admits nothing` in `session_protocol.feature`; in `resource_describe.feature`, `An incomplete upload does not admit content or consume its identity`, `Upload retry reports one assigned version`, `Upload retry after leader change reports the assigned version`, and `An uncertain upload completes once across installation and leader change`; `a_lost_upload_reply_retries_with_the_same_identity_and_archive` and `malformed_upload_replies_are_rejected_by_their_correlations` |
+| U-1 to U-6 | `An upload stream the protocol does not allow is refused with a typed failure and admits nothing` in `session_protocol.feature`; in `resource_describe.feature`, `An incomplete upload does not admit content or consume its identity`, `Upload retry reports one assigned version`, `An upload whose installing call loses its reply reports its one assigned version`, `Upload retry after leader change reports the assigned version`, `A leader resumes an upload whose publication it refused from its own installed copy`, and `An uncertain upload completes once across installation and leader change`; `a_lost_upload_reply_retries_with_the_same_identity_and_archive`, `an_upload_redirect_keeps_its_identity_and_archive` and `malformed_upload_replies_are_rejected_by_their_correlations` |
 | A-1 to A-6 | Every scenario of `backup.feature`, including `A client that loses its download fetches the archive again until a download collects it`, `An archive is refused once its execution reference's retry validity ends`, and `Downloads of another user's backup, or under a reference without an archive, are refused`; the console's `A console backup downloads a verified archive whose manifest lists the backed-up domains`, `A console backup download interrupted by a page reload resumes after the reload`, `A console backup download interrupted by a page reload resumes after leadership moved under the backup`, `The REPL's backup keeps one console session and its leader redirect when the session's connection is lost`, `The REPL and the backup controls keep one console session when leadership moves after the redirect` and `The REPL's backup keeps one console session when leadership moved after the redirect and the session's connection is lost` in `backup_restore.feature`; `every_download_frame_round_trips` and `a_download_request_with_an_invalid_reference_is_refused` in `nervix-client-wire`; the `backup_download_*` conformance frames |
-| A-7, A-8 | Every scenario of `backup_wait.feature`, including `A bounded native wait recovers the original multi-domain backup`, `A bounded CLI wait recovers the same multi-domain backup to another file`, `A backup execution can be recovered to another local destination`, `An expired reference refuses CLI recovery without starting another backup`, and `A leader change between domain cuts preserves multi-domain backup recovery` |
-| B-1 to B-7 | The binding tests of `nervix-client-ffi`, such as `retained_references_keep_the_frame_until_the_last_one_is_released`, `string_and_bytes_columns_are_copied_with_offsets_and_borrowed_per_cell`, `every_event_kind_reports_its_subscription_and_count`, and `a_token_bounds_a_call_by_cancellation_and_by_deadline`; the C, C++, Python, Java, and Ruby cases of `client_conformance.feature` |
+| A-7, A-8 | Every scenario of `backup_wait.feature`, including `A bounded native wait recovers the original multi-domain backup`, `A bounded CLI wait recovers the same multi-domain backup to another file`, `A backup execution can be recovered to another local destination`, `An expired reference refuses CLI recovery without starting another backup`, and `A leader change between domain cuts preserves multi-domain backup recovery`; `A native backup waits through an outage longer than its retry budget` in `client_wire_failures.feature`; `backup_waits_beyond_ordinary_request_and_retry_deadlines`, `backup_reconnects_with_the_same_reference_within_its_wait_budget`, `backup_redirected_to_an_unreachable_leader_recovers_within_its_wait_budget`, and `backup_wait_expiry_preserves_the_reference_for_explicit_recovery` in `nervix-client-core` |
+| B-1 to B-7 | The binding tests of `nervix-client-ffi`, such as `retained_references_keep_the_frame_until_the_last_one_is_released`, `string_and_bytes_columns_are_copied_with_offsets_and_borrowed_per_cell`, `every_event_kind_reports_its_subscription_and_count`, and `a_host_creates_triggers_and_frees_tokens_through_the_c_abi`; `a_token_bounds_a_call_by_cancellation_and_by_deadline` in `nervix-client-host`; the C, C++, Java, and Ruby cases of `client_conformance.feature` |
 | B-8 | `a_backup_outcome_reports_its_archive` and `client_errors_are_classified_and_keep_their_causes` in `nervix-client-ffi` |
-| B-9 | `a_retained_clock_event_outlives_a_reference_released_on_another_thread`, `a_session_reads_every_clock_event_kind_and_bounds_its_wait`, and `a_restoration_failure_names_its_domain_and_carries_no_clock` in `nervix-client-ffi`; the clock cases of `client_conformance.feature` for C, C++, Python, Java, and Ruby |
-| B-11 | `a_clock_attached_after_start_is_read_before_its_first_tick`, `every_state_reports_only_the_fields_and_projections_it_carries`, `a_refused_attach_leaves_the_session_following_what_it_followed`, `an_attach_cancelled_after_it_was_sent_is_resolved_by_executing_it_again`, `several_domains_are_read_apart_until_a_detach_or_an_end_withdraws_one`, `an_interrupted_attachment_reads_its_last_clock_without_a_tick_until_it_is_restored`, and `a_domain_clock_outlives_references_released_on_another_thread_and_its_session` in `nervix-client-ffi`; the clock cases of `client_conformance.feature` for the C ABI in process, C, C++, Python, Java, and Ruby |
-| B-12 to B-16 | `A <runtime> client publishes typed batches through a client ingestor and acknowledges their output through a client emitter` in `client_conformance.feature` for the C ABI in process, C, C++, Python, Java, and Ruby; `a_producer_reports_its_description_and_takes_every_outcome_class`, `a_refused_open_names_its_refusal_and_a_host_argument_is_checked_first`, `a_consumer_reads_and_settles_a_delivery_and_a_lost_confirmation_is_uncertain`, `a_reconnect_interrupts_a_consumer_expires_its_deliveries_and_restores_only_open_handles`, `every_kind_of_column_reads_back_from_the_batch_and_from_its_stream`, `a_builder_refuses_what_a_column_cannot_hold`, and `bolero_host_columns_round_trip_through_builder_and_stream` in `nervix-client-ffi` |
+| B-9 | `a_retained_clock_event_outlives_a_reference_released_on_another_thread`, `a_session_reads_every_clock_event_kind_and_bounds_its_wait`, and `a_restoration_failure_names_its_domain_and_carries_no_clock` in `nervix-client-ffi`; the clock cases of `client_conformance.feature` for C, C++, Java, and Ruby |
+| B-11 | `a_clock_attached_after_start_is_read_before_its_first_tick`, `every_state_reports_only_the_fields_and_projections_it_carries`, `a_refused_attach_leaves_the_session_following_what_it_followed`, `an_attach_cancelled_after_it_was_sent_is_resolved_by_executing_it_again`, `several_domains_are_read_apart_until_a_detach_or_an_end_withdraws_one`, `an_interrupted_attachment_reads_its_last_clock_without_a_tick_until_it_is_restored`, and `a_domain_clock_outlives_references_released_on_another_thread_and_its_session` in `nervix-client-ffi`; the clock cases of `client_conformance.feature` for the C ABI in process, C, C++, Java, and Ruby |
+| B-12 to B-16 | `A <runtime> client publishes typed batches through a client ingestor and acknowledges their output through a client emitter` in `client_conformance.feature` for the C ABI in process, C, C++, Java, and Ruby; `a_producer_reports_its_description_and_takes_every_outcome_class`, `a_refused_open_names_its_refusal_and_a_host_argument_is_checked_first`, `a_consumer_reads_and_settles_a_delivery_and_a_lost_confirmation_is_uncertain`, `a_reconnect_interrupts_a_consumer_expires_its_deliveries_and_restores_only_open_handles`, `every_kind_of_column_reads_back_from_the_batch_and_from_its_stream`, `a_builder_refuses_what_a_column_cannot_hold`, and `bolero_host_columns_round_trip_through_builder_and_stream` in `nervix-client-ffi` |
+| N-1 to N-5 | The three outlines of `client_conformance.feature` for CPython over the Python package, on one and three nodes, whose probe also checks a retained frame view, a wait cancelled from another thread and Arrow data pyarrow builds and reads; `a_wait_releases_the_gil_and_another_python_thread_cancels_it`, `every_failure_kind_raises_its_exception`, `a_frame_view_keeps_its_event_alive`, `a_producer_outlives_its_session` and `a_pycapsule_round_trip_keeps_every_column_kind_at_its_bounds` in `nervix-client-python`; `bolero_host_columns_round_trip_through_the_arrow_c_data_interface` and `bolero_typed_field_descriptions_round_trip` in `nervix-client-host` |
 | W-1 to W-5, B-10 | Every scenario of `restore.feature`, including `An interrupted restore upload is sent again under its execution reference`, `A restore repeated under its execution reference joins it or returns its recorded outcome`, and `A leader change while a restore applies resumes it on the new leader`; the console's restore scenarios in `backup_restore.feature`; `a_restore_start_round_trips`, `every_restore_chunk_round_trips_and_an_empty_one_is_refused`, and `every_restore_reply_round_trips` in `nervix-client-wire`; the `restore_*` conformance frames; `a_restore_outcome_reports_its_steps` in `nervix-client-ffi` |
 
 The [client representation properties](https://github.com/nervix-io/nervix/blob/main/tests/client-representation-coverage.md)
@@ -958,8 +1005,15 @@ bounds and then sends a valid completion and command on the same session.
 
 The conformance probes are complete, runnable clients, and each prints the same report as every
 other probe. They are qualification clients rather than supported SDKs. The Go and TypeScript probes
-each keep one request in flight and run no persistent command, so they use execution references that
-are not UUIDv7, which E-1 allows only for reads.
+each keep one request in flight. They use a harness-supplied UUIDv7 reference for the leader-only
+schema creation that proves redirect handling, and a separate reference for each later read or
+deliberately malformed request.
+
+Their three-node row scenarios start on a confirmed follower. The harness supplies the leader-only
+command's reference and requires the redirect report's original request, repeated request and
+terminal outcome to name that same reference. The native Go probe follows a command reply;
+TypeScript follows the console's `SessionEnding{LeaderRedirect}` before opening its subscription on
+the replacement session. The one-node examples are direct-connection controls.
 
 | Probe | Shows |
 | --- | --- |
@@ -967,7 +1021,7 @@ are not UUIDv7, which E-1 allows only for reads.
 | `tests/client_conformance/node/probe.ts` | A WebSocket client for Node.js and Bun: one binary message per frame, `BigInt` for every 64-bit value, float bits read from the buffer, and following a redirect's `web_console_uri` |
 | `tests/client_conformance/go/corpus.go`, `probe.ts corpus <dir>` | Reading every corpus frame without a FlatBuffers verifier, checking identifiers, discriminants, and required values |
 | `tests/client_conformance/c/probe.c`, `cpp/probe.cpp` | The binding from C and from C++ with `std::unique_ptr` ownership |
-| `tests/client_conformance/python/probe.py` | The binding through `ctypes`, with a `memoryview` over a retained frame |
+| `tests/client_conformance/python/probe.py` | The Python package `nervix_client`: a `memoryview` of a frame that keeps its event alive, waits cancelled from another thread, typed exceptions, and Arrow data pyarrow builds and reads through the PyCapsule interface |
 | `tests/client_conformance/java/Probe.java` | The binding through the Foreign Function and Memory API, with arena-owned events |
 | `tests/client_conformance/ruby/probe.rb` | The binding through Fiddle, with collector-driven release |
 

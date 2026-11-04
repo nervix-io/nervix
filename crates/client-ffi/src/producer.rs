@@ -1,204 +1,19 @@
-//! A producer a host holds: `nx_producer`, opened on a session's client ingestor.
+//! `nx_producer`: a producer a host holds, opened on a session's client ingestor.
 //!
-//! - **Owns.** Opening a producer with the fields and credit a host asks for, submitting the
-//!   batches a host built or wrote as canonical Arrow IPC, waiting for and taking their outcomes,
-//!   listing and releasing the submissions it holds, reading its description, admission and state,
-//!   and closing and releasing it.
-//! - **Depends on.** The Rust client's producer, the session it was opened on, the batch, field
-//!   and submission outcome handles, and the endpoint vocabulary.
+//! - **Owns.** Opening a producer through the C ABI with the credit a host passes, the endpoint
+//!   durations and credit it writes back, and the handle a host closes and frees.
+//! - **Depends on.** The shared producer, the session, batch, field and submission outcome
+//!   handles, the endpoint vocabulary and the C ABI boundary.
 //! - **Must not know.** How a batch is admitted, sent again or restored; the Rust producer decides
-//!   all of it, so this module keeps no state of its own about a submission or an attachment.
+//!   all of it.
 
-use std::{
-    num::{NonZeroU32, NonZeroU64},
-    time::Duration,
+use nervix_client_core::ClientProducerLimits;
+use nervix_client_host::{
+    Admission, Batch, Cancel, EndpointState, Failure, Fields, OpenRefusal, Producer, ReopenReason,
+    Schema, Session, SubmissionOutcome, Window, WindowKind, credit, nanos,
 };
 
-use bytes::Bytes;
-use meticulous::ResultExt as _;
-use nervix_client_core::{
-    ClientProducerAdmission, ClientProducerLimits, DomainName, IngestorName, ProducerBatch,
-    ProducerEnd, SubmissionId,
-};
-use nervix_primitives::sync::Arc;
-
-use crate::{
-    abi,
-    batch::Batch,
-    cancel::Cancel,
-    endpoint::{EndpointState, OpenRefusal, Reopen, ReopenReason, Window, WindowKind},
-    failure::Failure,
-    fields::Fields,
-    schema::Schema,
-    session::{Session, SessionRuntime},
-    submission::SubmissionOutcome,
-};
-
-/// Whether a producer's batches are admitted, with the header's values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i32)]
-pub enum Admission {
-    Open = 1,
-    Suspended = 2,
-}
-
-impl From<ClientProducerAdmission> for Admission {
-    fn from(admission: ClientProducerAdmission) -> Self {
-        match admission {
-            ClientProducerAdmission::Open => Self::Open,
-            ClientProducerAdmission::Suspended => Self::Suspended,
-        }
-    }
-}
-
-/// A producer, with the session its blocking calls run on and the schema of its batches.
-pub struct Producer {
-    producer: nervix_client_core::Producer,
-    schema: Schema,
-    session: Arc<SessionRuntime>,
-}
-
-/// The credit one endpoint asks for: how many batches and bytes may be outstanding at once.
-pub(crate) fn credit(batches: u32, bytes: u64) -> Result<(NonZeroU32, NonZeroU64), Failure> {
-    let Some(batches) = NonZeroU32::new(batches) else {
-        return Err(Failure::invalid_argument("batches", "must be positive"));
-    };
-    let Some(bytes) = NonZeroU64::new(bytes) else {
-        return Err(Failure::invalid_argument("bytes", "must be positive"));
-    };
-    Ok((batches, bytes))
-}
-
-/// A duration the wire carried, in nanoseconds.
-pub(crate) fn nanos(duration: Duration) -> u64 {
-    u64::try_from(duration.as_nanos())
-        .verified("the wire carries every endpoint duration as u64 nanoseconds")
-}
-
-impl Producer {
-    /// Opens a producer on `ingestor` of `domain`, blocking until the server answers.
-    pub fn open(
-        session: &Session,
-        domain: &str,
-        ingestor: &str,
-        fields: &Fields,
-        limits: ClientProducerLimits,
-        cancel: Option<&Cancel>,
-    ) -> Result<Self, Failure> {
-        let domain = match DomainName::try_from(domain) {
-            Ok(domain) => domain,
-            Err(error) => return Err(Failure::invalid_argument("domain", &error.to_string())),
-        };
-        let ingestor = match IngestorName::try_from(ingestor) {
-            Ok(ingestor) => ingestor,
-            Err(error) => return Err(Failure::invalid_argument("ingestor", &error.to_string())),
-        };
-        let expected = fields.schema_fields()?;
-        let shared = session.shared().clone();
-        let opening = async {
-            let opened = shared
-                .client()
-                .open_ingestor(domain, ingestor, expected, limits)
-                .await;
-            opened.map_err(Failure::from)
-        };
-        let producer = shared.block_on(cancel, opening)?;
-        let schema = Schema::of_fields(producer.description().fields.clone());
-        Ok(Self {
-            producer,
-            schema,
-            session: shared,
-        })
-    }
-
-    pub fn schema(&self) -> &Schema {
-        &self.schema
-    }
-
-    pub fn state(&self) -> EndpointState {
-        EndpointState::from(self.producer.connection())
-    }
-
-    pub fn admission(&self) -> Admission {
-        Admission::from(self.producer.admission())
-    }
-
-    /// Why the producer has to be opened again, once it does.
-    pub fn reopen(&self) -> Option<Reopen> {
-        match self.producer.end() {
-            Some(ProducerEnd::ReopenRequired(reason)) => Some(Reopen::from(&reason)),
-            Some(ProducerEnd::Closed | ProducerEnd::Ended { .. } | ProducerEnd::SessionLost)
-            | None => None,
-        }
-    }
-
-    /// Waits for credit and submits a batch built for this producer's schema.
-    pub fn submit(&self, batch: &Batch, cancel: Option<&Cancel>) -> Result<u64, Failure> {
-        let submitting = async {
-            let encoded = self
-                .producer
-                .batch(batch.record_batch())
-                .map_err(Failure::from)?;
-            self.producer.submit(encoded).await.map_err(Failure::from)
-        };
-        let id = self.session.block_on(cancel, submitting)?;
-        Ok(id.get().get())
-    }
-
-    /// Waits for credit and submits a batch a host wrote as one canonical Arrow IPC stream. The
-    /// stream is copied before anything waits.
-    pub fn submit_ipc(&self, ipc: &[u8], cancel: Option<&Cancel>) -> Result<u64, Failure> {
-        let batch = ProducerBatch::from_arrow_ipc(Bytes::copy_from_slice(ipc));
-        let submitting = async { self.producer.submit(batch).await.map_err(Failure::from) };
-        let id = self.session.block_on(cancel, submitting)?;
-        Ok(id.get().get())
-    }
-
-    fn submission(id: u64) -> Result<SubmissionId, Failure> {
-        let Some(id) = NonZeroU64::new(id) else {
-            return Err(Failure::invalid_argument(
-                "submission",
-                "is zero, which no submission is",
-            ));
-        };
-        Ok(SubmissionId::from(id))
-    }
-
-    /// Waits for a submission's outcome and takes it, which returns its credit.
-    pub fn rejoin(&self, id: u64, cancel: Option<&Cancel>) -> Result<SubmissionOutcome, Failure> {
-        let id = Self::submission(id)?;
-        let rejoining = async { self.producer.rejoin(id).await.map_err(Failure::from) };
-        let outcome = self.session.block_on(cancel, rejoining)?;
-        Ok(SubmissionOutcome::new(outcome))
-    }
-
-    /// Lets go of a submission, returning its outcome when it has one already.
-    pub fn release(&self, id: u64) -> Result<Option<SubmissionOutcome>, Failure> {
-        let id = Self::submission(id)?;
-        let released = self.producer.release(id).map_err(Failure::from)?;
-        match released {
-            Some(outcome) => Ok(Some(SubmissionOutcome::new(outcome))),
-            None => Ok(None),
-        }
-    }
-
-    /// Stops the producer's admission and waits until the server released it.
-    pub fn close(&self, cancel: Option<&Cancel>) -> Result<(), Failure> {
-        let closing = async { self.producer.close().await.map_err(Failure::from) };
-        self.session.block_on(cancel, closing)
-    }
-
-    /// Releases the producer, closing it without waiting when it is still open.
-    fn free(self) {
-        let Self {
-            producer,
-            schema,
-            session,
-        } = self;
-        drop(schema);
-        session.release(producer);
-    }
-}
+use crate::abi;
 
 /// # Safety
 ///
@@ -306,10 +121,7 @@ unsafe fn write_schema(producer: *const Producer, out: *mut *mut Schema) -> Resu
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nx_producer_generation(producer: *const Producer) -> u64 {
     // SAFETY: the header requires a live producer.
-    unsafe { abi::accessor(producer) }
-        .producer
-        .description()
-        .generation
+    unsafe { abi::accessor(producer) }.description().generation
 }
 
 /// # Safety
@@ -324,7 +136,7 @@ pub unsafe extern "C" fn nx_producer_contract(
     // SAFETY: the header requires a live producer and writable out-parameters.
     unsafe {
         let producer = abi::accessor(producer);
-        let contract = producer.producer.description().contract.as_digest();
+        let contract = producer.description().contract.as_digest();
         abi::write_bytes(digest, digest_len, contract);
     }
 }
@@ -342,7 +154,7 @@ pub unsafe extern "C" fn nx_producer_grant(
 ) {
     // SAFETY: the header requires a live producer and writable out-parameters.
     unsafe {
-        let grant = abi::accessor(producer).producer.description().grant;
+        let grant = abi::accessor(producer).description().grant;
         abi::write(batches, grant.batches.get());
         abi::write(bytes, grant.bytes.get());
         abi::write(max_batch_rows, grant.max_batch_rows.get());
@@ -364,7 +176,7 @@ pub unsafe extern "C" fn nx_producer_policy(
 ) {
     // SAFETY: the header requires a live producer and writable out-parameters.
     unsafe {
-        let policy = abi::accessor(producer).producer.description().policy;
+        let policy = abi::accessor(producer).description().policy;
         let acknowledged = Window::from(policy.window);
         abi::write(window, acknowledged.kind);
         abi::write(outstanding, acknowledged.outstanding);
@@ -556,7 +368,7 @@ unsafe fn write_pending(
     abi::require_out(count, "count")?;
     // SAFETY: the caller guarantees a live producer.
     let producer = unsafe { abi::handle(producer, "producer") }?;
-    let pending = producer.producer.pending_submissions();
+    let pending = producer.pending_submissions();
     // SAFETY: `count` is non-null, and the caller guarantees it is writable.
     unsafe { abi::write(count, pending.len()) };
     let written = pending.len().min(capacity);
@@ -639,10 +451,7 @@ unsafe fn closed(producer: *const Producer, cancel: *const Cancel) -> Result<(),
 /// other thread is using it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nx_producer_free(producer: *mut Producer) {
-    if producer.is_null() {
-        return;
-    }
-    // SAFETY: the header requires an unreleased producer no other thread uses.
-    let producer = unsafe { Box::from_raw(producer) };
-    producer.free();
+    // SAFETY: the header requires an unreleased producer no other thread uses, or null. Dropping
+    // it releases it inside its session's runtime.
+    unsafe { abi::release(producer) };
 }
