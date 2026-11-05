@@ -147,7 +147,8 @@ impl Failure {
             ClientError::RequestDeadline { .. } | ClientError::RetryDeadline => {
                 FailureKind::Deadline
             }
-            ClientError::UncertainCommand { .. }
+            ClientError::LastUnresolvedAnswer { .. }
+            | ClientError::UncertainCommand { .. }
             | ClientError::UncertainUpload { .. }
             | ClientError::SettlementUnknown { .. } => FailureKind::Uncertain,
             ClientError::EventOverflow { .. } => FailureKind::Overflow,
@@ -308,7 +309,10 @@ mod endpoint_recovery_tests {
 #[cfg(test)]
 mod call_cancellation_tests {
     use meticulous::ResultExt as _;
-    use nervix_client_core::{RequestKind, wire::CancellationStage};
+    use nervix_client_core::{
+        CommandDisposition, RequestKind,
+        wire::{CancellationStage, UnknownOutcomeCause},
+    };
 
     use super::*;
 
@@ -341,5 +345,32 @@ mod call_cancellation_tests {
             "the cancellation stays in the reported chain: {}",
             admitted.message()
         );
+    }
+
+    #[test]
+    fn an_unresolved_answer_stays_beneath_an_uncertain_host_failure() {
+        let reference = CommandExecutionReference::parse("command-1")
+            .assured("the test execution reference is valid");
+        let report = Report::new(ClientError::RetryDeadline)
+            .change_context(ClientError::LastUnresolvedAnswer {
+                disposition: CommandDisposition::OutcomeUnknown(
+                    UnknownOutcomeCause::LeadershipLost,
+                ),
+                message: "the lease could not be confirmed".to_string(),
+            })
+            .change_context(ClientError::UncertainCommand {
+                reference: reference.clone(),
+            });
+        let failure = Failure::from(report);
+
+        assert_eq!(failure.kind(), FailureKind::Uncertain);
+        assert_eq!(failure.execution_reference(), Some(&reference));
+        assert!(failure.message().contains("OutcomeUnknown(LeadershipLost)"));
+        assert!(
+            failure
+                .message()
+                .contains("the lease could not be confirmed")
+        );
+        assert!(failure.message().contains("session retry deadline expired"));
     }
 }
