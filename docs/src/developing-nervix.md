@@ -396,7 +396,7 @@ just test-connectors <filter>
 Each CI job's `runs-on` label picks one of three kinds of machine.
 
 GitHub's own hosted runners, which are free for a public repository, run the jobs that coordinate a
-run or need little of a machine: the test selection, the unit tests, the PR title check, the image metadata and
+run or need little of a machine: the test selection, the PR title check, the image metadata and
 manifest, the chaos plans and verdicts, the Bolero gate and the combination of its shards, the
 benchmark comment, the coverage merges, the book and the deployment checks. They also run the chaos
 shards, on the workers the suites were qualified on. `ubuntu-24.04` has 4 CPUs, 16 GB of memory and
@@ -448,17 +448,19 @@ took 49 of its job's 60 minutes.
 The scenario shards are timing sensitive, and they run on Blacksmith's
 `blacksmith-8vcpu-ubuntu-2404`, with 8 CPUs, 32 GB and 160 GB of disk. On `boat-xlarge` a shard
 lost on average a tenth of its CPU to its host and up to 58% at peaks, and its failures followed
-that loss. The unit tests run on GitHub's hosted `ubuntu-24.04`, whose 150 GB disk had about
-84 GiB free, room for their 5.1 GiB archive and the 32 GiB it restores: on Boat, on 3 November 2026,
-downloading the archive took 18 minutes and restoring it another 10, so the job reached its
-30-minute limit before any test ran. `.github/actionlint.yaml` declares the Blacksmith labels as
-well.
+that loss. The unit tests run on `blacksmith-4vcpu-ubuntu-2404`, with 4 CPUs, 16 GB RAM and
+[80 GB advertised storage](https://docs.blacksmith.sh/blacksmith-runners/overview). The job records
+total, used and available bytes for its checkout and temporary directory before downloading the
+compressed archive, which shares storage with the restored tests. Runner allocation and image
+contents determine the available space; the advertised tier alone does not establish that the
+archive fits. The archive's path checks, test workload and 30-minute job limit remain in force.
+`.github/actionlint.yaml` declares the Blacksmith labels as well.
 
 An archive restores only at the checkout path it was built in, and it checks that path before it
 restores any file. The scenario build and the scenario shards run on Blacksmith, whose runners
 check a repository out at the same path, so each shard restores and runs from its own checkout.
-GitHub's hosted runner checks out at another path, so the build publishes its path, and the `tests`
-job bind-mounts its checkout there, and restores and runs from that path.
+The build publishes its path, and the `tests` job bind-mounts its checkout there, and restores and
+runs from that physical path.
 
 A kache-backed job uses the cache bucket in its runner's region: the EU bucket on Boat's European
 machines, and the US bucket on GitHub's hosted runners and on Blacksmith's US runners.

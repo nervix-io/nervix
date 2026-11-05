@@ -246,8 +246,7 @@ class WorkflowTests(unittest.TestCase):
     def test_the_build_publishes_the_checkout_its_archives_restore_at(self) -> None:
         self.assertIn("checkout: ${{ github.workspace }}\n", self.job("scenarios-build"))
 
-    def test_the_tests_job_on_another_provider_restores_and_runs_at_the_builds_checkout(self) -> None:
-        self.assertNotEqual(self.runner_provider("tests"), self.runner_provider("scenarios-build"))
+    def test_the_tests_job_restores_and_runs_at_the_builds_checkout(self) -> None:
         directory = "working-directory: ${{ needs.scenarios-build.outputs.checkout }}\n"
         job = self.job("tests")
         restore, run = "just test-coverage-unpack", "just test-coverage-run"

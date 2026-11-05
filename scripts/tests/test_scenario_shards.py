@@ -11,6 +11,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -22,6 +23,7 @@ from scripts import scenario_shards as shards
 TARGETS = {"scenarios", "nervix-cli", "nervix-client-ffi", "nervix_client_ffi"}
 ONNX_LIBRARY = Path(".nervix-deps/onnxruntime/onnxruntime-linux-x64-1.30.0/lib/libonnxruntime.so.1.30.0")
 ONNX_LINK = ONNX_LIBRARY.parent / "libonnxruntime.so"
+PYTHON_WHEEL = Path("target/paced-simulation/wheels/nervix_client-0.1.0-cp312-abi3-linux_x86_64.whl")
 
 
 def write(path: Path, content: bytes, executable: bool = False) -> None:
@@ -58,6 +60,7 @@ class Checkout:
         write(root / shards.ONNX_FIXTURES / "simple_score.onnx", b"model")
         write(root / ONNX_LIBRARY, b"\x7fELF onnxruntime", executable=True)
         (root / ONNX_LINK).symlink_to(ONNX_LIBRARY.name)
+        write(root / PYTHON_WHEEL, b"wheel")
         for guest in shards.WASM_GUESTS:
             write(root / guest, b"\0asm")
         write(
@@ -199,6 +202,25 @@ class ArchiveTests(unittest.TestCase):
         self.assertNotIn("target/llvm-cov-target/debug/deps/libserde_derive-1a2b3c.so", packed_paths)
         self.assertFalse((debug / "build" / "nervix-cli-1" / "build-script-build").exists())
 
+    def test_the_driver_wheel_is_carried_into_a_restored_checkout(self) -> None:
+        build, manifest = self.build()
+        self.assertIn(PYTHON_WHEEL.as_posix(), [file.path for file in manifest.files])
+        root = self.shard_checkout(build)
+        self.unpack(root)
+        self.assertEqual((root / PYTHON_WHEEL).read_bytes(), b"wheel")
+
+    def test_a_build_without_the_python_driver_package_cannot_be_packed(self) -> None:
+        checkout = Checkout(self.base / "build")
+        (checkout.root / PYTHON_WHEEL).unlink()
+        with self.assertRaisesRegex(shards.ShardError, "Python.*wheel"):
+            checkout.pack(self.archive)
+
+    def test_a_build_with_two_python_driver_wheels_cannot_be_packed(self) -> None:
+        checkout = Checkout(self.base / "build")
+        write(checkout.root / PYTHON_WHEEL.with_name("nervix_client-0.2.0-cp312-abi3-linux_x86_64.whl"), b"another wheel")
+        with self.assertRaisesRegex(shards.ShardError, "Python.*wheel"):
+            checkout.pack(self.archive)
+
     def test_the_pack_holds_only_the_drivers_the_executable_names(self) -> None:
         checkout = Checkout(self.base / "build")
         debug = checkout.root / shards.COVERAGE_DEBUG
@@ -318,6 +340,16 @@ class RecipeTests(unittest.TestCase):
             self.assertIn(f'/llvm-cov-target/debug/{binary}"', shard)
             self.assertIn(f'"${{suite}}/{binary}"', build)
         self.assertIn('"${suite}/nervix-plexus-format"', build)
+        package = tomllib.loads((shards.ROOT / "crates/client-python/Cargo.toml").read_text())
+        library = package["lib"].get("name", package["package"]["name"].replace("-", "_"))
+        self.assertIn(f'"${{tools}}/paced-simulation/debug/lib{library}.so"', build)
+        self.assertIn(f'"${{suite}}/lib{library}.so"', build)
+        self.assertIn('NERVIX_PACED_SIMULATION_PYTHON=', shard)
+        self.assertIn('install-paced-simulation-python', self.recipe("test-scenarios-coverage-unpack"))
+
+    def test_the_prepared_runner_installs_the_instrumented_wheel(self) -> None:
+        head = self.recipe("test-scenarios-coverage-run").splitlines()[0]
+        self.assertEqual(head, ": install-paced-simulation-python")
 
 
 class WorkflowTests(unittest.TestCase):

@@ -2197,6 +2197,10 @@ column builder, TLS rebinding of every HTTPS listener, batched inference over in
 a restarted voter's ownership, and graceful shutdown with a slow cordon release and diagnostic
 server processes that stop gracefully, and its
 `stress-paced-simulation` invocation of the paced-driver scenarios with the stressed Rust driver.
+The Python companion uses the ordinary `nervix_client` package installed with the prerequisites.
+The runner selects that prepared interpreter explicitly, independently of its diagnostic Cargo
+target directory. The detector observes the diagnostic nodes those scenarios drive; it does not
+track synchronization inside the Python host or its ordinary client package.
 Endpoint ACK lifecycle examples carry `@deloxide_stress_endpoint_ack` and run in the separate
 `stress-endpoint-acknowledgement` invocation. Its serial process has a 900-second bound, including
 the existing 360-second teardown reserve. The baseline lifecycle process has a 3,960-second bound,

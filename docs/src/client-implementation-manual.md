@@ -1054,13 +1054,14 @@ scenario cuts.
 
 The [Paced Simulation Drivers](paced-simulation-drivers.md) are runnable applications rather than
 qualification clients. `examples/paced-simulation/python/paced_simulation.py` follows B-11 through
-the binding: it reads the attached clock before it submits anything, waits with
-`nx_domain_clock_wall_duration_until`, stamps its readings within `nx_domain_clock_admission_window`,
-pauses from `NX_CLOCK_EVENT_INTERRUPTED` until the next `NX_CLOCK_EVENT_STATE`, and runs its
-consumers beside its producer on one session, as emitter consumer rule E-6 allows. The Rust driver
+the native Python package: it reads `Session.domain_clock` before submitting, waits with
+`DomainClock.wall_duration_until`, and checks timestamps with `DomainClock.admission_window` and
+`DomainClock.admits`. It pauses from `ClockEventKind.INTERRUPTED` until the next
+`ClockEventKind.STATE`, and runs its consumers beside its producer on one session, as emitter
+consumer rule E-6 allows. The Rust driver
 beside it does the same with the Rust client.
 Both drivers explicitly reopen changed contracts within the current START generation, retaining
-the original handle for outstanding producer outcomes. Only `domain_stopped` and
+the original producer object for outstanding producer outcomes. Only `domain_stopped` and
 `generation_changed` wait for a later generation. Removed endpoints, incompatible fields, and
 unusable consumer credit produce configuration errors; no unknown submission is resent.
 
