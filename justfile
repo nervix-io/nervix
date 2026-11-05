@@ -679,7 +679,11 @@ test-rate-limit-model mode:
 test-rate-limit-diagnostic selection: build-deadlock-report
     NERVIX_PREPARED_TARGET_DIR={{ quote(cargo_target_dir) }} python3 -m scripts.rate_limit_checks {{ quote(selection) }} --target-dir {{ quote(cargo_target_dir + "/rate-limit/" + selection) }}
 
-# Qualify the pinned NATS driver's flush implementation through its own bounded stream tests.
+# Format the NATS driver package in its checkout.
+fmt-nats-driver checkout:
+    cargo +nightly fmt --manifest-path {{ quote(checkout + "/Cargo.toml") }} --package async-nats
+
+# Qualify the pinned NATS driver's flush, ordered headers and borrowed delivery metadata parser.
 test-nats-driver checkout *args:
     CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/nats-driver") }} cargo test --manifest-path {{ quote(checkout + "/async-nats/Cargo.toml") }} --package async-nats --no-default-features --features aws-lc-rs,jetstream,server_2_10,server_2_11 --lib -- {{ args }}
 
@@ -1718,6 +1722,11 @@ coverage-harness-liveness-report output:
 # `--name NAME` or `--pattern GLOB`, and `--path DIR`.
 ci-artifact-download run *args:
     python3 -m scripts.ci_artifacts download --run {{ quote(run) }} {{ args }}
+
+# Exercise the CI artifacts' transfer against a local fake of their bucket: path selection, parts,
+# resumed, paced and retried requests, progress reports, and the workflow steps that use them.
+test-ci-artifacts:
+    python3 -m unittest scripts.tests.test_ci_artifacts
 
 # Judge whether a pull request's head revision holds the complete evidence a release needs: every
 # check tests/release-evidence.toml requires passed on that revision and the label of every

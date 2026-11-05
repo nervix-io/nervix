@@ -32,6 +32,30 @@ private socket and atomics remain outside Nervix's modeled primitives: scripted 
 and public reconnect/STOP scenarios qualify this boundary, while Deloxide qualifies the tracked
 lifecycle paths around it and cannot observe those driver internals.
 
+NATS delivery metadata borrows the immutable message and opaque acknowledgement subject. Requested
+stream fields are decoded during one synchronous visit, with a stack-local `std::cell::OnceCell`
+sharing the parse. The host evaluates deferred producers only for fields its programs read.
+Typed field failures share an immutable, thin `StdArc` cause through retained snapshots; valid
+and unread values allocate no failure state. This reference owns diagnostic data, with no mutable
+protocol state or acknowledgement authority. The existing row-refusal map owns failures for read
+fields; no task, record or branch stores the visit cache. Reply subjects stay in each retained
+emitter envelope across retries, and ordered headers stay with their message. These paths add no
+shared map, lock or publication protocol.
+NATS transport headers share one immutable driver projection. Received headers borrow the same
+frame allocation as their payload, including a zero-length payload; outbound headers own the
+existing ordered vector and keep size admission ahead of wire encoding. Neither the Nervix
+header visitor nor the driver's pull-control header reader constructs an indexed map. Typed SDK
+map access can initialize a message-local `std::sync::OnceLock` projection; this is an external
+SDK inspection boundary, outside those record and control paths and outside Deloxide's tracked
+primitives. SDK authoring has an indexed copy-on-write view; both Nervix builders select the immutable
+transport view and never mutate a published projection. Driver-owner allocation, ownership and
+framing checks qualify this boundary; no concurrent map or new Nervix lock site is introduced.
+
+The metadata, request/reply, header-order and TLS scenarios are registered for active, order and
+stressed lifecycle diagnostics around the ingest groups and emitters. Deloxide does not observe
+the driver, asynchronous waits or these message-local conversions; their production-owner tests
+and bounded retention properties qualify those boundaries.
+
 These paths may apply bounded backpressure and preserve required ordering. Their steady-state work
 must not acquire a `Mutex` or `RwLock`, including a read lock, merely to discover configuration,
 ownership, topology, a service, or a metric series. A read lock still changes shared lock state,
@@ -1792,6 +1816,10 @@ imports. During recurring execution, unresolved generic, dynamic trait and funct
 application calls require a callable/trait contract or `nervix::dispatch(reason = "...")` on their
 owning callable; a cold module default is insufficient. A dispatch contract states the external
 driver or callback boundary; it does not exempt compiler-visible local callback bodies or acquisitions.
+
+The NATS stream metadata visitor carries this contract on its field helper: a synchronous callback
+projects the borrowed delivery metadata into the requested scalar sink. Its per-visit `OnceCell`
+is stack-local, and the compiler continues to analyze each local projection body.
 
 The MySQL insert builder and the Postgres table name builder carry a dispatch contract for the
 vocabulary's opaque iterator over at most two immutable table-name parts, with at most 128 bytes
