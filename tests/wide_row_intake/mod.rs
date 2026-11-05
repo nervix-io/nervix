@@ -13,10 +13,10 @@
     )
 )]
 
-use std::io;
+use std::{io, time::Duration};
 
 use cucumber::{gherkin::Step, when};
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_primitives::time::Instant;
 
 use crate::{
@@ -25,7 +25,7 @@ use crate::{
         paced_publication::PacedPublication,
         raw_session::{TestServerEvent, TestSession},
     },
-    docstring, expand_placeholders, parse_duration_text,
+    docstring, expand_placeholders,
 };
 
 struct ForwardingFailureObservation {
@@ -76,12 +76,11 @@ impl ForwardingFailureObservation {
 }
 
 #[when(
-    expr = "http payload is acknowledged within {string} by node {string} with host {string} path \
+    expr = "http payload is acknowledged within \"30s\" by node {string} with host {string} path \
             {string} after releasing paced node {string} on server error {string}"
 )]
 async fn when_a_forwarding_failure_releases_the_paced_publication(
     world: &mut ScenarioWorld,
-    wait: String,
     node: String,
     host: String,
     path: String,
@@ -89,8 +88,7 @@ async fn when_a_forwarding_failure_releases_the_paced_publication(
     expected: String,
     #[step] step: &Step,
 ) {
-    let wait = parse_duration_text(&wait)
-        .assured("the scenario declares a valid publication and failure-witness bound");
+    let wait = Duration::from_secs(30);
     let node = expand_placeholders(world, &node);
     let host = expand_placeholders(world, &host);
     let path = expand_placeholders(world, &path);
