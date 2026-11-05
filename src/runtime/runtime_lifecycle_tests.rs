@@ -61,8 +61,8 @@ fn idle_execution(domain: &DomainName) -> DomainExecution {
         generator_tasks: HashMap::default(),
         reingestor_tasks: HashMap::default(),
         placement_tasks: HashMap::default(),
-        relay_state_tasks: HashMap::default(),
-        relay_owner_tasks: HashMap::default(),
+        relay_state_tasks: BTreeMap::default(),
+        relay_owner_tasks: BTreeMap::default(),
         tasks: Vec::new(),
     }
 }
@@ -775,7 +775,10 @@ async fn a_stopping_domain_writes_a_materialized_relays_last_checkpoint_once_its
     let (told_to_stop, stop_reached) = oneshot::channel();
     let (apply, applying) = oneshot::channel();
     execution.relay_state_tasks.insert(
-        RelayName::from(&checkpoints.placement.identifier),
+        RelayUnitRef::new(
+            RelayName::from(&checkpoints.placement.identifier),
+            checkpoints.placement.unit,
+        ),
         relay_state_task_applying_as_it_stops(
             &checkpoints.runtime,
             state,

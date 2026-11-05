@@ -21,38 +21,38 @@ use meticulous::OptionExt as _;
 use thiserror::Error;
 
 use crate::{
-    AckWindow, AlterDeduplicator, AlterDeduplicatorOperation, AlterEmitter, AlterEmitterOperation,
-    AlterGenerator, AlterGeneratorOperation, AlterIngestor, AlterIngestorOperation, AlterJunction,
-    AlterPlacement, AlterPlacementOperation, AlterProcessorOperation, AlterReingestor, AlterRelay,
-    AlterRelayOperation, AlterReorderer, AlterReordererOperation, AlterSchema,
-    AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, Assignment, AssignmentTarget,
-    AssignmentTargetScope, AvroType, Backup, BackupCapture, BackupResources, BackupScope,
-    BinaryOperator, BranchEviction, BranchSelection, CborType, ClickHouseValueMapping,
-    ClientConfigEntry, ClientIngestMode, ClientResourceMount, CodecEncodingRule,
-    CodecJaqTransformations, CodecName, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
-    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
-    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
-    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
-    CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
-    CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
-    CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
-    CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
-    CreateWindowProcessor, CreateWireSchema, DescribeBackup, DescribeTransaction, DomainPace,
-    DomainStartPoint, EmitterBatchPolicy, EmitterBody, EmitterEntity, EmitterEnvelope,
-    EmitterPublishing, EnvelopeClause, ExistingUserPolicy, Expression, FieldScope, Float64Literal,
-    FlushPolicy, GeneralErrorPolicy, InferencerTensorDeclaration, InferencerTensorDimension,
-    InferencerTensorMapping, IngestTimestampSource, IngestorInput, Inheritance, InputCollectPolicy,
-    InspectionFormat, Invocation, JsonType, Literal, MaterializedStateDependency,
-    MaterializedStatePolicy, MembershipOperator, MessageErrorPolicy, Model, ModelName,
-    MongoDbConflictAction, MySqlConflictAction, NamePosition, OutputBranch, ParseAsType,
-    PlacementPolicy, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutputs, RangeOperator, RelayBranching, RelayName, Restore, RestoreLifecycle,
-    RestoreMode, RestoreScope, RestoreState, RetryPolicy, RouteConstruction, SchemaField,
-    SignalingProtocolName, SignalingStep, SignalingWaitStep, SignalingWireFormat, Statement,
-    SubscriptionLiteral, TransactionInspectionTarget, UnaryOperator, WindowBound, WindowStateLimit,
-    WireSchemaField,
+    AckWindow, AlterBranch, AlterBranchOperation, AlterDeduplicator, AlterDeduplicatorOperation,
+    AlterEmitter, AlterEmitterOperation, AlterGenerator, AlterGeneratorOperation, AlterIngestor,
+    AlterIngestorOperation, AlterJunction, AlterPlacement, AlterPlacementOperation,
+    AlterProcessorOperation, AlterReingestor, AlterRelay, AlterRelayOperation, AlterReorderer,
+    AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
+    AlterWireSchemaOperation, Assignment, AssignmentTarget, AssignmentTargetScope, AvroType,
+    Backup, BackupCapture, BackupResources, BackupScope, BinaryOperator, BranchEviction,
+    BranchPartitions, BranchSelection, CborType, ClickHouseValueMapping, ClientConfigEntry,
+    ClientIngestMode, ClientResourceMount, CodecEncodingRule, CodecJaqTransformations, CodecName,
+    CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob,
+    CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
+    CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
+    CreateClientOtel, CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar,
+    CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
+    CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator,
+    CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer,
+    CreateIngestor, CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay,
+    CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
+    CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, DescribeBackup,
+    DescribeTransaction, DomainPace, DomainStartPoint, EmitterBatchPolicy, EmitterBody,
+    EmitterEntity, EmitterEnvelope, EmitterPublishing, EnvelopeClause, ExistingUserPolicy,
+    Expression, FieldScope, Float64Literal, FlushPolicy, GeneralErrorPolicy,
+    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping,
+    IngestTimestampSource, IngestorInput, Inheritance, InputCollectPolicy, InspectionFormat,
+    Invocation, JsonType, Literal, MaterializedStateDependency, MaterializedStatePolicy,
+    MembershipOperator, MessageErrorPolicy, Model, ModelName, MongoDbConflictAction,
+    MySqlConflictAction, NamePosition, OutputBranch, ParseAsType, PlacementPolicy,
+    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, RangeOperator,
+    RelayBranching, RelayName, Restore, RestoreLifecycle, RestoreMode, RestoreScope, RestoreState,
+    RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName, SignalingStep,
+    SignalingWaitStep, SignalingWireFormat, Statement, SubscriptionLiteral,
+    TransactionInspectionTarget, UnaryOperator, WindowBound, WindowStateLimit, WireSchemaField,
 };
 
 /// The Plexus release canonical rendering writes.
@@ -865,6 +865,7 @@ impl Statement {
             Self::AlterReingestor(alter) => alter.to_canonical_plexus(),
             Self::AlterGenerator(alter) => alter.to_canonical_plexus(),
             Self::AlterPlacement(alter) => alter.to_canonical_plexus(),
+            Self::AlterBranch(alter) => alter.to_canonical_plexus(),
             Self::Drop(drop) => Ok(format!(
                 "DROP {} {};",
                 drop.kind.keyword_phrase(),
@@ -1281,6 +1282,25 @@ impl AlterSchema {
         Ok(format!(
             "ALTER SCHEMA {} {operations};",
             self.schema.as_str()
+        ))
+    }
+}
+
+impl AlterBranch {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        let operations = self
+            .operations
+            .iter()
+            .map(|operation| match operation {
+                AlterBranchOperation::SetPartitions { partitions } => {
+                    format!("SET PARTITIONS {}", partitions.count())
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(format!(
+            "ALTER BRANCH {} {operations};",
+            self.branch.as_str()
         ))
     }
 }
@@ -1808,6 +1828,11 @@ impl CreateBranch {
             self.schema.as_str(),
             self.ttl
         );
+        // One partition is the default every declaration without a count has, so its canonical
+        // rendering omits it.
+        if self.partitions != BranchPartitions::ONE {
+            rendered.push_str(&format!(" PARTITIONS {}", self.partitions.count()));
+        }
         if let Some(eviction) = &self.eviction {
             match eviction {
                 BranchEviction::Lru { max_instances } => {
@@ -3061,11 +3086,6 @@ impl EmitterPublishing<'_> {
                 ack_timeout,
                 retry_policy,
             } => confirmed("ACK", window, ack_timeout, retry_policy),
-            EmitterPublishing::NatsJetStream {
-                window,
-                ack_timeout,
-                retry_policy,
-            } => confirmed("JETSTREAM ACK", window, ack_timeout, retry_policy),
             EmitterPublishing::RequestAck { retry_policy } => {
                 format!("ACK {}", retry(retry_policy))
             }

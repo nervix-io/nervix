@@ -1,31 +1,34 @@
 //! Consensus-connectivity fault control for the server test harness.
 //!
 //! Layer: engines and infrastructure; mutation is exposed only to test harnesses.
-//! - **Owns.** A process-local switch that rejects Raft and admission-read traffic.
-//! - **Depends on.** Atomic synchronization.
+//! - **Owns.** Process-local controls for Raft connectivity and follower heartbeat answers.
+//! - **Depends on.** Atomic synchronization and the test clock.
 //! - **Must not know.** Runtime ownership, scheduling, or application listener behavior.
 
 use std::io;
 
-#[cfg(not(any(test, feature = "testing")))]
+#[cfg(not(feature = "testing"))]
 #[derive(Clone, Default)]
 pub(crate) struct ConnectivityFault(());
 
-#[cfg(not(any(test, feature = "testing")))]
+#[cfg(not(feature = "testing"))]
 impl ConnectivityFault {
     pub(crate) fn check(&self) -> io::Result<()> {
         Ok(())
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(feature = "testing")]
 pub use enabled::ConnectivityFault;
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(feature = "testing")]
 mod enabled {
+    use std::time::Duration;
+
+    use meticulous::ResultExt as _;
     use nervix_primitives::sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     };
 
     use super::*;
@@ -33,15 +36,20 @@ mod enabled {
     #[derive(Clone, Debug, Default)]
     pub struct ConnectivityFault {
         blocked: Arc<AtomicBool>,
+        heartbeat_response_delay: Arc<HeartbeatResponseDelay>,
+    }
+
+    #[derive(Debug, Default)]
+    struct HeartbeatResponseDelay {
+        milliseconds: AtomicU64,
+        received: AtomicU64,
     }
 
     impl ConnectivityFault {
-        #[cfg(feature = "testing")]
         pub fn block(&self) {
             self.blocked.store(true, Ordering::Release);
         }
 
-        #[cfg(feature = "testing")]
         pub fn restore(&self) {
             self.blocked.store(false, Ordering::Release);
         }
@@ -52,6 +60,34 @@ mod enabled {
             } else {
                 Ok(())
             }
+        }
+
+        pub(crate) fn set_heartbeat_response_delay(&self, delay: Duration) {
+            let milliseconds = u64::try_from(delay.as_millis())
+                .verified("the fixture's heartbeat answer delay fits milliseconds");
+            self.heartbeat_response_delay
+                .milliseconds
+                .store(milliseconds, Ordering::Relaxed);
+        }
+
+        pub(crate) fn delayed_heartbeat_requests(&self) -> u64 {
+            self.heartbeat_response_delay
+                .received
+                .load(Ordering::Relaxed)
+        }
+
+        pub(crate) async fn after_heartbeat_append(&self) {
+            let milliseconds = self
+                .heartbeat_response_delay
+                .milliseconds
+                .load(Ordering::Relaxed);
+            if milliseconds == 0 {
+                return;
+            }
+            self.heartbeat_response_delay
+                .received
+                .fetch_add(1, Ordering::Relaxed);
+            nervix_primitives::time::sleep(Duration::from_millis(milliseconds)).await;
         }
     }
 }

@@ -16,6 +16,17 @@ node's files, observes the initially loaded leaf on a fresh connection before re
 replacement leaf after restart. CLI and Rust-client operations verify the supplied CA and endpoint
 name, and the console recorder checks an opened WSS connection to the advertised leader.
 
+## Delayed Consensus Heartbeat Answers
+
+The leader-lease regression uses a testing-only control on each follower's consensus probe. The
+follower processes an empty Raft append before the control delays its response, so it keeps hearing
+the leader while the leader must decide whether to accept a late acknowledgement. The fixture
+counts requests that reached the delayed path. The three-node scenario requires both followers to
+have received at least two, the same node to remain leader in the same term for longer than one
+lease, and a write through that leader to commit within its stated budget. Its wait observes the
+request counts and the elapsed lease interval together; it does not infer the delay from a silence
+window. Ordinary builds carry none of the delay control.
+
 ## Paced Interconnect Fixture
 
 The separate failed-append regression establishes retained history on all three nodes before
@@ -680,6 +691,11 @@ before any scenario starts. The shard compiles nothing. The instrumented extensi
 beside the suite as an object for LLVM's report. Each driver process inherits the scenario
 binary's profile location, so both the Rust driver and Python extension contribute their counters
 to the same ordinary report when they exit.
+
+The scenario archive carries the exact Playwright driver and Node executable selected by the
+compiled Rust binding. The shard restores them at their embedded paths; it does not install a
+global npm Playwright package. Browser fixtures select the runner's installed Chrome or Chromium.
+The shard's Node.js setup serves native client probes independently of that bundled driver.
 
 The CI `scenarios-build` job uses the shared native
 [CI linker](./developing-nervix.md#validation-and-tests) for the server, CLI, unit tests and scenario harness,
@@ -3375,7 +3391,12 @@ for one build at a time, so the recipe builds each helper beside the suite in a 
 below `target/llvm-cov-tools`, and then installs it into the target directory of `cargo llvm-cov`. `scripts/scenario_shards.py`
 names what the archive holds: every executable `cargo llvm-cov report` reads as an object, the
 Playwright driver whose path the scenario executable holds, the ONNX fixtures and runtime, and the
-WASM guests. Each `scenarios (I of N)` job checks out the same revision on the build's provider,
+WASM guests. The archive stores each object without its DWARF debug information, most of a test
+executable's bytes, from a copy `objcopy --strip-debug` makes beside the build, whose own
+objects keep theirs. The symbol table and the coverage mapping stay, so a shard's report is the one
+the build's objects give, a panic names its location and a backtrace its functions; a backtrace
+from a restored object names no source line, and a debugger finds no variable in it. Each
+`scenarios (I of N)` job checks out the same revision on the build's provider,
 at the path the build checked out, which the executables' absolute paths require. It then restores
 the archive there with `just test-scenarios-coverage-unpack`. The restore refuses an archive of
 another revision or checkout path, a file restored at another size, and an executable whose shared libraries the runner
@@ -3424,8 +3445,9 @@ suite, so the dependencies they share compile once. It keeps Cargo's messages, a
 `scripts/unit_test_archive.py` reads the test executables from them. The scenario pack takes every
 object in the target directory, so it runs before the unit tests join the suite there. After the
 cache is published, `just test-coverage-pack` writes the second archive: every other object
-`cargo llvm-cov report` reads, the list of test executables, and the generated inputs a test reads.
-The scenario executable stays out, because the shards run it.
+`cargo llvm-cov report` reads, stored without its debug information as the scenario archive stores
+its objects, the list of test executables, and the generated inputs a test reads. The scenario
+executable stays out, because the shards run it.
 
 The workspace's all-features build includes the JVM binding's embedded tests. Before compiling
 them, `test-coverage-binaries` prepares the Java 21 jar with its native library and the boundary

@@ -27,6 +27,23 @@ handler remains recurring debt. Source hosts retain an exact instance readiness 
 the readiness registry. Relay channels, transport selection and domain publications use the
 immutable tables and retained lifetimes described below.
 
+## Unit allowance keyed stores
+
+`crates/rate-limit/src/keyed.rs::KeyedStore` owns a configured number of blocking-mutex shards,
+each holding `ExpiryMap<KeyFingerprint, Entry>`. One `Limiter` execution unit owns its clause's
+store, with exclusive admission spanning all clauses. Fingerprints are 128 bits; no original key
+value is retained or rendered. A lease on an established key holds one shard. First installation,
+global LRU eviction, statistics and snapshots lock shards in ascending order. An established-key
+lease takes no further lock. Keys are bounded globally by `MAX KEYS` and released at `TTL` from
+last accepted use. A refused payload restores cell debt and publishes no new key or eviction.
+Each synchronous operation is bounded by the declared shards and retained entries and awaits
+nothing. These accesses implement allowance accounting itself, rather than configuration or
+ownership discovery; they are the bounded protocol described in
+[Unit Allowance Transactions](../docs/src/data-plane-concurrency.md#unit-allowance-transactions).
+The store is dropped with its unit. Observer statistics expires keys before counting occupancy.
+The Shuttle check drives actual leases; the all-selection Deloxide owner record reaches actual
+tracked shard locks, including restoration. Neither claims coverage of governor internals.
+
 ## Diagnostic acquisition history
 
 `nervix-primitives::deadlock::OrderHistory::edges` is a diagnostic-only
@@ -352,6 +369,7 @@ awaiting replicas offers its revision through the offset state it retains and re
 | `FaultInjectionState::handoff_engagement_transport_failures` | Armed by a drain scenario; a testing build's coordinator looks its domain up before each remote ownership-handoff gate engagement request and delivers the failure once, and the entry stays marked delivered for the scenario's assertion; absent from product builds | test-only handoff transport fault control |
 | `FaultInjectionState::lost_handoff_gate_engagements` | Armed by a drain scenario for one coordinator-to-node link; a testing build's coordinator looks that link up before each attempt to send it an ownership-handoff gate engagement request, loses and counts every such request, and the count stays for the scenario's assertion; absent from product builds | test-only handoff link fault control |
 | `FaultInjectionState::owner_relay_fanout_delays` | Armed by the slow busy relay scenario; a testing build's relay owner looks its domain up before every batch it fans out and waits the armed delay; absent from product builds | test-only relay delivery fault control |
+| `FaultInjectionState::owner_relay_partition_fanout_pauses` | Armed by the relay partition capacity scenario for one partition of one relay; a testing build's owner of a partition unit looks its domain, relay and partition up before every batch it fans out, claims the pause once and waits for the scenario's release outside the map guard; the entry stays for the scenario's observations until that world's injector is dropped; a whole relay's owner never reads it; absent from product builds | test-only relay partition delivery fault control |
 | `FaultInjectionState::delayed_materialized_dependency_reads` | Armed by the slow parked-wait backup scenario for one junction; a testing build's relay processor looks itself up before every read of its materialized dependencies, including each re-evaluation of a message it parked on `REQUIRED WAIT`, and waits the armed delay; it remains until that world's injector is dropped; absent from product builds | test-only materialized dependency read fault control |
 | `FaultInjectionState::materialized_snapshot_fetch_holds` | Armed by the relocated-generator bulk contention scenario for one node; a testing build's materialized snapshot fetch on that node looks the node up once per fetch, after its first chunk arrived and before it stages that chunk, and the first such fetch waits there; that node's restore checkpoint maintenance looks the node up once per sweep, after the sweep asked bulk memory for its working set, and releases a reached hold; the resumed hold remains until that world's injector is dropped; absent from product builds | test-only materialized snapshot fetch hold in `fault_injection/materialized_fetch_hold.rs` |
 | `FaultInjectionState::wasm_reset_publication_authority_losses` | Armed for one scenario domain; looked up once before a generation publication and by explicit harness observations; its bounded remaining/delivered counts remain until that world's injector is dropped; absent from product builds | test-only WASM publication fault control |
@@ -365,7 +383,7 @@ awaiting replicas offers its revision through the offset state it retains and re
 | `FaultInjectionState::lost_resource_upload_replies` | Armed for one node before an upload; a testing build's gRPC upload transport looks the node up once per upload call whose reply reports that it installed a version, after the installation completed, and records the delivery there; explicit scenario observations read that retained state. The entry remains until that world's injector is dropped; absent from product builds | test-only installed upload reply loss in `fault_injection/resource_upload_reply.rs` |
 | `FaultInjectionState::refused_resource_upload_starts` | Armed for one node before an upload; a testing build looks the node up once per upload installation that reaches its upload start, before the start is proposed, and records the delivery there; explicit scenario observations read that retained state. The entry remains until that world's injector is dropped; absent from product builds | test-only resource upload start refusal in `fault_injection/resource_upload_start.rs` |
 | `FaultInjectionState::command_reply_scripts` | Armed for one domain and exact query; testing session commands read that domain once after execution and either substitute three bounded uncertainty causes, retaining at most four execution references, or answer once with another execution's failure, retaining at most two. Scenario observations read those references; arming the domain again replaces its script, and the world's injector drop disposes the entry. Absent from ordinary builds | test-only command reply script in `fault_injection/command_reply.rs` |
-| Other `src/fault_injection.rs` maps, consensus `append_stream_counts`, the test DNS authority | test-only; the consensus probe counts each setup attempt and successful open and reads only for explicit harness observations. A failed-append fixture clones its consensus probe once when arming and once per explicit failure observation, releasing the registry guard before awaiting; submissions retain their scoped control and reach no map | test-only |
+| Other `src/fault_injection.rs` maps, consensus `append_stream_counts`, the test DNS authority | Test-only. The consensus probe counts each setup attempt and successful open for explicit harness observations. The delayed-heartbeat scenario reaches the existing `consensus_probes` map once to arm each follower and during its bounded condition poll to read each follower's atomic request count; no product heartbeat reads that map. A failed-append fixture clones its consensus probe once when arming and once per explicit failure observation, releasing the registry guard before awaiting; submissions retain their scoped control and reach no map. All such entries end with the scenario's fault injector. | test-only |
 
 A leader's transaction reconciliation takes one replicated snapshot for cleanup eligibility in
 addition to the transaction-list snapshot. `StoreInner::state` releases its read guard after the

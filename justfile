@@ -283,6 +283,7 @@ test: tests-deps build-client-jvm-tests
         nervix-model-harness
         nervix-paced-simulation
         nervix-primitives
+        nervix-rate-limit
         nervix-scenarios
         nervix-server
         nervix-wasm
@@ -303,6 +304,7 @@ test: tests-deps build-client-jvm-tests
         --package nervix-interconnect \
         --package nervix-model-harness \
         --package nervix-paced-simulation \
+        --package nervix-rate-limit \
         --package nervix-wasm
     cargo test --all-targets --features native --package nervix-primitives
     just test-capability-docs
@@ -645,6 +647,18 @@ check-package-lib package *args:
 test-package-lib package *args:
     cargo test --package {{ package }} --lib -- {{ args }}
 
+# Package-scoped local evidence, using the canonical runners and complete registered owner records.
+# Normal CI keeps the full model inventories. Deloxide/fuzz CI remain disabled by policy.
+test-rate-limit-properties:
+    python3 -m scripts.rate_limit_checks properties --target-dir {{ quote(cargo_target_dir + "/rate-limit/properties") }}
+
+# Explore only the registered engine owner through the canonical model runners.
+test-rate-limit-model mode:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/rate-limit/" + mode) }} python3 -m scripts.rate_limit_checks {{ quote(mode) }} --target-dir {{ quote(cargo_target_dir + "/rate-limit/" + mode) }}
+
+test-rate-limit-diagnostic selection: build-deadlock-report
+    NERVIX_PREPARED_TARGET_DIR={{ quote(cargo_target_dir) }} python3 -m scripts.rate_limit_checks {{ quote(selection) }} --target-dir {{ quote(cargo_target_dir + "/rate-limit/" + selection) }}
+
 # Qualify the pinned NATS driver's flush implementation through its own bounded stream tests.
 test-nats-driver checkout *args:
     CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/nats-driver") }} cargo test --manifest-path {{ quote(checkout + "/async-nats/Cargo.toml") }} --package async-nats --no-default-features --features aws-lc-rs,jetstream,server_2_10,server_2_11 --lib -- {{ args }}
@@ -843,7 +857,7 @@ test-deadlock-probes features="deloxide" *args:
 # The packages whose `shuttle_` checks `test-shuttle` explores, as the Shuttle inventory lists them,
 # and whose test builds `shuttle-clippy-targets` lints. scripts/tests/test_shuttle_checks.py holds
 # this list to the inventory.
-shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-connector", "nervix-connector-kafka", "nervix-connector-mqtt", "nervix-connector-rabbitmq", "nervix-connector-redis", "nervix-connector-sqs", "nervix-connector-syslog", "nervix-connector-websockets", "nervix-consensus", "nervix-server", "nervix-deadlock"]
+shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-connector", "nervix-connector-kafka", "nervix-connector-mqtt", "nervix-connector-rabbitmq", "nervix-connector-redis", "nervix-connector-sqs", "nervix-connector-syslog", "nervix-connector-websockets", "nervix-consensus", "nervix-server", "nervix-deadlock", "nervix-rate-limit"]
 
 # Explore every registered Shuttle check of a production owner, each in its own process: under the
 # exploration it declares, then under the uncontrolled-nondeterminism detector. The inventory in
@@ -860,7 +874,7 @@ test-shuttle-checks filter="":
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    python3 -m unittest --quiet scripts.tests.test_shuttle_checks
+    python3 -m unittest --quiet scripts.tests.test_shuttle_checks scripts.tests.test_rate_limit_checks
     evidence="${NERVIX_MODEL_EVIDENCE:-}"
     report=()
     if [[ -n "$evidence" ]]; then report=(--report "$evidence"); fi
@@ -1390,6 +1404,7 @@ test-coverage-binaries: tests-deps build-client-jvm-tests
         nervix-model-harness
         nervix-paced-simulation
         nervix-primitives
+        nervix-rate-limit
         nervix-scenarios
         nervix-server
         nervix-wasm
@@ -1420,6 +1435,7 @@ test-coverage-binaries: tests-deps build-client-jvm-tests
         --package nervix-interconnect \
         --package nervix-model-harness \
         --package nervix-paced-simulation \
+        --package nervix-rate-limit \
         --package nervix-wasm
     coverage --all-targets --features native --package nervix-primitives
     python3 -m scripts.unit_test_archive plan
@@ -1670,6 +1686,11 @@ coverage-harness-liveness-report output:
 # `--name NAME` or `--pattern GLOB`, and `--path DIR`.
 ci-artifact-download run *args:
     python3 -m scripts.ci_artifacts download --run {{ quote(run) }} {{ args }}
+
+# Exercise the CI artifacts' transfer against a local fake of their bucket: path selection, parts,
+# resumed, paced and retried requests, progress reports, and the workflow steps that use them.
+test-ci-artifacts:
+    python3 -m unittest scripts.tests.test_ci_artifacts
 
 # Judge whether a pull request's head revision holds the complete evidence a release needs: every
 # check tests/release-evidence.toml requires passed on that revision and the label of every
@@ -2568,9 +2589,11 @@ fmt-check: cargo-fmt-check fmt-check-typed-ratchet taplo-format-check dockerfmt-
 
 gherkin-fmt:
     ghokin fmt replace tests/features
+    ghokin fmt replace crates/rate-limit/tests/features
 
 gherkin-fmt-check:
     ghokin check tests/features
+    ghokin check crates/rate-limit/tests/features
 
 # Format every Plexus file in the repository.
 plexus-fmt:
@@ -2650,11 +2673,11 @@ clippy_shuttle_connector_packages_3 := [
     "nervix-connector-websockets",
 ]
 
-clippy_shuttle_runtime_packages := ["nervix-client-core", "nervix-execution", "nervix-interconnect", "nervix-wasm"]
+clippy_shuttle_runtime_packages := ["nervix-client-core", "nervix-execution", "nervix-interconnect", "nervix-wasm", "nervix-rate-limit"]
 
 # Every package `test-shuttle` explores, in two lanes: the runtime and server, and the connectors.
 # scripts/tests/test_shuttle_checks.py holds the two to an exact partition of shuttle_test_packages.
-clippy_shuttle_test_packages_1 := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-consensus", "nervix-server", "nervix-deadlock"]
+clippy_shuttle_test_packages_1 := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-consensus", "nervix-server", "nervix-deadlock", "nervix-rate-limit"]
 
 clippy_shuttle_test_packages_2 := [
     "nervix-connector",
@@ -2705,7 +2728,7 @@ clippy-lane-ordinary-foundation-2: *(clippy-target "ordinary-foundation-2" *clip
 [private]
 clippy-lane-ordinary-foundation-3: \
     *(clippy-target "ordinary-foundation-3" *clippy_foundation_packages_3 ["--all-features", "--all-targets"]) \
-    *(clippy-target "ordinary-foundation-3" *["nervix-execution", "nervix-model-harness", "nervix-wasm"] ["--all-targets"]) \
+    *(clippy-target "ordinary-foundation-3" *["nervix-execution", "nervix-model-harness", "nervix-rate-limit", "nervix-wasm"] ["--all-targets"]) \
     (clippy-target "ordinary-foundation-3" "nervix-deadlock" ["--all-targets", "--features", "report-tool"])
 
 [private]
@@ -2783,7 +2806,8 @@ clippy-lane-shuttle-server: *(clippy-target "shuttle-server" *["nervix-connector
 [private]
 turmoil-clippy-targets: \
     (clippy-target "turmoil" "nervix-primitives" ["--all-targets", "--features", "turmoil native"]) \
-    *(clippy-target "turmoil" *["nervix-execution", "nervix-interconnect"] ["--all-targets", "--features", "turmoil"])
+    *(clippy-target "turmoil" *["nervix-execution", "nervix-interconnect"] ["--all-targets", "--features", "turmoil"]) \
+    (clippy-target "turmoil" "nervix-rate-limit" ["--lib", "--features", "turmoil"])
 
 # Lint the Loom models and harness, the primitive boundary, and each library as it ships and
 # in test mode. The same lanes run in the full validation matrix.
@@ -2799,6 +2823,8 @@ clippy-lane-loom-1: \
 
 [private]
 clippy-lane-loom-2: \
+    (clippy-target "loom-2" "nervix-rate-limit" ["--lib", "--features", "loom"]) \
+    (clippy-target "loom-2" "nervix-rate-limit" ["--lib", "--profile", "test", "--features", "loom"]) \
     *(clippy-target "loom-2" *["nervix-consensus", "nervix-server"] ["--lib", "--features", "loom"]) \
     (clippy-target "loom-2" "nervix-server" ["--lib", "--profile", "test", "--features", "loom"]) \
     (clippy-target "loom-2" "nervix-consensus" ["--lib", "--profile", "test", "--features", "loom testing"])
@@ -2814,6 +2840,7 @@ deloxide-clippy-targets: (clippy-lane-deloxide "deloxide") (clippy-lane-deloxide
 [private]
 clippy-lane-deloxide selection: \
     (clippy-target selection "nervix-primitives" ["--all-targets", "--features", selection + " native"]) \
+    (clippy-target selection "nervix-rate-limit" ["--lib", "--profile", "test", "--features", selection]) \
     (clippy-target selection "nervix-deadlock" ["--all-targets", "--features", selection]) \
     (clippy-target selection "nervix-paced-simulation" ["--all-targets", "--features", selection]) \
     (clippy-target selection "nervix-server" ["--lib", "--bins", "--features", selection]) \

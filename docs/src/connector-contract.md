@@ -1139,7 +1139,7 @@ as a whole token and `>` only last; a publication subject admits neither, since 
 published to one literal subject. The ingestor declares `NO ACK` with a required `QUEUE GROUP` and
 `INSTANCES`, and `BUFFER`/`DROP` for intake, because Core NATS keeps no backlog, position or
 acknowledgement for a subscriber. Both directions carry headers by name, and the ingestor projects
-no typed metadata field. The emitter declares Core `NO ACK` and `JETSTREAM ACK` publication, codec
+no typed metadata field. The subject emitter declares Core `NO ACK` publication, codec
 payloads, no envelope clause, and optional batching without a protocol maximum: each server
 announces its `max_payload`, and the client refuses a message above it before writing it. The
 unpooled client's Nervix-owned keys are the address, `timeout_ms`, the TLS files and the optional
@@ -1160,6 +1160,36 @@ typed connection failure. The cryptography chapter records the signing owner and
 The address's userinfo and query options belong to the driver and are masked in inspection. The
 NATS-specific declaration tests, generated grammar conformance and one-/three-node public
 declaration scenarios qualify these facts together.
+
+`NATS STREAM` is JetStream's side of the same client: an ingestor names a stream and one durable
+pull consumer of it, both an operator's, each held to the server's own name rule of 1 to 255 bytes
+without whitespace, control characters, `.`, `*`, `>` or a path separator. It declares
+`ACK SEQUENTIAL` and `ACK PARALLEL`, `SUSPEND`, `BUFFER` and `DROP`, the `broker_redelivered`
+position class and the `answered` acknowledgement confirmation, headers by name, and no typed
+metadata field. Its connector looks the consumer up when an instance resumes, never creates it,
+and refuses a push consumer and one whose acknowledgement policy is not explicit. One pull request
+at a time asks for at most the host's window, and at most the consumer's `MaxRequestBatch`, and
+waits without expiry or for the consumer's `MaxRequestExpires`, so the deliveries it holds ahead of
+the host stay within one window. Each delivery is settled individually: acknowledging sends `+ACK`
+and rejecting sends `-NAK` to the delivery's own subject as a request, and each returns once the
+server answered, within the client's request timeout. Suspending or closing an instance drains its
+inbox: the unsubscription ends the consumer's deliveries to it, and every delivery the client had
+already received is returned with `-NAK`, so the consumer delivers it again at once rather than
+once its `AckWait` passes. The driver ends the subscription as soon as it has written the
+unsubscription, so a delivery still travelling then, and one an instance held when its connection
+was lost, is delivered again once that `AckWait` passes. The
+stream's unit tests drive these paths through a scripted server, and one-/three-node public
+scenarios through a JetStream server qualify delivery, redelivery, suspension, missing entities
+and failover.
+
+A `NATS STREAM` emitter names an operator-provisioned stream and one literal publication subject.
+Opening looks up the stream and reports the missing external entity if it is absent. Every record
+carries the expected-stream header; a subject the stream does not capture is rejected per record.
+`MESSAGE ID` writes `Nats-Msg-Id` from the host's once-evaluated envelope, so an uncertain retry
+keeps the same ID and JetStream can deduplicate it. The emitter bounds in-flight publishes by the
+ACK window and each PubAck by `ACK TIMEOUT`, settling confirmed records through the shared
+confirmation window before retrying unresolved records. It never creates a stream or persists
+hot-path records.
 
 `MQTT TOPIC` keeps a subscription's topic filter and a publication's topic exactly as written,
 letter case included, within MQTT's 65,535-byte string. A filter may write `+` for one level and
@@ -1382,7 +1412,7 @@ the `write_header` calls of one record become on the published message.
 | `last_wins`, exact names | `SQS QUEUE` | `PULSAR TOPIC` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | `last_wins`, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary | None | `SQS QUEUE` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included; a value's exact type decides the type it travels as |
 | `ordered_repeats`, exact names | `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC` | `KAFKA TOPIC`, `MQTT TOPIC` | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
-| `repeats_by_name`, exact names | `NATS SUBJECT` | `NATS SUBJECT` | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
+| `repeats_by_name`, exact names | `NATS SUBJECT`, `NATS STREAM` | `NATS SUBJECT`, `NATS STREAM` | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | `repeats_by_name`, lowercase names | `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT` | None | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | `sorted_by_name`, exact names | `RABBITMQ QUEUE` | `RABBITMQ QUEUE`, `RABBITMQ EXCHANGE` | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `sorted_by_name`, lowercase names | None | `HTTP REQUEST` | one value per name, the last one written for it; names in ascending byte order; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
@@ -1683,7 +1713,7 @@ entity declares, which states what its positions still mean once their connectio
 <!-- connector-matrix:position:start -->
 | Position class | Entities | Meaning |
 | --- | --- | --- |
-| `broker_redelivered` | `MQTT TOPIC`, `RABBITMQ QUEUE`, `SQS QUEUE` | The host retains the positions, suspends the source, and resumes it. Once the resume succeeds it discards the retained positions, counts them in `nervix_ingestor_transport_redeliveries_total`, and reads again: the broker redelivers everything the lost connection did not acknowledge, and the new connection can neither acknowledge nor reject a delivery of the old one. |
+| `broker_redelivered` | `MQTT TOPIC`, `NATS STREAM`, `RABBITMQ QUEUE`, `SQS QUEUE` | The host retains the positions, suspends the source, and resumes it. Once the resume succeeds it discards the retained positions, counts them in `nervix_ingestor_transport_redeliveries_total`, and reads again: the broker redelivers everything the lost connection did not acknowledge, and the new connection can neither acknowledge nor reject a delivery of the old one. |
 | `none` | `CLIENT PRODUCER`, `HTTP REQUEST`, `HTTP ENDPOINT`, `NATS SUBJECT`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, `SYSLOG LISTENER` | Nothing is pending. The host keeps no position and reads again after its retry delay. |
 | `replayable` | `KAFKA TOPIC`, `PULSAR TOPIC` | The host retains the positions, suspends the source, and reestablishes its assignment. It retries the same rejection before polling any later batch or committing a later position, so a retried rejection must not depend on a poll. The [Kafka source](#integration-specific-boundaries) therefore seeks each rejected partition it is assigned at once, and starts every other one at its earliest rejected record when its consumer group assigns it again, until a commit passes that record. |
 <!-- connector-matrix:position:end -->
@@ -1789,6 +1819,7 @@ in one of these ways:
 | `KAFKA TOPIC`, `PULSAR TOPIC` | Ends at once, while it waits for a batch's first record or between the records of an `ACK PARALLEL` batch, with every record it gathered. |
 | `MQTT TOPIC` | Ends at once, while it waits for a batch's first publish or between the publishes of an `ACK PARALLEL` batch, with every publish it gathered. A publish the connection had already read when the read stopped waiting stays in the connection's read-ahead, which hands it to the next read first. |
 | `RABBITMQ QUEUE` | Ends at once while waiting for the first delivery or between deliveries of a parallel batch, returning every gathered delivery. A transport failure found after gathering is retained and reported on the next read, after the gathered deliveries reach the host. |
+| `NATS STREAM` | Ends at once while waiting for the first delivery or between deliveries of a parallel batch, returning every gathered delivery. Its pull request stays outstanding, so a delivery that reaches the instance's inbox afterwards waits there for the next read, which sends no new pull request until that one has brought what it asked for or ended. A transport failure found after gathering is retained and reported on the next read. |
 | `NATS SUBJECT`, `REDIS PUBSUB`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `SYSLOG LISTENER` | Reads one message at a time and takes nothing until that read returns, so it ends at once while it waits. |
 | `SQS QUEUE` | Sends no further `ReceiveMessage`, but never abandons the one in flight: the service takes the messages it answers with off the queue, so the read waits for that answer, which the receive's long poll of at most one second bounds, and returns what it brought with every message an `ACK PARALLEL` batch had already gathered. A service that has not answered within 10 seconds of the cancellation, or within the receive's `timeout_ms` after its long poll when that ends sooner, ends the read with a typed read failure, and a message it was returning stays invisible until its visibility timeout. A failure found after gathering, a receive that fails or a message without a receipt handle, is retained and reported on the next read, after the gathered messages reach the host. |
 
@@ -2052,7 +2083,7 @@ it did not get:
 <!-- connector-matrix:confirmation:start -->
 | Acknowledgement confirmation | Entities | Meaning |
 | --- | --- | --- |
-| `answered` | `KAFKA TOPIC`, `PULSAR TOPIC`, `SQS QUEUE` | Once the broker answered: SQS messages are acknowledged by `DeleteMessageBatch` requests of up to ten entries, a message left alone by a `DeleteMessage` request, and acknowledging returns once the service answered every request and deleted every message. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. A Pulsar source in an `ACK` mode acknowledges a batch's positions of each topic in one command that carries a request id, and acknowledging returns once the broker's `CommandAckResponse` arrived, within the client's operation timeout. |
+| `answered` | `KAFKA TOPIC`, `PULSAR TOPIC`, `NATS STREAM`, `SQS QUEUE` | Once the broker answered: SQS messages are acknowledged by `DeleteMessageBatch` requests of up to ten entries, a message left alone by a `DeleteMessage` request, and acknowledging returns once the service answered every request and deleted every message. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. A Pulsar source in an `ACK` mode acknowledges a batch's positions of each topic in one command that carries a request id, and acknowledging returns once the broker's `CommandAckResponse` arrived, within the client's operation timeout. A NATS STREAM source acknowledges each delivery with a request to its acknowledgement subject, and acknowledging returns once the server answered it, within the client's request timeout. |
 | `none` | `CLIENT PRODUCER`, `HTTP REQUEST`, `HTTP ENDPOINT`, `NATS SUBJECT`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, `SYSLOG LISTENER` | The source acknowledges nothing on its transport. |
 | `written` | `MQTT TOPIC`, `RABBITMQ QUEUE` | Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, and MQTT answers a `PUBACK` with nothing and a QoS 2 `PUBREC` only with the `PUBREL` the client completes on its own, so nothing more can be confirmed. An MQTT source returns once the client's event loop, which its connection's driver task keeps polling, has flushed every `PUBACK` and `PUBREC` the batch asks for to the connection. An MQTT subscription becomes ready only when its declared QoS is granted; a lower `SUBACK` grant fails in every mode, including `NO ACK`. |
 <!-- connector-matrix:confirmation:end -->
@@ -2344,7 +2375,8 @@ the emitter's transient error that `DESCRIBE EMITTER` shows and as an error even
 | Kafka | `NO ACK`: records librdkafka has queued and not yet sent, for up to the client's `linger.ms` or until a batch fills. `ACK`: nothing a completed publish reported delivered, but a record a failed publish stopped waiting for stays until librdkafka gives it up | Waits inside librdkafka's flush until the producer queue is empty or the deadline passes, which sends the queued records at once whatever `linger.ms` says, in both modes, and counts the records whose delivery report has not been served when the deadline passes |
 | Pulsar | `NO ACK`: accepted messages whose broker receipts have not arrived. `ACK`: nothing a completed publish reported delivered | Retains the receipts and waits for them until the finish deadline; reports a driver failure or the count still unanswered at that deadline |
 | MQTT | `QOS 0`: publishes the client took and its event loop has not yet written and flushed to the broker connection, which a client cut off from its broker holds until it connects again. `QOS 1` and `QOS 2`: nothing | Waits until the event loop has flushed every publish the client took or the deadline passes; reports a failed flush or the count still unflushed at that deadline |
-| NATS | Core `NO ACK`: nothing after a write whose connection flushed; after a failed or timed-out write, its pending count and connection expectation until the client's buffer is settled. JetStream: nothing, because JetStream answers each record | Drains and flushes the Core NATS client by the deadline, then verifies the pending write's connection. A connection change fails finish with the uncertain record count; a driver failure retains its typed cause; an expired deadline reports the pending count. Only a flush on the expected connection answers Flushed |
+| NATS SUBJECT | Nothing after a write whose connection flushed; after a failed or timed-out write, its pending count and connection expectation until the client's buffer is settled | Drains and flushes the Core NATS client by the deadline, then verifies the pending write's connection. A connection change fails finish with the uncertain record count; a driver failure retains its typed cause; an expired deadline reports the pending count. Only a flush on the expected connection answers Flushed |
+| NATS STREAM | Nothing a completed publish reported delivered: JetStream answers each record | Nothing to send |
 | ZeroMQ | Nothing a publish reported delivered: a completed send has flushed its frame to a peer's socket, and a send that ran out of `timeout_ms` failed its record | Nothing to send |
 | RabbitMQ, Redis Pub/Sub, SQS, Sentry, OTEL, HTTP, Syslog, ClickHouse, Postgres, MySQL, MongoDB, client emitters | Nothing: a publish returns once its transport answered for or wrote each record | Nothing to send |
 | Iceberg | Rows it staged and has not committed, which only a commit publishes | Nothing to send: a stop commits the staged rows before it finishes, and teardown leaves them uncommitted, as [Shutdown And Recovery](./shutdown.md#emitters) describes |
@@ -2455,8 +2487,8 @@ about a second of `ACK TIMEOUT`. An `ACK TIMEOUT` longer than the 2147483647 mil
 holds refuses the emitter when it starts. In `MODE NO ACK` the producer taking a record into its queue
 delivers it, and the client's own delivery bound applies.
 
-The NATS JetStream emitter awaits its `PubAck`s through the window: a `PubAck` confirms a record, a
-message above the server's `max_payload` is refused for good, and any other ending of the wait
+The NATS STREAM emitter awaits its `PubAck`s through the window: a `PubAck` confirms a record, a
+message above the server's `max_payload` or outside the named stream is refused for good, and any other ending of the wait
 leaves the record unresolved with the driver's typed cause. A client that does not take a record
 within `ACK TIMEOUT`, because its connection stopped draining what it queued, ends the publish
 through the window, so the retry resends none of the records JetStream confirmed before it.

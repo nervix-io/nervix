@@ -10,9 +10,9 @@ use nervix_arbitrary::{Arbitrary, Domain, Entropy};
 use nervix_models::{
     ClickHouseTableName, ExternalNameError, IcebergNamespace, IcebergTableName,
     KafkaConsumerGroupName, KafkaTopicName, MongoDbCollectionName, MqttTopicFilter, MqttTopicName,
-    MySqlTableName, NatsPublishSubjectName, NatsQueueGroupName, NatsSubjectName, PostgresTableName,
-    PulsarSubscriptionName, PulsarTopicName, RabbitMqQueueName, RedisChannelName,
-    RedisChannelPattern, SqsQueueName,
+    MySqlTableName, NatsConsumerName, NatsPublishSubjectName, NatsQueueGroupName, NatsStreamName,
+    NatsSubjectName, PostgresTableName, PulsarSubscriptionName, PulsarTopicName, RabbitMqQueueName,
+    RedisChannelName, RedisChannelPattern, SqsQueueName,
 };
 
 /// Pieces arbitrary text is assembled from: what the rules admit, the separators and wildcards
@@ -141,6 +141,8 @@ macro_rules! for_every_external_name_type {
         $assertion!(RedisChannelPattern, $text);
         $assertion!(NatsSubjectName, $text);
         $assertion!(NatsQueueGroupName, $text);
+        $assertion!(NatsStreamName, $text);
+        $assertion!(NatsConsumerName, $text);
         $assertion!(MqttTopicFilter, $text);
         $assertion!(ClickHouseTableName, $text);
         $assertion!(PostgresTableName, $text);
@@ -202,6 +204,8 @@ fn bolero_external_names_round_trip_through_every_representation() {
                 NatsQueueGroupName,
                 arbitrary.nats_queue_group_name()
             );
+            assert_external_name_round_trips!(NatsStreamName, arbitrary.nats_stream_name());
+            assert_external_name_round_trips!(NatsConsumerName, arbitrary.nats_consumer_name());
             assert_external_name_round_trips!(MqttTopicFilter, arbitrary.mqtt_topic_filter());
         });
 }
@@ -344,6 +348,28 @@ fn a_nats_subject_places_its_wildcards_as_whole_tokens() {
         refusal!(NatsQueueGroupName, "order workers"),
         ExternalNameError::InvalidChar { ch: ' ' }
     );
+}
+
+#[test]
+fn a_jetstream_name_holds_no_subject_separator_wildcard_or_path_separator() {
+    assert!(NatsStreamName::parse("Orders-EU").is_ok());
+    assert!(NatsConsumerName::parse("nervix_readers").is_ok());
+    for (text, ch) in [
+        ("orders.eu", '.'),
+        ("orders*", '*'),
+        ("orders>", '>'),
+        ("orders/eu", '/'),
+        ("orders\\eu", '\\'),
+    ] {
+        assert_eq!(
+            refusal!(NatsStreamName, text),
+            ExternalNameError::InvalidChar { ch }
+        );
+        assert_eq!(
+            refusal!(NatsConsumerName, text),
+            ExternalNameError::InvalidChar { ch }
+        );
+    }
 }
 
 #[test]

@@ -1,5 +1,5 @@
 Feature: Materialized state inspection respects schema sensitivity
-  Scenario Outline: Every node masks sensitive materialized fields and branch keys
+  Scenario Outline: Every node masks sensitive materialized fields and branch keys in every partition
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -19,7 +19,7 @@ Feature: Materialized state inspection respects schema sensitivity
       );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING SENSITIVE, zone STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS <partitions>;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge materialized-sensitive-{{test_id}}.example.com;
@@ -63,6 +63,8 @@ Feature: Materialized state inspection respects schema sensitivity
       """
 
     Examples:
-      | cluster_size | redacted |
-      | 1            | <masked> |
-      | 3            | <masked> |
+      | cluster_size | partitions | redacted |
+      | 1            | 1          | <masked> |
+      | 3            | 1          | <masked> |
+      | 1            | 4          | <masked> |
+      | 3            | 4          | <masked> |
