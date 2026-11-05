@@ -619,6 +619,7 @@ mod tests {
         .with_resolved_branching(Some(ResolvedBranching::branched(
             branch_name,
             branch_schema,
+            nervix_models::BranchPartitions::ONE,
         )));
         [branch, junction]
             .into_iter()

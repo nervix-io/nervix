@@ -71,6 +71,12 @@ jobs:
           toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
+      - name: Setup Java for JNI properties
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
       - name: Install tools
         uses: taiki-e/install-action@v2
         with:
@@ -214,6 +220,12 @@ jobs:
         with:
           toolchain: "1.99"
           targets: wasm32-unknown-unknown
+
+      - name: Setup Java for JNI properties
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
 
       - name: Setup pinned sanitizer nightly
         uses: dtolnay/rust-toolchain@nightly

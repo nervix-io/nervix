@@ -1542,6 +1542,7 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
         kind: RelayPayloadKind::Routed,
         domain: DomainName::parse("test").expect("test domain should be valid"),
         relay: RelayName::parse("relay").expect("test relay should be valid"),
+        unit: nervix_models::Unit::Single,
         key: None,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
@@ -1677,6 +1678,7 @@ async fn the_next_relay_on_a_channel_is_granted_before_the_outcome_of_the_one_be
         kind: RelayPayloadKind::Routed,
         domain: DomainName::parse("test").expect("test domain should be valid"),
         relay: RelayName::parse("relay").expect("test relay should be valid"),
+        unit: nervix_models::Unit::Single,
         key: None,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
@@ -1785,6 +1787,7 @@ async fn a_relay_grant_that_skips_its_channels_next_position_is_refused_out_of_o
         kind: RelayPayloadKind::Routed,
         domain: DomainName::parse("test").expect("test domain should be valid"),
         relay: RelayName::parse("relay").expect("test relay should be valid"),
+        unit: nervix_models::Unit::Single,
         key: None,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
@@ -1851,6 +1854,7 @@ async fn a_grant_refused_for_relay_memory_is_granted_once_room_returns() {
         kind: RelayPayloadKind::Routed,
         domain: DomainName::parse("test").expect("test domain should be valid"),
         relay: RelayName::parse("relay").expect("test relay should be valid"),
+        unit: nervix_models::Unit::Single,
         key: None,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
@@ -1990,6 +1994,7 @@ async fn terminal_relay_outcome_waits_for_application_queue_capacity() {
                 kind: RelayPayloadKind::Routed,
                 domain: DomainName::parse("test").expect("test domain should be valid"),
                 relay: RelayName::parse("relay").expect("test relay should be valid"),
+                unit: nervix_models::Unit::Single,
                 key: None,
                 batch_ipc: Executor::default()
                     .try_charge_owned(MemoryClass::Relay, vec![1])
@@ -2084,6 +2089,7 @@ async fn confirmed_cancellation_fences_attempt_before_grant_arrives() {
                 kind: RelayPayloadKind::Routed,
                 domain: DomainName::parse("test").expect("test domain should be valid"),
                 relay: RelayName::parse("relay").expect("test relay should be valid"),
+                unit: nervix_models::Unit::Single,
                 key: None,
                 batch_ipc: Executor::default()
                     .try_charge_owned(MemoryClass::Relay, vec![1])
@@ -2130,6 +2136,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
         kind: RelayPayloadKind::Routed,
         domain: DomainName::parse("test").expect("test domain should be valid"),
         relay: RelayName::parse("relay").expect("test relay should be valid"),
+        unit: nervix_models::Unit::Single,
         key: None,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
@@ -2205,6 +2212,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
         kind: RelayPayloadKind::Routed,
         domain: DomainName::parse("test").expect("test domain should be valid"),
         relay: RelayName::parse("relay").expect("test relay should be valid"),
+        unit: nervix_models::Unit::Single,
         key: None,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
@@ -2244,6 +2252,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
         kind: RelayPayloadKind::Routed,
         domain: DomainName::parse("test").expect("test domain should be valid"),
         relay: RelayName::parse("relay").expect("test relay should be valid"),
+        unit: nervix_models::Unit::Single,
         key: None,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
@@ -2291,6 +2300,7 @@ async fn same_epoch_retry_of_admitted_relay_does_not_enqueue_twice() {
         kind: RelayPayloadKind::Routed,
         domain: DomainName::parse("test").expect("test domain should be valid"),
         relay: RelayName::parse("relay").expect("test relay should be valid"),
+        unit: nervix_models::Unit::Single,
         key: None,
         batch_ipc: Executor::default()
             .try_charge_owned(MemoryClass::Relay, vec![1])
@@ -2387,6 +2397,7 @@ async fn an_outcome_addressed_to_an_earlier_registrar_run_leaves_the_current_adm
                 kind: RelayPayloadKind::Routed,
                 domain: DomainName::parse("test").expect("test domain should be valid"),
                 relay: RelayName::parse("relay").expect("test relay should be valid"),
+                unit: nervix_models::Unit::Single,
                 key: None,
                 batch_ipc: Executor::default()
                     .try_charge_owned(MemoryClass::Relay, vec![1])
@@ -2480,6 +2491,7 @@ async fn receiver_process_restart_makes_unresolved_relay_indeterminate() {
                 kind: RelayPayloadKind::Routed,
                 domain: DomainName::parse("test").expect("test domain should be valid"),
                 relay: RelayName::parse("relay").expect("test relay should be valid"),
+                unit: nervix_models::Unit::Single,
                 key: None,
                 batch_ipc: Executor::default()
                     .try_charge_owned(MemoryClass::Relay, vec![1])
@@ -2559,6 +2571,7 @@ async fn reserved_relay_work_reports_progress_before_runtime_admission() {
                 kind: RelayPayloadKind::Routed,
                 domain: DomainName::parse("test").expect("test domain should be valid"),
                 relay: RelayName::parse("relay").expect("test relay should be valid"),
+                unit: nervix_models::Unit::Single,
                 key: None,
                 batch_ipc: Executor::default()
                     .try_charge_owned(MemoryClass::Relay, vec![1])

@@ -307,15 +307,18 @@ holds the archived union of both. The registry's `NERVIX MODEL NJS` archive sign
 current Model layout, including that union, the separate JSON and CBOR wire type enums, the AVRO
 representation types, explicit `BASE64` codec encoding, a Pulsar subscription's required type, an
 owned Pulsar subscription's required start position, a Kafka consumer group's required start
-position, the required branch partition count, Sentry platform, an ingestor's `TIMESTAMP AT
+position, the required 16-bit branch partition count, Sentry platform, an ingestor's `TIMESTAMP AT
 metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the receive count an SQS
 QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an MQTT TOPIC
 ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter writes beside
 its publishing mode, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a
 `PATTERN`, and that header state. Consensus's `raft_jetstream_` keyspaces and current state metadata
-encoding identify its stored shapes, the statements a transaction keeps included. An unrecognized
-signature, namespace or encoding fails with the owning storage error and requires the stored data to
-be recreated.
+encoding identify its stored shapes, including the partition count of every resolved branch
+declaration in the committed schedule and the statements a transaction keeps. The runtime state
+store's `unit-labelled-metric-checkpoint-segments` format identifies the checkpoints it keeps,
+including the unit every branch-aggregated metric series carries. An unrecognized signature,
+namespace or encoding fails with the owning storage error and requires the stored data to be
+recreated.
 
 ## Absence And Distinct States
 
@@ -1275,3 +1278,12 @@ String properties retain their exact declared type and cross the AMQP short-stri
 message is sent. Targeted emitter alterations represent setting and dropping persistence,
 timestamps and the whole property set as separate semantic operations, and preserve the envelope
 fields each operation does not address.
+
+The JVM binding's package-private JNI edge encodes owned native allocations in Java `long` values
+and an omitted native handle as zero only at that boundary. Public Java classes expose optional
+objects as `null` and typed enum variants and exceptions. A handle's private State serializes its
+short borrows and unique release. Its open/closing/closed state ends admission on close and
+defers native release until an admitted short call returns; it refuses nested access so a mutable
+borrow cannot overlap itself. Blocking calls own independent leases. A `Fields` lease is a
+complete validated description snapshot, while a mutable builder has no shared lease. Direct
+read-only buffers retain the native allocation through their root rather than a raw unowned address.

@@ -1177,12 +1177,15 @@ async fn branched_root_without_children_acks_success() {
     install_unpaced_test_domain(&runtime, &root_domain);
     let root_relay = named("tenant_orders");
     let root_services = test_relay_boundary_services();
-    let owner_task = runtime.spawn_relay_owner_task(
-        &root_domain,
-        &root_relay,
-        root_services.clone(),
-        RelayRetention::default(),
-    );
+    let owner_task = runtime
+        .spawn_relay_owner_task(
+            &root_domain,
+            &root_relay,
+            Unit::Single,
+            root_services.clone(),
+            RelayRetention::default(),
+        )
+        .expect("a whole relay schedules its single unit");
     let root_key = Some(concrete_branch_key([(
         named("tenant"),
         RuntimeValue::String("acme".to_string()),
@@ -1279,15 +1282,18 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
         0,
         Vec::new(),
         None,
-        Arc::new(BranchPresence::new()),
+        RelayBranchPresences::single(Arc::new(BranchPresence::new())),
         nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
     ));
-    let owner_task = runtime.spawn_relay_owner_task(
-        &domain,
-        &root_relay,
-        services.clone(),
-        RelayRetention::default(),
-    );
+    let owner_task = runtime
+        .spawn_relay_owner_task(
+            &domain,
+            &root_relay,
+            Unit::Single,
+            services.clone(),
+            RelayRetention::default(),
+        )
+        .expect("a whole relay schedules its single unit");
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
     let branched_runtime = BranchExecutionRuntime::new(
         runtime,
@@ -1372,15 +1378,18 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
             0,
             Vec::new(),
             None,
-            Arc::new(BranchPresence::new()),
+            RelayBranchPresences::single(Arc::new(BranchPresence::new())),
             nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
         ));
-        let owner_task = runtime.spawn_relay_owner_task(
-            &domain,
-            &root_relay,
-            services.clone(),
-            RelayRetention::default(),
-        );
+        let owner_task = runtime
+            .spawn_relay_owner_task(
+                &domain,
+                &root_relay,
+                Unit::Single,
+                services.clone(),
+                RelayRetention::default(),
+            )
+            .expect("a whole relay schedules its single unit");
         let schema = test_schema(&[
             ("tenant", ParseAsType::String),
             ("user_id", ParseAsType::U32),

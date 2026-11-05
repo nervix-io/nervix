@@ -1352,6 +1352,8 @@ impl Runtime {
                       is an ownership refusal, not an operation failure"
         )
     )]
+    /// Hands `batch` to the owner of the unit of `relay` its key lands in: this node's owner buffer
+    /// of that unit when this node owns it, and otherwise a delivery to the unit's owner.
     pub(in crate::runtime) async fn ingest_stream_boundary_message(
         &self,
         domain: &DomainName,
@@ -1359,10 +1361,20 @@ impl Runtime {
         services: &RelayBoundaryServices,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
-        if !self.owns_relay(services) {
-            return services.dispatch_to_owner(domain, relay, batch).await;
+        let unit = match services.unit_of(&batch.key) {
+            Ok(unit) => unit,
+            Err(refusal) => {
+                let reason = format!("{refusal:#}");
+                for ack in batch.acks.iter() {
+                    ack.no_ack(reason.clone());
+                }
+                return Err(Box::new(batch.clone()));
+            }
+        };
+        if !self.owns_relay_unit(services, unit) {
+            return services.dispatch_to_owner(domain, relay, batch, unit).await;
         }
-        services.enqueue_owner_batch(batch).await
+        services.enqueue_owner_batch(batch, unit).await
     }
 
     /// Executes the collected ingest group, then builds one Arrow batch per (relay,

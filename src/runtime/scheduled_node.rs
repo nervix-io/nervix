@@ -108,7 +108,9 @@ impl PlacedNodeState {
 pub(super) struct ScheduledNodePlacement {
     pub(super) tasks: PlacementTasks,
     pub(super) kafka_offset_state: Option<KafkaOffsetStateOriginator>,
-    pub(super) materialized_state: Option<MaterializedRelayStateOriginator>,
+    /// The originator of the materialized state of each unit of a materialized relay this node
+    /// owns, handed to that unit's state task.
+    pub(super) materialized_states: BTreeMap<Unit, MaterializedRelayStateOriginator>,
 }
 
 /// The background tasks a scheduled node's assignment runs on one cluster node.

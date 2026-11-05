@@ -99,7 +99,7 @@ const EXECUTION_FAMILIES: [ModelVariant; 13] = [
 
 /// Every aspect of a Model change, in declaration order. The vocabulary declares no iterator over
 /// the aspects, so the tests below read every archived aspect back to keep this list complete.
-const MODEL_CHANGE_ASPECTS: [ModelChangeAspect; 76] = [
+const MODEL_CHANGE_ASPECTS: [ModelChangeAspect; 77] = [
     ModelChangeAspect::RelayCapacity,
     ModelChangeAspect::RelaySchema,
     ModelChangeAspect::RelayBranching,
@@ -176,6 +176,7 @@ const MODEL_CHANGE_ASPECTS: [ModelChangeAspect; 76] = [
     ModelChangeAspect::EntityReplaced,
     ModelChangeAspect::EntityCreated,
     ModelChangeAspect::EntityDropped,
+    ModelChangeAspect::BranchPartitions,
 ];
 
 /// Every runtime state a Model change can make meaningless, in declaration order.
@@ -547,11 +548,13 @@ impl Arbitrary<'_> {
         operations: TransactionOperationRange,
     ) -> OwnershipMoveImpact {
         let node = ImpactNodeCoverage::all_executions(self.execution_node_ref());
+        let unit = self.unit();
         let source = self.cluster_node();
         let destination = self.cluster_node();
         let attribution = self.impact_attribution(operations);
         OwnershipMoveImpact {
             node,
+            unit,
             source,
             destination,
             attribution,
@@ -2252,11 +2255,9 @@ mod tests {
             for (identity, node) in &schedule.nodes {
                 assert_eq!(identity, &node.identity());
                 assert!(EXECUTION_KINDS.contains(&node.kind()), "{identity:?}");
-                assert!(
-                    node.single_unit()
-                        .assigned_nodes
-                        .is_sorted_by(|left, right| left < right)
-                );
+                for unit in node.units.values() {
+                    assert!(unit.assigned_nodes.is_sorted_by(|left, right| left < right));
+                }
                 if let Some(primary) = node.primary_node() {
                     assert!(node.is_assigned_to(primary), "{identity:?}");
                 }

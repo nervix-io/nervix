@@ -48,8 +48,8 @@ apply anything. The revision holds:
 Each scheduled node owns a map of `Unit::Single`, `Unit::Partition(p)`, or `Unit::Instance(i)`
 placements. The unit carries its primary, assigned nodes, ownership transition, and WASM guest
 generations. The revision and planned resource assignments preserve those unit keys, and schedule
-reassignments name the node and unit together. Current graphs emit one `Single` unit for each node;
-the branch Model records one direct partition while the language has no partition syntax.
+reassignments name the node and unit together. A relay branched by a branch of several partitions
+emits one `Partition` unit per partition, and every other node emits one `Single` unit.
 
 The source digest identifies which schedule produced the installed revision. A planned change
 also carries its predecessor digest, so an incremental application is attempted only when the
@@ -282,6 +282,9 @@ The swap sequence fences delivery before stopping an owner, prepares new local p
 programs, replaces relay owner and remote-consumer edges, and publishes the routing snapshot
 before waking materialized-state waiters. An owner that still executes locally across a placement
 change keeps its task; a moved owner rebinds only its affected runtime and state placement. A
+partition a node keeps owning keeps its owner task, while its relay-state task restarts around the
+rebinding with the originator the new assignment issued, as
+[Materialized relay entries](data-plane-concurrency.md#materialized-relay-entries) describes. A
 reassignment rebinds the replicated state of every node it names, so a Kafka ingestor kept this way
 takes the originator its domain offsets' new binding issued: a change that only replaces a replica
 of those offsets never refuses the ingestor's commits. An ingestor instance the schedule stopped

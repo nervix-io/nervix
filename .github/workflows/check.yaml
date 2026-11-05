@@ -680,6 +680,12 @@ jobs:
             sudo apt-get install --yes --no-install-recommends libpython3.12t64
           fi
 
+      - name: Setup Java for embedded JVM tests
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
       # The tests sync their storage below /tmp and the checkout. A single-use runner needs no crash
       # consistency, so those volumes drop their write barriers, as the build job's kache start step
       # drops them for its store.
@@ -921,6 +927,12 @@ jobs:
       # the scenario suite there.
       - name: Pack the scenario suite
         run: just test-scenarios-coverage-pack "${RUNNER_TEMP}/scenario-suite/scenario-suite.tar.zst"
+
+      - name: Setup Java for embedded JVM tests
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
 
       - name: Build the unit tests
         run: just test-coverage-binaries
@@ -1517,7 +1529,7 @@ jobs:
             target/coverage-full/summary.md
           if-no-files-found: warn
 
-  # The cross-language client probes: C, C++, Java and Ruby over the shared Rust binding's C ABI,
+  # The cross-language client probes: C, C++ and Ruby through the C ABI, Java through JNI,
   # CPython over its Python package, and independent Go and TypeScript implementations on Node.js and
   # Bun. They need toolchains the suite job does not install and run a feature of their own, so they
   # are a job of their own beside the suite rather than minutes added to its critical path. They run
@@ -1587,12 +1599,12 @@ jobs:
           sudo dpkg -i /tmp/tinygo.deb
           tinygo version
 
-      # The Foreign Function and Memory API the Java probe uses is final from Java 22.
+      # The JNI library is compiled and exercised at its Java 21 floor.
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "25"
+          java-version: "21"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -1671,6 +1683,9 @@ jobs:
 
       - name: Publish kache report after the build
         run: python3 scripts/publish_kache_report.py --phase build "${RUNNER_TEMP}/kache-build-report"
+
+      - name: JVM binding boundary and embedded properties
+        run: just test-client-jvm
 
       - name: Client conformance
         run: just test-client-conformance-run
