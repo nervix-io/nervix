@@ -28,6 +28,41 @@ Feature: Web console Plexus REPL
       | 1            |
       | 3            |
 
+  @console_foreign_execution
+  Scenario Outline: Web console refuses a command outcome that names another execution and recovers its own
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".prompt-row" contains "{{domain}}"
+    Given the next successful reply to console command "CREATE SCHEMA answered_once ( value I64 );" names another execution
+    When selector ".prompt-row input" is filled with "CREATE SCHEMA answered_once ( value I64 );"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then the console repeated the command under its own execution reference on a new connection
+    And selector ".terminal" contains "protocol violation: the reply to command execution '{{own_execution}}' names execution '{{foreign_execution}}'"
+    And selector ".terminal" contains "quiesce level: DYNAMIC; planned relocations: 0" exactly 1 times
+    And selector ".terminal" does not contain "another execution's failure"
+
+    Given the next successful reply to console command "CREATE RESOURCE answered_bundle;" names another execution
+    When selector ".create-menu-button" is pressed with "Enter"
+    And selector ".create-menu [data-create-kind='resource']" is pressed with "Enter"
+    And selector ".create-name" is filled with "answered_bundle"
+    Then selector ".create-preview" contains "CREATE RESOURCE answered_bundle;"
+    When selector ".create-submit" is pressed with "Enter"
+    Then the console repeated the command under its own execution reference on a new connection
+    And selector ".create-status" contains "Completed"
+    And selector ".terminal" contains "created resource 'answered_bundle'" exactly 1 times
+    And selector ".terminal" does not contain "another execution's failure"
+    And selector ".resource-dialog" contains "answered_bundle"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @connector_completion
   Scenario Outline: Web console completes connector expressions from their declared scope
     Given a <cluster_size> node nervix cluster is started

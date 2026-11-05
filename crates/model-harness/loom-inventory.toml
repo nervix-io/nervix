@@ -14,6 +14,20 @@
 # changing the owner's ordering means revisiting its qualification.
 
 [[invariant]]
+claim = "Under the unit's exclusive transaction scope, refund restores the exact prior GCRA horizon while an observer may read; this is one-location arithmetic, with no cross-location publication claim."
+id = "rate-limit.direct.exact-refund"
+package = "nervix-rate-limit"
+test = "loom_tests::loom_a_refunded_charge_restores_the_exact_prior_horizon"
+
+[[qualification]]
+failure = "refund changed the pre-charge horizon"
+id = "rate-limit.direct.refund-clears-debt"
+invariant = "rate-limit.direct.exact-refund"
+original = "self.0.store(before, Ordering::Relaxed);"
+path = "crates/rate-limit/src/cell.rs"
+weakened = "let _ = before; self.0.store(0, Ordering::Relaxed);"
+
+[[invariant]]
 claim = "A state-assignment drain observes every write completed by an operation admitted under the superseded assignment before returning; ArcSwap internals remain opaque."
 id = "server.state-assignment.drained-publication"
 package = "nervix-server"
