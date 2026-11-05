@@ -500,9 +500,9 @@ fn avro_long(value: i64) -> Vec<u8> {
 mod tests {
     use apache_avro::{Schema as AvroSchema, from_avro_datum, types::Value as AvroValue};
     use nervix_models::{
-        AvroType, ByteSizeUnit, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
-        CodecWireFormat, CreateCodec, CreateSchema, CreateWireSchema, JsonType, ParseAsType,
-        ResolvedCodecWireFormat, SchemaField, WireSchemaField,
+        AvroType, ByteSizeUnit, CborType, CodecJaqFormat, CodecJaqTransformations,
+        CodecProtobufConfig, CodecWireFormat, CreateCodec, CreateSchema, CreateWireSchema,
+        JsonType, ParseAsType, ResolvedCodecWireFormat, SchemaField, WireSchemaField,
     };
     use nervix_primitives::sync::Arc;
     use prost::Message as _;
@@ -568,19 +568,19 @@ mod tests {
             .expect("rows should concatenate")
     }
 
-    fn json_wire() -> CreateWireSchema<JsonType> {
+    fn event_wire<T>(seq: T, note: T) -> CreateWireSchema<T> {
         CreateWireSchema {
             name: named("event_wire"),
             strictness: Default::default(),
             fields: vec![
                 WireSchemaField {
                     name: named("seq"),
-                    ty: JsonType::Integer,
+                    ty: seq,
                     optional: false,
                 },
                 WireSchemaField {
                     name: named("note"),
-                    ty: JsonType::String,
+                    ty: note,
                     optional: false,
                 },
             ],
@@ -705,7 +705,7 @@ mod tests {
                 wire_schema: named("event_wire"),
             },
         );
-        let wire = json_wire();
+        let wire = event_wire(JsonType::Integer, JsonType::String);
         let codec = compile(&codec, ResolvedCodecWireFormat::Json(&wire), None);
 
         let payload = container(&codec).expect("the container should encode");
@@ -724,7 +724,7 @@ mod tests {
                 wire_schema: named("event_wire"),
             },
         );
-        let wire = json_wire();
+        let wire = event_wire(CborType::Integer, CborType::String);
         let codec = compile(&codec, ResolvedCodecWireFormat::Cbor(&wire), None);
 
         let payload = container(&codec).expect("the container should encode");
@@ -919,7 +919,7 @@ mod tests {
                 wire_schema: named("event_wire"),
             },
         );
-        let wire = json_wire();
+        let wire = event_wire(JsonType::Integer, JsonType::String);
         let codec = compile(&codec, ResolvedCodecWireFormat::Json(&wire), None);
         let batch = events();
         let encoder = codec

@@ -119,7 +119,8 @@ budget, so the rest of it stays with command and replication traffic and with so
 while they wait; see
 [Storage Working Sets](./consensus-storage-and-replication.md#storage-working-sets).
 The credentials budget holds the 19 MiB Argon2id works in for one password, so a node computes one
-hash at a time and a burst of login attempts waits there without touching any other class. A stored
+hash at a time and a burst of login attempts waits there without touching any other class. An
+attempt for a name that names no user costs one such hash too. A stored
 hash whose parameters need more memory than that never verifies.
 
 These budgets cover transient work: data in flight between nodes and the working memory of the

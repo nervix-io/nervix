@@ -12,11 +12,11 @@
     nervix::layer(decisions, reason = "owns the decisions boundary declared above")
 )]
 
-use ahash::{HashSet, HashSetExt};
+use ahash::{HashMap, HashMapExt};
 use error_stack::Report;
 use nervix_jaq::CompiledJaqProgram;
 use nervix_models::{
-    AvroType, CodecEncoding, CodecEncodingRule, CodecJaqTransformations, CodecName,
+    AvroType, CborType, CodecEncoding, CodecEncodingRule, CodecJaqTransformations, CodecName,
     CodecWireFormat, CreateAvroWireSchema, CreateCborWireSchema, CreateCodec, CreateJsonWireSchema,
     CreateLookup, CreateRelay, CreateSchema, CreateWireSchema, DomainName, FieldName,
     IngestorInput, JsonType, LookupName, Model, ModelIndex, ModelKind, ModelName, ParseAsType,
@@ -247,7 +247,7 @@ pub(in crate::registry) fn ensure_codec_schema_compatibility(
     schema: &CreateSchema,
     encoding_rules: &[CodecEncodingRule],
 ) -> Result<(), Report<RegistryError>> {
-    let rfc3339_fields = if let ResolvedCodecWireFormat::Syslog = wire_format {
+    let field_encodings = if let ResolvedCodecWireFormat::Syslog = wire_format {
         if !encoding_rules.is_empty() {
             return Err(Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
@@ -255,7 +255,7 @@ pub(in crate::registry) fn ensure_codec_schema_compatibility(
                 reason: "SYSLOG codecs do not support ENCODE field rules".to_string(),
             }));
         }
-        HashSet::new()
+        HashMap::new()
     } else {
         ensure_supported_codec_encoding_rules(domain, identifier, schema, encoding_rules)?
     };
@@ -276,7 +276,7 @@ pub(in crate::registry) fn ensure_codec_schema_compatibility(
                 .collect::<Vec<_>>(),
             schema,
             "json",
-            &rfc3339_fields,
+            &field_encodings,
         ),
         ResolvedCodecWireFormat::Cbor(cbor) => ensure_wire_field_set_matches(
             domain,
@@ -288,12 +288,12 @@ pub(in crate::registry) fn ensure_codec_schema_compatibility(
                     name: field.name.as_str(),
                     optional: field.optional,
                     wire_type: field.ty.as_ref().to_string(),
-                    compatibility: WireTypeCompatibility::Json(field.ty),
+                    compatibility: WireTypeCompatibility::Cbor(field.ty),
                 })
                 .collect::<Vec<_>>(),
             schema,
             "cbor",
-            &rfc3339_fields,
+            &field_encodings,
         ),
         ResolvedCodecWireFormat::Avro(avro) => ensure_wire_field_set_matches(
             domain,
@@ -310,7 +310,7 @@ pub(in crate::registry) fn ensure_codec_schema_compatibility(
                 .collect::<Vec<_>>(),
             schema,
             "avro",
-            &rfc3339_fields,
+            &field_encodings,
         ),
         ResolvedCodecWireFormat::JaqNative {
             transformations, ..
@@ -413,17 +413,9 @@ fn ensure_supported_codec_encoding_rules(
     identifier: &ModelName,
     schema: &CreateSchema,
     encoding_rules: &[CodecEncodingRule],
-) -> Result<HashSet<FieldName>, Report<RegistryError>> {
-    let mut rfc3339_fields = HashSet::new();
+) -> Result<HashMap<FieldName, CodecEncoding>, Report<RegistryError>> {
+    let mut field_encodings = HashMap::new();
     for rule in encoding_rules {
-        if rule.encoding != CodecEncoding::Rfc3339 {
-            return Err(Report::new(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: format!("unsupported codec encoding rule {rule:?}"),
-            }));
-        }
-
         let Some(schema_field) = schema
             .fields
             .iter()
@@ -439,19 +431,27 @@ fn ensure_supported_codec_encoding_rules(
             }));
         };
 
-        if schema_field.ty != ParseAsType::Datetime {
+        let expected = match rule.encoding {
+            CodecEncoding::Rfc3339 => ParseAsType::Datetime,
+            CodecEncoding::Base64 => ParseAsType::Bytes,
+        };
+        if schema_field.ty != expected {
             return Err(Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
                 reason: format!(
-                    "codec encoding rule field '{}' must be DATETIME, found {:?}",
+                    "codec encoding rule field '{}' must be {}, found {:?}",
                     rule.field.as_str(),
+                    expected,
                     schema_field.ty
                 ),
             }));
         }
 
-        if !rfc3339_fields.insert(rule.field.clone()) {
+        if field_encodings
+            .insert(rule.field.clone(), rule.encoding)
+            .is_some()
+        {
             return Err(Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
@@ -462,7 +462,7 @@ fn ensure_supported_codec_encoding_rules(
             }));
         }
     }
-    Ok(rfc3339_fields)
+    Ok(field_encodings)
 }
 
 struct WireFieldCompatibility<'a> {
@@ -472,9 +472,10 @@ struct WireFieldCompatibility<'a> {
     compatibility: WireTypeCompatibility,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WireTypeCompatibility {
     Json(JsonType),
+    Cbor(CborType),
     Avro(AvroType),
 }
 
@@ -484,7 +485,7 @@ fn ensure_wire_field_set_matches(
     wire_fields: &[WireFieldCompatibility<'_>],
     schema: &CreateSchema,
     wire_kind: &str,
-    rfc3339_fields: &HashSet<FieldName>,
+    field_encodings: &HashMap<FieldName, CodecEncoding>,
 ) -> Result<(), Report<RegistryError>> {
     for schema_field in &schema.fields {
         let Some(wire_field) = wire_fields
@@ -503,7 +504,7 @@ fn ensure_wire_field_set_matches(
 
         if !wire_field.compatibility.supports(
             &schema_field.ty,
-            rfc3339_fields.contains(&schema_field.name),
+            field_encodings.get(&schema_field.name).copied(),
         ) {
             return Err(Report::new(RegistryError::IncompatibleSchema {
                 domain: domain.as_str().to_string(),
@@ -545,10 +546,11 @@ fn ensure_wire_field_set_matches(
 }
 
 impl WireTypeCompatibility {
-    fn supports(self, ty: &ParseAsType, encodes_datetime_as_rfc3339: bool) -> bool {
+    fn supports(self, ty: &ParseAsType, encoding: Option<CodecEncoding>) -> bool {
         match self {
-            Self::Json(wire) => json_type_matches_parse_as(wire, ty, encodes_datetime_as_rfc3339),
-            Self::Avro(wire) => avro_type_matches_parse_as(wire, ty, encodes_datetime_as_rfc3339),
+            Self::Json(wire) => json_type_matches_parse_as(wire, ty, encoding),
+            Self::Cbor(wire) => cbor_type_matches_parse_as(wire, ty, encoding),
+            Self::Avro(wire) => avro_type_matches_parse_as(wire, ty, encoding),
         }
     }
 }
@@ -556,39 +558,63 @@ impl WireTypeCompatibility {
 fn json_type_matches_parse_as(
     wire: JsonType,
     ty: &ParseAsType,
-    encodes_datetime_as_rfc3339: bool,
+    encoding: Option<CodecEncoding>,
 ) -> bool {
     match wire {
-        JsonType::String => {
-            *ty == ParseAsType::String
-                || encodes_datetime_as_rfc3339 && *ty == ParseAsType::Datetime
-        }
-        JsonType::Bytes => *ty == ParseAsType::Bytes,
+        JsonType::String => text_wire_type_matches(ty, encoding),
         JsonType::Number => *ty == ParseAsType::F32 || *ty == ParseAsType::F64,
         JsonType::Integer => parse_as_is_integer(ty),
         JsonType::Boolean => *ty == ParseAsType::Bool,
         JsonType::Array => parse_as_is_list(ty),
+    }
+}
+
+fn text_wire_type_matches(ty: &ParseAsType, encoding: Option<CodecEncoding>) -> bool {
+    matches!(
+        (ty, encoding),
+        (ParseAsType::String, None)
+            | (ParseAsType::Datetime, Some(CodecEncoding::Rfc3339))
+            | (ParseAsType::Bytes, Some(CodecEncoding::Base64))
+    )
+}
+
+fn cbor_type_matches_parse_as(
+    wire: CborType,
+    ty: &ParseAsType,
+    encoding: Option<CodecEncoding>,
+) -> bool {
+    let encodes_datetime_as_rfc3339 = encoding == Some(CodecEncoding::Rfc3339);
+    match wire {
+        CborType::String => {
+            *ty == ParseAsType::String
+                || encodes_datetime_as_rfc3339 && *ty == ParseAsType::Datetime
+        }
+        CborType::Bytes => *ty == ParseAsType::Bytes && encoding.is_none(),
+        CborType::Number => *ty == ParseAsType::F32 || *ty == ParseAsType::F64,
+        CborType::Integer => parse_as_is_integer(ty),
+        CborType::Boolean => *ty == ParseAsType::Bool,
+        CborType::Array => parse_as_is_list(ty),
         // An exact wire type names the one internal type it binds, so a DATETIME wire field needs
         // no text encoding rule: its RFC 3339 text is the wire type itself.
-        JsonType::U8 => *ty == ParseAsType::U8,
-        JsonType::I8 => *ty == ParseAsType::I8,
-        JsonType::U16 => *ty == ParseAsType::U16,
-        JsonType::I16 => *ty == ParseAsType::I16,
-        JsonType::U32 => *ty == ParseAsType::U32,
-        JsonType::I32 => *ty == ParseAsType::I32,
-        JsonType::U64 => *ty == ParseAsType::U64,
-        JsonType::I64 => *ty == ParseAsType::I64,
-        JsonType::F32 => *ty == ParseAsType::F32,
-        JsonType::F64 => *ty == ParseAsType::F64,
-        JsonType::Datetime => *ty == ParseAsType::Datetime,
-        JsonType::Object | JsonType::Null => false,
+        CborType::U8 => *ty == ParseAsType::U8,
+        CborType::I8 => *ty == ParseAsType::I8,
+        CborType::U16 => *ty == ParseAsType::U16,
+        CborType::I16 => *ty == ParseAsType::I16,
+        CborType::U32 => *ty == ParseAsType::U32,
+        CborType::I32 => *ty == ParseAsType::I32,
+        CborType::U64 => *ty == ParseAsType::U64,
+        CborType::I64 => *ty == ParseAsType::I64,
+        CborType::F32 => *ty == ParseAsType::F32,
+        CborType::F64 => *ty == ParseAsType::F64,
+        CborType::Datetime => *ty == ParseAsType::Datetime,
+        CborType::Object | CborType::Null => false,
     }
 }
 
 fn avro_type_matches_parse_as(
     wire: AvroType,
     ty: &ParseAsType,
-    encodes_datetime_as_rfc3339: bool,
+    encoding: Option<CodecEncoding>,
 ) -> bool {
     match wire {
         AvroType::Boolean => *ty == ParseAsType::Bool,
@@ -596,15 +622,9 @@ fn avro_type_matches_parse_as(
         AvroType::Long => *ty == ParseAsType::I64,
         AvroType::Float => *ty == ParseAsType::F32,
         AvroType::Double => *ty == ParseAsType::F64,
-        AvroType::String => {
-            *ty == ParseAsType::String
-                || encodes_datetime_as_rfc3339 && *ty == ParseAsType::Datetime
-        }
-        AvroType::Bytes => *ty == ParseAsType::Bytes,
+        AvroType::String => text_wire_type_matches(ty, encoding),
+        AvroType::Bytes => *ty == ParseAsType::Bytes && encoding.is_none(),
         AvroType::Array => parse_as_is_list(ty),
-        AvroType::Null | AvroType::Record | AvroType::Enum | AvroType::Map | AvroType::Fixed => {
-            false
-        }
     }
 }
 
@@ -1008,6 +1028,240 @@ mod tests {
         let _ = fs::remove_dir_all(path);
     }
 
+    #[derive(Debug)]
+    struct CodecBindingCase {
+        wire: WireTypeCompatibility,
+        internal: ParseAsType,
+        rules: Vec<CodecEncodingRule>,
+    }
+
+    impl CodecBindingCase {
+        fn validate(&self) -> Result<(), Report<RegistryError>> {
+            let schema = CreateSchema {
+                name: named("binary_schema"),
+                fields: vec![SchemaField {
+                    name: named("value"),
+                    ty: self.internal.clone(),
+                    optional: false,
+                    sensitive: false,
+                }],
+            };
+            let domain = named("example");
+            let identifier = named("binary_codec");
+            macro_rules! validate_binding {
+                ($format:ident, $ty:expr) => {
+                    ensure_codec_schema_compatibility(
+                        &domain,
+                        &identifier,
+                        ResolvedCodecWireFormat::$format(&CreateWireSchema {
+                            name: named("binary_wire"),
+                            strictness: Default::default(),
+                            fields: vec![WireSchemaField {
+                                name: named("value"),
+                                ty: $ty,
+                                optional: false,
+                            }],
+                        }),
+                        &schema,
+                        &self.rules,
+                    )
+                };
+            }
+            match self.wire {
+                WireTypeCompatibility::Json(ty) => validate_binding!(Json, ty),
+                WireTypeCompatibility::Cbor(ty) => validate_binding!(Cbor, ty),
+                WireTypeCompatibility::Avro(ty) => validate_binding!(Avro, ty),
+            }
+        }
+    }
+
+    #[test]
+    fn validates_every_json_and_avro_field_binding() {
+        struct BindingRow {
+            wire: WireTypeCompatibility,
+            types: Vec<ParseAsType>,
+            encoding: Option<CodecEncoding>,
+        }
+        use ParseAsType::{
+            Bool, Bytes, Datetime, F32, F64, I8, I16, I32, I64, String, U8, U16, U32, U64,
+        };
+        use WireTypeCompatibility::{Avro, Json};
+        let lists = vec![
+            ParseAsType::Vec {
+                element: Box::new(String),
+            },
+            ParseAsType::Array {
+                element: Box::new(I64),
+                len: std::num::NonZeroU32::MIN,
+            },
+        ];
+        let rows = [
+            BindingRow {
+                wire: Json(JsonType::String),
+                types: vec![String],
+                encoding: None,
+            },
+            BindingRow {
+                wire: Json(JsonType::String),
+                types: vec![Datetime],
+                encoding: Some(CodecEncoding::Rfc3339),
+            },
+            BindingRow {
+                wire: Json(JsonType::String),
+                types: vec![Bytes],
+                encoding: Some(CodecEncoding::Base64),
+            },
+            BindingRow {
+                wire: Json(JsonType::Integer),
+                types: vec![U8, I8, U16, I16, U32, I32, U64, I64],
+                encoding: None,
+            },
+            BindingRow {
+                wire: Json(JsonType::Number),
+                types: vec![F32, F64],
+                encoding: None,
+            },
+            BindingRow {
+                wire: Json(JsonType::Boolean),
+                types: vec![Bool],
+                encoding: None,
+            },
+            BindingRow {
+                wire: Json(JsonType::Array),
+                types: lists.clone(),
+                encoding: None,
+            },
+            BindingRow {
+                wire: Avro(AvroType::Boolean),
+                types: vec![Bool],
+                encoding: None,
+            },
+            BindingRow {
+                wire: Avro(AvroType::Int),
+                types: vec![I32],
+                encoding: None,
+            },
+            BindingRow {
+                wire: Avro(AvroType::Long),
+                types: vec![I64],
+                encoding: None,
+            },
+            BindingRow {
+                wire: Avro(AvroType::Float),
+                types: vec![F32],
+                encoding: None,
+            },
+            BindingRow {
+                wire: Avro(AvroType::Double),
+                types: vec![F64],
+                encoding: None,
+            },
+            BindingRow {
+                wire: Avro(AvroType::String),
+                types: vec![String],
+                encoding: None,
+            },
+            BindingRow {
+                wire: Avro(AvroType::String),
+                types: vec![Datetime],
+                encoding: Some(CodecEncoding::Rfc3339),
+            },
+            BindingRow {
+                wire: Avro(AvroType::String),
+                types: vec![Bytes],
+                encoding: Some(CodecEncoding::Base64),
+            },
+            BindingRow {
+                wire: Avro(AvroType::Bytes),
+                types: vec![Bytes],
+                encoding: None,
+            },
+            BindingRow {
+                wire: Avro(AvroType::Array),
+                types: lists.clone(),
+                encoding: None,
+            },
+        ];
+        let mut types = ParseAsType::scalar_variants().to_vec();
+        types.extend(lists);
+        let wires = [
+            Json(JsonType::String),
+            Json(JsonType::Integer),
+            Json(JsonType::Number),
+            Json(JsonType::Boolean),
+            Json(JsonType::Array),
+            Avro(AvroType::Boolean),
+            Avro(AvroType::Int),
+            Avro(AvroType::Long),
+            Avro(AvroType::Float),
+            Avro(AvroType::Double),
+            Avro(AvroType::String),
+            Avro(AvroType::Bytes),
+            Avro(AvroType::Array),
+        ];
+        for wire in wires {
+            for internal in &types {
+                for encoding in [
+                    None,
+                    Some(CodecEncoding::Rfc3339),
+                    Some(CodecEncoding::Base64),
+                ] {
+                    // The oracle is this finite public matrix: 17 rows, each with at most eight types.
+                    let accepted = rows.iter().any(|row| {
+                        row.wire == wire && row.encoding == encoding && row.types.contains(internal)
+                    });
+                    let rules = encoding
+                        .into_iter()
+                        .map(|encoding| CodecEncodingRule {
+                            field: named("value"),
+                            encoding,
+                        })
+                        .collect();
+                    let case = CodecBindingCase {
+                        wire,
+                        internal: internal.clone(),
+                        rules,
+                    };
+                    let result = case.validate();
+                    assert_eq!(result.is_ok(), accepted, "{case:?}: {result:?}");
+                    if let Err(error) = result {
+                        let rendered = format!("{error:#}");
+                        assert!(rendered.contains("binary_codec"), "{rendered}");
+                        assert!(rendered.contains("value"), "{rendered}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn base64_rules_reject_unknown_and_duplicate_fields() {
+        for fields in [&["missing"][..], &["value", "value"][..]] {
+            let case = CodecBindingCase {
+                wire: WireTypeCompatibility::Json(JsonType::String),
+                internal: ParseAsType::Bytes,
+                rules: fields
+                    .iter()
+                    .map(|field| CodecEncodingRule {
+                        field: named(field),
+                        encoding: CodecEncoding::Base64,
+                    })
+                    .collect(),
+            };
+            let error = case
+                .validate()
+                .err()
+                .assured("a rule cannot reference an absent field or declare the same field twice");
+            assert!(matches!(
+                error.current_context(),
+                RegistryError::InvalidModel { .. }
+            ));
+            let rendered = format!("{error:#}");
+            assert!(rendered.contains("binary_codec"), "{rendered}");
+            assert!(rendered.contains(fields[0]), "{rendered}");
+        }
+    }
+
     #[rstest]
     #[case::requires_explicit_rfc3339_for_json_string_datetime(
         CodecTypeCase::Json {
@@ -1065,15 +1319,7 @@ mod tests {
         },
         CodecTypeExpectation::Accepted
     )]
-    #[case::accepts_json_bytes_for_internal_bytes(
-        CodecTypeCase::Json {
-            internal: ParseAsType::Bytes,
-            wire: JsonType::Bytes,
-            rfc3339_field: None,
-        },
-        CodecTypeExpectation::Accepted
-    )]
-    #[case::rejects_json_text_for_internal_bytes(
+    #[case::requires_base64_for_json_string_bytes(
         CodecTypeCase::Json {
             internal: ParseAsType::Bytes,
             wire: JsonType::String,
@@ -1099,118 +1345,6 @@ mod tests {
         CodecTypeCase::Avro {
             internal: ParseAsType::I32,
             wire: nervix_models::AvroType::Long,
-        },
-        CodecTypeExpectation::IncompatibleSchema
-    )]
-    #[case::accepts_exact_json_u8_for_internal_u8(
-        CodecTypeCase::Json {
-            internal: ParseAsType::U8,
-            wire: JsonType::U8,
-            rfc3339_field: None,
-        },
-        CodecTypeExpectation::Accepted
-    )]
-    #[case::accepts_exact_json_i8_for_internal_i8(
-        CodecTypeCase::Json {
-            internal: ParseAsType::I8,
-            wire: JsonType::I8,
-            rfc3339_field: None,
-        },
-        CodecTypeExpectation::Accepted
-    )]
-    #[case::accepts_exact_json_u16_for_internal_u16(
-        CodecTypeCase::Json {
-            internal: ParseAsType::U16,
-            wire: JsonType::U16,
-            rfc3339_field: None,
-        },
-        CodecTypeExpectation::Accepted
-    )]
-    #[case::accepts_exact_json_i16_for_internal_i16(
-        CodecTypeCase::Json {
-            internal: ParseAsType::I16,
-            wire: JsonType::I16,
-            rfc3339_field: None,
-        },
-        CodecTypeExpectation::Accepted
-    )]
-    #[case::accepts_exact_json_u32_for_internal_u32(
-        CodecTypeCase::Json {
-            internal: ParseAsType::U32,
-            wire: JsonType::U32,
-            rfc3339_field: None,
-        },
-        CodecTypeExpectation::Accepted
-    )]
-    #[case::accepts_exact_json_i32_for_internal_i32(
-        CodecTypeCase::Json {
-            internal: ParseAsType::I32,
-            wire: JsonType::I32,
-            rfc3339_field: None,
-        },
-        CodecTypeExpectation::Accepted
-    )]
-    #[case::accepts_exact_json_u64_for_internal_u64(
-        CodecTypeCase::Json {
-            internal: ParseAsType::U64,
-            wire: JsonType::U64,
-            rfc3339_field: None,
-        },
-        CodecTypeExpectation::Accepted
-    )]
-    #[case::accepts_exact_json_i64_for_internal_i64(
-        CodecTypeCase::Json {
-            internal: ParseAsType::I64,
-            wire: JsonType::I64,
-            rfc3339_field: None,
-        },
-        CodecTypeExpectation::Accepted
-    )]
-    #[case::accepts_exact_json_f32_for_internal_f32(
-        CodecTypeCase::Json {
-            internal: ParseAsType::F32,
-            wire: JsonType::F32,
-            rfc3339_field: None,
-        },
-        CodecTypeExpectation::Accepted
-    )]
-    #[case::accepts_exact_json_f64_for_internal_f64(
-        CodecTypeCase::Json {
-            internal: ParseAsType::F64,
-            wire: JsonType::F64,
-            rfc3339_field: None,
-        },
-        CodecTypeExpectation::Accepted
-    )]
-    #[case::accepts_exact_json_datetime_for_internal_datetime_without_a_text_rule(
-        CodecTypeCase::Json {
-            internal: ParseAsType::Datetime,
-            wire: JsonType::Datetime,
-            rfc3339_field: None,
-        },
-        CodecTypeExpectation::Accepted
-    )]
-    #[case::rejects_exact_json_u8_for_internal_u16(
-        CodecTypeCase::Json {
-            internal: ParseAsType::U16,
-            wire: JsonType::U8,
-            rfc3339_field: None,
-        },
-        CodecTypeExpectation::IncompatibleSchema
-    )]
-    #[case::rejects_exact_json_f32_for_internal_f64(
-        CodecTypeCase::Json {
-            internal: ParseAsType::F64,
-            wire: JsonType::F32,
-            rfc3339_field: None,
-        },
-        CodecTypeExpectation::IncompatibleSchema
-    )]
-    #[case::rejects_exact_json_datetime_for_internal_text(
-        CodecTypeCase::Json {
-            internal: ParseAsType::String,
-            wire: JsonType::Datetime,
-            rfc3339_field: None,
         },
         CodecTypeExpectation::IncompatibleSchema
     )]

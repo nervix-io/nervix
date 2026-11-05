@@ -32,9 +32,14 @@ instance for a type that reads through one consumer. The Model, registry and con
 preserve those complete values.
 
 KAFKA TOPIC ingestor generators draw domain-owned offsets, with no position, and a consumer group
-with either required `START AT` position. The Model, registry and consensus properties preserve
-those complete values. The `NERVIX SUB TYPES` registry signature identifies this current Model
-layout before decoding.
+with either required `START AT` position. Statement generators mix typed `SET START AT` with shared
+ingestor operations. The Model, registry and consensus properties preserve those complete values.
+
+Wire-schema generators carry each format's declared types, and codec generators carry explicit
+`BASE64` byte-text rules alongside `RFC3339` datetime-text rules. JSON, CBOR and AVRO retain their
+own wire type enums. The Model/archive, registry and consensus properties preserve those complete
+values. The `NERVIX WIRE TYPE` registry signature and `raft_wire_alter_` consensus namespace
+identify the current Model layout before decoding.
 
 `ALTER INGESTOR` and `ALTER EMITTER` statement generators draw, for every entity, each change its
 own grammar writes: a locator, a declared option and the `DROP` of an optional one, `SET MODE`,
@@ -42,7 +47,7 @@ Kafka's and Pulsar's `SET START AT`, a declared quiesce mode and `SET CLIENT` wh
 or writes through a client. They mix them with the shared operations, the in-place construction
 changes of a route or an emitter, and an emitter's envelope clauses and properties. The Model/archive,
 consensus and canonical Plexus properties preserve the complete operations in order, and the
-`raft_alter_parity_` consensus namespace identifies the statement layout the transactions it keeps
+`raft_wire_alter_` consensus namespace identifies the statement layout the transactions it keeps
 are stored in before decoding.
 
 MQTT TOPIC ingestor generators draw either session at QoS 0, 1 or 2 beside `NO ACK`, and the
