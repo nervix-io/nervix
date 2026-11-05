@@ -2435,6 +2435,10 @@ benchmark-ci nervix_image artifacts_root *args: benchmark-flink-image
 cargo-fmt:
     cargo +nightly fmt
 
+# Format selected Rust files without revisiting their child modules.
+fmt-rust-files +files:
+    rustup run nightly rustfmt --config skip_children=true {{ quote(files) }}
+
 # Ripgrep honors the repository ignore rules, so generated target trees are not formatted.
 taplo-format:
     git ls-files -z --cached --others --exclude-standard '*.toml' | xargs -0 -r taplo format

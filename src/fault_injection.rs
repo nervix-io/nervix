@@ -88,6 +88,7 @@ mod runtime_installation;
 mod session_backpressure;
 mod shutdown_handoff;
 mod standalone_transaction;
+mod subscription_response;
 #[cfg(test)]
 mod syslog_tests;
 mod transaction_cleanup;
@@ -1548,24 +1549,6 @@ impl FaultInjection {
         self.release_command_pause(&CommandPausePoint::ResponseDelivery(node_id.clone()));
     }
 
-    /// Holds one opened subscription before its reply announces its schema.
-    pub fn pause_subscription_response_delivery_on(&self, node_id: ClusterNodeName) {
-        self.arm_command_pause(CommandPausePoint::SubscriptionResponseDelivery(node_id));
-    }
-
-    pub async fn wait_for_subscription_response_delivery_pause(&self, node_id: &ClusterNodeName) {
-        self.wait_for_command_pause(&CommandPausePoint::SubscriptionResponseDelivery(
-            node_id.clone(),
-        ))
-        .await;
-    }
-
-    pub fn release_subscription_response_delivery_pause(&self, node_id: &ClusterNodeName) {
-        self.release_command_pause(&CommandPausePoint::SubscriptionResponseDelivery(
-            node_id.clone(),
-        ));
-    }
-
     pub fn release_all_command_pauses(&self) {
         for pause in &self.inner.command_pauses {
             pause.release();
@@ -2380,16 +2363,6 @@ impl FaultInjection {
     pub(crate) async fn pause_command_response_delivery_if_armed(&self, node_id: &ClusterNodeName) {
         self.pause_command_if_armed(CommandPausePoint::ResponseDelivery(node_id.clone()))
             .await;
-    }
-
-    pub(crate) async fn pause_subscription_response_delivery_if_armed(
-        &self,
-        node_id: &ClusterNodeName,
-    ) {
-        self.pause_command_if_armed(CommandPausePoint::SubscriptionResponseDelivery(
-            node_id.clone(),
-        ))
-        .await;
     }
 
     pub(crate) async fn pause_command_after_durable_admission_if_armed(
