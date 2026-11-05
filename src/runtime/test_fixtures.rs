@@ -353,7 +353,9 @@ pub(super) fn test_relay_boundary_services() -> Arc<super::RelayBoundaryServices
         0,
         Vec::new(),
         None,
-        nervix_primitives::sync::Arc::new(super::BranchPresence::new()),
+        RelayBranchPresences::single(nervix_primitives::sync::Arc::new(
+            super::BranchPresence::new(),
+        )),
         nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
     ))
 }
@@ -566,6 +568,7 @@ pub(super) fn test_named_branching(
                 })
                 .collect(),
         },
+        nervix_models::BranchPartitions::ONE,
     )
 }
 
@@ -982,6 +985,7 @@ impl EntrypointTestDomain<'_> {
                 name: named("entrypoint_branch"),
                 fields: Self::schema_fields(self.branch_fields),
             },
+            nervix_models::BranchPartitions::ONE,
         )
     }
 
@@ -1214,8 +1218,8 @@ pub(super) fn install_test_domain_execution(
             generator_tasks: HashMap::default(),
             reingestor_tasks: HashMap::default(),
             placement_tasks: HashMap::default(),
-            relay_state_tasks: HashMap::default(),
-            relay_owner_tasks: HashMap::default(),
+            relay_state_tasks: BTreeMap::default(),
+            relay_owner_tasks: BTreeMap::default(),
             tasks: Vec::new(),
         },
     );

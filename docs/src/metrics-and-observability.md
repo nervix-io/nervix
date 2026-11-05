@@ -31,7 +31,8 @@ curl http://127.0.0.1:<observability-port>/metrics
 Prometheus metrics are intentionally branch-aggregated. They aggregate across concrete relay
 branches and do not include a branch key label. This keeps Prometheus cardinality bounded when a
 relay is branched by high-cardinality values such as tenant, user, account, or device id. Branch
-lifecycle metrics identify the declared branch, not the concrete key.
+lifecycle metrics identify the declared branch, not the concrete key. A partitioned relay's series
+carry its partition, whose cardinality is bounded by the partition count its branch declares.
 
 ## Metric Labels
 
@@ -44,6 +45,8 @@ Graph metric series use these labels:
 - `direction`: `received` or `sent`
 - `relay`: logical relay associated with the observation, or `-` when no relay applies
 - `peer_kind` and `peer`: relay peer labels for node-to-relay observations, or `-` when no peer applies
+- `partition`: the partition of a partitioned relay that records a `RELAY` series, or `-` for a
+  relay with one owner and for every other series
 - `branch`: named branch declaration on branch lifecycle metrics
 - `reason`: branch eviction reason, either `lru` or `ttl`
 - `le`: Prometheus histogram bucket boundary
@@ -66,8 +69,15 @@ carries none. See [HTTP inspection and metrics](./emitters.md#http-inspection-an
 Example Prometheus series:
 
 ```text
-nervix_messages_total{domain="prod",target_kind="RELAY",target="notifications",physical_node_id="node-1",direction="received",relay="notifications",peer_kind="-",peer="-"} 42
+nervix_messages_total{domain="prod",target_kind="RELAY",target="notifications",physical_node_id="node-1",direction="received",relay="notifications",peer_kind="-",peer="-",partition="-"} 42
+nervix_messages_total{domain="prod",target_kind="RELAY",target="tenant_events",physical_node_id="node-2",direction="received",relay="tenant_events",peer_kind="-",peer="-",partition="1"} 17
 ```
+
+`DESCRIBE` metric lines of a partitioned relay name the partition after the relay, for example
+`messages_total received relay=tenant_events partition=1 physical_node=node-2 total=17 ...`.
+Every `RELAY` series a partitioned relay records names one of its partitions, so such a relay has no
+`RELAY` series with `partition="-"`. A partition's series exist on the node that owns it and are
+withdrawn when that owner ends, as when the partition moves to another node.
 
 Example `DESCRIBE INGESTOR` edge metric section:
 
