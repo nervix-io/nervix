@@ -304,6 +304,9 @@ impl Arbitrary<'_> {
             EmitterEntity::Nats(NatsEmitter::Subject(entity)) => {
                 self.nats_subject_emitter_change(entity)
             }
+            EmitterEntity::Nats(NatsEmitter::Stream(entity)) => {
+                self.nats_stream_emitter_change(entity)
+            }
             EmitterEntity::ZeroMq(ZeroMqEmitter::Push(entity)) => {
                 ZeroMqPushEmitterChange::Mode(entity.mode).into()
             }
@@ -412,6 +415,16 @@ impl Arbitrary<'_> {
             NatsSubjectEmitterChange::Subject(entity.subject)
         } else {
             NatsSubjectEmitterChange::Mode(entity.mode)
+        };
+        change.into()
+    }
+
+    /// A change to the body of `entity`, a `NATS STREAM` emitter.
+    fn nats_stream_emitter_change(&mut self, entity: NatsStreamEmitter) -> EmitterChange {
+        let change = match self.entropy.byte() % 3 {
+            0 => NatsStreamEmitterChange::Stream(entity.stream),
+            1 => NatsStreamEmitterChange::Subject(entity.subject),
+            _ => NatsStreamEmitterChange::Mode(entity.mode),
         };
         change.into()
     }

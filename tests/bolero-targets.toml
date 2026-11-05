@@ -627,7 +627,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/connectors/__fuzz__/surface__bolero_generated_entities_state_only_what_their_entity_declares/corpus"
-domain_version = 30
+domain_version = 31
 features = []
 id = "models-connector-declarations"
 invariant = "A generated ingestor and emitter of every entity state only what their entity declares: a declared delivery or publishing mode whose required option choices they make, a quiesce mode their entity honors, a body of the declared form, batching the declared legality admits, a type contract exactly for direct-value bodies and a client of a declared connector."
@@ -1316,7 +1316,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/registry/__fuzz__/registry__storage__tests__bolero_registry_archived_models_round_trip/corpus"
-domain_version = 35
+domain_version = 36
 features = []
 id = "registry-archived-models"
 invariant = "The registry's current tagged Model archive restores the complete generated vocabulary Model, including full-width counts and pinned resource bindings."
@@ -3191,10 +3191,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__emitter_record_writes__tests__bolero_retained_payloads_are_written_unchanged_until_answered/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "emitter-retained-payloads"
-invariant = "Across generated packing and write steps with delivered, rejected and unanswered records and failed writes, every write hands the emitter the retained payloads in packing order with exactly the bytes, key, text or typed headers, group and complete MQTT retained-publication envelope they were prepared with; a delivery resolves every member, a rejection rejects every member with one error and leaves them awaiting it, and an unanswered payload stays retained unchanged."
+invariant = "Across generated packing and write steps with delivered, rejected and unanswered records and failed writes, every write hands the emitter the retained payloads in packing order with exactly the bytes, key, text or typed headers, group, complete MQTT retained-publication envelope and message ID envelope they were prepared with; a delivery resolves every member, a rejection rejects every member with one error and leaves them awaiting it, and an unanswered payload stays retained unchanged."
 manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-server"
@@ -3776,7 +3776,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/plexus/src/__fuzz__/canonical_round_trip_tests__bolero_entity_presentations_keep_declared_rows_and_complete_configuration/corpus"
-domain_version = 26
+domain_version = 27
 features = []
 id = "connector-entity-presentation"
 invariant = "Every generated source and sink entity uses its declared phrase and ordered inspection rows, while the canonical Plexus built from that shared presentation reparses to its complete Model including all options, modes, payload mappings, flush and error policies."

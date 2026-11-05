@@ -44,7 +44,7 @@ ingestor operations. The Model, registry and consensus properties preserve those
 Wire-schema generators carry each format's declared types, and codec generators carry explicit
 `BASE64` byte-text rules alongside `RFC3339` datetime-text rules. JSON, CBOR and AVRO retain their
 own wire type enums. The Model/archive, registry and consensus properties preserve those complete
-values. The `NERVIX CBOR TYPE` registry signature and `raft_cbor_type_` consensus namespace identify
+values. The `NERVIX CBOR NATS` registry signature and `raft_cbor_nats_` consensus namespace identify
 the current Model layout before decoding.
 
 `ALTER INGESTOR` and `ALTER EMITTER` statement generators draw, for every entity, each change its
@@ -53,7 +53,7 @@ Kafka's and Pulsar's `SET START AT`, a declared quiesce mode and `SET CLIENT` wh
 or writes through a client. They mix them with the shared operations, the in-place construction
 changes of a route or an emitter, and an emitter's envelope clauses and properties. The
 Model/archive, consensus and canonical Plexus properties preserve the complete operations in order,
-and the `raft_cbor_type_` consensus namespace identifies the statement layout the transactions it
+and the `raft_cbor_nats_` consensus namespace identifies the statement layout the transactions it
 keeps are stored in before decoding.
 
 MQTT TOPIC ingestor generators draw either session at QoS 0, 1 or 2 beside `NO ACK`, and the
@@ -65,6 +65,11 @@ and the archive signature and consensus keyspace namespace fence this shape befo
 MQTT TOPIC emitter generators draw `NO ACK` at QoS 0 and `ACK`, with either window, at QoS 1 or 2,
 so every pairing the declaration admits is generated and none it refuses. The same properties
 preserve the quality of service and the mode as separate written values under the same fence.
+
+NATS emitter generators draw the Core subject and JetStream stream entities, including the stream
+name, publication subject, acknowledged window, and optional message ID. Model/archive, registry,
+consensus, canonical Plexus and presentation properties preserve the complete destination. The
+current archive signature and consensus keyspaces fence this expanded emitter union.
 
 Every target is registered in `tests/bolero-targets.toml` for ordinary randomized/corpus checks and
 sanitizer libFuzzer. The same bounded generators, production storage paths and complete assertions
