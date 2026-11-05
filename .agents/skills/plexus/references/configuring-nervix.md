@@ -796,6 +796,8 @@ Choose checks relevant to the configured graph:
   outside the curated Plexus index.
 - `SHOW TRANSACTIONS;` checks open/committing progress and retained commit, revert, failure, or
   expiry outcomes.
+- Recover an interrupted command under its original execution reference. A transaction's state
+  alone does not establish that command's outcome; follow `Client Session Protocol` → `Exact Recovery`.
 
 For a parse error, follow the reported expected token and compare clause order with the relevant
 public example. For an MQTT QoS, session or mode pairing refusal, use the underlined token and the

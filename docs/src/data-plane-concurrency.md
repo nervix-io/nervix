@@ -2271,6 +2271,14 @@ resume barriers use the existing async pause owner, whose ordering remains outsi
 observation; the public outcome and dependent mutation assert recovery under the original
 execution reference.
 
+The `@client_wire_standalone_completion` one- and three-node examples hold a coordinator after a
+failed commit attempt until transaction reconciliation commits the same command. The testing
+hook reads its node/domain point in `FaultInjectionState::command_pauses` once per failed attempt,
+clones the watch-backed pause and ends the map guard before waiting. The resumed coordinator
+removes the one-shot point after release. Both this DashMap and the watch wait are untracked by
+Deloxide. The owner test and
+public examples assert the original response and exact replay without changing commit ordering.
+
 The registered `@pulsar_message_metadata` workloads cover source metadata in all three delivery
 modes, branch-local event-time windows, broker redelivery and independent broker-stored batches.
 The batch oracle checks member sequence and event-time precedence, envelope inheritance and exact

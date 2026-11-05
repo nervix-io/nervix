@@ -2486,10 +2486,13 @@ An ordinary command whose internal transaction is still committing when its comm
 any other report, such as `TransactionCommitError::RecoverQuiescence` above a drain timeout or a
 consensus write refused by a saturated log, answers `OutcomeUnknown` with the `StillApplying` cause
 rather than `Failed`. That report describes one attempt, and the committing transaction keeps the
-command's domain mutation lease until recovery under the same reference records the outcome. A
-model step that adopts its transaction's own pause validates its frozen planning inputs against
-the domain as that pause left it, so `PlanningInputsChanged` names only inputs that another owner
-changed.
+command's domain mutation lease until recovery under the same reference records the outcome. If
+another coordinator has already finished that transaction, the ordinary command recovers its
+recorded outcome instead: an obsolete commit-attempt report cannot replace a committed success or
+the transaction's recorded terminal failure. Typed leadership loss still selects the leader
+response. A model step that adopts its transaction's own pause validates its frozen planning inputs
+against the domain as that pause left it, so `PlanningInputsChanged` names only inputs that another
+owner changed.
 
 An ordinary command's preflight, queue, and commit-planning refusals are reports decided against
 its coordinator's observation of the command's internal transaction. Before the session maps such a
@@ -2571,7 +2574,11 @@ name's report beneath `InvalidResourceName`, a local archive's I/O error beneath
 `InvalidCursor` or `InvalidCompletionPageSize`, the event queue's overflow beneath `EventOverflow`,
 and the `BackupDownloadError` beneath `BackupDownload`. A failure that may hide an admitted command
 or an installed upload is `UncertainCommand` or `UncertainUpload` above the failure that left the
-outcome unknown. A call its caller cancels through `execute_prepared_with_cancellation` ends with
+outcome unknown. If the server answered a command with a disposition that required another attempt,
+`LastUnresolvedAnswer` holds the last such typed disposition and its public message between
+`UncertainCommand` and the retry deadline that ended retrying. It does not replace the outer
+uncertainty or turn the intermediate answer into a terminal outcome. A call its caller cancels
+through `execute_prepared_with_cancellation` ends with
 the server's `RequestCancelled` at `BeforeAdmission` for a command that never ran,
 `UncertainCommand` above `RequestCancelled` at `AfterAdmission` for one that keeps running, or
 `CallCancelled` when no request of the call waited for a reply, beneath `UncertainCommand` or

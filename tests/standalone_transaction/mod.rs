@@ -12,12 +12,17 @@ use meticulous::ResultExt as _;
 use nervix_models::DomainName;
 use nervix_server::StandaloneTransactionBoundary;
 
-use super::{ScenarioWorld, common::cluster::node_name, expand_placeholders};
+use super::{
+    ScenarioWorld,
+    common::{cluster::node_name, command_probe::CommandPause},
+    expand_placeholders,
+};
 
 fn preparation_boundary(boundary: &str) -> StandaloneTransactionBoundary {
     match boundary {
         "lookup" => StandaloneTransactionBoundary::Lookup,
         "preflight" => StandaloneTransactionBoundary::Preflight,
+        "commit_failure" => StandaloneTransactionBoundary::CommitFailure,
         _ => panic!("unknown standalone preparation boundary '{boundary}'"),
     }
 }
@@ -26,11 +31,14 @@ fn preparation_boundary(boundary: &str) -> StandaloneTransactionBoundary {
 async fn arm_preparation_pause(world: &mut ScenarioWorld, node: String, boundary: String) {
     let node = node_name(&expand_placeholders(world, &node));
     let domain = DomainName::parse(&world.domain).assured("the scenario domain is valid");
-    world.fault_injection.pause_standalone_transaction(
-        node,
-        domain,
-        preparation_boundary(&boundary),
+    let boundary = preparation_boundary(&boundary);
+    world.command_probes.arm_pause(
+        node.clone(),
+        CommandPause::StandaloneTransaction(domain.clone(), boundary),
     );
+    world
+        .fault_injection
+        .pause_standalone_transaction(node, domain, boundary);
 }
 
 #[then(expr = "standalone preparation on node {string} reaches its {word} boundary")]
@@ -55,9 +63,12 @@ async fn observe_preparation_pause(world: &mut ScenarioWorld, node: String, boun
 async fn release_preparation_pause(world: &mut ScenarioWorld, node: String, boundary: String) {
     let node = node_name(&expand_placeholders(world, &node));
     let domain = DomainName::parse(&world.domain).assured("the scenario domain is valid");
-    world.fault_injection.release_standalone_transaction_pause(
+    let boundary = preparation_boundary(&boundary);
+    world.command_probes.release_pause(
         &node,
-        &domain,
-        preparation_boundary(&boundary),
+        CommandPause::StandaloneTransaction(domain.clone(), boundary),
     );
+    world
+        .fault_injection
+        .release_standalone_transaction_pause(&node, &domain, boundary);
 }
