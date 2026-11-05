@@ -10,8 +10,8 @@ emitters](emitters.md#client-emitters), all on one session:
 
 - `nervix-paced-simulation`, in `examples/paced-simulation/rust`, is built on the [Rust Client
   Library](client-library.md).
-- `examples/paced-simulation/python/paced_simulation.py` is built on the shared C binding,
-  through `ctypes` and the Python standard library alone.
+- `examples/paced-simulation/python/paced_simulation.py` uses the native `nervix_client` Python
+  package, which drives the Rust client directly and releases the GIL for blocking calls.
 
 Both take the same options, print the same report and write the same ledger and effect store, so
 either one can continue a run the other began. They are complete programs meant to be copied: the
@@ -100,9 +100,9 @@ just paced-simulation --server http://127.0.0.1:47391 --username default \
 `just paced-simulation` builds and runs the release binary, which is the same as
 `cargo run --release --package nervix-paced-simulation -- <options>`.
 
-The Python driver loads the shared binding named by `--library` or `NERVIX_CLIENT_LIBRARY`, and
-needs Python 3.12 or later. `just paced-simulation-python` builds the binding and runs the driver
-with it:
+The Python driver imports `nervix_client` and needs CPython 3.12 or later.
+`just paced-simulation-python` builds a release wheel, installs it into the generated environment
+at `target/paced-simulation/python`, and runs the driver with that interpreter:
 
 ```bash
 just paced-simulation-python --server http://127.0.0.1:47391 --username default \

@@ -304,16 +304,18 @@ value.
 
 A NATS ingestor Model is one of two entities, `NATS SUBJECT` or `NATS STREAM`, so a stored ingestor
 holds the archived union of both. The registry's `NERVIX MODEL NJS` archive signature identifies the
-current Model layout, including that union, a Pulsar subscription's required type, an owned Pulsar
-subscription's required start position, a Kafka consumer group's required start position, the
-required branch partition count, Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>`
-source, an SQS QUEUE emitter's `SEND` request shape, the receive count an SQS QUEUE ingestor's `ACK
-PARALLEL MAX` declares, the session and quality of service an MQTT TOPIC ingestor writes beside its
-delivery mode, the quality of service an MQTT TOPIC emitter writes beside its publishing mode, a
-`REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`, and that header
-state. Consensus's `raft_jetstream_` keyspaces and current state metadata encoding identify its
-stored shapes, the statements a transaction keeps included. An unrecognized signature, namespace or
-encoding fails with the owning storage error and requires the stored data to be recreated.
+current Model layout, including that union, the separate JSON and CBOR wire type enums, the AVRO
+representation types, explicit `BASE64` codec encoding, a Pulsar subscription's required type, an
+owned Pulsar subscription's required start position, a Kafka consumer group's required start
+position, the required branch partition count, Sentry platform, an ingestor's `TIMESTAMP AT
+metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the receive count an SQS
+QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an MQTT TOPIC
+ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter writes beside
+its publishing mode, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a
+`PATTERN`, and that header state. Consensus's `raft_jetstream_` keyspaces and current state metadata
+encoding identify its stored shapes, the statements a transaction keeps included. An unrecognized
+signature, namespace or encoding fails with the owning storage error and requires the stored data to
+be recreated.
 
 ## Absence And Distinct States
 
@@ -467,6 +469,12 @@ the interruption before delivery from a replacement attachment. Its prior delive
 expired, while a settlement sent before losing its answer is separately uncertain. The domain
 `START` generation and endpoint contract fingerprint are required values on every successful
 consumer open, so absence cannot be mistaken for a matching contract.
+
+The browser retains an uncertain command's complete original request and issue order. Its retry
+availability is explicitly waiting or ready, with a bounded delay retained for the next attempt.
+The current connection owns the timer futures; ending it releases those waits for recovery on
+the replacement connection. A terminal reply removes the command's retry record. No timestamp or
+request-number sentinel stands for either state, and retry metadata carries no second payload.
 
 **Expression scopes and errors.** The VM frontend receives a scope policy that says whether a
 bare field may be read, written, both, or neither. A generated or set-only route reports an
@@ -1219,6 +1227,11 @@ presence. An absent socket after accept failure requires rebind, while the same 
 owns established connection tasks and queued frames; source close ends that retained state.
 The testing capability shares one named listener-fault request between the connector and host:
 the selected bound address and its acknowledgement belong to that same armed request.
+
+The consensus append-submission test control is idle, armed for one follower, or delivered with
+that nonempty request's previous and last log identities and entry count. The delivered variant
+owns its observation, so it cannot also remain armed. A scoped stream control retains its target;
+the ordinary build's inert control is zero-sized and retains no target or shared state.
 
 A Syslog frame's peer is a UDP address, a TCP address or a shared TLS connection identity. Only the
 TLS variant can hold a verified client-certificate subject, whose absence represents a connection

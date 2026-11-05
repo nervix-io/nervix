@@ -56,7 +56,7 @@ Feature: Cross-language client conformance
         f64v number,
         flag boolean,
         text string,
-        raw BYTES,
+        raw string,
         at string,
         maybe integer OPTIONAL,
         secret string
@@ -64,7 +64,7 @@ Feature: Cross-language client conformance
       CREATE CODEC typed_row_codec
         FROM WIRE JSON SCHEMA typed_row_wire
         TO SCHEMA typed_row
-        ENCODE at AS RFC3339;
+        ENCODE at AS RFC3339, raw AS BASE64;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY typed_rows SCHEMA typed_row BRANCHED BY by_tenant;

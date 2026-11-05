@@ -143,7 +143,11 @@ branches. Schema fields are added in declaration order and can be moved or remov
 field selects its exact scalar type, then may wrap it in any sequence of variable vectors and
 fixed arrays; each fixed array needs a positive length. Optional and sensitive flags are separate
 controls. Wire fields select the types of their chosen format and an explicit `STRICT` or `LOOSE`
-mode. A wire schema's format is part of its identity, so JSON, CBOR, and AVRO definitions may
+mode. JSON offers `string`, `number`, `integer`, `boolean`, and `array`; AVRO offers `boolean`,
+`int`, `long`, `float`, `double`, `string`, `bytes`, and `array`. Codec field encoding controls
+select `RFC3339` or `BASE64` for explicit text interchange, as described in
+[Schemas And Codecs](schemas-and-codecs.md#codecs).
+A wire schema's format is part of its identity, so JSON, CBOR, and AVRO definitions may
 share a name. The preview and submitted command come from the completed semantic Model's
 canonical renderer, just as they do for the earlier forms.
 
@@ -173,8 +177,9 @@ schema is an exact typed selection. Declared wire-schema choices are limited to 
 format, even when wire schemas of different formats share a name. JAQ-native and Protobuf codecs
 choose ingestion (decode), emitting (encode), or both, and may add an emitting-batch program after
 an emitting program. These are program editors: their contents remain jaq source in the current
-codec Model, including quotes and whitespace. RFC3339 field encoding rules can be added in order
-where the format supports them. The preview renders the complete codec Model as canonical Plexus.
+codec Model, including quotes and whitespace. Field encoding rules select RFC3339 or BASE64 and
+can be added in order where the format supports them. The preview renders the complete codec
+Model as canonical Plexus.
 
 The Protobuf controls select an existing resource and one of its completed versions, including
 `LATEST`, then accept an optional `.proto` file and include root, additional compiler
@@ -462,7 +467,12 @@ attached transaction stay as they were. See
 [Plexus Overview](plexus-overview.md) for its forms and output.
 
 Every persistent command keeps one execution reference while the browser waits, reconnects, or
-follows leadership. The transaction id and status are replicated. If the WebSocket closes
+follows leadership. When its outcome is not known yet, the console repeats it on the open session
+after a wait that starts at 250 milliseconds and doubles to at most five seconds. The command keeps
+its position ahead of later held commands, while session messages continue to arrive. The selected
+domain, clock and relay tabs keep their existing attachments. A redirect or an ended connection
+triggers recovery; an uncertain reply alone leaves the connection open. The transaction id and
+status are replicated. If the WebSocket closes
 unexpectedly or leadership changes, the console reconnects and attaches that id before resuming a
 pending command. Each append is matched by its reference and expected position, and an outstanding
 commit remains pending through `COMMITTING` until its exact terminal result. A

@@ -45,6 +45,48 @@ Feature: Web console visual codec and signaling protocol creation
       | 1            |
       | 3            |
 
+  @visual_codec_base64
+  Scenario Outline: A visual codec declares BASE64 for byte text in a <format> string
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE DOMAIN {{domain}};
+      CREATE SCHEMA visual_binary (payload BYTES);
+      CREATE WIRE <format> SCHEMA visual_binary_wire MODE STRICT (payload string);
+      """
+    And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
+    And selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".create-menu-button" is clicked
+    And selector ".create-menu [data-create-kind='codec']" is clicked
+    And selector ".create-name" is filled with "visual_binary_codec"
+    And selector ".create-codec-format [data-format='<kind>']" is clicked
+    And selector ".create-codec-schema .create-choice-search" is filled with "visual_binary"
+    Then selector ".create-codec-schema [data-value='visual_binary']" exists
+    When selector ".create-codec-schema [data-value='visual_binary']" is clicked
+    And selector ".create-codec-wire-schema .create-choice-search" is filled with "visual_binary_wire"
+    Then selector ".create-codec-wire-schema [data-value='visual_binary_wire']" exists
+    When selector ".create-codec-wire-schema [data-value='visual_binary_wire']" is clicked
+    And selector ".create-codec-encoding-add" is clicked
+    And selector ".create-codec-encoding-field" is filled with "payload"
+    And selector ".create-codec-encoding-format [data-value='BASE64']" is clicked
+    Then selector ".create-codec-encoding-format [data-value='BASE64'].active" exists
+    And selector ".create-preview" contains "ENCODE payload AS BASE64"
+    When selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
+    And selector ".prompt-row input" is filled with "SHOW CREATE CODEC visual_binary_codec;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "ENCODE payload AS BASE64"
+
+    Examples:
+      | cluster_size | format | kind      |
+      | 1            | JSON   | wire-json |
+      | 3            | JSON   | wire-json |
+      | 1            | AVRO   | wire-avro |
+      | 3            | AVRO   | wire-avro |
+
   @visual_signaling_create
   Scenario: A multi-step signaling protocol retains its order and program text
     Given a 1 node nervix cluster is started

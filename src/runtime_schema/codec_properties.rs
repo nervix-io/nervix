@@ -23,9 +23,9 @@
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain, Entropy};
 use nervix_models::{
-    AvroType, CodecEncoding, CodecEncodingRule, CodecName, CodecWireFormat, CreateAvroWireSchema,
-    CreateCodec, CreateJsonWireSchema, JsonType, ParseAsType, ResolvedCodecWireFormat,
-    WireSchemaField, WireSchemaName, WireSchemaStrictness,
+    AvroType, CborType, CodecEncoding, CodecEncodingRule, CodecName, CodecWireFormat,
+    CreateAvroWireSchema, CreateCborWireSchema, CreateCodec, CreateJsonWireSchema, JsonType,
+    ParseAsType, ResolvedCodecWireFormat, WireSchemaField, WireSchemaName, WireSchemaStrictness,
 };
 use nervix_primitives::sync::Arc;
 use serde_json::Value as JsonValue;
@@ -131,7 +131,7 @@ impl SchemafulFormat {
 #[derive(Debug, Clone)]
 pub(crate) enum GeneratedWireSchema {
     Json(CreateJsonWireSchema),
-    Cbor(CreateJsonWireSchema),
+    Cbor(CreateCborWireSchema),
     Avro(CreateAvroWireSchema),
 }
 
@@ -184,12 +184,40 @@ impl CodecCase {
         }
         let mut encoding_rules = Vec::new();
         let wire = match format {
-            SchemafulFormat::Json | SchemafulFormat::Cbor => {
+            SchemafulFormat::Json => {
                 let mut fields = Vec::with_capacity(order.len());
                 for index in &order {
                     let field = &schema.model.fields[*index];
-                    let ty = json_wire_type(arbitrary.entropy(), &field.ty);
-                    if field.ty == ParseAsType::Datetime && ty == JsonType::String {
+                    let ty = json_wire_type(&field.ty);
+                    let encoding = match field.ty {
+                        ParseAsType::Datetime => Some(CodecEncoding::Rfc3339),
+                        ParseAsType::Bytes => Some(CodecEncoding::Base64),
+                        _ => None,
+                    };
+                    if let Some(encoding) = encoding {
+                        encoding_rules.push(CodecEncodingRule {
+                            field: field.name.clone(),
+                            encoding,
+                        });
+                    }
+                    fields.push(WireSchemaField {
+                        name: field.name.clone(),
+                        ty,
+                        optional: field.optional,
+                    });
+                }
+                GeneratedWireSchema::Json(CreateJsonWireSchema {
+                    name: wire_name.clone(),
+                    strictness,
+                    fields,
+                })
+            }
+            SchemafulFormat::Cbor => {
+                let mut fields = Vec::with_capacity(order.len());
+                for index in &order {
+                    let field = &schema.model.fields[*index];
+                    let ty = cbor_wire_type(arbitrary.entropy(), &field.ty);
+                    if field.ty == ParseAsType::Datetime && ty == CborType::String {
                         encoding_rules.push(CodecEncodingRule {
                             field: field.name.clone(),
                             encoding: CodecEncoding::Rfc3339,
@@ -201,20 +229,28 @@ impl CodecCase {
                         optional: field.optional,
                     });
                 }
-                let definition = CreateJsonWireSchema {
+                let definition = CreateCborWireSchema {
                     name: wire_name.clone(),
                     strictness,
                     fields,
                 };
-                match format {
-                    SchemafulFormat::Json => GeneratedWireSchema::Json(definition),
-                    _ => GeneratedWireSchema::Cbor(definition),
-                }
+                GeneratedWireSchema::Cbor(definition)
             }
             SchemafulFormat::Avro => {
                 let mut fields = Vec::with_capacity(order.len());
                 for index in &order {
                     let field = &schema.model.fields[*index];
+                    let ty = if field.ty == ParseAsType::Bytes && arbitrary.entropy().flag() {
+                        AvroType::String
+                    } else {
+                        avro_wire_type(&field.ty)
+                    };
+                    if field.ty == ParseAsType::Bytes && ty == AvroType::String {
+                        encoding_rules.push(CodecEncodingRule {
+                            field: field.name.clone(),
+                            encoding: CodecEncoding::Base64,
+                        });
+                    }
                     if field.ty == ParseAsType::Datetime {
                         encoding_rules.push(CodecEncodingRule {
                             field: field.name.clone(),
@@ -223,7 +259,7 @@ impl CodecCase {
                     }
                     fields.push(WireSchemaField {
                         name: field.name.clone(),
-                        ty: avro_wire_type(&field.ty),
+                        ty,
                         optional: field.optional,
                     });
                 }
@@ -327,19 +363,9 @@ fn assert_typed_decode_failure(refused: &error_stack::Report<CodecError>) {
     );
 }
 
-/// A JSON or CBOR wire type the registry binds to an internal field of type `ty`: the generic JSON
-/// type of its kind, or the exact wire type of the same name.
-fn json_wire_type(entropy: &mut Entropy<'_>, ty: &ParseAsType) -> JsonType {
-    let exact = entropy.flag();
+/// The JSON representation for one internal field; text interchange is declared by the codec.
+fn json_wire_type(ty: &ParseAsType) -> JsonType {
     match ty {
-        ParseAsType::U8 if exact => JsonType::U8,
-        ParseAsType::I8 if exact => JsonType::I8,
-        ParseAsType::U16 if exact => JsonType::U16,
-        ParseAsType::I16 if exact => JsonType::I16,
-        ParseAsType::U32 if exact => JsonType::U32,
-        ParseAsType::I32 if exact => JsonType::I32,
-        ParseAsType::U64 if exact => JsonType::U64,
-        ParseAsType::I64 if exact => JsonType::I64,
         ParseAsType::U8
         | ParseAsType::I8
         | ParseAsType::U16
@@ -348,14 +374,42 @@ fn json_wire_type(entropy: &mut Entropy<'_>, ty: &ParseAsType) -> JsonType {
         | ParseAsType::I32
         | ParseAsType::U64
         | ParseAsType::I64 => JsonType::Integer,
-        ParseAsType::F32 if exact => JsonType::F32,
-        ParseAsType::F64 if exact => JsonType::F64,
         ParseAsType::F32 | ParseAsType::F64 => JsonType::Number,
-        ParseAsType::Datetime if exact => JsonType::Datetime,
-        ParseAsType::Datetime | ParseAsType::String => JsonType::String,
+        ParseAsType::Datetime | ParseAsType::String | ParseAsType::Bytes => JsonType::String,
         ParseAsType::Bool => JsonType::Boolean,
-        ParseAsType::Bytes => JsonType::Bytes,
         ParseAsType::Array { .. } | ParseAsType::Vec { .. } => JsonType::Array,
+    }
+}
+
+/// A CBOR wire type the registry binds to an internal field of type `ty`: the generic JSON
+/// type of its kind, or the exact wire type of the same name.
+fn cbor_wire_type(entropy: &mut Entropy<'_>, ty: &ParseAsType) -> CborType {
+    let exact = entropy.flag();
+    match ty {
+        ParseAsType::U8 if exact => CborType::U8,
+        ParseAsType::I8 if exact => CborType::I8,
+        ParseAsType::U16 if exact => CborType::U16,
+        ParseAsType::I16 if exact => CborType::I16,
+        ParseAsType::U32 if exact => CborType::U32,
+        ParseAsType::I32 if exact => CborType::I32,
+        ParseAsType::U64 if exact => CborType::U64,
+        ParseAsType::I64 if exact => CborType::I64,
+        ParseAsType::U8
+        | ParseAsType::I8
+        | ParseAsType::U16
+        | ParseAsType::I16
+        | ParseAsType::U32
+        | ParseAsType::I32
+        | ParseAsType::U64
+        | ParseAsType::I64 => CborType::Integer,
+        ParseAsType::F32 if exact => CborType::F32,
+        ParseAsType::F64 if exact => CborType::F64,
+        ParseAsType::F32 | ParseAsType::F64 => CborType::Number,
+        ParseAsType::Datetime if exact => CborType::Datetime,
+        ParseAsType::Datetime | ParseAsType::String => CborType::String,
+        ParseAsType::Bool => CborType::Boolean,
+        ParseAsType::Bytes => CborType::Bytes,
+        ParseAsType::Array { .. } | ParseAsType::Vec { .. } => CborType::Array,
     }
 }
 

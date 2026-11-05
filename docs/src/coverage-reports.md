@@ -66,6 +66,15 @@ the downloaded artifact:
 | `coverage-typed-ratchet-python` | Architecture source/compiler rule runners and their qualification, the native collector, the Bolero runner and its coverage export, and the console build script |
 | `coverage-primitive-boundary` | Primitive provenance and thread-owner validation |
 
+The Python paced driver runs with the wheel installed in its own CPython 3.12 environment.
+Scenario coverage builds its Rust extension with the same LLVM flags as the Rust driver, keeps
+Cargo's `libnervix_client_python.so` beside the suite for object discovery, and carries the wheel
+with its `nervix_client` module in the scenario archive.
+The restore recipe and prepared-suite runner install that wheel and the Python coverage runtime
+before scenarios start, preserving the extension's instrumentation. The existing
+`target/paced-simulation/python.lcov` remains an ordinary Python coverage input; Rust
+execution inside the package contributes to the ordinary scenario report.
+
 The collector's real toolchain fixtures and Deloxide's real process supervision tests run in
 separate Python interpreters, so each supervisor retains ownership of its own children.
 `coverage-model-runner` appends both executions into one branch coverage file before exporting it.
@@ -73,6 +82,9 @@ separate Python interpreters, so each supervisor retains ownership of its own ch
 Only reports the artifact actually exports are inputs; running a focused coverage recipe does not
 register it in CI by itself. Focused Backup, Visual Create, client and runtime recipes export local
 ordinary reports for `coverage-patch`, using the same normalization as the workspace merge.
+`just coverage-web-console <output> <test arguments...>` measures selected native console owner
+tests, preserving each argument. It does not instrument the browser asset; public console
+scenarios execute that asset separately and measure the native server and harness they exercise.
 `just coverage-otel` appends the OTEL and related connector-admission scenarios to current-source
 ordinary profiles, with the browser build and configured ORT environment. It exports a local
 focused report, rather than a CI merge input. Start a new source generation with
@@ -80,7 +92,7 @@ focused report, rather than a CI merge input. Start a new source generation with
 The focused `coverage-scenarios` and `coverage-scenarios-append` recipes preserve each scenario
 argument, including spaces, regular-expression pipes, literal shell characters and empty values.
 Quote a name filter or input glob as one argument; pass separate options as separate arguments.
-They retain the instrumented CLI, report tool, paced driver, shared binding, formatter and ORT
+They retain the instrumented CLI, report tool, paced driver, native Python extension, formatter and ORT
 environment. The first starts a fresh measurement; the append variant retains current profiles
 with `--no-clean`. `just test-scenario-arguments` checks these boundaries through the actual recipe
 bodies with recording builders and Cargo, without compiling or starting services.
