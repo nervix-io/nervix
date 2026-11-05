@@ -23,7 +23,11 @@ use std::{
     num::{NonZeroU16, NonZeroU64},
 };
 
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use meticulous::OptionExt as _;
+use rkyv::{
+    Archive, Deserialize as RkyvDeserialize, Place, Serialize as RkyvSerialize,
+    primitive::ArchivedU64, rancor::Fallible,
+};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumIter};
 
@@ -71,18 +75,7 @@ impl IngestorInstancingCapability {
 
 /// The intake units an instance-capable source declares. Fixed counts retain their full-width
 /// positive count; a partition declaration takes the constructed branch's cardinality.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IngestorInstances {
     Count(NonZeroU64),
     PerPartition,
@@ -96,6 +89,44 @@ impl IngestorInstances {
             Self::Count(_) => "<count>",
             Self::PerPartition => "PER PARTITION",
         }
+    }
+
+    /// Zero encodes the partition-following form; every positive value encodes its exact count.
+    fn archive_count(self) -> u64 {
+        match self {
+            Self::Count(count) => count.get(),
+            Self::PerPartition => 0,
+        }
+    }
+}
+
+impl Archive for IngestorInstances {
+    type Archived = ArchivedU64;
+    type Resolver = <u64 as Archive>::Resolver;
+
+    fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
+        self.archive_count().resolve(resolver, out);
+    }
+}
+
+impl<S: Fallible + ?Sized> RkyvSerialize<S> for IngestorInstances
+where
+    u64: RkyvSerialize<S>,
+{
+    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        RkyvSerialize::serialize(&self.archive_count(), serializer)
+    }
+}
+
+impl<D: Fallible + ?Sized> RkyvDeserialize<IngestorInstances, D> for ArchivedU64 {
+    fn deserialize(&self, _deserializer: &mut D) -> Result<IngestorInstances, D::Error> {
+        let count = self.to_native();
+        Ok(match count {
+            0 => IngestorInstances::PerPartition,
+            _ => IngestorInstances::Count(
+                NonZeroU64::new(count).verified("the partition-following zero case returned above"),
+            ),
+        })
     }
 }
 

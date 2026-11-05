@@ -73,12 +73,13 @@ impl Unit {
     pub const FIRST_INSTANCE: Self = Self::from_rank(INSTANCE_START);
     pub const MAX_INSTANCE_INDEX: u64 = u64::MAX - INSTANCE_START;
 
-    pub fn partition(index: u32) -> Self {
-        Self::from_rank(
-            u64::from(index)
-                .checked_add(1)
-                .assured("a 32-bit partition plus one fits in 64 bits"),
-        )
+    pub const fn partition(index: u32) -> Self {
+        // The rank is index + 1. Its low-word overflow is retained in the upper word.
+        let (lower, carry) = index.overflowing_add(1);
+        Self {
+            upper: if carry { 1 } else { 0 },
+            lower,
+        }
     }
 
     pub fn try_instance(index: u64) -> Result<Self, UnitIndexError> {

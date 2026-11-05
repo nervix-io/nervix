@@ -7,7 +7,29 @@
 
 use std::num::NonZeroU64;
 
+use meticulous::ResultExt as _;
 use nervix_models::IngestorInstances;
+
+#[test]
+fn instancing_declaration_keeps_eight_byte_native_and_archive_layout() {
+    assert_eq!(std::mem::size_of::<IngestorInstances>(), 8);
+    assert_eq!(std::mem::size_of::<rkyv::Archived<IngestorInstances>>(), 8);
+    assert_eq!(std::mem::align_of::<rkyv::Archived<IngestorInstances>>(), 8);
+    for declaration in [
+        IngestorInstances::ONE,
+        IngestorInstances::Count(NonZeroU64::MAX),
+        IngestorInstances::PerPartition,
+    ] {
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&declaration)
+            .assured("every current instancing declaration has an archive encoding");
+        assert_eq!(bytes.len(), 8);
+        assert_eq!(
+            rkyv::from_bytes::<IngestorInstances, rkyv::rancor::Error>(&bytes)
+                .assured("a current instancing declaration decodes"),
+            declaration,
+        );
+    }
+}
 
 #[test]
 fn bolero_instancing_preserves_its_count_or_partition_form() {
