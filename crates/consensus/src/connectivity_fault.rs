@@ -7,23 +7,22 @@
 
 use std::io;
 
-#[cfg(not(any(test, feature = "testing")))]
+#[cfg(not(feature = "testing"))]
 #[derive(Clone, Default)]
 pub(crate) struct ConnectivityFault(());
 
-#[cfg(not(any(test, feature = "testing")))]
+#[cfg(not(feature = "testing"))]
 impl ConnectivityFault {
     pub(crate) fn check(&self) -> io::Result<()> {
         Ok(())
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(feature = "testing")]
 pub use enabled::ConnectivityFault;
 
-#[cfg(any(test, feature = "testing"))]
+#[cfg(feature = "testing")]
 mod enabled {
-    #[cfg(feature = "testing")]
     use std::time::Duration;
 
     use nervix_primitives::sync::{
@@ -46,12 +45,10 @@ mod enabled {
     }
 
     impl ConnectivityFault {
-        #[cfg(feature = "testing")]
         pub fn block(&self) {
             self.blocked.store(true, Ordering::Release);
         }
 
-        #[cfg(feature = "testing")]
         pub fn restore(&self) {
             self.blocked.store(false, Ordering::Release);
         }
@@ -64,7 +61,6 @@ mod enabled {
             }
         }
 
-        #[cfg(feature = "testing")]
         pub(crate) fn set_heartbeat_response_delay(&self, delay: Duration) {
             let milliseconds = u64::try_from(delay.as_millis())
                 .expect("the fixture's heartbeat answer delay fits milliseconds");
@@ -73,14 +69,12 @@ mod enabled {
                 .store(milliseconds, Ordering::Relaxed);
         }
 
-        #[cfg(feature = "testing")]
         pub(crate) fn delayed_heartbeat_requests(&self) -> u64 {
             self.heartbeat_response_delay
                 .received
                 .load(Ordering::Relaxed)
         }
 
-        #[cfg(feature = "testing")]
         pub(crate) async fn after_heartbeat_append(&self) {
             let milliseconds = self
                 .heartbeat_response_delay
