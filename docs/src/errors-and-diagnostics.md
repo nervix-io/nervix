@@ -2,6 +2,14 @@
 
 *Plexus, the Nervix graph definition language.*
 
+The allowance engine returns `Admission` decisions separately from input and conversion errors.
+`WaitUntil`, `NeverAdmissible` and `KeyBudgetExhausted` are ordinary outcomes, not decode failures
+or dropped payloads. `QuotaError` identifies invalid rates, bursts, costs, TTLs and horizon ranges;
+`AdmissionError` identifies charge shape, monotonic regression, clock range, exhausted visit
+sequences and malformed generations. Both retain typed `error_stack::Report` contexts. Key
+fingerprints have a value-free `Debug` implementation, and the engine never receives original
+key values. Host policy and public message-error mapping belong to the caller.
+
 Native session TLS provisioning fails before a node opens its stores or listeners. Missing
 certificate/key paths and TLS files supplied in HTTP mode are distinct application errors. File
 reads retain their `io::Error` beneath `TlsMaterialError::ReadFile`, including the certificate or

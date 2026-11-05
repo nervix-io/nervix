@@ -75,6 +75,53 @@ three selections on one and three nodes. Its saturated-log counterpart, which ke
 command applying while its transaction commits, adds no tracked acquisition and stays outside
 them; its owner test and public scenario cover it.
 
+## Unit Allowance Transactions
+
+`nervix-rate-limit::Limiter` belongs to one execution unit. Admission takes `&mut self`, and its
+ordered clause vector owns every direct cell and keyed store. The mutable borrow excludes another
+payload throughout tentative charges, the latest-deadline calculation, and commit or refund.
+It adds no process-wide admission gate. No guard crosses an await; the caller receives the outcome
+and owns any wait before another whole-payload check.
+
+The direct GCRA cell is one selected `AtomicU64`, holding its epoch-relative horizon in
+nanoseconds. Zero denotes the actual fully replenished horizon at the epoch. Governor updates
+the scalar through a relaxed CAS loop; refund restores the exact pre-charge horizon under the
+transaction's exclusive writer scope. There is no cross-location publication or reference-count
+ordering claim. A failed later clause refunds every tentative charge, and waiting reports the
+latest governor `NotUntil` among the clauses. Costs above any burst and a zero key budget have
+distinct typed outcomes. An invalid charge shape or clock range is rejected before charging.
+
+A keyed clause shards its `ExpiryMap` by the remainder of a 128-bit fingerprint. Its explicit
+shard count and global `MAX KEYS` bound the store. Existing-key admission retains one blocking
+shard guard; missing-key installation, capacity eviction, statistics and generation capture take
+all shards in ascending index order. A one-shard lease never acquires another shard. The lease
+keeps the governor cell protected until whole-payload commit or refund. New keys and eviction
+remain tentative until commit. Accepted uses move the key to the shard's end with a globally
+ordered visit ordinal; the least ordinal among shard fronts is the global LRU victim. Refused
+payloads change neither retained debt nor LRU position. Visit reservation may leave ordinal gaps.
+Expiry removes keys whose last accepted use is at least `TTL` ago; statistics expires them before
+reporting active occupancy, and counts only capacity removals as evictions. All work is synchronous
+and bounded by the retained entries, declared shards and clause vector; the store has no timer or
+background task. The unit owner supplies nondecreasing monotonic observations.
+
+Generations capture live debt and retained key ages with their LRU ordinals. Fully replenished or
+expired state needs no retained horizon. UTC conversion preserves every field at the same anchor,
+credits elapsed time once on recovery, and drops horizons or TTLs that have elapsed. Restoring
+builds fresh stores and an epoch preceding the oldest retained use; malformed state is refused.
+
+The registered Loom invariant `rate-limit.direct.exact-refund` drives the production cell with a
+concurrent observer; its registered weakening clears debt instead of restoring it. The registered
+Shuttle check drives production keyed leases through concurrent charges, refunds, eviction and
+capacity observations at the exact TTL of two seeded keys, followed by a final expiry. It explores three participants with two attempts each;
+it does not model governor internals or physical elapsed time. The Deloxide workload
+`owner.rate-limit-keyed-transactions` reaches the tracked locks in `crates/rate-limit/src/keyed.rs`
+in all four selections, including fresh keyed restoration. It observes tracked blocking locks,
+not atomic ordering, UTC arithmetic or asynchronous waits. The concurrent-map ledger records this
+bounded protocol. `just test-rate-limit-model` and `just test-rate-limit-diagnostic` select only
+this package's registered records through the canonical runners; their evidence explicitly names
+that scope and never constitutes whole-workspace qualification. Full CI model runners retain
+their full inventories; Deloxide CI remains governed by the current execution policy.
+
 ## Remote ACK And Admission Owners
 
 `just bench-remote-owners` measures registration, admission, Alive, ordered parking/resume and
