@@ -10,11 +10,12 @@ the system behaves this way. This manual does not repeat those reasons, and the 
 repeat these rules.
 
 The Rust client, `nervix-client-core`, is the reference implementation. The shared binding exposes
-it through the C ABI of `nervix-client-ffi` to C, C++, JVM, and Ruby hosts and through the Python
-package `nervix_client` to CPython hosts, and a host that uses the binding inherits every rule
-below from it except those in [Using The Shared Binding](#using-the-shared-binding) and [Using The
-Python Package](#using-the-python-package). An implementation that speaks the protocol itself, as
-the Go and TypeScript conformance clients do, follows all of it.
+it through the C ABI of `nervix-client-ffi` to C, C++, and Ruby hosts, the Python package
+`nervix_client` to CPython hosts, and the JNI library `nervix-client-jvm` to JVM hosts. A host
+that uses a binding inherits every rule below from it except its host-specific rules in
+[Using The Shared Binding](#using-the-shared-binding), [Using The Python Package](#using-the-python-package),
+and [Using The JVM Library](#using-the-jvm-library). An implementation that speaks the protocol
+itself, as the Go and TypeScript conformance clients do, follows all of it.
 
 The Rust reference implementation's execution modes and native/browser capability boundaries are
 specified in [Execution Primitives](./execution-primitives.md). Those repository build and
@@ -351,7 +352,9 @@ reset. A genuine reset failure arrives as `RequestFailed` and follows the failur
   `LeadershipObserved`, and try them, and its configured seeds, when its session is lost.
 - **D-4.** A client MUST bound every call with a deadline of its own. When a deadline passes before
   a command's outcome is known, the client MUST report the command as uncertain, naming its
-  reference, and never as failed or completed.
+  reference, and never as failed or completed. The Rust client keeps the last nonterminal answer's
+  typed disposition and message in the report chain when one arrived before the deadline; that
+  answer remains diagnostic evidence rather than a completed outcome.
 - **D-5.** After it loses a session, a client that restores session state MUST, in this order: open
   a new session; attach the domain clocks it follows; open the subscriptions it keeps again, each as
   a new generation, reporting the gap; attach its transaction; and only then repeat outstanding
@@ -499,7 +502,7 @@ payload, infinity, and nullable and sensitive branch key fields.
 | JavaScript and TypeScript | A `Number` holds 53 bits of integer precision. | Read `U64`, `I64`, `DATETIME`, request identities, generations, and counts as `BigInt`. |
 | JavaScript and TypeScript | JavaScriptCore, which Bun runs on, canonicalizes a NaN it materializes as a `Number`; V8 keeps the payload. | Read a float's bits from the buffer as an unsigned integer when the bits matter, instead of calling the generated `value()` accessor. |
 | JavaScript and TypeScript | `Date` has millisecond precision and a narrower range than the protocol's nanoseconds. | Keep a `DATETIME` as a `BigInt` of nanoseconds. |
-| Java and other JVM languages | There are no unsigned primitive types. | A `U64` arrives in a `long`; compare and print it with the unsigned `Long` operations. Values read from the binding's column copies are raw bytes of the declared width, so widen a `U8`, `U16`, or `U32` without sign extension. |
+| Java and other JVM languages | There are no unsigned primitive types. | JNI preserves a `U64` in a `long`; compare and print it with the unsigned `Long` operations. Generations, identities, unsigned offsets and durations use the same bit-preserving rule. Values read from the binding's column copies are raw bytes of the declared width, so widen a `U8`, `U16`, or `U32` without sign extension. |
 | C and C++ | Strings may contain NUL, and the binding never terminates them. | Use the length every accessor returns; never treat a value as a C string. |
 | Python | A `memoryview` borrows memory it does not own. | Keep the object that owns the buffer alive for as long as the view is used. |
 | Every runtime | A borrowed value reads the frame it was verified in. | Keep the frame alive, and unchanged, while any borrowed value is used, and copy what must outlive it. |
@@ -849,6 +852,33 @@ A host of the C ABI, `nervix-client-ffi`, follows the contract in
   `NX_ERROR_REOPEN_REQUIRED` as the end of the handle, read why with the handle's reopen reason,
   and open a new one only after checking the endpoint it now expects.
 
+## Using The JVM Library
+
+A Java 21 host uses `io.nervix.client.Nervix`, built on JNI in `crates/client-jvm` and the same
+`nervix-client-host` runtime. B-1, B-7, B-8, B-10, B-12 and B-14 to B-16 apply through its typed
+classes and enums. The C retain/release and borrowed-pointer rules become these Java ownership rules:
+
+- **J-1.** Close each `AutoCloseable` handle promptly. Cleaner releases unreachable handles once; its action
+  holds no reference to its Java referent. Java references share the same object; closing that object
+  ends new access through every reference immediately. An admitted short call keeps its native allocation
+  alive through JNI marshalling even if class loading reenters `close()` on the same thread; the
+  allocation is released as that call returns. Nested access to the same handle is refused.
+  Producers, consumers and deliveries retain the session
+  runtime they require. Releasing a delivery never settles it.
+- **J-2.** A blocking call takes independent leases on its inputs before waiting, with no Java monitor held.
+  Another thread may trigger the same `Cancel`, close the original handle, or use independent
+  references. Draft `Fields` and `BatchBuilder` calls are serialized by their own short-call monitor;
+  an endpoint open takes a complete field-description snapshot before waiting.
+- **J-3.** A read-only direct frame or IPC buffer retains its native owner, including every derived slice or
+  duplicate, after the handle closes. Bulk arrays and builder inputs are copies. Use Arrow IPC for
+  Arrow Java interchange. Preserve float bits and unsigned widths as the host table requires.
+- **J-4.** Branch on `ClientException.kind()` or its typed subclass. Read `executionReference()` for exact
+  command recovery and `openRefusal()` for endpoint refusal; never decide from message text. A
+  command disposition is an `Outcome`, separate from a failed host operation. Completion ranges
+  count UTF-8 bytes. Read clock/event variant-specific fields only for the kind that carries them.
+- **J-5.** Use endpoint `end(Cancel)` to wait for server closure and `close()` to release ownership. The
+  library implements no Java retry, correlation, acknowledgement or restoration state machine.
+
 ## Using The Python Package
 
 A CPython host imports `nervix_client`, the package `crates/client-python` builds on pyo3. It
@@ -990,7 +1020,7 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | Q-1, Q-2 | `configured_choices` unit tests for exact wire-schema, resource, version, VHOST, signaling, and dependency choices; `typed_choices_and_lookup_states_round_trip` in `nervix-client-wire`; `A resource-backed codec selects a completed version and file explicitly` and `A codec can choose a wire schema staged earlier in its transaction` in `visual_create_codec.feature`; `WebSocket client and endpoint select an existing signaling protocol` in `visual_create_client_endpoint.feature`; Go and Node.js corpus probes in `client_conformance.feature` |
 | L-1 to L-3 | `use_domain_is_served_by_the_client`, `list_domains_is_served_from_a_domain_list_request`, `execute_rejects_mixed_client_local_multi_statement_request`, `execute_rejects_client_local_command_during_transaction`, and `a_create_subscription_statement_is_sent_as_a_subscribe_request`; `Implicit multi-command requests are rejected` in `plexus_transactions.feature` |
 | E-1 to E-5 | In `client_wire_failures.feature`: `A command lost after durable admission is recovered by its request identity`, `A reclaimed command identity stays expired after a durable restart`, `A race across leaders recovers a typed execution reference conflict`, `A command identity outside its retry window starts no effect`, `A full command history refuses new identities and keeps every retained result`, `Concurrent exact BEGIN retries join one durable execution`, and `Reusing a durable transaction identity with different content fails semantically`; `a_command_reply_for_another_execution_cannot_claim_success` |
-| E-6 to E-8 | `Leadership lost after durable admission leaves an unknown outcome that a retry recovers` and `A leader that cannot confirm its lease during <phase> reports that, not a move` in `session_protocol.feature`; `Web console recovers an uncertain command on its existing session` in `plexus_repl.feature`; `an_unknown_outcome_is_recovered_with_the_same_execution_reference`, `replies_ask_for_the_routing_their_disposition_needs` and `an_unknown_command_waits_before_repeating_on_its_open_connection` |
+| E-6 to E-8, D-4 | `Leadership lost after durable admission leaves an unknown outcome that a retry recovers` and `A leader that cannot confirm its lease during <phase> reports that, not a move` in `session_protocol.feature`; `Web console recovers an uncertain command on its existing session` in `plexus_repl.feature`; `an_unknown_outcome_is_recovered_with_the_same_execution_reference`, `replies_ask_for_the_routing_their_disposition_needs`, `an_unknown_command_waits_before_repeating_on_its_open_connection` and `an_uncertain_command_deadline_names_its_last_server_answer` in `nervix-client-core` |
 | D-1 to D-5 | `A redirect names no endpoint for a leader that discovery cannot reach` in `session_protocol.feature`; `The Rust client reconnects through its original seed after the leader stops` in `client_wire_failures.feature`; `a_command_redirect_keeps_its_execution_reference`, `a_command_waits_for_an_election_and_is_sent_again_with_its_reference`, `a_closed_session_recovers_through_a_configured_seed`, and `a_reconnected_session_restores_subscriptions_before_it_attaches_its_transaction` |
 | X-1 to X-3 | In `client_wire_failures.feature`: `A command missing from a committed transaction cannot report aggregate success`, `Replaying a BEGIN whose response was lost returns the original transaction`, `Replaying an accepted <append_kind> append does not preflight or append it again`, and the three exact transaction batch retries, including `A committed transaction batch keeps its one outcome when leadership moves while each attempt records it`; `lost_begin_append_and_commit_replies_retry_the_exact_request` and `concurrent_commands_capture_transaction_position_in_send_order` |
 | X-4, X-5 | `A commit fenced to a preview the transaction outgrew is refused and stays open` in `plexus_transactions.feature`; `a_commit_fences_against_the_basis_its_own_transaction_reported`, `a_refused_commit_does_not_adopt_an_unreviewed_basis`, and `an_older_inspection_cannot_replace_a_newer_queue_preview` |
@@ -1011,6 +1041,7 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | B-11 | `a_clock_attached_after_start_is_read_before_its_first_tick`, `every_state_reports_only_the_fields_and_projections_it_carries`, `a_refused_attach_leaves_the_session_following_what_it_followed`, `an_attach_cancelled_after_it_was_sent_is_resolved_by_executing_it_again`, `several_domains_are_read_apart_until_a_detach_or_an_end_withdraws_one`, `an_interrupted_attachment_reads_its_last_clock_without_a_tick_until_it_is_restored`, and `a_domain_clock_outlives_references_released_on_another_thread_and_its_session` in `nervix-client-ffi`; the clock cases of `client_conformance.feature` for the C ABI in process, C, C++, Java, and Ruby |
 | B-12 to B-16 | `A <runtime> client publishes typed batches through a client ingestor and acknowledges their output through a client emitter` in `client_conformance.feature` for the C ABI in process, C, C++, Java, and Ruby; `a_producer_reports_its_description_and_takes_every_outcome_class`, `a_refused_open_names_its_refusal_and_a_host_argument_is_checked_first`, `a_consumer_reads_and_settles_a_delivery_and_a_lost_confirmation_is_uncertain`, `a_reconnect_interrupts_a_consumer_expires_its_deliveries_and_restores_only_open_handles`, `every_kind_of_column_reads_back_from_the_batch_and_from_its_stream`, `a_builder_refuses_what_a_column_cannot_hold`, and `bolero_host_columns_round_trip_through_builder_and_stream` in `nervix-client-ffi` |
 | N-1 to N-5 | The three outlines of `client_conformance.feature` for CPython over the Python package, on one and three nodes, whose probe also checks a retained frame view, a wait cancelled from another thread and Arrow data pyarrow builds and reads; `a_wait_releases_the_gil_and_another_python_thread_cancels_it`, `every_failure_kind_raises_its_exception`, `a_frame_view_keeps_its_event_alive`, `a_producer_outlives_its_session` and `a_pycapsule_round_trip_keeps_every_column_kind_at_its_bounds` in `nervix-client-python`; `bolero_host_columns_round_trip_through_the_arrow_c_data_interface` and `bolero_typed_field_descriptions_round_trip` in `nervix-client-host` |
+| J-1 to J-5 | Java 21's three one-/three-node conformance outlines; `BoundaryTests` checks columns, Cleaner release and cancellation from another Java thread; `nervix-client-jvm` embeds the JVM to check every host failure kind, restoration messages/waits, and registered complete JNI field/column properties. The Java row probe checks native Cleaner release and derived-buffer retention after its session closes. |
 | W-1 to W-5, B-10 | Every scenario of `restore.feature`, including `An interrupted restore upload is sent again under its execution reference`, `A restore repeated under its execution reference joins it or returns its recorded outcome`, and `A leader change while a restore applies resumes it on the new leader`; the console's restore scenarios in `backup_restore.feature`; `Ctrl-C during a CLI RESTORE leaves it to recover under its execution reference` in `cli_session.feature`; `a_restore_start_round_trips`, `every_restore_chunk_round_trips_and_an_empty_one_is_refused`, and `every_restore_reply_round_trips` in `nervix-client-wire`; the `restore_*` conformance frames; `a_restore_outcome_reports_its_steps` in `nervix-client-ffi` |
 
 The [client representation properties](https://github.com/nervix-io/nervix/blob/main/tests/client-representation-coverage.md)
@@ -1041,7 +1072,7 @@ the replacement session. The one-node examples are direct-connection controls.
 | `tests/client_conformance/go/corpus.go`, `probe.ts corpus <dir>` | Reading every corpus frame without a FlatBuffers verifier, checking identifiers, discriminants, and required values |
 | `tests/client_conformance/c/probe.c`, `cpp/probe.cpp` | The binding from C and from C++ with `std::unique_ptr` ownership |
 | `tests/client_conformance/python/probe.py` | The Python package `nervix_client`: a `memoryview` of a frame that keeps its event alive, waits cancelled from another thread, typed exceptions, and Arrow data pyarrow builds and reads through the PyCapsule interface |
-| `tests/client_conformance/java/Probe.java` | The binding through the Foreign Function and Memory API, with arena-owned events |
+| `tests/client_conformance/java/Probe.java` | Java 21 JNI classes with Cleaner-owned handles and owner-retaining direct frame buffers |
 | `tests/client_conformance/ruby/probe.rb` | The binding through Fiddle, with collector-driven release |
 
 Run with the `clock` argument, each binding probe follows a paced domain clock instead: it attaches

@@ -3419,6 +3419,13 @@ cache is published, `just test-coverage-pack` writes the second archive: every o
 `cargo llvm-cov report` reads, the list of test executables, and the generated inputs a test reads.
 The scenario executable stays out, because the shards run it.
 
+The workspace's all-features build includes the JVM binding's embedded tests. Before compiling
+them, `test-coverage-binaries` prepares the Java 21 jar with its native library and the boundary
+fixtures. The unit archive includes the jar and every compiled fixture class, including nested
+classes; packing refuses a missing jar or fixture entry class. Both the build and unit-test jobs
+install Java 21, and the restored runner uses those packaged inputs without compiling. The
+scenario archive has no JVM fixture dependency.
+
 The `tests` job needs that build, and restores the archive with `just test-coverage-unpack`, under
 the checks a shard's restore makes. `just test-coverage-run` then compiles nothing. Cargo would
 compare the restored files with sources whose modification times the checkout set and rebuild them,

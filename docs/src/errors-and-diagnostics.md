@@ -2568,7 +2568,11 @@ name's report beneath `InvalidResourceName`, a local archive's I/O error beneath
 `InvalidCursor` or `InvalidCompletionPageSize`, the event queue's overflow beneath `EventOverflow`,
 and the `BackupDownloadError` beneath `BackupDownload`. A failure that may hide an admitted command
 or an installed upload is `UncertainCommand` or `UncertainUpload` above the failure that left the
-outcome unknown. A call its caller cancels through `execute_prepared_with_cancellation` ends with
+outcome unknown. If the server answered a command with a disposition that required another attempt,
+`LastUnresolvedAnswer` holds the last such typed disposition and its public message between
+`UncertainCommand` and the retry deadline that ended retrying. It does not replace the outer
+uncertainty or turn the intermediate answer into a terminal outcome. A call its caller cancels
+through `execute_prepared_with_cancellation` ends with
 the server's `RequestCancelled` at `BeforeAdmission` for a command that never ran,
 `UncertainCommand` above `RequestCancelled` at `AfterAdmission` for one that keeps running, or
 `CallCancelled` when no request of the call waited for a reply, beneath `UncertainCommand` or
@@ -2586,6 +2590,13 @@ restoration failure the client reports as a subscription or domain clock event c
 chain as its message. The shared C binding classifies a failure from the current context, a failed
 backup download from the `BackupDownloadError` beneath it, and returns the whole chain as the
 error's message.
+
+The Java 21 JNI library consumes that same classified host failure. It throws one
+`Nervix.ClientException` subclass per `FailureKind`, preserving the complete message, optional
+execution reference and typed open refusal. It never reclassifies by message text or treats a
+command disposition as a thrown operation error. A JNI library error stays at JNI's foreign
+boundary; an already pending Java exception is preserved. Checked native exports contain Rust
+unwinds at that boundary. Restoration events expose the shared client's message and retry wait.
 
 Resource archive construction returns its first I/O failure beneath `BuildUploadArchive`.
 Failure and cancellation abandon the partial temporary archive; they perform no destructor
