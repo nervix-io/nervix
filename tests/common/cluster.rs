@@ -3111,6 +3111,24 @@ impl Cluster {
         publish_nats(&self.dependencies, subject, payload).await
     }
 
+    pub(crate) async fn publish_nats_with_reply(
+        &self,
+        subject: &str,
+        reply: &str,
+        payload: &str,
+    ) -> io::Result<()> {
+        let client = nats_client(&self.dependencies).await?;
+        client
+            .publish_with_reply(
+                subject.to_string(),
+                reply.to_string(),
+                payload.as_bytes().to_vec().into(),
+            )
+            .await
+            .map_err(io::Error::other)?;
+        client.flush().await.map_err(io::Error::other)
+    }
+
     pub(crate) async fn provision_nats_stream(
         &self,
         stream: &str,
@@ -7296,10 +7314,12 @@ async fn publish_nats_with_headers(
     headers: &[(&str, &str)],
 ) -> io::Result<()> {
     let client = nats_client(dependencies).await?;
-    let mut header_map = async_nats::HeaderMap::new();
-    for (name, value) in headers {
-        header_map.append(*name, *value);
-    }
+    let header_map = async_nats::HeaderMap::from_ordered(
+        headers
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect(),
+    );
     client
         .publish_with_headers(
             subject.to_string(),
@@ -7951,7 +7971,9 @@ async fn observe_zeromq(addr: &str) -> io::Result<BrokerObserver> {
 }
 
 async fn nats_client(dependencies: &DependencyEndpoints) -> io::Result<NatsClient> {
-    async_nats::connect(dependencies.get(NATS_ADDR)?)
+    async_nats::ConnectOptions::new()
+        .ordered_headers()
+        .connect(dependencies.get(NATS_ADDR)?)
         .await
         .map_err(io::Error::other)
 }
@@ -8205,6 +8227,7 @@ async fn nats_consumer_exists(
 async fn nats_tls_client(dependencies: &DependencyEndpoints) -> io::Result<NatsClient> {
     let ca_path = dependencies.tls_ca_path()?;
     async_nats::ConnectOptions::new()
+        .ordered_headers()
         .add_root_certificates(ca_path.to_path_buf())
         .require_tls(true)
         .connect(dependencies.get(NATS_TLS_ADDR)?)
