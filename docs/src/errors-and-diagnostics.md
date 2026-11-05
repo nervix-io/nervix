@@ -41,6 +41,17 @@ RabbitMQ's TLS file keys declare `amqps` as their permitted address scheme. The 
 and commit, naming the key, `addr` and `amqps` without the configured values. The existing
 certificate/key pairing refusal remains independent of the scheme check.
 
+NATS stream metadata is decoded where a program requests it. A malformed acknowledgement
+subject retains the driver's parsing cause; a nonpositive sequence or delivery count and an
+out-of-range publication timestamp have distinct typed field causes. `IngestMetadataFailure`
+shares the immutable typed cause through capture and replay. The host projects it into a validation
+row outcome only for a read field, after `FILTER WHERE` and before event-time selection. A delivery
+retains its opaque transport acknowledgement independently; a missing acknowledgement remains a
+source-attempt failure. A computed Core reply subject
+that violates the publication-subject rule instead becomes a per-record rejection before hand-over.
+An invalid literal reply subject is refused by registry preflight with `NatsReplySubject` and the
+external-name validation cause, before the emitter starts.
+
 An OTEL literal outside its declared field domain is a typed registry mapping issue that names
 the signal, key and required constraint. It carries no literal value. A TLS file key with a
 plaintext endpoint is a typed client-schema scheme refusal before file inspection, for either
@@ -1321,7 +1332,10 @@ A NATS source whose client loses its connection to the server reports
 received, and each reconnect that fails reports `NatsSubjectIngestorError::Connect` beneath
 `IngestorError::Resume`; the source host shows the deepest cause as the ingestor's transient error.
 The driver's `ConnectError` remains beneath `Connect`, so a peer that closes before its initial
-INFO message is reported as `expected INFO, got nothing`. A NATS STREAM source reports the
+INFO message is reported as `expected INFO, got nothing`. The driver's ordered header decoder
+keeps invalid UTF-8, header-name, header-value and checked-offset conversion failures as typed
+causes under `io::Error`; these remain transport failures, separate from projected delivery-field
+failures. A NATS STREAM source reports the
 server's answer that its stream or consumer does not exist as
 `NatsStreamIngestorError::MissingStream` or `MissingConsumer` beneath `IngestorError::Resume`,
 naming the stream and the consumer, and a consumer it cannot read as declared as `PushConsumer` or

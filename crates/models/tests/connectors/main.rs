@@ -328,14 +328,29 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
             every_node: false,
             reference: IngestorReferenceKind::Client(ConnectorKind::Mqtt),
         },
-        IngestorEntityKind::Nats(NatsIngestorEntity::Subject) => headers_only(
-            Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
-            ConnectorKind::Nats,
-        ),
-        IngestorEntityKind::Nats(NatsIngestorEntity::Stream) => headers_only(
-            Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
-            ConnectorKind::Nats,
-        ),
+        IngestorEntityKind::Nats(NatsIngestorEntity::Subject) => IngestorDeclaration {
+            headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+            metadata: &[
+                ("subject", IngestorMetadataType::String),
+                ("reply", IngestorMetadataType::String),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Nats),
+        },
+        IngestorEntityKind::Nats(NatsIngestorEntity::Stream) => IngestorDeclaration {
+            headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
+            metadata: &[
+                ("subject", IngestorMetadataType::String),
+                ("reply", IngestorMetadataType::String),
+                ("stream", IngestorMetadataType::String),
+                ("consumer", IngestorMetadataType::String),
+                ("sequence", IngestorMetadataType::U64),
+                ("timestamp", IngestorMetadataType::Datetime),
+                ("delivered", IngestorMetadataType::U64),
+            ],
+            every_node: false,
+            reference: IngestorReferenceKind::Client(ConnectorKind::Nats),
+        },
         IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => IngestorDeclaration {
             headers: Some(HeaderModel::exact(HeaderLayout::SortedByName)),
             metadata: &[
@@ -749,11 +764,11 @@ fn emitter_declaration(kind: EmitterEntityKind) -> EmitterDeclaration {
             &["NoAck", "BrokerAck"],
         ),
         EmitterEntityKind::Nats(NatsEmitterEntity::Subject) => codec(
-            Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
+            Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
             &["NoAck"],
         ),
         EmitterEntityKind::Nats(NatsEmitterEntity::Stream) => codec(
-            Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
+            Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
             &["BrokerAck"],
         ),
         EmitterEntityKind::Sqs(SqsEmitterEntity::Queue) => EmitterDeclaration {
