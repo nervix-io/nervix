@@ -2728,7 +2728,7 @@ impl Application {
                 nervix_primitives::select! {
                     _ = cluster_events_shutdown.cancelled() => break,
                     received = cluster_event_rx.recv() => match received {
-                        Ok(change) => cluster_events.relay_membership(&change),
+                        Ok(change) => cluster_events.relay_info(nervix_client_wire::NoticeKind::Membership, change.to_string()),
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             warn!(skipped, "cluster event relay fell behind the event bus");
                         }
@@ -2746,7 +2746,7 @@ impl Application {
                 nervix_primitives::select! {
                     _ = consensus_events_shutdown.cancelled() => break,
                     received = consensus_event_rx.recv() => match received {
-                        Ok(message) => consensus_events.relay_leadership(message),
+                        Ok(message) => consensus_events.relay_info(nervix_client_wire::NoticeKind::Leadership, message),
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             warn!(skipped, "consensus event relay fell behind the event bus");
                         }

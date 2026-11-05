@@ -118,48 +118,27 @@ impl SessionEvents {
         self.publish(NoticeLevel::Error, NoticeKind::ControlPlane, message);
     }
 
-    /// Report a runtime failure another node recovered from and fanned out to this one.
-    ///
-    /// The failing node traces its own report only at `debug` once an observer takes it, so this
-    /// node's `warn` line is where an operator of its sessions finds it.
+    /// Report a runtime failure another node fanned out to this one. Its own node traces it only at
+    /// `debug`, so this `warn` line is where an operator of these sessions finds it.
     pub(in crate::application) fn report_peer_runtime_error(&self, message: String) {
         warn!(error = %message, kind = "runtime", "server error reported to sessions");
         self.publish(NoticeLevel::Error, NoticeKind::Runtime, message);
     }
 
-    /// Offer a change of this node's live set that the membership task has already recorded.
-    ///
-    /// The cluster layer writes its own `info` line before handing the change here, so this is a
-    /// relay rather than a report and it logs nothing of its own.
-    pub(in crate::application) fn relay_membership(&self, change: &cluster::MembershipChange) {
-        self.publish(
-            NoticeLevel::Info,
-            NoticeKind::Membership,
-            change.to_string(),
-        );
-    }
-
-    /// Offer a consensus transition the consensus bus has already recorded in its `info` line.
-    pub(in crate::application) fn relay_leadership(&self, message: String) {
-        self.publish(NoticeLevel::Info, NoticeKind::Leadership, message);
-    }
-
-    /// Offer a committed cluster-parameter revision this node installed and has already logged.
-    pub(in crate::application) fn relay_cluster_parameters(&self, revision: std::num::NonZeroU64) {
-        self.publish(
-            NoticeLevel::Info,
-            NoticeKind::ClusterParameters,
-            format!("cluster parameters committed at revision {revision}"),
-        );
+    /// Offer, as `kind`, an event its owner already recorded in its own `info` line (a live-set
+    /// change, a consensus transition, an installed parameter revision); it logs nothing itself.
+    pub(in crate::application) fn relay_info(&self, kind: NoticeKind, message: String) {
+        self.publish(NoticeLevel::Info, kind, message);
     }
 
     fn publish(&self, level: NoticeLevel, kind: NoticeKind, message: String) {
+        let notice = ServerNotice {
+            level,
+            kind,
+            message,
+        };
         self.sender
-            .send(ServerNotice {
-                level,
-                kind,
-                message,
-            })
+            .send(notice)
             .discarded("the record this event carries is written before it is offered");
     }
 

@@ -18,9 +18,9 @@ use leptos::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_client_wire::{NoticeKind, NoticeLevel, ServerNotice};
 
-/// How many entries the panel keeps. Older entries are dropped, while the count of received events
-/// keeps every one.
-const MAX_ENTRIES: usize = 64;
+/// How many entries the panel keeps: as many as the REPL transcript keeps records. Older entries
+/// are dropped, while the count of received events keeps every one.
+const MAX_ENTRIES: usize = super::MAX_HISTORY_RECORDS;
 
 /// What identifies one entry. A membership event names the session that received it, so the same
 /// event repeated within that session joins its entry; any other event has an entry of its own.

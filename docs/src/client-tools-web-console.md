@@ -74,7 +74,7 @@ leadership notices of the node the console is connected to: a node that joined, 
 as a new incarnation, the node's Raft transitions, and the membership operations it proposes while
 it leads. A membership event repeated within one session is shown once with its count, for example
 `node 'node-3' left ×2`. The panel keeps the events of earlier sessions after a reconnect, up to its
-newest 64 entries; the count on the button keeps every event received.
+newest 256 entries; the count on the button keeps every event received.
 
 ```text
 node 'node-3' joined (incarnation 1793845627114630656)
