@@ -54,6 +54,7 @@ mod command_reply;
 mod consensus;
 mod domain_clock;
 mod domain_resume;
+mod emitter_mode;
 mod entity_drain;
 #[cfg(test)]
 mod entity_drain_tests;
@@ -101,6 +102,7 @@ use command_reply::CommandReplyScript;
 pub use command_reply::ForeignExecutionObservation;
 use domain_clock::DomainClockProgressPausePoint;
 pub use domain_resume::DomainResumeBoundary;
+use emitter_mode::EmitterFaultMode;
 use entity_drain::ForcedEntityDrainTimeout;
 pub(crate) use entity_drain::ObservedEntityDrain;
 use execution::NodeExecution;
@@ -126,13 +128,6 @@ use runtime_installation::RuntimeInstallationRefusals;
 use session_backpressure::ArmedSessionBackpressure;
 pub use standalone_transaction::StandaloneTransactionBoundary;
 use wasm_reset_publication::{WasmResetPublicationAuthorityLoss, WasmResetPublicationFailure};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EmitterFaultMode {
-    Fail,
-    Stall,
-    UnknownRecord,
-}
 
 /// A consensus storage failure a scenario armed for a node before that node started.
 ///
@@ -1163,59 +1158,6 @@ impl FaultInjection {
         keyspace.rotate_memtable_and_wait()
     }
 
-    pub fn fail_emitter(&self, emitter: &str) {
-        self.inner
-            .emitter_faults
-            .insert(emitter.to_ascii_lowercase(), EmitterFaultMode::Fail);
-    }
-
-    pub fn stall_emitter(&self, emitter: &str) {
-        self.inner
-            .emitter_faults
-            .insert(emitter.to_ascii_lowercase(), EmitterFaultMode::Stall);
-    }
-
-    pub fn clear_emitter_fault(&self, emitter: &str) {
-        self.inner
-            .emitter_faults
-            .remove(&emitter.to_ascii_lowercase());
-    }
-
-    /// Replaces the next record write's answers with an identity outside that exact write.
-    pub fn answer_next_emitter_with_unknown_record(&self, emitter: &str) {
-        self.inner.emitter_faults.insert(
-            emitter.to_ascii_lowercase(),
-            EmitterFaultMode::UnknownRecord,
-        );
-    }
-
-    pub(crate) fn received_emitter_record_outcome(
-        &self,
-        emitter: &EmitterName,
-        records: usize,
-        outcome: nervix_connector::PerRecordOutcome<nervix_connector::EmitterRecordId>,
-    ) -> nervix_connector::PerRecordOutcome<nervix_connector::EmitterRecordId> {
-        if records == 0 {
-            return outcome;
-        }
-        let armed = self
-            .inner
-            .emitter_faults
-            .remove_if(emitter.as_str(), |_, mode| {
-                *mode == EmitterFaultMode::UnknownRecord
-            });
-        if armed.is_none() {
-            return outcome;
-        }
-        let mut answer = nervix_connector::PerRecordOutcome::with_capacity(1);
-        answer.deliver(nervix_connector::EmitterRecordId::new(records));
-        answer
-    }
-
-    pub fn clear_all_emitter_faults(&self) {
-        self.inner.emitter_faults.clear();
-    }
-
     pub fn fail_ingestor(&self, ingestor: &str) {
         self.inner
             .failed_ingestors
@@ -2162,38 +2104,6 @@ impl FaultInjection {
                 to_node_id,
             })
             .means_shutdown("leadership transfer watcher");
-    }
-
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            bounded,
-            reason = "the scenario selects one retained emitter fault mode",
-            key = "one test emitter",
-            bound = "one keyed read; the guard ends with the synchronous predicate"
-        )
-    )]
-    pub(crate) fn emitter_should_fail(&self, emitter: &EmitterName) -> bool {
-        self.inner
-            .emitter_faults
-            .get(&emitter.as_str().to_ascii_lowercase())
-            .is_some_and(|mode| *mode == EmitterFaultMode::Fail)
-    }
-
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            bounded,
-            reason = "the scenario selects one retained emitter stall mode",
-            key = "one test emitter",
-            bound = "one keyed read; the guard ends with the synchronous predicate"
-        )
-    )]
-    pub(crate) fn emitter_should_stall(&self, emitter: &EmitterName) -> bool {
-        self.inner
-            .emitter_faults
-            .get(&emitter.as_str().to_ascii_lowercase())
-            .is_some_and(|mode| *mode == EmitterFaultMode::Stall)
     }
 
     #[cfg_attr(
