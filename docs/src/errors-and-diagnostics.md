@@ -301,6 +301,12 @@ before data-stream admission. A management request failure uses the same unreach
 as a heartbeat; subsequent data-stream setup failures remain transport failures. Neither path
 retries inside the adapter or changes the caller's retry gate.
 
+A heartbeat worker accepts a follower answer arriving inside the leader lease, even after one
+heartbeat interval, and credits its original sending time. Its management request and worker share
+that lease deadline. A timeout or transport failure still becomes an unreachable-peer outcome;
+the lease check uses the acknowledged request's sending time. Empty replication
+probes retain their shorter soft deadline and existing failure projection.
+
 An ended consensus append input completes normally without a peer operation or a peer error. With
 a first request available, stream setup may return the existing typed admission, membership or
 transport failure as an unreachable-peer result. The caller's retry gate runs before that setup
