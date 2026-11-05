@@ -12,6 +12,9 @@ rustflags := env('RUSTFLAGS', '')
 build_mode := "debug"
 release_flag := if build_mode == "release" { "--release" } else { "" }
 cargo_target_dir := env("CARGO_TARGET_DIR", justfile_directory() + "/target")
+# Java fixtures belong to the caller's build root, including when LLVM or Bolero builds Rust
+# in a separate instrumented directory.
+export NERVIX_CLIENT_JVM_TEST_ARTIFACTS := env("NERVIX_CLIENT_JVM_TEST_ARTIFACTS", cargo_target_dir + "/client-conformance/java")
 turmoil_failures := cargo_target_dir + "/turmoil-failures"
 coverage_tools_dir := cargo_target_dir + "/llvm-cov-tools"
 default_jobs := num_jobs() || "4"
@@ -262,7 +265,7 @@ paced-simulation-python *args:
     just cargo_target_dir={{ quote(cargo_target_dir) }} build-paced-simulation-python release
     {{ quote(cargo_target_dir + "/paced-simulation/python/bin/python") }} examples/paced-simulation/python/paced_simulation.py {{ quote(args) }}
 
-test: tests-deps
+test: tests-deps build-client-jvm-tests
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
@@ -1211,11 +1214,77 @@ build-client-python:
     uv pip install --quiet --python "${environment}/bin/python" pyarrow==26.0.0 \
         "${artifacts}"/wheels/nervix_client-*.whl
 
+# Package the Java 21 API and this target's JNI library into one self-loading jar.
+build-client-jvm:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir) }} cargo build --package nervix-client-jvm
+    just cargo_target_dir={{ quote(cargo_target_dir) }} package-client-jvm
+
+# Package Java sources with the JNI library the native build already produced.
+package-client-jvm:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    artifacts={{ quote(cargo_target_dir + "/client-conformance/java") }}
+    classes="${artifacts}/classes"
+    rm -rf "${classes}" && mkdir -p "${classes}/io/nervix/client/native"
+    javac --release 21 -Xlint:all -Werror -d "${classes}" crates/client-jvm/java/io/nervix/client/*.java
+    case "$(uname -s)" in
+        Darwin) library=libnervix_client_jvm.dylib ;;
+        *) library=libnervix_client_jvm.so ;;
+    esac
+    cp {{ quote(cargo_target_dir + "/debug") }}/"${library}" "${classes}/io/nervix/client/native/"
+    jar --create --file "${artifacts}/nervix-client.jar" -C "${classes}" .
+    mkdir -p "${artifacts}/probe"
+    javac --release 21 -Xlint:all -Werror -cp "${artifacts}/nervix-client.jar" \
+        -d "${artifacts}/probe" tests/client_conformance/java/Probe.java
+
+# Compile only the JVM boundary fixtures beside the already built jar.
+build-client-jvm-tests: build-client-jvm
+    just cargo_target_dir={{ quote(cargo_target_dir) }} package-client-jvm-tests
+
+# Compile the current Java boundary fixtures against the packaged jar.
+package-client-jvm-tests:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    artifacts={{ quote(cargo_target_dir + "/client-conformance/java") }}
+    mkdir -p "${artifacts}/tests"
+    javac --release 21 -Xlint:all -Werror -cp "${artifacts}/nervix-client.jar" \
+        -d "${artifacts}/tests" crates/client-jvm/tests/java/io/nervix/client/*.java
+
+# Hold the Java 21 API to its host ownership and bulk-column contracts.
+test-client-jvm-api: build-client-jvm-tests
+    just cargo_target_dir={{ quote(cargo_target_dir) }} test-client-jvm-api-run
+
+# Run prepared Java boundary fixtures without rebuilding their native prerequisite.
+test-client-jvm-api-run:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    artifacts={{ quote(cargo_target_dir + "/client-conformance/java") }}
+    java -Xcheck:jni -cp "${artifacts}/nervix-client.jar:${artifacts}/tests" \
+        io.nervix.client.BoundaryTests
+    java -Xcheck:jni -cp "${artifacts}/tests" io.nervix.client.ReentrantClose \
+        "${artifacts}/nervix-client.jar"
+
+# Exercise the actual JNI implementations and Java classes in one embedded JVM.
+test-client-jvm: test-client-jvm-api
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir) }} BOLERO_RANDOM_SEED="${BOLERO_RANDOM_SEED:-2026110404}" cargo test --package nervix-client-jvm --features jvm-tests --lib
+
+# Run one JNI regression after build-client-jvm-tests prepared its Java classes.
+test-client-jvm-case filter:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir) }} cargo test --package nervix-client-jvm --features jvm-tests --lib -- {{ quote(filter) }} --exact --nocapture
+
+# Replay a named, provenance-recorded JNI test executable without Cargo rebuilding its inputs.
+test-client-jvm-executable executable *args:
+    BOLERO_RANDOM_SEED="${BOLERO_RANDOM_SEED:-2026110404}" {{ quote(executable) }} {{ args }}
+
+# Collect the JNI implementation counters from the embedded JVM's current native method table.
+coverage-client-jvm output="lcov-client-jvm.info": build-client-jvm-tests
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir) }} cargo llvm-cov --package nervix-client-jvm --features jvm-tests --lib --lcov --output-path {{ quote(output) }}
+
 # Build what the cross-language client probes run: the shared Rust binding, the C and C++ probes
-# linked against it, the Python package in the probe's virtual environment, the Go probe with its
-# generated FlatBuffers code, and the TypeScript probe bundled with its generated code for Node.js
+# linked against it, the JNI jar and Java probe, the Python package in its virtual environment,
+# the Go probe with its generated FlatBuffers code, and the TypeScript probe bundled with its generated code for Node.js
 # and Bun. Every generated file lands under the artifacts directory, never in the source tree.
-build-client-conformance: build-client-python
+build-client-conformance: build-client-python build-client-jvm
     #!/usr/bin/env bash
     set -euo pipefail
     artifacts={{ quote(cargo_target_dir + "/client-conformance") }}
@@ -1304,7 +1373,7 @@ test-coverage-build: coverage-clean-workspace test-coverage-binaries
 # Build the workspace's test binaries beside what the target directory already holds, and record
 # the test executables a run starts. CI builds them after the scenario suite, so both share one
 # target directory and their dependencies compile once.
-test-coverage-binaries: tests-deps
+test-coverage-binaries: tests-deps build-client-jvm-tests
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
@@ -1380,6 +1449,10 @@ test-coverage-pack archive:
 # checking every file it holds and the shared libraries its executables load.
 test-coverage-unpack archive:
     python3 -m scripts.unit_test_archive unpack {{ quote(archive) }}
+
+# Hold the unit archive and its build/restore workflow to the generated-input contract.
+test-unit-test-archive:
+    python3 -m unittest scripts.tests.test_unit_test_archive
 
 # Build the scenario suite and the binaries its scenarios start, under the instrumentation of
 # `cargo llvm-cov`, so `test-scenarios-coverage-run` compiles nothing. Cargo holds a target directory
@@ -2473,6 +2546,10 @@ benchmark-ci nervix_image artifacts_root *args: benchmark-flink-image
 cargo-fmt:
     cargo +nightly fmt
 
+# Format one package during a focused implementation cycle.
+cargo-fmt-package package:
+    cargo +nightly fmt --package {{ package }}
+
 # Ripgrep honors the repository ignore rules, so generated target trees are not formatted.
 taplo-format:
     git ls-files -z --cached --others --exclude-standard '*.toml' | xargs -0 -r taplo format
@@ -2529,7 +2606,7 @@ clippy_build_directory(lane) := cargo_target_dir / "clippy" / lane
 # libraries and engines below them, and the cluster's network stack.
 clippy_language_packages_1 := ["nervix-plexus", "nervix-plexus-format", "nervix-roto", "nervix-vm", "nervix-web-console"]
 
-clippy_language_packages_2 := ["nervix-benchmark", "nervix-cli", "nervix-client-ffi", "nervix-client-host", "nervix-client-python"]
+clippy_language_packages_2 := ["nervix-benchmark", "nervix-cli", "nervix-client-ffi", "nervix-client-host", "nervix-client-jvm", "nervix-client-python"]
 
 clippy_foundation_packages_1 := ["nervix-approx-into", "nervix-bounded-write", "nervix-dataflow-graph", "nervix-expiry-map", "nervix-primitives-macros", "nervix-recovery"]
 
@@ -3003,22 +3080,22 @@ validate-dns-dependencies:
 # Check formatting and validate with the same concurrency default as local validation. The checks run
 # beside each other, each Cargo build in a target directory of its own, so a check never waits for
 # another's directory lock; `jobs` bounds how many recipes run at once. The ratchet's tools build
-# beside them, and the ratchet runs after them, as the dependency of
-# `validate-deloxide-applicability`, which reads its gate: its analyses admit themselves against the
-# host's memory as if nothing else ran, and beside the lints the kernel killed its server analysis
-# for memory (Check 41066649586).
+# beside them, and the ratchet runs after them, before `validate-deloxide-applicability` reads its
+# gate: its analyses admit themselves against the host's memory as if nothing else ran, and beside
+# the lints the kernel killed its server analysis for memory (Check 41066649586).
 #
 # `shard`, `1/2` or `2/2`, runs one of the two parts the checks job's matrix divides them into, on a
 # runner of its own; without it every check runs. The first part checks formatting, the ordinary,
 # Turmoil and Deloxide lints and the source, dependency and documentation validations. The second
 # lints the Shuttle and Loom modes and the compiler tooling, builds the ratchet's tools and runs the
-# ratchet once its own lints have finished. Together the two parts are every check.
+# ratchet once its own lints have finished. Together the two parts are every check `validate` runs,
+# which scripts/tests/test_ratchet.py holds the checks job's matrix to.
 validate-ci jobs=default_jobs shard="": (run-with-jobs validate_ci_recipe(shard) jobs)
 
 validate_ci_recipe(shard) := if shard == "" { "validate-ci-targets" } else if shard == "1/2" { "validate-ci-shard-1" } else if shard == "2/2" { "validate-ci-shard-2" } else { error("validate-ci takes shard 1/2 or 2/2, or none for every check, not " + shard) }
 
 [private]
-validate-ci-targets: validate-ci-checks validate-deloxide-applicability
+validate-ci-targets: validate-ci-checks ratchet validate-deloxide-applicability
 
 [private, parallel]
 validate-ci-checks: validate-ci-shard-1-checks validate-ci-shard-2-checks
@@ -3027,7 +3104,7 @@ validate-ci-checks: validate-ci-shard-1-checks validate-ci-shard-2-checks
 validate-ci-shard-1: validate-ci-shard-1-checks
 
 [private]
-validate-ci-shard-2: validate-ci-shard-2-checks validate-deloxide-applicability
+validate-ci-shard-2: validate-ci-shard-2-checks ratchet validate-deloxide-applicability
 
 [private, parallel]
 validate-ci-shard-1-checks: fmt-check validate-ci-shard-1-lints validate-skill validate-plexus-docs validate-connector-capabilities validate-connector-matrix validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies test-go-ci-tool

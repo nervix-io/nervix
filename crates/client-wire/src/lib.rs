@@ -110,8 +110,9 @@ pub use reply::{
 };
 pub use request::{
     AttachDomainClockRequest, AttachTransactionRequest, CancelRequest, ClientMessage,
-    ClientRequest, CommandRequest, DetachDomainClockRequest, InspectTransactionRequest,
-    SelectDomainRequest, SubscribeRequest, SuggestRequest, UnsubscribeRequest,
+    ClientRequest, ClientRequestKind, CommandRequest, DetachDomainClockRequest,
+    InspectTransactionRequest, SelectDomainRequest, SubscribeRequest, SuggestRequest,
+    UnsubscribeRequest,
 };
 pub use restore::{
     RestoreChunk, RestoreDisposition, RestoreMessage, RestoreReply, RestoreStart,

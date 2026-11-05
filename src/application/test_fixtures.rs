@@ -283,6 +283,7 @@ fn test_session_service(
         interconnect.clone(),
         consensus.proposer().local_node_id().clone(),
     );
+    let traffic = super::client_traffic::ClientTraffic::new(runtime.metrics().client_traffic());
     SessionServiceImpl {
         inner: Arc::new(SessionServiceInner {
             cluster: cluster.clone(),
@@ -309,6 +310,7 @@ fn test_session_service(
             service_tasks: super::service_tasks::ServiceTasks::default(),
             auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
             failed_auth_rate_limit_keys: DashMap::with_hasher(RandomState::new()),
+            traffic,
             transaction_bindings: DashMap::with_hasher(RandomState::new()),
             command_executions: super::command_execution::CommandExecutionOwners::default(),
             transaction_executions: DashMap::with_hasher(RandomState::new()),

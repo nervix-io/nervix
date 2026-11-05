@@ -18,9 +18,9 @@ use nervix_client_wire::{
     DomainPaceChoice,
 };
 use nervix_models::{
-    AvroType, DomainName, FieldName, JsonType, MaterializedRelayState, ModelKind, ModelName,
-    NodeRef, ParseAsType, PlacementPolicy, RelayName, SchemaName, SubscriptionDeliveryBehavior,
-    WireSchemaStrictness,
+    AvroType, CborType, DomainName, FieldName, JsonType, MaterializedRelayState, ModelKind,
+    ModelName, NodeRef, ParseAsType, PlacementPolicy, RelayName, SchemaName,
+    SubscriptionDeliveryBehavior, WireSchemaStrictness,
 };
 
 use super::{
@@ -1215,7 +1215,7 @@ fn creation_components_render_each_typed_draft_and_accessible_status() {
             ),
             (
                 CreateKind::WireCborSchema,
-                WireFieldType::Json(JsonType::String),
+                WireFieldType::Cbor(CborType::String),
                 "CBOR",
             ),
             (

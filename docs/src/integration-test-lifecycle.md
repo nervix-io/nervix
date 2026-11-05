@@ -18,6 +18,16 @@ name, and the console recorder checks an opened WSS connection to the advertised
 
 ## Paced Interconnect Fixture
 
+The separate failed-append regression establishes retained history on all three nodes before
+stopping one follower and creating its backlog. It arms a single nonempty submission on the
+future leader before transferring leadership, then restarts the follower without waiting for
+catch-up. Arming therefore does not race the transfer, and the one failed submission happens
+after the follower is running again. Its request boundary is retained for the assertion. Native client
+attachment and commit, applied backlog and later writes, and a strict read on the successor
+verify recovery within the existing scenario and product budgets. The control uses an async
+mutex and releases the fault registry's guard before awaiting; neither the failure nor its
+observation requires a blocking lock or a new lifecycle task.
+
 The rate-limited follower catch-up scenario starts a TCP byte pacer before restarting a stopped
 node. Its listener takes the existing advertised endpoint and forwards opaque bytes to a private
 interconnect listener on the restarted node. The advertised endpoint stays fixed so retained peer
@@ -3407,6 +3417,13 @@ object in the target directory, so it runs before the unit tests join the suite 
 cache is published, `just test-coverage-pack` writes the second archive: every other object
 `cargo llvm-cov report` reads, the list of test executables, and the generated inputs a test reads.
 The scenario executable stays out, because the shards run it.
+
+The workspace's all-features build includes the JVM binding's embedded tests. Before compiling
+them, `test-coverage-binaries` prepares the Java 21 jar with its native library and the boundary
+fixtures. The unit archive includes the jar and every compiled fixture class, including nested
+classes; packing refuses a missing jar or fixture entry class. Both the build and unit-test jobs
+install Java 21, and the restored runner uses those packaged inputs without compiling. The
+scenario archive has no JVM fixture dependency.
 
 The `tests` job needs that build, and restores the archive with `just test-coverage-unpack`, under
 the checks a shard's restore makes. `just test-coverage-run` then compiles nothing. Cargo would

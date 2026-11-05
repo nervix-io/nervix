@@ -203,7 +203,7 @@ impl Arbitrary<'_> {
         match variant {
             ModelVariant::Schema => Model::Schema(self.create_schema()),
             ModelVariant::WireJsonSchema => Model::WireJsonSchema(self.json_wire_schema()),
-            ModelVariant::WireCborSchema => Model::WireCborSchema(self.json_wire_schema()),
+            ModelVariant::WireCborSchema => Model::WireCborSchema(self.cbor_wire_schema()),
             ModelVariant::WireAvroSchema => Model::WireAvroSchema(self.avro_wire_schema()),
             ModelVariant::Codec => Model::Codec(self.create_codec()),
             ModelVariant::ClientKafka => unpooled_client!(self, ClientKafka, CreateClientKafka),

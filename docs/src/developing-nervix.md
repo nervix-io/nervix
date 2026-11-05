@@ -41,6 +41,18 @@ Install:
   (`python3-dev` on Debian and Ubuntu, or any CPython that `uv python install` provides), which
   the tests of the Python package, `crates/client-python`, embed
 
+The JVM library requires a JDK 21 or later (`openjdk-21-jdk-headless` on Debian and Ubuntu).
+`just build-client-jvm` compiles the API with `javac --release 21` and packages it with the current
+target's JNI library into `target/client-conformance/java/nervix-client.jar`; all generated classes,
+probe classes and native files stay under `target`. `just test-client-jvm-api` exercises bulk columns,
+handle cleanup and cancellation with `-Xcheck:jni`. `just test-client-jvm` also embeds the JVM for
+the JNI failure and representation tests. The all-features workspace recipes `just test` and
+`just test-coverage` enable `jvm-tests` and prepare the same fixtures, so they also require JDK 21.
+The coverage build packages the jar and fixtures for its restored unit runner. Client conformance
+CI and the workspace build/test jobs provision Java 21.
+`NERVIX_CLIENT_JVM_TEST_ARTIFACTS` points embedded tests at the prepared Java artifacts; just exports
+the configured build root's path so instrumented Rust builds use the same jar and fixtures.
+
 The Python package builds with maturin, which `just build-client-python` runs as
 `uvx --from maturin==1.16.0 maturin`, into an abi3 wheel for CPython 3.12 and later under
 `target/client-conformance/wheels`. The recipe installs the wheel and `pyarrow`, the probe's test
@@ -319,6 +331,9 @@ every CPU, and in Check 41126961308, which compiled the server cold, one recipe 
 enough Clippy compilations to pass the runner's 32 GB and one was killed. The typed ratchet's
 admission queue admits its server analyses as if nothing else ran: beside the lints, the kernel's
 out-of-memory killer ended the ratchet's Shuttle analysis of the server in Check 41066649586.
+`just test-ratchet-units` fails when the shards stop being every check or the gate stops running
+after the second shard's lints, as [the debt ratchet's CI contract](architecture-enforcement.md)
+describes.
 
 Each package and configuration is a dependency of one shared Clippy recipe, and the configurations
 run in lanes. A lane holds the configurations that can reuse one another's build artifacts: one
