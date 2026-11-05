@@ -17,6 +17,38 @@
 # the compiler's catalog: a new owner of tracked locks needs a record, and a record whose file no
 # longer acquires one is removed.
 
+[[invocation]]
+bound_seconds = 120
+evidence = true
+id = "rate-limit-store"
+kind = "libtest-each"
+marker = "diagnostic_tests::deloxide_"
+package = "nervix-rate-limit"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+target = "lib"
+
+[[workload]]
+coverage = "The engine's selected blocking shard locks, concurrent key leases, exact rollback, global eviction, TTL removal and fresh keyed-store restoration; governor internals and atomic memory ordering are outside detector evidence."
+id = "owner.rate-limit-keyed-transactions"
+invariant = "Bounded key transactions never exceed the global capacity, retain no refunded charge and restore the complete allowance generation without a tracked deadlock."
+invocation = "rate-limit-store"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+test = "diagnostic_tests::deloxide_keyed_transactions_expire_evict_refund_and_restore"
+
+[[owner]]
+path = "crates/rate-limit/src/keyed.rs"
+workloads = ["owner.rate-limit-keyed-transactions"]
+
 [[workload]]
 coverage = "Kafka records through the real broker and the source host's tracked ingestion and ACK state, with every new metadata field read in NO ACK, ACK SEQUENTIAL and ACK PARALLEL on one and three nodes. Driver polling and borrowed metadata visits are untracked."
 examples = 6

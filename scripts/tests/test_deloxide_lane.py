@@ -468,7 +468,7 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(len(order_only), 9)
         self.assertEqual(
             list(inventory.invocations),
-            ["probes", "primitive-conformance", "owner-tests", "scenarios", "paced-simulation",
+            ["rate-limit-store", "probes", "primitive-conformance", "owner-tests", "scenarios", "paced-simulation",
              "stress-transaction-retention", "stress-scenarios", "stress-endpoint-acknowledgement", "stress-paced-simulation", "stress-restore-scenarios", "cluster-parameters"],
         )
         for name in ("scenarios", "paced-simulation"):

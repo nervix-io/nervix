@@ -3982,3 +3982,33 @@ random_iterations = 256
 source = "crates/client-jvm/src/tests.rs"
 test = "tests::bolero_field_descriptions_round_trip_through_jni"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/rate-limit/src/__fuzz__/tests__bolero_quota_bounds_match_wide_integer_arithmetic/corpus"
+domain_version = 1
+features = []
+id = "rate-limit-quota-bounds"
+invariant = "Quota construction agrees with a wide-integer oracle for rate, burst and nanosecond horizon bounds; accepted quotas preserve the ceiling interval and complete burst."
+manifest = "Cargo.toml"
+max_input_bytes = 32
+package = "nervix-rate-limit"
+random_iterations = 256
+source = "crates/rate-limit/src/tests.rs"
+test = "tests::bolero_quota_bounds_match_wide_integer_arithmetic"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/rate-limit/src/__fuzz__/tests__bolero_utc_generations_preserve_all_fields_at_the_same_anchor/corpus"
+domain_version = 1
+features = []
+id = "rate-limit-utc-generations"
+invariant = "UTC conversion preserves every relative horizon, key fingerprint, key age, LRU ordinal and clause declaration at the same injected anchor."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-rate-limit"
+random_iterations = 256
+source = "crates/rate-limit/src/tests.rs"
+test = "tests::bolero_utc_generations_preserve_all_fields_at_the_same_anchor"
+test_target = "lib"
