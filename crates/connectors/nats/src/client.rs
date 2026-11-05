@@ -1,7 +1,7 @@
 //! Shared NATS connection-options preparation.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** Declared authentication and TLS options for every NATS client connection.
+//! - **Owns.** Declared authentication, TLS and ordered-header retention for every NATS client connection.
 //! - **Depends on.** The connector contract, node executor, vocabulary and the NATS driver.
 //! - **Must not know.** Graph routing, subscriptions, publishing, placement or retry policy.
 
@@ -70,7 +70,9 @@ impl NatsClientOptions {
         } else {
             ConnectOptions::new()
         };
-        options = options.require_tls(address.tls_required());
+        options = options
+            .ordered_headers()
+            .require_tls(address.tls_required());
         let tls = client_tls_paths(config);
         if let Some(ca_file) = tls.ca_file {
             options = options.add_root_certificates(ca_file);
