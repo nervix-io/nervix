@@ -81,9 +81,8 @@ pub(crate) const MAX_OUTSTANDING_APPEND_BYTES: u64 = 16 * 1024 * 1024;
 /// How long an append stream with a batch outstanding may go without an answer while its follower
 /// also accepts none of the leader's bytes.
 const APPEND_STREAM_IDLE_BOUND: Duration = Duration::from_secs(5);
-/// The ceiling on a heartbeat's deadline. OpenRaft's soft TTL is usually far shorter, and the
-/// shorter of the two always wins.
-const HEARTBEAT_DEADLINE_CEILING: Duration = Duration::from_secs(5);
+/// The ceiling on an initial empty replication probe's soft request deadline.
+const REPLICATION_PROBE_DEADLINE_CEILING: Duration = Duration::from_secs(5);
 
 const _: () = assert!(
     MAX_OUTSTANDING_APPEND_BATCHES > 0
@@ -111,10 +110,13 @@ pub(crate) enum AppendPath {
     Replication,
 }
 
-/// The deadline for one heartbeat or leadership probe: whichever of OpenRaft's soft TTL and this
-/// crate's ceiling expires first.
-pub(crate) fn heartbeat_deadline(option: &RPCOption) -> Duration {
-    option.soft_ttl().min(HEARTBEAT_DEADLINE_CEILING)
+/// Heartbeat answers may arrive throughout the worker's lease-sized hard TTL. Initial empty
+/// replication probes retain their shorter soft TTL and five-second ceiling.
+pub(crate) fn append_request_deadline(option: &RPCOption, path: AppendPath) -> Duration {
+    match path {
+        AppendPath::Heartbeat => option.hard_ttl(),
+        AppendPath::Replication => option.soft_ttl().min(REPLICATION_PROBE_DEADLINE_CEILING),
+    }
 }
 
 /// Initial probes have no log data; commit updates following data stay on the ordered stream.
@@ -765,6 +767,25 @@ mod tests {
     use nervix_primitives::time::sleep;
 
     use super::*;
+
+    #[test]
+    fn heartbeat_answer_uses_the_lease_without_extending_replication_probes() {
+        let lease = RPCOption::new(Duration::from_millis(1_992));
+        assert_eq!(
+            append_request_deadline(&lease, AppendPath::Heartbeat),
+            Duration::from_millis(1_992)
+        );
+        assert_eq!(
+            append_request_deadline(&lease, AppendPath::Replication),
+            Duration::from_millis(1_494)
+        );
+
+        let long_probe = RPCOption::new(Duration::from_secs(12));
+        assert_eq!(
+            append_request_deadline(&long_probe, AppendPath::Replication),
+            REPLICATION_PROBE_DEADLINE_CEILING
+        );
+    }
 
     /// How often a follower that keeps reading accepts more of the leader's bytes.
     const ACCEPTANCE_CADENCE: Duration = Duration::from_millis(2_500);

@@ -1,5 +1,11 @@
 Feature: Pipelined raft replication and bounded log retention
 
+  Scenario: A late heartbeat answer inside the leader lease keeps an idle leader writing
+    Given a 3 node nervix cluster is started
+    When follower heartbeat answers take "300ms" while the leader idles for "3s"
+    Then the delayed-heartbeat leader creates domain "late_heartbeat_0" within "60s"
+    And within "60s" every node has applied 1 domains named "late_heartbeat"
+
   Scenario: A paced follower recovers an occupied listener before its catch-up start
     Given a 3 node nervix cluster is started
     When node "node-3" is stopped

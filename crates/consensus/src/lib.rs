@@ -2116,6 +2116,8 @@ struct ConsensusState {
     interconnect_advertise_addr: NodeEndpoint,
     interconnect: Transport,
     connectivity: ConnectivityFault,
+    #[cfg(feature = "testing")]
+    heartbeat_response_delay: Arc<HeartbeatResponseDelay>,
     /// A test harness's refusal of one command execution's proposal; inert outside test builds.
     lease_refusal: LeaseRefusal,
     raft_retention: RaftRetentionPolicy,
@@ -2146,6 +2148,27 @@ struct ConsensusTestProbeState {
     append_stream_counts: Mutex<BTreeMap<ClusterNodeName, AppendStreamCounts>>,
     connectivity: ConnectivityFault,
     lease_refusal: LeaseRefusal,
+    heartbeat_response_delay: Arc<HeartbeatResponseDelay>,
+}
+
+/// A follower-side answer delay that leaves its Raft request processing intact.
+#[cfg(feature = "testing")]
+#[derive(Debug, Default)]
+struct HeartbeatResponseDelay {
+    milliseconds: AtomicU64,
+    received: AtomicU64,
+}
+
+#[cfg(feature = "testing")]
+impl HeartbeatResponseDelay {
+    async fn after_append(&self) {
+        let milliseconds = self.milliseconds.load(Ordering::Relaxed);
+        if milliseconds == 0 {
+            return;
+        }
+        self.received.fetch_add(1, Ordering::Relaxed);
+        nervix_primitives::time::sleep(Duration::from_millis(milliseconds)).await;
+    }
 }
 
 #[cfg(feature = "testing")]
@@ -2164,6 +2187,23 @@ impl ConsensusTestProbe {
     /// Delay every completed consensus storage sync; a zero duration disables the delay.
     pub fn set_storage_commit_delay(&self, delay: Duration) {
         self.inner.storage_fault.set_after_sync_delay(delay);
+    }
+
+    /// Delay each empty append answer after the follower has processed it.
+    pub fn set_heartbeat_response_delay(&self, delay: Duration) {
+        let milliseconds = u64::try_from(delay.as_millis())
+            .verified("the fixture's heartbeat answer delay fits milliseconds");
+        self.inner
+            .heartbeat_response_delay
+            .milliseconds
+            .store(milliseconds, Ordering::Relaxed);
+    }
+
+    pub fn delayed_heartbeat_requests(&self) -> u64 {
+        self.inner
+            .heartbeat_response_delay
+            .received
+            .load(Ordering::Relaxed)
     }
 
     pub fn append_stream_open_count(&self, target: &ClusterNodeName) -> u64 {
@@ -2233,6 +2273,10 @@ trait AppendStreamOpenRecorder: Clone + Send + Sync + 'static {
     fn record_append_stream_attempt(&self, target: &ClusterNodeName);
     fn connectivity_fault(&self) -> ConnectivityFault;
     fn lease_refusal(&self) -> LeaseRefusal;
+    #[cfg(feature = "testing")]
+    fn heartbeat_response_delay(&self) -> Arc<HeartbeatResponseDelay> {
+        Arc::default()
+    }
 }
 
 impl AppendStreamOpenRecorder for () {
@@ -2264,6 +2308,10 @@ impl AppendStreamOpenRecorder for ConsensusTestProbe {
 
     fn lease_refusal(&self) -> LeaseRefusal {
         self.inner.lease_refusal.clone()
+    }
+
+    fn heartbeat_response_delay(&self) -> Arc<HeartbeatResponseDelay> {
+        self.inner.heartbeat_response_delay.clone()
     }
 }
 
@@ -2448,6 +2496,8 @@ impl Consensus {
 
         let connectivity = append_stream_open_recorder.connectivity_fault();
         let lease_refusal = append_stream_open_recorder.lease_refusal();
+        #[cfg(feature = "testing")]
+        let heartbeat_response_delay = append_stream_open_recorder.heartbeat_response_delay();
         let network = NetworkFactory {
             local_node_id: settings.node_id.clone(),
             interconnect: settings.interconnect.clone(),
@@ -2515,6 +2565,8 @@ impl Consensus {
                 interconnect_advertise_addr: settings.interconnect_advertise_addr,
                 interconnect: settings.interconnect,
                 connectivity,
+                #[cfg(feature = "testing")]
+                heartbeat_response_delay,
                 lease_refusal,
                 raft_retention: retention,
                 membership_mutation: AsyncMutex::new(ReportedAdmissionRefusals::default()),
@@ -2582,10 +2634,10 @@ impl Consensus {
                         }
                     };
                     {
-                        let mapping_input = receiver
-                            .append_entries(request)
-                            .await
-                            .map(wire::AppendEntriesResponseRecord::from);
+                        let response = receiver.append_entries(request).await;
+                        #[cfg(feature = "testing")]
+                        receiver.inner.heartbeat_response_delay.after_append().await;
+                        let mapping_input = response.map(wire::AppendEntriesResponseRecord::from);
                         match mapping_input {
                             Ok(mapped_value) => Ok(mapped_value),
                             Err(mapping_error) => {
@@ -4854,7 +4906,7 @@ where
                     .request_with_timeout(
                         &self.target,
                         wire::HeartbeatRequest(record),
-                        replication::heartbeat_deadline(&option),
+                        replication::append_request_deadline(&option, self.append_path),
                     )
                     .await
                     .map_err(io_error);
