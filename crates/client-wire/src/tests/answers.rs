@@ -61,7 +61,8 @@ const UNCANCELLABLE: [ClientRequestKind; 2] =
 fn the_table_names_every_request_and_gives_every_outcome_to_exactly_one_of_them() {
     let requests: HashSet<ClientRequestKind> =
         OUTCOMES.iter().map(|(request, _)| *request).collect();
-    assert_eq!(requests, ClientRequestKind::iter().collect());
+    let every_request: HashSet<ClientRequestKind> = ClientRequestKind::iter().collect();
+    assert_eq!(requests, every_request);
 
     let outcomes: HashSet<ReplyBodyKind> = OUTCOMES.iter().map(|(_, outcome)| *outcome).collect();
     assert_eq!(
