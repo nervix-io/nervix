@@ -66,6 +66,15 @@ the downloaded artifact:
 | `coverage-typed-ratchet-python` | Architecture source/compiler rule runners and their qualification, the native collector, the Bolero runner and its coverage export, and the console build script |
 | `coverage-primitive-boundary` | Primitive provenance and thread-owner validation |
 
+The Python paced driver runs with the wheel installed in its own CPython 3.12 environment.
+Scenario coverage builds its Rust extension with the same LLVM flags as the Rust driver, keeps
+Cargo's `libnervix_client_python.so` beside the suite for object discovery, and carries the wheel
+with its `nervix_client` module in the scenario archive.
+The restore recipe and prepared-suite runner install that wheel and the Python coverage runtime
+before scenarios start, preserving the extension's instrumentation. The existing
+`target/paced-simulation/python.lcov` remains an ordinary Python coverage input; Rust
+execution inside the package contributes to the ordinary scenario report.
+
 The collector's real toolchain fixtures and Deloxide's real process supervision tests run in
 separate Python interpreters, so each supervisor retains ownership of its own children.
 `coverage-model-runner` appends both executions into one branch coverage file before exporting it.
@@ -73,6 +82,9 @@ separate Python interpreters, so each supervisor retains ownership of its own ch
 Only reports the artifact actually exports are inputs; running a focused coverage recipe does not
 register it in CI by itself. Focused Backup, Visual Create, client and runtime recipes export local
 ordinary reports for `coverage-patch`, using the same normalization as the workspace merge.
+`just coverage-web-console <output> <test arguments...>` measures selected native console owner
+tests, preserving each argument. It does not instrument the browser asset; public console
+scenarios execute that asset separately and measure the native server and harness they exercise.
 `just coverage-otel` appends the OTEL and related connector-admission scenarios to current-source
 ordinary profiles, with the browser build and configured ORT environment. It exports a local
 focused report, rather than a CI merge input. Start a new source generation with
@@ -80,7 +92,7 @@ focused report, rather than a CI merge input. Start a new source generation with
 The focused `coverage-scenarios` and `coverage-scenarios-append` recipes preserve each scenario
 argument, including spaces, regular-expression pipes, literal shell characters and empty values.
 Quote a name filter or input glob as one argument; pass separate options as separate arguments.
-They retain the instrumented CLI, report tool, paced driver, shared binding, formatter and ORT
+They retain the instrumented CLI, report tool, paced driver, native Python extension, formatter and ORT
 environment. The first starts a fresh measurement; the append variant retains current profiles
 with `--no-clean`. `just test-scenario-arguments` checks these boundaries through the actual recipe
 bodies with recording builders and Cargo, without compiling or starting services.
@@ -266,7 +278,15 @@ binaries after building beside the suite in directories of their own, and `test-
 the `scenarios-build` job, in one target directory, publishes its cache and packs one archive for
 each. The `tests` job restores
 [its archive](./integration-test-lifecycle.md#unit-test-archive) and runs `test-coverage-run`, which
-starts each test executable directly. The scenario suite runs in
+starts each test executable directly.
+The all-features workspace build includes the embedded JVM tests. Its preparation builds the
+Java 21 jar with its native library and the Java boundary fixtures. The unit-test archive carries
+that jar and every fixture class, including nested classes; packing refuses missing entry classes.
+The build and restored-test jobs provision Java 21. The restored runner loads those inputs and
+registers the instrumented executable's JNI methods, so their counters belong to the ordinary
+workspace report; the runner does not rebuild the jar, fixtures or Rust code.
+
+The scenario suite runs in
 [shards](./integration-test-lifecycle.md#scenario-shards): each shard restores its archive and runs
 `test-scenarios-coverage-shard`, which runs its share of the suite and exports the pair from that
 share's profiles, compiling nothing. `just coverage-report-workspace` writes the same pair from the
@@ -285,8 +305,13 @@ just coverage-merge coverage-inputs/tests coverage-inputs/coverage-scenarios-1 \
 It names one input for each shard that `SCENARIO_SHARDS` runs, so a shard whose report is missing
 fails the merge as a missing input. Native extras are a required input when the selected extra-tests
 job succeeds and a label selected a coverage-producing step; a missing download fails the merge.
+When only `extra-runners` selects coverage, those extras are Python tooling reports. The merge
+names that artifact with `--python-input coverage-inputs/coverage-native-extras`. A Rust-producing
+label instead names it as an ordinary input, including when `extra-runners` is also present, so a
+lost Rust export cannot be hidden by a surviving Python report. The full union downloads native
+extras only for a Rust-producing label; tooling-only counters already belong to its ordinary input.
 Extra jobs that collect no coverage, such as Miri, require no report. The extra-tests job publishes
-that selection once; both coverage jobs use it. Every download names one exact artifact and its destination directory, because
+both coverage selections once; the coverage jobs use them. Every download names one exact artifact and its destination directory, because
 `download-artifact` v8 extracts a single match directly into the supplied path. Workflow contract
 tests keep the scenario and Deloxide downloads aligned with their producer matrices. The merge sums
 the counters of every report that measured a file, so the shards' reports add up to the suite's.
@@ -298,6 +323,12 @@ collection below `native-coverage`. A collection of another mode describes model
 execution, so it is never read: the Shuttle, Loom, Turmoil and Deloxide primitive conformance
 collections in the native extras artifact are recorded as left out. The reports of the `shuttle`,
 `loom`, `turmoil`, `deloxide` and Bolero fuzz jobs are not inputs at all.
+
+An explicitly declared `--python-input` must contain at least one `python.lcov` report and no Rust
+workspace export or native collection. It uses the same root metadata, tracked-source mapping and
+report validation as every input. Ordinary inputs still require a Rust export or complete ordinary
+collection. Python-only inputs never waive the merged report's requirement to measure every Rust
+workspace member. The merge record names each input's declared kind.
 
 The Deloxide lane selections retain their reports, completion records and lane evidence in
 `deloxide-<selection>` artifacts. Live Bolero sanitizer campaigns publish each shard's source
@@ -330,7 +361,8 @@ others.
 
 The merge fails with a message naming what to fix when:
 
-- an input is missing, or holds neither a workspace export nor a complete ordinary collection;
+- an input is missing, or a Rust input holds neither a workspace export nor a complete ordinary collection;
+- a Python-only input holds no tooling report or contains Rust coverage;
 - an input has no root metadata;
 - none of a report's records lies below its producer's checkout root;
 - a report contributes no record of a tracked file;

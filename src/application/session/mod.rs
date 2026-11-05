@@ -64,16 +64,16 @@ use meticulous::OptionExt as _;
 use nervix_client_wire::{
     AttachDomainClockRequest, AttachTransactionRequest, CancelOutcome, CancelRequest, CancelState,
     CancellationStage, ChoiceLookupRequest, ClientFrame, ClientMessage, ClientRequest,
-    CloseEmitterRequest, CommandRequest, DetachDomainClockRequest, DomainClockAttachDisposition,
-    DomainClockAttachOutcome, DomainClockAttachRefusal, DomainClockDetachDisposition,
-    DomainClockDetachOutcome, DomainList, DomainSelection, EncodedFrame, InspectTransactionRequest,
-    InspectionOutcome, MAX_IN_FLIGHT_REQUESTS, OpenEmitterRequest, OpenIngestorRequest,
-    ReadEmitterBatchRequest, Reply, ReplyBody, ReplyDelivery, RequestCancelled, RequestId,
-    RequestRejected, RequestRejection, SelectDomainRequest, ServerFrame, SessionEndReason,
-    SessionEnding, SessionLimits, SettleEmitterBatchRequest, SubscribeDisposition,
-    SubscribeOutcome, SubscribeRequest, SubscriptionRefusal, SubscriptionType, SuggestRequest,
-    UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame, WireDecodeError,
-    WireEncodeError,
+    CloseEmitterRequest, CommandDisposition, CommandRequest, DetachDomainClockRequest,
+    DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockAttachRefusal,
+    DomainClockDetachDisposition, DomainClockDetachOutcome, DomainList, DomainSelection,
+    EncodedFrame, InspectTransactionRequest, InspectionOutcome, MAX_IN_FLIGHT_REQUESTS,
+    OpenEmitterRequest, OpenIngestorRequest, ReadEmitterBatchRequest, Reply, ReplyBody,
+    ReplyDelivery, RequestCancelled, RequestId, RequestRejected, RequestRejection,
+    SelectDomainRequest, ServerFrame, SessionEndReason, SessionEnding, SessionLimits,
+    SettleEmitterBatchRequest, SubscribeDisposition, SubscribeOutcome, SubscribeRequest,
+    SubscriptionRefusal, SubscriptionType, SuggestRequest, UnsubscribeDisposition,
+    UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame, WireDecodeError, WireEncodeError,
 };
 use nervix_execution::{AdmissionError, CpuClass, ExecutionError, MemoryClass};
 use nervix_models::{
@@ -101,6 +101,7 @@ use self::{
     producers::SessionProducers,
 };
 use super::{
+    client_traffic::{ClientTraffic, ReplyEnding},
     command_result::CommandResult,
     model_mutation::command_error,
     session_service::{SessionServiceImpl, rejected_source_response},
@@ -110,8 +111,10 @@ use super::{
     transaction::TransactionInspectionOutcome,
 };
 
-/// The transport a session arrived on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The client listener a session, or any other call a client makes, arrived on. Its `snake_case`
+/// name labels the node's client traffic series.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr, strum::EnumIter)]
+#[strum(serialize_all = "snake_case")]
 pub(in crate::application) enum SessionTransport {
     /// A native client over gRPC, served by any node.
     Grpc,
@@ -288,6 +291,10 @@ impl SessionShared {
         &self.delivery.limits
     }
 
+    fn traffic(&self) -> &ClientTraffic {
+        &self.service.inner.traffic
+    }
+
     /// Queues one control frame for the client. An error means the session ended or its
     /// transport stopped taking frames.
     async fn send_frame(&self, frame: EncodedFrame<ServerFrame>) -> Result<(), LaneClosed> {
@@ -317,9 +324,13 @@ impl SessionShared {
     /// Encodes and queues one reply, splitting it into transfer parts when it is larger than a
     /// frame. A reply that cannot be encoded is replaced by a typed rejection, never truncated.
     async fn reply(&self, request_id: RequestId, body: ReplyBody) -> QueuedReply {
+        let ending = ReplyEnding::of(&body);
         let reply = Reply { request_id, body };
         let (delivery, queued) = match self.encode_reply(reply).await {
-            Ok(delivery) => (delivery, QueuedReply::Reply),
+            Ok(delivery) => {
+                self.traffic().reply(self.transport, ending);
+                (delivery, QueuedReply::Reply)
+            }
             Err(failure) => {
                 let rejection = failure.rejection();
                 debug!(
@@ -327,6 +338,8 @@ impl SessionShared {
                     message = rejection.message,
                     "a session reply was replaced by a rejection"
                 );
+                self.traffic()
+                    .reply(self.transport, ReplyEnding::Rejected(rejection.rejection));
                 let rejected = Reply {
                     request_id,
                     body: ReplyBody::Rejected(rejection),
@@ -354,6 +367,7 @@ impl SessionShared {
                         debug!(%request_id, "the session ended during a reply transfer");
                         return QueuedReply::Nothing;
                     }
+                    self.traffic().transfer_part(self.transport);
                 }
             }
         }
@@ -600,6 +614,13 @@ impl SessionServiceImpl {
     ) where
         S: Stream<Item = InboundFrame> + Unpin + Send,
     {
+        #[cfg(feature = "testing")]
+        let acceptance_observer = self
+            .inner
+            .runtime
+            .fault_injection()
+            .session_acceptance_observer_on(self.inner.consensus.local_node_id());
+        let _served = self.inner.traffic.serve_session(transport);
         let subscriptions = SessionSubscriptions::for_user(user);
         let (selection, _) = watch::channel(None);
         let shared = Arc::new(SessionShared {
@@ -644,6 +665,24 @@ impl SessionServiceImpl {
                     // Taking a frame can wait for room to answer it, which a client that reads
                     // nothing never makes. Neither the node stopping nor the session ending waits
                     // on that client.
+                    #[cfg(feature = "testing")]
+                    let request_id = frame.request_id();
+                    let accepting = accept_frame(&shared, &ordered_tx, frame);
+                    #[cfg(feature = "testing")]
+                    let accepting = async {
+                        match &acceptance_observer {
+                            Some(observer) => {
+                                observer
+                                    .observe(
+                                        request_id,
+                                        || shared.delivery.outbound.control_has_no_room(),
+                                        accepting,
+                                    )
+                                    .await
+                            }
+                            None => accepting.await,
+                        }
+                    };
                     let accepted = nervix_primitives::select! {
                         biased;
                         _ = shared.ended() => break,
@@ -652,7 +691,7 @@ impl SessionServiceImpl {
                             node_stopping = true;
                             break;
                         }
-                        accepted = accept_frame(&shared, &ordered_tx, frame) => accepted,
+                        accepted = accepting => accepted,
                     };
                     if !accepted {
                         break;
@@ -722,6 +761,10 @@ async fn accept_frame(
         request_id,
         request,
     } = message;
+    shared.traffic().request(
+        shared.transport,
+        nervix_client_wire::ClientRequestKind::from(&request),
+    );
     let routed = match request {
         ClientRequest::Cancel(cancel) => {
             shared.cancel(request_id, cancel).await;
@@ -918,11 +961,29 @@ async fn run_ordered_lane(
         }
         let request_id = item.request_id;
         let request: &'static str = (&item.request).into();
+        let execution_reference = if tracing::enabled!(tracing::Level::DEBUG) {
+            match &item.request {
+                OrderedRequest::Command(command) => Some(command.execution_reference.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let mut answered_disposition = None;
         let started = nervix_primitives::time::Instant::now();
-        serve_ordered(&shared, item, &mut subscriptions, &mut clock_attachments).await;
+        serve_ordered(
+            &shared,
+            item,
+            &mut subscriptions,
+            &mut clock_attachments,
+            &mut answered_disposition,
+        )
+        .await;
         debug!(
             %request_id,
             request,
+            execution_reference = ?execution_reference,
+            disposition = ?answered_disposition,
             elapsed = ?started.elapsed(),
             "served an ordered session request"
         );
@@ -937,6 +998,7 @@ async fn serve_ordered(
     item: OrderedWork,
     subscriptions: &mut SessionSubscriptions,
     clock_attachments: &mut ClockAttachments,
+    answered_disposition: &mut Option<CommandDisposition>,
 ) {
     let OrderedWork {
         request_id,
@@ -945,7 +1007,8 @@ async fn serve_ordered(
     } = item;
     match request {
         OrderedRequest::Command(command) => {
-            serve_command(shared, request_id, &admission, command, subscriptions).await;
+            *answered_disposition =
+                serve_command(shared, request_id, &admission, command, subscriptions).await;
         }
         OrderedRequest::Attach(attach) => {
             if admission.admit().is_err() {
@@ -1063,8 +1126,10 @@ async fn serve_command(
     admission: &RequestAdmission,
     command: CommandRequest,
     subscriptions: &mut SessionSubscriptions,
-) {
+) -> Option<CommandDisposition> {
     let execution_reference = command.execution_reference.clone();
+    #[cfg(feature = "testing")]
+    let reply_script_request = command.clone();
     let processing = shared
         .service
         .process_command(command, subscriptions, admission);
@@ -1074,12 +1139,33 @@ async fn serve_command(
         _ = admission.cancelled_before_admission() => Err(CancelledBeforeAdmission),
     };
     let Ok(response) = processed else {
-        return;
+        return None;
     };
     let outcome = command_outcome(execution_reference, response);
-    shared
+    #[cfg(feature = "testing")]
+    let outcome = {
+        let mut outcome = outcome;
+        shared
+            .service
+            .inner
+            .runtime
+            .fault_injection()
+            .substitute_uncertain_command_reply(&reply_script_request, &mut outcome);
+        outcome
+    };
+    let disposition = if tracing::enabled!(tracing::Level::DEBUG) {
+        Some(outcome.disposition.clone())
+    } else {
+        None
+    };
+    let queued = shared
         .finish_with(request_id, ReplyBody::Command(Box::new(outcome)))
         .await;
+    if queued == QueuedReply::Reply {
+        disposition
+    } else {
+        None
+    }
 }
 
 async fn serve_subscribe(

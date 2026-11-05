@@ -50,6 +50,7 @@ mod backup_cut;
 #[cfg(test)]
 mod backup_cut_tests;
 mod client_inspection;
+mod command_reply;
 mod consensus;
 mod domain_clock;
 mod domain_resume;
@@ -59,6 +60,7 @@ mod entity_drain_tests;
 mod execution;
 mod handoff_gate_link;
 mod interest_visibility;
+mod listener_accept;
 mod live_view_gap;
 #[cfg(test)]
 mod live_view_gap_tests;
@@ -75,6 +77,7 @@ mod resource_publication_tests;
 mod resource_upload_reply;
 #[cfg(test)]
 mod resource_upload_reply_tests;
+mod resource_upload_start;
 mod restarted_voter;
 mod restore_publication;
 #[cfg(test)]
@@ -83,6 +86,7 @@ mod restore_staging;
 #[cfg(test)]
 mod restore_staging_tests;
 mod runtime_installation;
+mod session_backpressure;
 mod shutdown_handoff;
 mod standalone_transaction;
 mod subscription_opening;
@@ -93,6 +97,7 @@ mod wasm_reset_publication;
 
 pub use backup_cut::BackupCutBoundary;
 use backup_cut::{BackupCutGate, BackupCutGateKey};
+use command_reply::CommandReplyScript;
 use domain_clock::DomainClockProgressPausePoint;
 pub use domain_resume::DomainResumeBoundary;
 use entity_drain::ForcedEntityDrainTimeout;
@@ -100,6 +105,8 @@ pub(crate) use entity_drain::ObservedEntityDrain;
 use execution::NodeExecution;
 use handoff_gate_link::HandoffGateLink;
 use interest_visibility::InterestVisibilityRefusal;
+use listener_accept::ListenerAcceptFailures;
+pub(crate) use listener_accept::ListenerAcceptFaults;
 use live_view_gap::{LiveViewGap, LiveViewGapState};
 use materialized_reads::DelayedMaterializedReads;
 use model_publication::ModelPublicationRefusal;
@@ -109,11 +116,13 @@ use relay_memory::RelayMemoryFill;
 use relocation_commit::RelocationCommitRefusal;
 use resource_publication::ResourcePublicationRefusal;
 use resource_upload_reply::ResourceUploadReplyLoss;
+use resource_upload_start::ResourceUploadStartRefusal;
 use restarted_voter::{StartupObservationEnd, StartupVoterGossip};
 use restore_publication::RestorePublicationFailure;
 pub use restore_staging::RestoreStagingKind;
 use restore_staging::{RestoreStagingFailure, RestoreStagingTarget};
 use runtime_installation::RuntimeInstallationRefusals;
+use session_backpressure::ArmedSessionBackpressure;
 pub use standalone_transaction::StandaloneTransactionBoundary;
 use wasm_reset_publication::{WasmResetPublicationAuthorityLoss, WasmResetPublicationFailure};
 
@@ -165,6 +174,8 @@ pub struct FaultInjection {
 
 #[derive(Debug)]
 struct FaultInjectionState {
+    /// One bounded command-reply script per scenario domain, absent from ordinary builds.
+    command_reply_scripts: DashMap<DomainName, CommandReplyScript, RandomState>,
     emitter_faults: DashMap<String, EmitterFaultMode, RandomState>,
     failed_ingestors: DashMap<String, (), RandomState>,
     unavailable_emitter_clients: DashMap<String, (), RandomState>,
@@ -240,6 +251,10 @@ struct FaultInjectionState {
     /// Losses of the reply to a node's next upload call that installs a version, each keeping
     /// whether an installing call met it.
     lost_resource_upload_replies: DashMap<ClusterNodeName, ResourceUploadReplyLoss, RandomState>,
+    /// Refusals of a node's next resource upload start, each keeping whether an upload start met
+    /// it.
+    refused_resource_upload_starts:
+        DashMap<ClusterNodeName, ResourceUploadStartRefusal, RandomState>,
     /// Failures of every staging of one kind of a restored domain's checkpoints until cleared,
     /// each keeping whether a staging met it.
     failed_restore_checkpoint_stagings:
@@ -343,6 +358,11 @@ struct FaultInjectionState {
     /// source consumed the fault before checking its established connections. The armed request
     /// remains available until acknowledged; another request cannot overwrite it before then.
     syslog_listener_faults: watch::Sender<Option<SyslogListenerFault>>,
+    /// The public listeners, by bound address, whose next accept fails, and those whose armed
+    /// failure happened.
+    listener_accept_failures: watch::Sender<ListenerAcceptFailures>,
+    /// One scoped observation, borrowed only when a native session starts.
+    session_backpressure: watch::Sender<Option<ArmedSessionBackpressure>>,
     branch_instance_expiration_scan_interval: RwLock<Option<Duration>>,
     domain_drain_timeout: RwLock<Option<Duration>>,
     entity_gate_deadline: RwLock<Option<Duration>>,
@@ -531,9 +551,12 @@ impl Default for FaultInjection {
     fn default() -> Self {
         let (leadership_transfers, _) = broadcast::channel(16);
         let (syslog_listener_faults, _) = watch::channel(None);
+        let (listener_accept_failures, _) = watch::channel(ListenerAcceptFailures::default());
+        let (session_backpressure, _) = watch::channel(None);
         let (startup_observation_end, _) = watch::channel(StartupObservationEnd::Unarmed);
         Self {
             inner: Arc::new(FaultInjectionState {
+                command_reply_scripts: DashMap::default(),
                 emitter_faults: DashMap::default(),
                 failed_ingestors: DashMap::default(),
                 unavailable_emitter_clients: DashMap::default(),
@@ -562,6 +585,7 @@ impl Default for FaultInjection {
                 failed_resource_installations: DashMap::default(),
                 refused_resource_publications: DashMap::default(),
                 lost_resource_upload_replies: DashMap::default(),
+                refused_resource_upload_starts: DashMap::default(),
                 failed_restore_checkpoint_stagings: DashMap::default(),
                 failed_restore_state_publications: DashMap::default(),
                 native_metadata_interruptions: DashMap::default(),
@@ -604,6 +628,8 @@ impl Default for FaultInjection {
                 state_replica_installation_failing: AtomicBool::new(false),
                 syslog_ingestor_bind_ips: DashMap::default(),
                 syslog_listener_faults,
+                listener_accept_failures,
+                session_backpressure,
                 branch_instance_expiration_scan_interval: RwLock::new(None),
                 domain_drain_timeout: RwLock::new(None),
                 entity_gate_deadline: RwLock::new(None),

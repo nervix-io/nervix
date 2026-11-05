@@ -501,7 +501,10 @@ Generators retain the domain acknowledgement tracker. Ingest executions, groups 
 bindings retain the same domain/ingestor tracker pair. Task and branch metric handles retain the
 exact placement's dirty mark. Client batch outcome counters, quiesced payload counters/gauges and
 subscription drop counters retain their Prometheus children, including every declared outcome
-label combination, so recording resolves no label set.
+label combination, so recording resolves no label set. Persistent-command refusal counters resolve
+their four reason children at node metric registration and increment those retained handles when
+the application refuses admission. Completion, background recovery and follower consensus
+application do not record those events.
 
 Subscription generations also retain the node's executor and pass it directly to predicate
 evaluation. Executor admission continues to own worker and memory bounds for extension calls.
@@ -1808,6 +1811,13 @@ describe test selection, not a product wait deadline. The executor-saturation lo
 testing fault control. The [concurrent map inventory](https://github.com/nervix-io/nervix/blob/main/tests/concurrent-map-inventory-ledger.md)
 records the runtime ownership review; source contracts and expectations are the executable policy.
 
+The console's uncertain-command reply fixture uses a testing-only domain/query map after command
+execution. It substitutes three replies and retains at most four execution references, releases
+each map guard before queuing the reply, and drops the map with the scenario's injector. Its
+DashMap accesses and browser timers are untracked by Deloxide. The browser retry queue has one
+task owner; deterministic owner tests and public one- and three-node scenarios check its ordering,
+backoff and retained session attachments.
+
 ### Complete analysis and qualification
 
 The isolated tooling workspace uses `nightly-2026-09-17`; product builds use stable. The twelve
@@ -2187,6 +2197,10 @@ column builder, TLS rebinding of every HTTPS listener, batched inference over in
 a restarted voter's ownership, and graceful shutdown with a slow cordon release and diagnostic
 server processes that stop gracefully, and its
 `stress-paced-simulation` invocation of the paced-driver scenarios with the stressed Rust driver.
+The Python companion uses the ordinary `nervix_client` package installed with the prerequisites.
+The runner selects that prepared interpreter explicitly, independently of its diagnostic Cargo
+target directory. The detector observes the diagnostic nodes those scenarios drive; it does not
+track synchronization inside the Python host or its ordinary client package.
 Endpoint ACK lifecycle examples carry `@deloxide_stress_endpoint_ack` and run in the separate
 `stress-endpoint-acknowledgement` invocation. Its serial process has a 900-second bound, including
 the existing 360-second teardown reserve. The baseline lifecycle process has a 3,960-second bound,
@@ -2593,6 +2607,14 @@ the tracked lock activity that was recorded; the complete scenario verdict also 
 delivery and recovery behavior that the external runner observes.
 
 ## Deterministic Concurrency Verification
+
+The consensus failed-submission fixture retains one async-mutex-owned state: idle, armed for a
+follower, or delivered with the complete request boundary. Each append stream retains its scoped
+control, so submission reaches no concurrent registry. Only a nonempty request to the armed
+follower consumes it, and later requests proceed. The unit control check and three-node public
+regression qualify that fault and recovery; they make no memory-ordering or lock-free notification
+claim. Deloxide does not observe the async mutex. The fixture adds no tracked acquisition and is
+inert outside test builds.
 
 The relay interaction's ordinary output-wake test stages a collected batch through the production
 admission path and awaits its domain-owned collection deadline before making the output wake

@@ -29,6 +29,11 @@ Point it at another cluster with `--server`, which takes a full URL. An `https:/
 nervix-cli --server https://nervix.example.com:47390 --tls required --tls-ca-cert ./ca.pem
 ```
 
+The server presents the certificate configured by its `--grpc-tls-cert` and `--grpc-tls-key`
+options in `--grpc-mode https`. Provision the certificate for the hostname in `--server`, and give
+the CLI its issuing CA. [Native session TLS](installation-cargo.md#native-session-tls) shows the
+server options and their environment variables.
+
 ## Options
 
 | Option | Environment variable | Default | Meaning |
@@ -43,6 +48,8 @@ nervix-cli --server https://nervix.example.com:47390 --tls required --tls-ca-cer
 | `--username <NAME>` | `NERVIX_USERNAME` | `default` | registry user |
 | `--password <PASSWORD>` | `NERVIX_PASSWORD` | | prompted interactively when unset |
 | `--command <Plexus>` | | | run statements once and exit |
+| `--execution-reference <REFERENCE>` | | | with `--command` or a node administration subcommand, send the command under the execution reference the CLI printed for an earlier uncertain run of it, which recovers that run's outcome |
+| `--upload-identity <IDENTITY>` | | | with a `--command` that is one `UPLOAD RESOURCE`, send it under the upload identity the CLI printed for an earlier uncertain run of it, which recovers that run's outcome |
 | `--backup-wait-timeout <DURATION>` | | `10m` | overall wait of one `BACKUP` command across its cuts, redirects and reconnects, from one millisecond through 24 hours; applies to `backup`, `--command` and the REPL |
 
 There is no general CLI configuration file and no `--version` flag. `--server`, `--domain`, and the
@@ -69,6 +76,91 @@ one, use [`nervix-plexus-format`](client-tools-plexus-format.md):
 ```bash
 nervix-cli --domain quickstart --command "$(cat pipeline.plexus)"
 ```
+
+## Exit Status
+
+The CLI ends with one of these statuses. It decides the status from the typed outcome it received,
+never from the text it printed:
+
+| Status | Meaning |
+| --- | --- |
+| `0` | Everything completed: every statement of `--command`, the subcommand, or the REPL the operator left with `exit`, `quit`, `Ctrl-D` or `Ctrl-C` at the prompt. |
+| `1` | It failed: the server reported that a statement failed, a subscription or an upload was refused, a statement was refused before it was sent, or the CLI could not connect, authenticate, or obtain an answer to a request that changed nothing. |
+| `2` | The arguments were invalid. |
+| `3` | An outcome did not arrive: a command or an upload may have taken effect and its outcome is not known yet, or a completed `BACKUP` did not download its archive. The CLI printed the execution reference or upload identity that recovers it; see [Uncertain Outcomes](#uncertain-outcomes). |
+| `130` | Ctrl-C cancelled the command before the server admitted it, so it changed nothing; see [Interrupting A Statement](#interrupting-a-statement). |
+
+A command of several statements takes the status of its worst statement: an unknown outcome over a
+failure, and a failure over a completion. The REPL reports each statement's outcome as it ends and
+keeps running whatever the outcome, so its own status only says how the session ended.
+
+## Interrupting A Statement
+
+Ctrl-C while a statement runs interrupts that statement, in the REPL, in `--command`, and in the
+node administration subcommands. For a command the server runs, the CLI asks the server to cancel
+it and reports what the server decided:
+
+- When the server had not admitted the command yet, it never will, and nothing happened:
+
+  ```text
+  cancelled: the command was not admitted, so it changed nothing
+  ```
+
+  `--command` then exits with status `130`.
+- When the server had already admitted it, the command keeps running and only the wait for it ends.
+  Its outcome is not known yet, as [Uncertain Outcomes](#uncertain-outcomes) describes, and
+  `--command` exits with status `3`.
+- When the command finished before the cancellation took hold, the CLI prints its outcome as usual.
+
+A second Ctrl-C stops waiting for the server's answer, which leaves the outcome not known. `UPLOAD
+RESOURCE` and `RESTORE` stream their archive on a call of their own, which a cancellation cannot
+reach, so Ctrl-C stops sending it; the server may already have received the whole archive, so the
+outcome is not known. A statement the client serves itself, such as `LIST DOMAINS` or `CREATE
+SUBSCRIPTION`, stops waiting at once and is reported as interrupted with status `3`, because it may
+still take effect, as a subscription that is opening does. Ctrl-C at the prompt, with no statement
+running, leaves the REPL.
+
+## Uncertain Outcomes
+
+A command's outcome is not known yet when the server reports that it admitted the command without
+an outcome, when the client's retry deadline passes before the answer arrives, when the session that
+carried it was lost and no new one could recover the answer, or when Ctrl-C ended the wait for an
+admitted command. An admitted command keeps running, so its effect may still happen. The CLI prints
+the cause and the execution reference that recovers it:
+
+```text
+error: command outcome for execution '01a1f3c2-7e4b-7a10-9c3d-5b2e8f6a1d00' is uncertain: the server cancelled the command request (AfterAdmission)
+outcome: not known yet; the command may have been admitted. Run it again with --execution-reference 01a1f3c2-7e4b-7a10-9c3d-5b2e8f6a1d00 to recover its outcome.
+```
+
+Sending a command again under the same execution reference never applies it twice: the server
+returns the outcome it recorded, or the outcome of the admitted command once it finishes. With
+`--command`, pass the reference back:
+
+```bash
+nervix-cli --domain quickstart --command "CREATE RESOURCE orders_model;" \
+  --execution-reference 01a1f3c2-7e4b-7a10-9c3d-5b2e8f6a1d00
+```
+
+In the REPL, running the same statement again in the same domain repeats it under its reference:
+
+```text
+nervix[quickstart]> CREATE RESOURCE orders_model;
+^C
+error: command outcome for execution '01a1f3c2-7e4b-7a10-9c3d-5b2e8f6a1d00' is uncertain: the server cancelled the command request (AfterAdmission)
+outcome: not known yet; the command may have been admitted. Run the same statement again to recover its outcome under execution reference 01a1f3c2-7e4b-7a10-9c3d-5b2e8f6a1d00.
+nervix[quickstart]> CREATE RESOURCE orders_model;
+repeating the uncertain statement under execution reference 01a1f3c2-7e4b-7a10-9c3d-5b2e8f6a1d00
+created resource 'orders_model'
+```
+
+The REPL keeps only the last statement whose outcome was not known, and repeats it when the next
+statement with the same text runs in the same domain; once that statement's outcome is known, the
+next run of it is a new command. A reference identifies one command: sending it with other text is
+refused as an execution reference conflict, and a reference past the server's retry validity is
+refused as expired, after which its outcome can no longer be recovered. An upload is recovered by
+its upload identity instead, as [Session And Transaction Statements](#session-and-transaction-statements)
+describes.
 
 ## The Interactive REPL
 
@@ -213,7 +305,10 @@ marks the gap; the notices after it keep printing.
 
 ### Leaving
 
-`exit`, `quit`, `Ctrl-D`, or `Ctrl-C`.
+`exit`, `quit`, `Ctrl-D`, or `Ctrl-C` at the prompt. Ctrl-C while a statement runs interrupts that
+statement instead, as [Interrupting A Statement](#interrupting-a-statement) describes. A statement
+that fails, is refused or leaves its outcome not known never ends the REPL: it prints the outcome,
+or the whole chain of why the request failed, and draws the next prompt.
 
 ## Session And Transaction Statements
 
@@ -279,11 +374,33 @@ renders live progress, and finishes after every current live node incarnation ha
 installed the assigned version:
 
 ```text
-upload resource 'order_model' finished: 4.2 MiB sent
+upload resource 'order_model' finished: 4.2 MiB sent, installed on every live node
 uploaded resource version 1
 ```
 
 See [Resources](resources.md#lifecycle) for what a resource version contains.
+
+The CLI gives each upload one upload identity, which every call it opens for that upload carries.
+When an upload's outcome is not known, because its call failed, passed its deadline or was
+interrupted after the server may have received the whole archive, the CLI prints the identity that
+recovers it:
+
+```text
+upload outcome: not known yet; the server may have installed it. Run it again with --upload-identity 01a1f3c4-0b6e-7c21-8d4a-2f9e6c3b7a10 to recover its outcome.
+```
+
+Sending the same directory again under the same identity installs nothing twice: it joins the
+installation that is still running, or reports the version the earlier call installed. In the REPL,
+running the same statement again in the same domain repeats it under its identity; with
+`--command`, pass the identity back with `--upload-identity`. The directory must still hold the
+same files, because the identity is bound to the archive its first complete call sent. `UPLOAD
+RESOURCE` is refused while a transaction is open, because the version it would install would not
+belong to the transaction, and `REVERT` could not take it back:
+
+```text
+upload resource 'order_model' failed after sending 0 B
+error: client-local commands are not allowed while a transaction is active
+```
 
 Use `--command` for an atomic resource rebinding just like any other server statement:
 
@@ -337,7 +454,10 @@ retains it.
 ## Restoring
 
 `RESTORE` in the REPL or through `--command` streams the archive the statement names from this
-machine to the leader, and prints the restore's report when it ends. The `restore` subcommand does
+machine to the leader, and prints the restore's report when it ends; `--command` exits with the
+status of that outcome. A restore whose outcome is not known prints its execution reference, and
+sending it again under that reference, by running the statement again in the REPL or with
+`--execution-reference`, resumes it rather than repeating it. The `restore` subcommand does
 the same with arguments instead of Plexus, shows how much of the archive was sent while it streams,
 and exits with a nonzero status whenever the restore did not complete:
 
@@ -386,7 +506,9 @@ nervix-cli --domain quickstart subscribe sampled orders \
 | `--where <expression>` | Plexus predicate over delivered records, read exactly as the `WHERE` clause of a typed `CREATE SUBSCRIPTION` and validated locally before the subscription opens |
 
 `--dropping` and `--blocking` are mutually exclusive. Subscription semantics, sampling, and
-backpressure are covered in [Sessions](sessions.md).
+backpressure are covered in [Sessions](sessions.md). A subscription the server refuses to open,
+such as one whose relay does not exist, prints the refusal and its diagnostics and exits with
+status `1`; Ctrl-C ends a subscription that opened with status `0`.
 
 The subcommand prints server notices beside the rows, and keeps printing both across reconnects:
 the client opens the subscription again on its next session, reports the gap as an interruption
@@ -482,6 +604,15 @@ Each of these submits one statement and exits:
 Drain and replication behaviour is described in
 [Replication And Drain Behavior](metrics-and-observability.md#replication-and-drain-behavior).
 
+Each subcommand exits with the status of its statement's outcome, as [Exit Status](#exit-status)
+describes, and Ctrl-C interrupts it as it interrupts `--command`. One whose outcome is not known
+prints its execution reference; run the same subcommand again with that reference, given before the
+subcommand, to recover it:
+
+```bash
+nervix-cli --execution-reference 01a1f3c2-7e4b-7a10-9c3d-5b2e8f6a1d00 drain-node node-2
+```
+
 `drain-node` cordons the target before moving work. It visits domains and their hard placement
 groups or independent runtime nodes in canonical order, drains one unit at a time, and leaves the
 node cordoned. A successful result starts with the aggregate and effective quiesce level, followed
@@ -522,7 +653,8 @@ retry deadline. `BACKUP` uses the global `--backup-wait-timeout` instead, ten mi
 for the entire command across all domain cuts and reconnections. This applies to Plexus in
 `--command` and the REPL as well as the `backup` subcommand. Its per-domain `TIMEOUT` does not
 determine that total wait. A statement the leader never answered in its wait is reported with its execution
-reference as not known yet. A redirect that reaches the terminal as a statement's own result is
+reference as not known yet, and [Uncertain Outcomes](#uncertain-outcomes) describes how to recover
+it. A redirect that reaches the terminal as a statement's own result is
 printed as:
 
 ```text

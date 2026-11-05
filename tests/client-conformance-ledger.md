@@ -22,22 +22,21 @@ lifetimes, restoration and runnable paced workflows. This ledger owns the qualif
 | C (C11) | Shared Rust binding | Native gRPC | `tests/client_conformance/c/probe.c` |
 | C++ (C++17) | Shared Rust binding, owned through `std::unique_ptr` | Native gRPC | `tests/client_conformance/cpp/probe.cpp` |
 | CPython 3.12+ | Shared Rust binding through the Python package `nervix_client` on pyo3, `crates/client-python` | Native gRPC | `tests/client_conformance/python/probe.py` |
-| Java 22+ | Shared Rust binding through the Foreign Function and Memory API | Native gRPC | `tests/client_conformance/java/Probe.java` |
+| Java 21+ | Shared Rust host runtime through the JNI library, `crates/client-jvm` | Native gRPC | `tests/client_conformance/java/Probe.java` |
 | Ruby 3.3+ | Shared Rust binding through Fiddle | Native gRPC | `tests/client_conformance/ruby/probe.rb` |
 | Go 1.25+ | Independent native client, `flatc --go` and `google.golang.org/grpc` | Native gRPC | `tests/client_conformance/go/` |
 | Node.js 24 | Independent native client, `flatc --ts` and the built-in `WebSocket` | Binary WebSocket | `tests/client_conformance/node/probe.ts` |
 | Bun 1.4 | The same TypeScript client, unchanged | Binary WebSocket | `tests/client_conformance/node/probe.ts` |
 
-The shared Rust binding is the host session runtime, `crates/client-host`, which C, C++, Java and
+The shared Rust binding is the host session runtime, `crates/client-host`, which C, C++ and
 Ruby hosts reach through the C ABI of `crates/client-ffi`, whose contract is
 `crates/client-ffi/include/nervix_client.h`, and CPython hosts through the Python package of
-`crates/client-python`. Every binding host drives the Rust client's own state machine, so leader
+`crates/client-python` and JVM hosts through the JNI jar of `crates/client-jvm`. Every binding host drives the Rust client's own state machine, so leader
 retry, request correlation, reconnection, execution identity and subscription restoration are the
 ones `nervix-client-core` tests, and no host reinterprets an uncertain outcome.
 The Go and TypeScript clients implement the protocol themselves: they correlate replies by request
 identity, follow a leader redirect with the same execution reference, and fail rather than report
-success when an outcome is unknown. Other JVM languages reach the binding through the same Foreign
-Function and Memory API as Java. Kotlin and Swift have no live probes in this inventory.
+success when an outcome is unknown. Other JVM languages reach the binding through the same Java classes and JNI library as Java. Kotlin and Swift have no live probes in this inventory.
 
 ## Build and run
 
@@ -53,7 +52,7 @@ pull request labeled `client-conformance`.
 | C | `cc -std=c11 -Wall -Wextra -Werror -pthread -I crates/client-ffi/include tests/client_conformance/c/probe.c -L target/debug -lnervix_client_ffi -Wl,-rpath,target/debug -o target/client-conformance/c-probe` | `target/client-conformance/c-probe` |
 | C++ | `c++ -std=c++17 -Wall -Wextra -Werror -pthread -I crates/client-ffi/include tests/client_conformance/cpp/probe.cpp -L target/debug -lnervix_client_ffi -Wl,-rpath,target/debug -o target/client-conformance/cpp-probe` | `target/client-conformance/cpp-probe` |
 | Python | `just build-client-python`: `maturin build` of `crates/client-python` into an abi3 wheel under `target/client-conformance/wheels`, installed with `pyarrow` into the CPython 3.12 environment `target/client-conformance/python` | `target/client-conformance/python/bin/python tests/client_conformance/python/probe.py` |
-| Java | None; the launcher compiles the source file | `java --enable-native-access=ALL-UNNAMED tests/client_conformance/java/Probe.java` |
+| Java | `just build-client-jvm`: Java 21 classes, JNI library bundled into `target/client-conformance/java/nervix-client.jar`, and compiled probe | `java -Xcheck:jni -cp target/client-conformance/java/nervix-client.jar:target/client-conformance/java/probe Probe` |
 | Ruby | None | `ruby tests/client_conformance/ruby/probe.rb` |
 | Go | `flatc --go` into a copy of `tests/client_conformance/go`, then `go build` | `target/client-conformance/go-probe`, or `go-probe corpus <dir>` |
 | Node.js | `flatc --ts`, `npm ci`, then `esbuild probe.ts --bundle --platform=node --format=esm` | `node target/client-conformance/node/probe.mjs`, or with `corpus <dir>` |
@@ -176,7 +175,7 @@ Beyond the shared report, each kind of probe checks what only it can reach:
 | Binding hosts | Rows survive on a retained reference after the first is released, and read identically after collections, allocation churn, and release on another thread. Every column is copied in one call, and every string and bytes value borrowed from the frame equals its copy. A wait cancelled from another thread reports `NX_ERROR_CANCELLED`, an expired deadline `NX_ERROR_DEADLINE`, and a cancelled command keeps its execution reference. A clock wait of a session that follows no clock ends the same two ways, and the clock the attach reported and the first tick event read identically on a retained reference after the first is released on another thread. |
 | Binding hosts, producers and consumers | Every buffer a host passes a batch builder is overwritten as soon as the call returns, and the rows the consumer reads are still the ones the host built. The stream a host passes `nx_producer_submit_ipc` is overwritten or released as soon as the call returns, and the server still refuses it for its schema rather than as malformed. A delivery's batch borrows the stream the delivery carried. A delivery and its batch retained before the first reference is released on another thread read the same stream and rows, and the retained delivery settles the attempt. A submission's pending list names the one waiting submission, and a wait for its outcome ends by its deadline while its output is unacknowledged. |
 | Python | The frame is a `memoryview` whose buffer keeps the event alive; it stays readable after every other reference is dropped and collected. |
-| Java | References retained into automatic arenas are released by the collector while other references to the same event are read. A view of a released event throws instead of reading freed memory. |
+| Java | Cleaner releases unreachable handles. A read-only direct frame buffer retains its native event, including through slice/duplicate chains after explicit event close. Shared handle leases permit cross-thread cancellation and release. |
 | Ruby | References nothing reaches are released by the collector's free function while retained references are read. |
 | Go, TypeScript | A request that omits the required subscription type is rejected rather than defaulted, and cancelling an identity that is not in flight reports `NotInFlight`. The TypeScript client reads every 64-bit value as a `BigInt`. |
 
@@ -223,18 +222,18 @@ the independent interoperation with Rust in both encoding directions.
 
 [Client I/O 05](https://app.clickup.com/t/86bc8bj8d) added
 `examples/paced-simulation/python/paced_simulation.py`, a runnable application rather than a probe.
-It reaches the binding's C ABI through `ctypes`, with nothing but the standard library: it
-follows the domain clock and projects every wait and admission check through
-`nx_domain_clock_*`, builds its batches with `nx_batch_builder_*`, reads deliveries with
-`nx_batch_*`, and runs its producer, consumers, clock and inspection loops on one session from
-several threads. `paced_simulation.feature` runs it with `just test-scenarios` beside the Rust
-driver, on one and three nodes, against the published example graph; `just tests-deps` builds the
-binding it loads.
+It uses the native `nervix_client` package over the Rust client. Its `DomainClock` projects every
+wait and admission check, `BatchBuilder` constructs the input columns, and typed batches expose
+the delivery columns. Producer, consumer, clock and inspection loops share one session across
+Python threads; blocking calls release the GIL and Python owns each object's lifetime.
+`paced_simulation.feature` runs it with `just test-scenarios` beside the Rust driver, on one and
+three nodes, against the published example graph. `just tests-deps` builds and installs the wheel
+into the interpreter the scenario harness starts.
 The contract-change outline alters both emitters and the ingestor within one START generation and
 checks reopening, completed outcomes, and each ledger reading's exact effect. Separate one- and
 three-node cases check refusal after endpoint removal, schema change, and an unusable consumer
-credit request. Outcome threads retain the Python producer handle and its credit independently
-of the replacement, so neither a late outcome nor handle cleanup affects the replacement.
+credit request. Outcome threads retain the Python producer object and its credit independently
+of the replacement, so neither a late outcome nor object collection affects the replacement.
 The credit-wait outline changes the ingestor while a tick waits for the first batch's outcome,
 checks that its refusal leaves that reading unapplied, and explicitly replays it exactly once.
 A delayed consumer refusal after the last submitted tick also exits promptly instead of waiting

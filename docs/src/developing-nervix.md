@@ -41,6 +41,18 @@ Install:
   (`python3-dev` on Debian and Ubuntu, or any CPython that `uv python install` provides), which
   the tests of the Python package, `crates/client-python`, embed
 
+The JVM library requires a JDK 21 or later (`openjdk-21-jdk-headless` on Debian and Ubuntu).
+`just build-client-jvm` compiles the API with `javac --release 21` and packages it with the current
+target's JNI library into `target/client-conformance/java/nervix-client.jar`; all generated classes,
+probe classes and native files stay under `target`. `just test-client-jvm-api` exercises bulk columns,
+handle cleanup and cancellation with `-Xcheck:jni`. `just test-client-jvm` also embeds the JVM for
+the JNI failure and representation tests. The all-features workspace recipes `just test` and
+`just test-coverage` enable `jvm-tests` and prepare the same fixtures, so they also require JDK 21.
+The coverage build packages the jar and fixtures for its restored unit runner. Client conformance
+CI and the workspace build/test jobs provision Java 21.
+`NERVIX_CLIENT_JVM_TEST_ARTIFACTS` points embedded tests at the prepared Java artifacts; just exports
+the configured build root's path so instrumented Rust builds use the same jar and fixtures.
+
 The Python package builds with maturin, which `just build-client-python` runs as
 `uvx --from maturin==1.16.0 maturin`, into an abi3 wheel for CPython 3.12 and later under
 `target/client-conformance/wheels`. The recipe installs the wheel and `pyarrow`, the probe's test
@@ -319,6 +331,9 @@ every CPU, and in Check 41126961308, which compiled the server cold, one recipe 
 enough Clippy compilations to pass the runner's 32 GB and one was killed. The typed ratchet's
 admission queue admits its server analyses as if nothing else ran: beside the lints, the kernel's
 out-of-memory killer ended the ratchet's Shuttle analysis of the server in Check 41066649586.
+`just test-ratchet-units` fails when the shards stop being every check or the gate stops running
+after the second shard's lints, as [the debt ratchet's CI contract](architecture-enforcement.md)
+describes.
 
 Each package and configuration is a dependency of one shared Clippy recipe, and the configurations
 run in lanes. A lane holds the configurations that can reuse one another's build artifacts: one
@@ -396,7 +411,7 @@ just test-connectors <filter>
 Each CI job's `runs-on` label picks one of three kinds of machine.
 
 GitHub's own hosted runners, which are free for a public repository, run the jobs that coordinate a
-run or need little of a machine: the test selection, the unit tests, the PR title check, the image metadata and
+run or need little of a machine: the test selection, the PR title check, the image metadata and
 manifest, the chaos plans and verdicts, the Bolero gate and the combination of its shards, the
 benchmark comment, the coverage merges, the book and the deployment checks. They also run the chaos
 shards, on the workers the suites were qualified on. `ubuntu-24.04` has 4 CPUs, 16 GB of memory and
@@ -448,17 +463,19 @@ took 49 of its job's 60 minutes.
 The scenario shards are timing sensitive, and they run on Blacksmith's
 `blacksmith-8vcpu-ubuntu-2404`, with 8 CPUs, 32 GB and 160 GB of disk. On `boat-xlarge` a shard
 lost on average a tenth of its CPU to its host and up to 58% at peaks, and its failures followed
-that loss. The unit tests run on GitHub's hosted `ubuntu-24.04`, whose 150 GB disk had about
-84 GiB free, room for their 5.1 GiB archive and the 32 GiB it restores: on Boat, on 3 November 2026,
-downloading the archive took 18 minutes and restoring it another 10, so the job reached its
-30-minute limit before any test ran. `.github/actionlint.yaml` declares the Blacksmith labels as
-well.
+that loss. The unit tests run on `blacksmith-4vcpu-ubuntu-2404`, with 4 CPUs, 16 GB RAM and
+[80 GB advertised storage](https://docs.blacksmith.sh/blacksmith-runners/overview). The job records
+total, used and available bytes for its checkout and temporary directory before downloading the
+compressed archive, which shares storage with the restored tests. Runner allocation and image
+contents determine the available space; the advertised tier alone does not establish that the
+archive fits. The archive's path checks, test workload and 30-minute job limit remain in force.
+`.github/actionlint.yaml` declares the Blacksmith labels as well.
 
 An archive restores only at the checkout path it was built in, and it checks that path before it
 restores any file. The scenario build and the scenario shards run on Blacksmith, whose runners
 check a repository out at the same path, so each shard restores and runs from its own checkout.
-GitHub's hosted runner checks out at another path, so the build publishes its path, and the `tests`
-job bind-mounts its checkout there, and restores and runs from that path.
+The build publishes its path, and the `tests` job bind-mounts its checkout there, and restores and
+runs from that physical path.
 
 A kache-backed job uses the cache bucket in its runner's region: the EU bucket on Boat's European
 machines, and the US bucket on GitHub's hosted runners and on Blacksmith's US runners.

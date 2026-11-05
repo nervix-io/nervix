@@ -25,6 +25,7 @@
 )]
 
 mod backup;
+mod cancellation;
 mod client;
 mod connection;
 mod consumer;

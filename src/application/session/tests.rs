@@ -3,7 +3,8 @@
 //! Test harness outside the product layer order.
 //! - **Owns.** Assertions that a reply larger than a frame arrives whole as transfer parts, that a
 //!   reply larger than the transfer limit is refused whole, that a cancellation of a request that
-//!   is not in flight says so, that registration refuses a duplicate or excess request rather
+//!   is not in flight says so, that the node's client traffic series count what each of those
+//!   sessions served, that registration refuses a duplicate or excess request rather
 //!   than queueing it while a submitted batch stays outside the in-flight limit, that a subscription statement the parser rejects is refused with the
 //!   stage and the diagnostic located in that statement, and that a domain clock attachment
 //!   delivers its changes between its replies and ends when its domain leaves the node. An attach
@@ -19,6 +20,7 @@ use std::{
 
 use arch_into::ArchInto as _;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_approx_into::ApproxInto as _;
 use nervix_client_wire::{
     AttachDomainClockRequest, CancelRequest, ClientFrame, ClientMessage, ClientRequest,
     CommandDisposition as WireCommandDisposition, CommandRequest, DetachDomainClockRequest,
@@ -180,6 +182,24 @@ impl SessionUnderTest {
     }
 }
 
+/// The value the node's metrics export for exactly `series`, a family name with its labels in
+/// exposition order.
+fn exported(service: &SessionServiceImpl, series: &str) -> f64 {
+    let text = service.inner.runtime.metrics().prometheus_text();
+    for line in text.lines() {
+        let Some(value) = line.strip_prefix(series) else {
+            continue;
+        };
+        let Some(value) = value.strip_prefix(' ') else {
+            continue;
+        };
+        return value
+            .parse()
+            .assured("the Prometheus text format prints a sample's value as a number");
+    }
+    panic!("the node exports no {series}:\n{text}");
+}
+
 /// A transaction with two queued schemas, then a JSON description of it as request 4.
 fn describe_two_operation_transaction(session: &SessionUnderTest) {
     session.command(1, "BEGIN;", None);
@@ -289,6 +309,15 @@ async fn a_reply_larger_than_a_frame_arrives_whole_in_transfer_parts() {
         panic!("DESCRIBE TRANSACTION is answered with a command outcome, found {body:?}");
     };
     assert!(frames > 1, "a reply above one frame travels in parts");
+    let parts: f64 = frames.approx_into();
+    assert_eq!(
+        exported(
+            &service,
+            "nervix_session_transfer_parts_total{transport=\"grpc\"}"
+        ),
+        parts,
+        "every part of the reply is counted"
+    );
     let inspection = outcome
         .inspection
         .verified("a description carries its typed inspection");
@@ -321,6 +350,22 @@ async fn a_reply_larger_than_the_transfer_limit_is_refused_whole() {
     };
     assert_eq!(frames, 1);
     assert_eq!(rejected.rejection, RequestRejection::ReplyTooLarge);
+    assert_eq!(
+        exported(
+            &service,
+            "nervix_session_rejections_total{rejection=\"reply_too_large\",transport=\"grpc\"}"
+        ),
+        1.0,
+        "the rejection that replaced the reply is counted"
+    );
+    assert_eq!(
+        exported(
+            &service,
+            "nervix_session_transfer_parts_total{transport=\"grpc\"}"
+        ),
+        0.0,
+        "a refused reply sends no transfer part"
+    );
 
     session.close().await;
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");
@@ -351,8 +396,35 @@ async fn cancelling_a_request_that_is_not_in_flight_says_so() {
     };
     assert_eq!(outcome.target, request_id(1));
     assert_eq!(outcome.state, nervix_client_wire::CancelState::NotInFlight);
+    for (series, value) in [
+        ("nervix_sessions{transport=\"grpc\"}", 1.0),
+        ("nervix_sessions_opened_total{transport=\"grpc\"}", 1.0),
+        (
+            "nervix_session_requests_total{request=\"command\",transport=\"grpc\"}",
+            1.0,
+        ),
+        (
+            "nervix_session_requests_total{request=\"cancel\",transport=\"grpc\"}",
+            1.0,
+        ),
+        (
+            "nervix_session_cancellations_total{stage=\"before_admission\",transport=\"grpc\"}",
+            0.0,
+        ),
+        (
+            "nervix_session_cancellations_total{stage=\"after_admission\",transport=\"grpc\"}",
+            0.0,
+        ),
+    ] {
+        assert_eq!(exported(&service, series), value, "{series}");
+    }
 
     session.close().await;
+    assert_eq!(
+        exported(&service, "nervix_sessions{transport=\"grpc\"}"),
+        0.0,
+        "a session leaves the open sessions once it ends"
+    );
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");
 }
 

@@ -241,6 +241,10 @@ impl IngestorEntityBody for RedisPubSubIngestor {
         IngestorReference::Client(&self.client)
     }
 
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
+    }
+
     fn quiesce(&self) -> &IngestQuiesceMode {
         &self.quiesce
     }
@@ -269,6 +273,47 @@ impl RedisPubSubIngestMode {
     }
 }
 
+/// One change an `ALTER REDIS PUBSUB INGESTOR` writes to the body of the ingestor it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum RedisPubSubIngestorChange {
+    /// `SET CHANNEL '<channel>'` or `SET PATTERN '<pattern>'`: the one subscription the body
+    /// writes, whichever locator names it.
+    Subscription(RedisSubscriptionTarget),
+    /// `SET MODE <mode>`.
+    Mode(RedisPubSubIngestMode),
+}
+
+impl crate::IngestorEntityChange for RedisPubSubIngestorChange {
+    type Entity = RedisPubSubIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut RedisPubSubIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Subscription(subscription) => entity.subscription = subscription.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Subscription(subscription) => format!(
+                "SET {} {}",
+                subscription.locator().keywords,
+                crate::string_literal(subscription.as_str())
+            ),
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
+    }
+}
+
 connector_ingestors! {
     connector Redis = "REDIS";
     /// What a Redis source reads.
@@ -277,7 +322,7 @@ connector_ingestors! {
     pub enum RedisIngestorAlteration;
     /// The entities a Redis source reads.
     pub enum RedisIngestorEntity {
-        PubSub(RedisPubSubIngestor) = "PUBSUB", "Redis Pub/Sub";
+        PubSub(RedisPubSubIngestor => RedisPubSubIngestorChange) = "PUBSUB", "Redis Pub/Sub";
     }
 }
 
@@ -322,15 +367,51 @@ impl EmitterEntityBody for RedisPubSubEmitter {
     }
 }
 
+/// One change an `ALTER REDIS PUBSUB EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum RedisPubSubEmitterChange {
+    /// `SET CHANNEL '<name>'`.
+    Channel(RedisChannelName),
+    /// `SET MODE <mode>`.
+    Mode(RedisPubSubPublishingMode),
+}
+
+impl crate::EmitterEntityChange for RedisPubSubEmitterChange {
+    type Entity = RedisPubSubEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut RedisPubSubEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Channel(name) => entity.channel = name.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Channel(name) => format!("SET CHANNEL {}", crate::string_literal(name.as_str())),
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector Redis = "REDIS";
     /// What a Redis emitter writes.
     pub enum RedisEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum RedisPubSubEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum RedisEmitterChange;
     /// The entities a Redis emitter writes.
     pub enum RedisEmitterEntity {
-        PubSub(RedisPubSubEmitter, RedisPubSubPublishingMode) = "PUBSUB";
+        PubSub(RedisPubSubEmitter, RedisPubSubPublishingMode, RedisPubSubEmitterChange) = "PUBSUB";
     }
 }
 

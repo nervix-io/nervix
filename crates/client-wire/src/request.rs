@@ -174,7 +174,14 @@ pub struct DetachDomainClockRequest {
     pub domain: DomainName,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One request of a session. [`ClientRequestKind`] names which request it is, without its
+/// fields; its `snake_case` name labels the node's request series.
+#[derive(Debug, Clone, PartialEq, Eq, strum::EnumDiscriminants)]
+#[strum_discriminants(
+    name(ClientRequestKind),
+    derive(Hash, strum::IntoStaticStr, strum::EnumIter),
+    strum(serialize_all = "snake_case")
+)]
 pub enum ClientRequest {
     Command(CommandRequest),
     Suggest(SuggestRequest),

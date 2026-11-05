@@ -7,7 +7,9 @@
 //!   leaders the frames of that record report, and what a record shows: whether the page ever held
 //!   two session connections at once, whether its session started where the page was opened and
 //!   followed its leader redirect, whether every later connection reached a node reported to the
-//!   page as the leader, and whether its session connected again where it lost its connection.
+//!   page as the leader, which node first served its session as leader, and whether its session
+//!   connected again where it lost its connection, and observations of its session identities
+//!   and domain, clock and subscription setup replies.
 //! - **Depends on.** The console WebSocket paths, codecs and messages of the client wire contract,
 //!   and URL parsing.
 //! - **Must not know.** How the console drives its session, or how a node serves it.
@@ -47,6 +49,7 @@ use nervix_client_wire::{
         WebSocketData,
     },
 };
+use nervix_models::ClusterNodeName;
 use serde::Deserialize;
 use url::Url;
 
@@ -232,7 +235,7 @@ impl RecordedConnection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ReportedLeader {
     /// The node the connection reached: the leader that serves the console's session.
-    Serving,
+    Serving(ClusterNodeName),
     /// The node whose web console a redirect names.
     Redirect(Url),
 }
@@ -262,7 +265,7 @@ impl ReportedLeader {
     /// The leader a leadership observation names: the serving node itself, or the remote leader.
     fn of_leadership(leadership: Leadership) -> Option<Self> {
         match leadership {
-            Leadership::ServingNode(_) => Some(Self::Serving),
+            Leadership::ServingNode(node) => Some(Self::Serving(node)),
             Leadership::Remote(leader) => Self::at_console(leader),
             Leadership::Unknown => None,
         }
@@ -415,6 +418,15 @@ pub(crate) struct ConsoleConnectionRecord {
     losses: Vec<u64>,
 }
 
+/// Public session connections and setup replies observed before or after a command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConsoleSetupObservation {
+    pub(crate) connections: Vec<u64>,
+    pub(crate) domain_selections: usize,
+    pub(crate) clock_attachments: usize,
+    pub(crate) subscriptions: usize,
+}
+
 /// The two kinds of stream the backup controls open beside the session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BackupStream {
@@ -490,9 +502,72 @@ pub(crate) enum ConnectionRecordViolation {
 }
 
 impl ConsoleConnectionRecord {
+    /// Reads setup replies through the public codec. Comparing observations after a command
+    /// proves both that the same connection survived and that existing intent was not restored.
+    pub(crate) fn setup_observation(
+        &self,
+    ) -> Result<ConsoleSetupObservation, Report<FrameReadFailure>> {
+        let codec = ClientWebSocketCodec::new(SessionLimits::DEFAULT);
+        let mut observation = ConsoleSetupObservation {
+            connections: Vec::new(),
+            domain_selections: 0,
+            clock_attachments: 0,
+            subscriptions: 0,
+        };
+        for connection in &self.connections {
+            if connection.purpose != ConnectionPurpose::Session {
+                continue;
+            }
+            observation.connections.push(connection.opened);
+            for frame in &connection.frames {
+                let data = WebSocketData::Binary(Bytes::copy_from_slice(&frame.bytes));
+                let verified = codec
+                    .decode(data)
+                    .map_err(|error| error.change_context(FrameReadFailure::NotFrame))?;
+                let message = ServerMessage::decode(&verified)
+                    .map_err(|error| error.change_context(FrameReadFailure::NotMessage))?;
+                if let ServerMessage::Reply(reply) = message {
+                    match reply.body {
+                        ReplyBody::DomainSelection(_) => observation.domain_selections += 1,
+                        ReplyBody::DomainClockAttach(_) => observation.clock_attachments += 1,
+                        ReplyBody::Subscribe(_) => observation.subscriptions += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok(observation)
+    }
+
     /// Every connection with its place in the record, the first being 1.
     fn numbered(&self) -> impl Iterator<Item = (usize, &RecordedConnection)> {
         (1_usize..).zip(&self.connections)
+    }
+
+    /// The first node that told the page it serves its session as leader. Redirects name a
+    /// possible destination, while this report establishes which node actually served it.
+    pub(crate) fn first_serving_node(
+        &self,
+    ) -> Result<Option<ClusterNodeName>, Report<UnreadableFrame>> {
+        // Connections and frames are a sequence of browser events, in their recorded order.
+        for (number, connection) in self.numbered() {
+            if connection.purpose != ConnectionPurpose::Session {
+                continue;
+            }
+            for frame in &connection.frames {
+                let reported = connection.purpose.reported_leader(frame).map_err(|error| {
+                    error.change_context(UnreadableFrame {
+                        connection: number,
+                        purpose: connection.purpose.clone(),
+                        received: frame.received,
+                    })
+                })?;
+                if let Some(ReportedLeader::Serving(node)) = reported {
+                    return Ok(Some(node));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// The consoles of the nodes reported to the page as the leader on its connections, each with

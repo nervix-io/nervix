@@ -26,7 +26,7 @@ use nervix_primitives::{
     net::TcpListener,
     stream::wrappers::{ReceiverStream, TcpListenerStream},
     sync::{
-        Arc, Mutex,
+        Arc, CancellationToken, Mutex,
         atomic::{AtomicU64, Ordering},
         mpsc, oneshot,
     },
@@ -202,6 +202,8 @@ enum UploadReplyMode {
     WrongRequestId,
     Redirect(Url),
     Reject,
+    /// The server receives the whole archive and never answers it.
+    Withheld,
 }
 
 impl NamedService for SessionService {
@@ -352,6 +354,7 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for InstallUpload {
             };
             let mode = upload_reply_mode.lock().await.take();
             let reject = matches!(mode.as_ref(), Some(UploadReplyMode::Reject));
+            let withheld = matches!(mode.as_ref(), Some(UploadReplyMode::Withheld));
             match mode {
                 Some(UploadReplyMode::WrongIdentity) => {
                     if let UploadDisposition::Installed {
@@ -376,7 +379,7 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for InstallUpload {
                         }),
                     });
                 }
-                Some(UploadReplyMode::Reject) | None => {}
+                Some(UploadReplyMode::Reject | UploadReplyMode::Withheld) | None => {}
             }
             let reply = reply
                 .encode(&limits())
@@ -387,6 +390,9 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for InstallUpload {
                 .is_err()
             {
                 return Err(Status::unavailable("the test takes no more uploads"));
+            }
+            if withheld {
+                std::future::pending::<()>().await;
             }
             if reject {
                 return Err(Status::permission_denied("the upload is not authorized"));
@@ -1065,6 +1071,107 @@ async fn an_unanswered_command_ends_with_a_reusable_uncertain_identity() {
         panic!("the deadline must report uncertainty");
     };
     assert_eq!(reference, &expected);
+}
+
+#[nervix_primitives::test]
+async fn an_uncertain_command_deadline_names_its_last_server_answer() {
+    let mut server = TestServer::start().await;
+    let client = server
+        .connect_with(ConnectOptions {
+            request_timeout: Duration::from_secs(2),
+            retry_timeout: Duration::from_millis(800),
+            ..ConnectOptions::default()
+        })
+        .await;
+    let mut exchange = server.next_exchange().await;
+    let execution = client.prepare_execution("SHOW CLUSTER STATUS;").await;
+    let expected = execution.reference().clone();
+    let mut command =
+        nervix_primitives::task::spawn(async move { client.execute_prepared(&execution).await });
+
+    let (error, answered) = nervix_primitives::time::timeout(Duration::from_secs(3), async {
+        let mut answered = 0;
+        loop {
+            nervix_primitives::select! {
+                biased;
+                result = &mut command => {
+                    let error = result
+                        .assured("the command task completes")
+                        .expect_err("unresolved answers do not establish an outcome");
+                    break (error, answered);
+                }
+                request = exchange.next_request() => {
+                    let ClientRequest::Command(sent) = request.request else {
+                        panic!("only the command is retried");
+                    };
+                    assert_eq!(sent.execution_reference, expected);
+                    let (disposition, message) = if answered == 0 {
+                        (
+                            CommandDisposition::NotLeader(LeaderRedirect { leader: None }),
+                            "no leader is elected".to_string(),
+                        )
+                    } else {
+                        (
+                            CommandDisposition::OutcomeUnknown(
+                                crate::wire::UnknownOutcomeCause::LeadershipLost,
+                            ),
+                            format!("the lease could not be confirmed on attempt {}", answered + 1),
+                        )
+                    };
+                    exchange
+                        .reply(
+                            request.request_id,
+                            command_outcome(&expected, disposition, &message),
+                            &limits(),
+                        )
+                        .await;
+                    answered += 1;
+                }
+            }
+        }
+    })
+    .await
+    .assured("the command retry deadline ends the test");
+
+    assert!(answered >= 2, "the server answered two distinct attempts");
+    let ClientError::UncertainCommand { reference } = error.current_context() else {
+        panic!("the deadline leaves the command uncertain: {error:?}");
+    };
+    assert_eq!(reference, &expected);
+    let mut contexts = error
+        .frames()
+        .filter_map(|frame| frame.downcast_ref::<ClientError>());
+    assert!(matches!(
+        contexts.next(),
+        Some(ClientError::UncertainCommand { .. })
+    ));
+    let Some(ClientError::LastUnresolvedAnswer {
+        disposition,
+        message,
+    }) = contexts.next()
+    else {
+        panic!("the last answer is a typed context: {error:?}");
+    };
+    assert_eq!(
+        disposition,
+        &CommandDisposition::OutcomeUnknown(crate::wire::UnknownOutcomeCause::LeadershipLost)
+    );
+    assert_eq!(
+        message,
+        &format!("the lease could not be confirmed on attempt {answered}")
+    );
+    assert!(matches!(contexts.next(), Some(ClientError::RetryDeadline)));
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains("OutcomeUnknown(LeadershipLost)"),
+        "the disposition that remained unresolved belongs in the chain: {rendered}"
+    );
+    assert!(
+        rendered.contains(&format!(
+            "the lease could not be confirmed on attempt {answered}"
+        )),
+        "the last answer's message belongs in the chain: {rendered}"
+    );
 }
 
 #[nervix_primitives::test]
@@ -2324,6 +2431,50 @@ async fn a_prepared_upload_uses_its_captured_domain() {
     assert!(outcome.succeeded());
     assert_eq!(received.start.domain, domain("tenant"));
     assert_eq!(received.start.upload_identity, *prepared.upload_identity());
+}
+
+#[nervix_primitives::test]
+async fn a_cancelled_upload_the_server_received_is_uncertain_under_its_identity() {
+    let mut server = TestServer::start().await;
+    *server.upload_reply_mode.lock().await = Some(UploadReplyMode::Withheld);
+    let client = server.connect().await;
+    let _exchange = server.next_exchange().await;
+    let directory = tempfile::tempdir().assured("a temporary directory is available");
+    write_file(&directory.path().join("payload.bin"), &[7_u8; 1000]);
+    let query = format!(
+        "UPLOAD RESOURCE model VERSION '{}';",
+        directory.path().display()
+    );
+    let prepared = client.prepare_execution(query).await;
+    let cancellation = CancellationToken::new();
+    let uploading = {
+        let client = client.clone();
+        let prepared = prepared.clone();
+        let cancellation = cancellation.clone();
+        nervix_primitives::task::spawn(async move {
+            client
+                .execute_prepared_with_cancellation(&prepared, &cancellation)
+                .await
+        })
+    };
+    let received = within_deadline(server.uploads.recv())
+        .await
+        .assured("the server received the whole archive");
+    cancellation.cancel();
+
+    let error = within_deadline(uploading)
+        .await
+        .assured("the upload task runs to its end")
+        .expect_err("an upload cancelled after the server received it may have been installed");
+    let ClientError::UncertainUpload { identity } = error.current_context() else {
+        panic!("a cancelled upload the server may have installed is uncertain: {error:?}");
+    };
+    assert_eq!(identity, prepared.upload_identity());
+    assert_eq!(&received.start.upload_identity, prepared.upload_identity());
+    assert!(
+        matches!(cause_beneath(&error), Some(ClientError::CallCancelled)),
+        "the caller's cancellation stays beneath the uncertainty: {error:?}"
+    );
 }
 
 #[nervix_primitives::test]

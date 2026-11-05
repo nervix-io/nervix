@@ -193,6 +193,70 @@ pub(super) fn metrics_body<'src>()
     )
 }
 
+/// `SET ATTRIBUTES { … }`, `SET RESOURCE { … }`, `SET SCOPE '<name>' [VERSION '<version>']`, or the
+/// `DROP` of one: the mappings an OpenTelemetry emitter writes besides its `VALUES`.
+fn mapping_change<'src>()
+-> impl Parser<'src, &'src [Token], OtelMappingChange, extra::Err<ParseError<'src>>> + Clone {
+    let attributes = kw(Identifier::Attributes)
+        .ignore_then(clickhouse_values())
+        .map(OtelMappingChange::Attributes);
+    let resource = kw(Identifier::Resource)
+        .ignore_then(otel_resource_values())
+        .map(OtelMappingChange::Resource);
+    let scope = otel_scope_parser().map(OtelMappingChange::Scope);
+    let set = kw(Identifier::Set).ignore_then(choice((attributes, resource, scope)));
+    let drop = kw(Identifier::Drop).ignore_then(choice((
+        kw(Identifier::Attributes).to(OtelMappingChange::DropAttributes),
+        kw(Identifier::Resource).to(OtelMappingChange::DropResource),
+        kw(Identifier::Scope).to(OtelMappingChange::DropScope),
+    )));
+    choice((set, drop)).boxed()
+}
+
+/// One of the mappings, or `SET MODE <mode>`: one part of an `OTEL LOGS` body.
+pub(super) fn logs_change<'src>()
+-> impl Parser<'src, &'src [Token], OtelLogsEmitterChange, extra::Err<ParseError<'src>>> + Clone {
+    let publishing = kw_phrase2(Identifier::Set, Identifier::Mode)
+        .ignore_then(logs_mode())
+        .map(OtelLogsEmitterChange::Mode);
+    choice((
+        mapping_change().map(OtelLogsEmitterChange::Mappings),
+        publishing,
+    ))
+    .boxed()
+}
+
+/// One of the mappings, or `SET MODE <mode>`: one part of an `OTEL TRACES` body.
+pub(super) fn traces_change<'src>()
+-> impl Parser<'src, &'src [Token], OtelTracesEmitterChange, extra::Err<ParseError<'src>>> + Clone {
+    let publishing = kw_phrase2(Identifier::Set, Identifier::Mode)
+        .ignore_then(traces_mode())
+        .map(OtelTracesEmitterChange::Mode);
+    choice((
+        mapping_change().map(OtelTracesEmitterChange::Mappings),
+        publishing,
+    ))
+    .boxed()
+}
+
+/// `SET METRIC …`, one of the mappings, or `SET MODE <mode>`: one part of an `OTEL METRICS` body.
+pub(super) fn metrics_change<'src>()
+-> impl Parser<'src, &'src [Token], OtelMetricsEmitterChange, extra::Err<ParseError<'src>>> + Clone
+{
+    let metric = kw(Identifier::Set)
+        .ignore_then(metric_locator())
+        .map(OtelMetricsEmitterChange::Metric);
+    let publishing = kw_phrase2(Identifier::Set, Identifier::Mode)
+        .ignore_then(metrics_mode())
+        .map(OtelMetricsEmitterChange::Mode);
+    choice((
+        metric,
+        mapping_change().map(OtelMetricsEmitterChange::Mappings),
+        publishing,
+    ))
+    .boxed()
+}
+
 #[cfg(test)]
 #[cfg_attr(
     nervix_lint,

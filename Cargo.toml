@@ -307,6 +307,7 @@ members = [
   "crates/client-core",
   "crates/client-ffi",
   "crates/client-host",
+  "crates/client-jvm",
   "crates/client-python",
   "crates/client-wire",
   "crates/columnar-json",
@@ -490,9 +491,9 @@ humantime = "2"
 hyper = "1"
 hyper-rustls = "0.27"
 hyper-util = "0.1"
-iceberg = "0.10"
-iceberg-catalog-rest = "0.10"
-iceberg-storage-opendal = { version = "0.10", features = [
+iceberg = "0.11"
+iceberg-catalog-rest = "0.11"
+iceberg-storage-opendal = { version = "0.11", features = [
   "opendal-s3",
   "opendal-gcs",
   "opendal-azdls",
@@ -506,6 +507,7 @@ jaq-core = "3"
 jaq-fmts = "0.1"
 jaq-json = "2"
 jaq-std = "3"
+jni = "0.22.4"
 # The VM resolves time zone names only against the IANA database `jiff-tzdb` bundles, never against
 # the host, so every node running one build computes the same local times.
 jiff = { version = "0.2.35", default-features = false, features = ["std"] }
@@ -547,7 +549,6 @@ nervix-checkpoint-replication = { package = "nervix-checkpoint-replication", pat
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
 nervix-client-ffi = { package = "nervix-client-ffi", path = "crates/client-ffi" }
 nervix-client-host = { package = "nervix-client-host", path = "crates/client-host" }
-nervix-client-python = { package = "nervix-client-python", path = "crates/client-python" }
 nervix-client-wire = { package = "nervix-client-wire", path = "crates/client-wire" }
 nervix-columnar-json = { package = "nervix-columnar-json", path = "crates/columnar-json" }
 nervix-connector = { package = "nervix-connector", path = "crates/connector" }
@@ -598,7 +599,10 @@ nix = "0.30"
 # Compile-time checked non-zero literals, so a constant that must not be zero is rejected by the
 # compiler rather than by a runtime guard.
 nonzero_ext = "0.3"
-opendal = "0.57"
+opendal = "0.58"
+# The Reqwest transport an Iceberg object-store operator carries in its context, built over the
+# emitter's own client. Its TLS features stay off: that client brings its AWS-LC configuration.
+opendal-http-transport-reqwest = { version = "0.58", default-features = false }
 # OpenRaft prereleases change snapshot APIs without semver compatibility.
 openraft = { version = "=0.10.0-alpha.33", default-features = false, features = [
   "tokio-rt",
@@ -650,6 +654,8 @@ rcgen = { version = "0.13", default-features = false, features = [
   "pem",
 ] }
 # Keep the AWS-LC support from PR #850 and the librdkafka 2.12.1 backport of duplicate FETCH_STOP fix #5574.
+# The fork builds librdkafka's TLS on the aws-lc-sys that aws-lc-rs links, so an aws-lc-rs upgrade
+# that moves to another aws-lc-sys moves the fork too; `just ratchet` refuses a second AWS-LC.
 rdkafka = { git = "https://github.com/nervix-io/rust-rdkafka.git", branch = "nervix-aws-lc-fetch-stop", default-features = false }
 redis = { version = "1.1.0", default-features = false, features = [
   "aio",

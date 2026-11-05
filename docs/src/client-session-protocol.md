@@ -66,6 +66,8 @@ over the interconnect, and that node encodes Row frames for its own sessions.
 | Vocabulary | `nervix-models` | Execution references, domain, relay, subscription and user names, timestamps, the transaction status, preview identity and impact report, the resource description, and the observed domain clock. |
 | Edges | The wire crate, `nervix-client-wire` | The FlatBuffers schema, frame verification and ownership, the session limits, the typed requests, replies, events, transfers and rows the schema describes, the display text of a row, and how frames travel in gRPC and WebSocket messages. It knows no registry, runtime, consensus, parser, Arrow, or client dispatch. |
 | Edges | The session service in `nervix-server` | Authenticating a call, one session per transport connection, correlation, the ordered and concurrent lanes, cancellation against admission, typed rejections, reply encoding and transfer, the control and subscription lanes a session's frames wait in, unsolicited events, domain clock attachments, the upload stream, the backup download stream, the restore stream, and carrying a download or a restore over a console WebSocket of its own. |
+| Edges | The client traffic record in `nervix-server` | The traffic series of each client listener, resolved once when the service starts, and the operator's record of a call whose credentials did not authenticate it. |
+| Edges | The public listeners in `nervix-server` | Taking each connection a public listener accepts, and reporting an accept that failed while the listener keeps accepting. |
 | Edges | The Row encoder in `nervix-server` | Binding one subscription generation to the row schema it announces and writing selected Arrow rows into bounded frames. |
 | Edges | The session command and transaction adapters in `nervix-server` | Command admission and retained outcomes, and a session's transaction lifecycle, its binding, statement preflight and the replicated commit with the quiescence it recovers from. |
 | Edges | Session subscriptions | Creation and deletion, the per-session subscription set, the generation each subscription opens with, its lifecycle, and its filter and sampling. |
@@ -75,7 +77,8 @@ over the interconnect, and that node encodes Row frames for its own sessions.
 | Data plane | Relay subscription fan-out | The subscribers of one relay, the definition they were attached under, and ending every subscriber before a batch of another definition can reach it. |
 | Edges | The Rust client, `nervix-client-core` | Connecting, TLS selection, the dispatcher that pairs replies with requests, execution identity across retries, redirect and reconnect, transaction binding and previews, desired subscriptions and their restoration, followed domain clocks, uploads, and backup downloads verified against their summary. |
 | Edges | The host session runtime, `nervix-client-host` | What every binding shares: the session runtime a host's thread blocks on, cancellation and deadlines, the classification of every client failure by its report's context, subscription events with bulk column access to their verified frames, domain clock events and the clock of each followed domain with its projections, field descriptions, and the Rust client's producers and consumers with their typed outcomes, settlements and Arrow batches built and read one column level at a time. |
-| Edges | The C ABI, `nervix-client-ffi` | The C ABI through which C, C++, JVM and Ruby hosts drive the host session runtime: the handles a host holds, retains and releases, borrowed frame access, and bulk column copies into memory the host passes. |
+| Edges | The C ABI, `nervix-client-ffi` | The C ABI through which C, C++ and Ruby hosts drive the host session runtime: the handles a host holds, retains and releases, borrowed frame access, and bulk column copies into memory the host passes. |
+| Edges | The JVM library, `nervix-client-jvm` | Java 21 classes on JNI: Cleaner-owned handles, independent blocking leases, typed exceptions, owner-retaining read-only direct buffers, bulk column arrays and Arrow IPC. |
 | Edges | The Python package, `nervix-client-python` | `nervix_client`, through which CPython hosts drive the host session runtime on pyo3: objects whose lifetimes are Python's, waits that release the GIL, typed exceptions, connection options, columns read as Python values, and Arrow batches exchanged through the Arrow PyCapsule interface. |
 | Edges | The web console and the CLI | Consumers of the same protocol with bounded buffers of their own. The console speaks it over its WebSockets: the session, and one per backup download or restore stream, whose archive it verifies or measures itself; the CLI uses the Rust client. |
 
@@ -221,7 +224,9 @@ sanitizer-backed fuzzing run the same assertions through the
 ## Transports, Endpoints, And Authentication
 
 Every live node runs both client listeners. Neither depends on leadership or placement, and both
-close only when the node begins to stop.
+close only when the node begins to stop. An accept that fails closes neither: the listener reports
+the failure and accepts the next connection, as
+[Stop Requests](./shutdown.md#stop-requests) describes for every public listener.
 
 Configured `HTTP ENDPOINT` and `WEBSOCKETS ENDPOINT` ingestors use the server's VHOST listeners on
 every live node. Their codec payloads and configured WebSocket signaling follow the
@@ -252,10 +257,17 @@ above it is refused before it is buffered.
 The listener serves plaintext HTTP/2 on `--addr` (`NERVIX_ADDR`, default `127.0.0.1:47391`) and
 advertises `--grpc-advertise-addr` (`NERVIX_GRPC_ADVERTISE_ADDR`), or the listen address when that
 is unset. `--grpc-mode https` (`NERVIX_GRPC_MODE`) serves the listener over TLS on
-`--grpc-https-listen-addr` instead and advertises `--grpc-https-advertise-addr`. That mode presents
-the development certificate that `scripts/generate_dev_tls.sh` writes under `tls/dev` in the source
-tree the server was built from; no option selects another certificate, and the Kubernetes deployment
-runs the listener in plaintext mode.
+`--grpc-https-listen-addr` instead and advertises `--grpc-https-advertise-addr`. HTTPS requires
+`--grpc-tls-cert` (`NERVIX_GRPC_TLS_CERT`) and `--grpc-tls-key` (`NERVIX_GRPC_TLS_KEY`), naming the
+operator's PEM certificate chain and private key. The first certificate is the server's leaf and
+must cover the advertised hostname or IP address. Every node needs its own reachable advertised
+address and provisioned identity. The Kubernetes deployment runs the listener in plaintext mode.
+
+The node validates the complete identity at startup, before opening its stores or listeners.
+Missing material, unreadable files, unusable PEM and mismatched keys fail startup with a typed
+cause; TLS files supplied in HTTP mode are refused. Certificates are loaded once, so rotation
+requires restarting the node. A running listener retains the loaded identity. Client trust remains
+explicit: the native client uses the supplied CA, while the browser uses its own trust store.
 
 ### Console WebSocket
 
@@ -265,6 +277,12 @@ and optionally a TLS listener, `--web-console-https-listen-addr` with `--web-con
 `--web-console-tls-key`. Each binary message holds exactly one frame in either direction and nothing
 else: no size prefix, never two frames, never part of one. Ping, pong, and close messages belong to
 the WebSocket connection and never carry a frame.
+
+`--web-console-advertise-addr` names the externally reachable host and port. Its advertised scheme
+is HTTPS when the HTTPS console listener is configured and HTTP otherwise. Without an explicit
+address, the HTTPS listener's address is preferred. The certificate and key are loaded once at
+startup; rotation requires a restart. Console HTTPS configuration is independent of native gRPC
+TLS configuration.
 
 The console session is served only by the leader. A console session on any other node is ended at
 once with a `SessionEnding` whose reason is a `LeaderRedirect` naming the leader, and the console
@@ -298,7 +316,8 @@ further. The server closes with `1011` the rare answer it cannot fit into a fram
 
 The console has no upload stream: it uploads a resource through its own HTTP path,
 `/console/resources/upload`, where the leader builds the archive from the files it receives, as
-[Resource Versions And Bindings](./resource-versions.md#assignment) describes.
+[Resource Versions And Bindings](./resource-versions.md#assignment) describes. How the console
+sends an upload again is described with the [Resource Uploads](#resource-uploads) contract.
 
 ### Authentication
 
@@ -316,6 +335,20 @@ for it in turn. A node whose credentials class cannot take the verification now 
 credentials were not judged, so the attempt neither counts as a failure nor paces the user, and the
 same credentials may be presented again. After a failed attempt for a user, that user's later
 attempts are paced to ten per second until one succeeds.
+
+Every name costs the node the same work. Credentials whose name names no user, or cannot name one,
+have their password hashed on the credentials worker exactly as creating a user hashes one, under
+the same charge, before they are refused. Neither the answer nor when it arrives tells an unknown
+user from a wrong password, and a node whose credentials class cannot take that hash now answers
+`UNAVAILABLE` or `503` for an unknown user as it does for a known one.
+
+Credentials a listener judged and refused are logged at `warn` as `client authentication failed`,
+with the listener as `transport` and the address the call came from as `peer`. The record never
+carries the user name or the password the call presented, because a name an operator did not
+create can be a password typed into the wrong field. A call that presented no readable credentials
+is logged at `debug`. Every attempt is counted on the node that judged it, in
+`nervix_client_authentications_total` by outcome; see
+[Client Traffic](./metrics-and-observability.md#client-traffic).
 
 Authentication establishes who owns what a session does: its transaction binding, its execution
 references, its subscriptions, and its uploads. It is the only access control. Every authenticated
@@ -382,10 +415,11 @@ next request at once; see [Producers](#producers). A session admits at most 64 r
 counting both lanes and producer closes but not submitted batches, which their producer's credit
 bounds instead. A request beyond that is refused with
 `TooManyRequestsInFlight` rather than queued, which also bounds the requests waiting for the ordered
-lane; nothing about the refused request was admitted. The web console never sends a request that
-keeps its order past that limit: it holds the request, in the order it was issued, until an
-earlier reply frees a place. Its completions, choice lookups, and domain selections go out at once
-and report the refusal if they find the session full. A request identity that is already in flight
+lane; nothing about the refused request was admitted. The web console holds every kind of its
+session requests while this window is full, including completions, choice lookups, domain selections
+and transaction attachment. Ready work keeps its issue order, with setup and reattachment first;
+[Restoration And Bounded Consumers](#restoration-and-bounded-consumers) describes lookup replacement
+and connection lifetimes. A request identity that is already in flight
 is refused with `DuplicateRequestId`, and that refusal necessarily names the same identity as the
 request still in flight.
 
@@ -576,6 +610,15 @@ because a client recovers from both the same way.
 `OutcomeOrigin` distinguishes an outcome produced by this request, `Executed`, from one read back
 from the durable record of an earlier attempt with the same reference, `Recovered`. A recovered
 failure is the same failure: its message and diagnostics are the ones retained when it happened.
+
+Every `OutcomeUnknown` cause permits a repeat on the existing open session. `LeadershipLost` can
+mean an unconfirmed lease on the node that still leads; it does not by itself identify another
+endpoint. The Rust client and web console back off and repeat there under the same execution
+reference. A subsequent redirect, a session-ending event, or a transport ending supplies the reason
+to reconnect. The console starts its per-command wait at 250 milliseconds, doubles it up to five
+seconds while the answer remains unknown, and keeps processing session messages during the wait.
+Held commands retain their issue order, and the selected domain, clock and subscription tabs keep
+their existing attachments. Only a terminal disposition is rendered as the command's outcome.
 
 For a WASM state reset, loss of Raft leadership during generation publication leaves the durable
 step applying under its original reference. The request can wait for recovery or answer
@@ -843,14 +886,20 @@ configuration until the commit.
 
 **Binding, attach, and takeover.** The session that begins a transaction is bound to it. The binding
 is soft state in the leader's memory: it routes commands, and it is gone after a leader change or
-when the session ends. A session binds an existing transaction with `AttachTransactionRequest`,
+when the session ends. An open transaction that expires takes its binding with it. A transaction
+that finishes otherwise, such as a commit that another request admitted before this session attached,
+keeps the binding of the session that holds it: that session's next request for the transaction is
+answered from the transaction's recorded outcome, and that answer ends the binding. A session binds
+an existing transaction with `AttachTransactionRequest`,
 which the leader grants only to the transaction's owner; the reply is `TransactionAttached` with the
 current status, `TransactionAlreadyFinished` with the final status and aggregate outcome while its
 tombstone is retained, or a failure for an identity that is unknown or retained no longer. A leader
 that holds no binding for the session's transaction answers the session's next transaction request
 with `TransactionDetached`, and the client attaches again and repeats the request under the same
-reference. A finished or failed attach does not resolve commands whose replies were lost: the
-client repeats each under its own execution reference and expected position. The leader returns a
+reference. An attach that reports the transaction already finished binds nothing, and a session that
+still named that transaction no longer holds it. A finished or failed attach does not resolve
+commands whose replies were lost: the client repeats each under its own execution reference and
+expected position. The leader returns a
 recorded outcome before planning a new request; a command it never admitted receives a failure.
 Attaching from a second session takes the binding over, and the displaced session's next
 transaction request receives `TransactionTakenOver` before anything is admitted. While a session
@@ -970,9 +1019,17 @@ that outlives `request_timeout` is the client's only sign that its session may b
 every request still waiting on that session, and the next request opens a new one. While an
 election converges it retries with a delay that starts at 100 milliseconds and doubles up to one
 second. When a call's deadline passes before a command's outcome is known, and the command may have
-been admitted, the call fails as uncertain and names the execution reference. The Rust client, the
-CLI, and the console never send `CancelRequest`: a caller that stops waiting only drops its waiter,
-and the reply, when it comes, is discarded.
+been admitted, the call fails as uncertain and names the execution reference. When a nonterminal
+server answer arrived before the deadline, the Rust client's report also retains the last such
+answer's typed disposition and message beneath the uncertainty and above the deadline. That answer
+does not establish the command's outcome. The console never
+sends `CancelRequest`. The Rust client sends one only for a call made through
+`execute_prepared_with_cancellation`, when its caller cancels the call while the command waits for
+its reply, and it keeps waiting for the command's terminal reply: `RequestCancelled` before
+admission fails the call as cancelled with no effect, and after admission as uncertain under the
+execution reference. The CLI cancels that way when its operator presses Ctrl-C while a command runs;
+see [Interrupting A Statement](./client-tools-cli.md#interrupting-a-statement). Any other caller that
+stops waiting only drops its waiter, and the reply, when it comes, is discarded.
 
 `nervix-cli backup --timeout` sets only each running domain's quiesce timeout; its request and
 retry budgets stay at their defaults, and `--backup-wait-timeout` bounds the overall command wait.
@@ -1049,7 +1106,8 @@ stateDiagram-v2
     Connecting --> Failed: retry deadline passed
     Open --> Open: reply routed by request identity
     Open --> Redirecting: LeaderRedirect names the leader's endpoint
-    Open --> AwaitingLeader: LeaderRedirect names no endpoint, or OutcomeUnknown
+    Open --> AwaitingLeader: LeaderRedirect names no endpoint
+    Open --> Open: OutcomeUnknown, back off and repeat on this session
     AwaitingLeader --> Open: back off, then repeat under the same reference
     Redirecting --> Restoring: new session on the leader
     Open --> Lost: transport failure, session ending, or protocol violation
@@ -1349,11 +1407,20 @@ session to restore subscriptions or clocks it prints why while the client keeps 
 console keeps at most 256 lines and 256 KiB per REPL and per subscription
 tab, and marks where it omitted earlier lines. It keeps the latest 256 commands and 256 KiB of its
 command history and the snapshot of the one domain it observes. It holds at most 64 requests of its
-controls waiting for a connection, carrying at most 4 MiB of text, and at most 256 held or awaiting
-their reply, carrying at most 16 MiB, and sends the ordered ones only while the server has room for
-them in flight; a request past either bound is not sent, and the control that issued it reports
-why. It drops the parts of a reply nobody awaits, such as a superseded
-completion.
+controls waiting for a connection, carrying at most 4 MiB of text. Connected controls can admit at
+most 256 outstanding requests carrying at most 16 MiB. Setup also restores the retained tabs,
+selected domain and clock, and transaction even with a full control backlog, so that backlog can
+recover. Every request kind shares the 64-place in-flight window,
+including lookups, domain selection, restoration and transaction attachment. Connection setup and
+reattachment progress ahead of ordered work that waits for them; other waiting controls respect
+ready work's issue order, so a stream of lookups cannot keep overtaking earlier commands. A waiting
+completion or choice
+lookup is replaced by the latest one for that input or control; a superseded sent lookup retains
+only its request identity until its terminal reply, so it still occupies its server request place.
+Its text and partial reply are released immediately, and later parts are discarded without
+reassembly; the final part releases its place. Waiting connection-local requests end with that
+connection, while ordered commands retain their issue order and execution references. A request
+past either outstanding bound is not sent, and the control that issued it reports why.
 
 A tab whose generation the server ended with `SubscriptionEnded` turns ended in the web console. It
 keeps its rows and the reason, and it is not restored on a later connection, which would not change
@@ -1688,6 +1755,15 @@ each chunk is non-empty and fits one frame. There is no manifest, digest, or fin
 leader hashes the archive as it stages it and verifies everything else when it installs it. The
 console WebSocket carries no upload stream.
 
+The console posts the selected files to its own HTTP path, `/console/resources/upload`, under an
+upload identity it chooses once per upload. A node that cannot propose for the upload as the
+leader, because another node leads, none is known, or it could not confirm its lease, answers
+`409 Conflict`. That refusal decided nothing, so the console sends the same files under the same
+upload identity again, to the leader it knows by then, after the wait it takes before reconnecting,
+which doubles from 250 ms up to five seconds, for as long as its upload dialog stays open, as the
+Rust client opens another call after a redirect or a reply without a leader. A success names the
+installed version, and every other answer is final.
+
 The Rust client builds one deterministic archive in a temporary file before opening an upload
 call. Archive construction uses bounded 1 MiB read and write buffers. Only a successfully
 terminated and flushed archive becomes an upload body. An I/O failure abandons the partial file
@@ -1952,6 +2028,14 @@ repeats each outstanding command under its execution reference, which joins the 
 returns its retained outcome, and sends again each upload, restore or download whose call did not
 answer.
 
+The shutdown outlines in `session_protocol.feature` verify both client observations on one and
+three nodes. Reading clients receive their ending and an `OK` end of call, including while an
+admitted command still runs. The unread-client outline first establishes an actual wait for
+response capacity, then measures the connection's ending from the stop request, requires the
+grace-period cut log from that launch and checks that admission completed within the shutdown
+deadline. [Integration Test Lifecycle](./integration-test-lifecycle.md#scenario-driven-stops)
+owns the harness observations and their diagnostic scope.
+
 **Forced ending.** A repeated signal, an expired shutdown deadline, `SIGKILL`, or a crash ends the
 connection without warning. A command whose reply was not received may or may not have been
 admitted, and the client cannot tell which from the connection. It repeats the command under the
@@ -1994,10 +2078,10 @@ it restores them.
 ## Bindings For Other Hosts
 
 A host language reaches the protocol in one of two ways. It uses the shared Rust binding, or it
-implements the protocol itself from the schema. The binding is the supported path: C, C++, JVM and
+implements the protocol itself from the schema. The binding is the supported path: C, C++ and
 Ruby hosts load its C ABI, `nervix-client-ffi`, whose contract is
 `crates/client-ffi/include/nervix_client.h`, and CPython hosts import its Python package,
-`nervix_client`. Both drive the host session runtime every binding of the Rust client shares,
+`nervix_client`, while JVM hosts use the Java 21 JNI library in `crates/client-jvm`. All drive the host session runtime every binding of the Rust client shares,
 `nervix-client-host`, and through it the Rust client's own state machine, so request correlation,
 leader redirects, reconnection, execution identity across retries, and desired-subscription
 restoration are decided once, in the library, and a host never retries, reroutes, or reinterprets
@@ -2018,7 +2102,11 @@ The C ABI's lifecycle follows from that choice:
 - **Threads.** Each session runs on a runtime of its own, with two threads the library owns. The
   library never calls host code, so no host function ever runs on a library thread. Every blocking
   call runs on the calling thread until it completes, fails, or is cancelled, and a session may be
-  used from several threads at once; commands of one session still run one at a time. A call made
+  used from several threads at once; commands of one session still run one at a time. The call's
+  futures, and every frame that polls them, live on that thread's stack. A prepared command
+  completes on a thread with a 512 KiB stack in the unoptimized library, half the default stack of
+  a Java thread, as `a_prepared_command_completes_on_a_host_thread_with_half_a_java_stack` in
+  `nervix-client-core` holds. A call made
   from a thread that is itself driving a Tokio runtime cannot block on the library's runtime and
   aborts the process, so a Rust host calls the binding from a blocking thread.
 - **Cancellation and deadlines.** Every blocking call takes an optional `nx_cancel`. A token
@@ -2108,6 +2196,23 @@ host differs from a C one:
   event, in native byte order. A batch exports itself and a submission is imported through the
   Arrow PyCapsule interface, so pyarrow and polars read and build batches without a copy, and a
   rows event's rows export as one Arrow batch whose sensitive fields are nullable.
+
+A JVM host uses `io.nervix.client.Nervix` from the jar built by `just build-client-jvm`.
+The jar bundles its target's JNI library and extracts it to a private temporary directory when
+loaded; `-Dio.nervix.client.library=/absolute/path/to/library` selects an explicit library instead.
+A jar without a bundled library uses `System.loadLibrary`. Build an artifact for the host's native
+target; no Java preview feature or native-access flag is required on Java 21. Every handle is
+`AutoCloseable` with Cleaner fallback. A short call borrows under its handle's private monitor;
+reentrant close stops new admission and defers release until the short call returns, and nested
+access to that handle is refused;
+a blocking call first takes an independent native lease and releases that monitor. Closing the
+original handle cannot invalidate that call, and another thread may trigger its `Cancel`.
+The library calls no Java from its own threads. A frame or IPC `ByteBuffer` is direct and read-only;
+its root retains the native event, batch or delivery through every slice and duplicate. Bulk
+column arrays and builder inputs are copied. Strings preserve UTF-8 bytes and embedded NUL;
+unsigned 64-bit values preserve their bits in `long`. Prepared executions, typed failure causes,
+completion edits, clocks, endpoint admission, recovery and settlement all remain the shared host's.
+`end(Cancel)` waits for endpoint closure; `close()` releases ownership without acknowledging data.
 
 Independent implementations exist as qualification clients rather than supported SDKs. The Go client
 speaks native gRPC with `flatc --go` output and `google.golang.org/grpc`, and the TypeScript client
@@ -2219,7 +2324,13 @@ The protocol makes a client's view of its own work explicit rather than inferred
 - **Correlation.** Every reply names the request identity it answers, and every command outcome
   names its execution reference. A client that logs both can pair a reply with the request it sent
   and with every later attempt of the same command. The CLI prints the execution reference of a
-  command whose outcome is unknown, so an operator can see what a later retry will recover.
+  command whose outcome is unknown, and the upload identity of such an upload, and sends it again
+  under that identity when the operator runs the same statement again at the prompt or passes it to
+  `--execution-reference` or `--upload-identity`, so the later attempt recovers the outcome rather
+  than starting another command. The serving node's ordered-request debug event names the request
+  identity and, for a command, its execution reference and the disposition it queued. A command
+  cancelled before admission or whose reply could not be queued has no answered disposition in that
+  event.
 - **Dispositions and origin.** A command outcome states its disposition, and whether it was executed
   now or recovered from the durable record. `OutcomeUnknown` names its cause, a conflict names what
   differed, and a stale preview names both identities.
@@ -2227,6 +2338,12 @@ The protocol makes a client's view of its own work explicit rather than inferred
   owner, domain, state, pending count, progress, age, and idle time, from any node.
   `DESCRIBE TRANSACTION` reads one transaction's full impact report; see [Transaction Quiescence And
   Impact Inspection](./transaction-quiescence.md#observing-a-transaction).
+- **Command history.** Every node's metrics endpoint exposes its applied execution counts by
+  applying, finished and expired state and its durable retry-fence timestamp. Admission refusal
+  counters distinguish expired, future-dated and timestamp-less references and exhausted history
+  capacity on the process that handles the refusal; replicated application on followers does not
+  multiply that count. See [Command Execution History](./metrics-and-observability.md#command-execution-history)
+  for labels, node attribution and restart behavior.
 - **Subscriptions.** A client learns of its own losses from `SubscriptionDeliveryLost`,
   `SubscriptionRowsSkipped`, and `SubscriptionEnded`, and the Rust client reports a lost session as
   an interruption of each clock and of each subscription the server had not ended, each refused
@@ -2252,16 +2369,23 @@ The protocol makes a client's view of its own work explicit rather than inferred
   execution reference, and every other end of a download at `debug`.
 
 The server keeps its own records at the levels the logging contract assigns. Listener startup is
-logged at `info`. A reply replaced by a rejection, a reply the session ended before it could queue,
+logged at `info`, and so is a listener that accepts connections again after its accepts failed; the
+first of those failures is logged at `warn` and the ones repeating it at `debug`. A reply replaced
+by a rejection, a reply the session ended before it could queue,
 a subscription notice or loss report that does not fit a frame, domain clock attach, detach, and
 end, and producer opens, refusals, closes, and ends are logged at `debug`. A session that falls behind the notice bus, an event or snapshot that
-does not fit a frame, a failed revert at a clean close, and a failed remote subscription dispatch
-are logged at `warn`. A failed revert at a clean close names its transaction and renders the
+does not fit a frame, a failed revert at a clean close, a failed remote subscription dispatch, and
+credentials a listener judged and refused are logged at `warn`. A failed revert at a clean close names its transaction and renders the
 revert's whole cause chain, so a lease the leader could not confirm, a lost leadership and a
 storage failure read differently. Session opening and closing, individual requests, and rows are
-not logged, and no log line carries a payload value. The server exports no metric for sessions, requests,
-rejections, or authentication attempts; a client that needs them measures them itself. Producer
-counts are exported by the node that executes the client ingestor, not per session.
+not logged, and no log line carries a payload value. Each node exports the traffic its client
+listeners carry: the sessions it serves and has served, the requests they decode by kind, the
+rejections and cancellations that end requests, the transfer parts of large replies, and the
+authentication attempts it judged by outcome, each by transport; see
+[Client Traffic](./metrics-and-observability.md#client-traffic). They count traffic and carry no
+session, request, execution or user identity, so a client that pairs its own replies with its
+requests still logs their identities itself. Producer counts are exported by the node that
+executes the client ingestor, not per session.
 
 ## Retained Subscription And Producer Dependencies
 

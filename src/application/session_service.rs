@@ -52,6 +52,7 @@ use super::{
     backup::{CaptureSectionKey, CapturedSectionStage, ServerRetainedBackups},
     client_consumers::ClientConsumerRouter,
     client_producers::ClientProducerRouter,
+    client_traffic::ClientTraffic,
     command_execution::{CommandAdmission, CommandExecutionOwners, PersistentCommandRequest},
     command_result::{
         CommandDiagnostic, CommandDisposition, CommandOrigin, CommandResponse, CommandResult,
@@ -183,6 +184,8 @@ pub(in crate::application) struct SessionServiceInner {
     pub(in crate::application) service_tasks: ServiceTasks,
     pub(in crate::application) auth_rate_limiter: AuthRateLimiter,
     pub(in crate::application) failed_auth_rate_limit_keys: DashMap<String, (), RandomState>,
+    /// The series the traffic of this node's client listeners is recorded into.
+    pub(in crate::application) traffic: ClientTraffic,
     pub(in crate::application) transaction_bindings: DashMap<String, String, RandomState>,
     /// Retry validity and history capacity every durable command admission applies.
     /// Requests with one durable execution reference join one application owner on this leader.
@@ -1839,9 +1842,9 @@ impl SessionServiceImpl {
                 .await
             {
                 if execution.is_expired() {
-                    return Ok(CommandResponse::executed(expired_reference(
-                        execution_reference,
-                    )));
+                    return Ok(CommandResponse::executed(
+                        self.refuse_expired_reference(execution_reference),
+                    ));
                 }
                 let digest = match PersistentCommandRequest::transaction_digest(&req.query) {
                     Ok(digest) => digest,

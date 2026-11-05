@@ -229,6 +229,10 @@ impl IngestorEntityBody for WebsocketsConnectionIngestor {
         IngestorReference::Client(&self.client)
     }
 
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
+    }
+
     fn quiesce(&self) -> &IngestQuiesceMode {
         &self.quiesce
     }
@@ -313,6 +317,94 @@ impl IngestorEntityBody for WebsocketsEndpointIngestor {
     }
 }
 
+/// One change an `ALTER WEBSOCKETS CONNECTION INGESTOR` writes to the body of the ingestor it
+/// changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum WebsocketsConnectionIngestorChange {
+    /// `SET HEADERS { … }`.
+    Headers(Vec<WebsocketsUpgradeHeader>),
+    /// `DROP HEADERS`: the upgrade request sends no header of its own.
+    DropHeaders,
+    /// `SET MODE <mode>`.
+    Mode(WebsocketsIngestMode),
+}
+
+impl crate::IngestorEntityChange for WebsocketsConnectionIngestorChange {
+    type Entity = WebsocketsConnectionIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut WebsocketsConnectionIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Headers(headers) => entity.headers = headers.clone(),
+            Self::DropHeaders => {
+                if entity.headers.is_empty() {
+                    return Err(error_stack::Report::new(
+                        crate::AlterIngestorError::OptionNotWritten {
+                            kind:
+                                <WebsocketsConnectionIngestor as crate::IngestorEntityModel>::KIND,
+                            option: "HEADERS",
+                        },
+                    ));
+                }
+                entity.headers.clear();
+            }
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Headers(headers) => format!(
+                "SET HEADERS {}",
+                crate::canonical::upgrade_headers_to_plexus(headers)
+            ),
+            Self::DropHeaders => "DROP HEADERS".to_owned(),
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
+    }
+}
+
+/// One change an `ALTER WEBSOCKETS ENDPOINT INGESTOR` writes to the body of the ingestor it
+/// changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum WebsocketsEndpointIngestorChange {
+    /// `SET MODE <mode>`.
+    Mode(EndpointIngestMode),
+}
+
+impl crate::IngestorEntityChange for WebsocketsEndpointIngestorChange {
+    type Entity = WebsocketsEndpointIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut WebsocketsEndpointIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
+    }
+}
+
 connector_ingestors! {
     connector Websockets = "WEBSOCKETS";
     /// What a WebSockets source reads.
@@ -321,7 +413,7 @@ connector_ingestors! {
     pub enum WebsocketsIngestorAlteration;
     /// The entities a WebSockets source reads.
     pub enum WebsocketsIngestorEntity {
-        Connection(WebsocketsConnectionIngestor) = "CONNECTION", "WebSocket client";
-        Endpoint(WebsocketsEndpointIngestor) = "ENDPOINT", "WebSocket endpoint";
+        Connection(WebsocketsConnectionIngestor => WebsocketsConnectionIngestorChange) = "CONNECTION", "WebSocket client";
+        Endpoint(WebsocketsEndpointIngestor => WebsocketsEndpointIngestorChange) = "ENDPOINT", "WebSocket endpoint";
     }
 }

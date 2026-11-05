@@ -40,8 +40,10 @@ select another connector or entity. Nervix references remain typed identifiers, 
 locators preserve the text admitted by their entity's name rule.
 
 An ingestor or emitter alteration repeats its stored connector and entity. `SET FROM` or `SET TO`
-is parsed as that entity's complete replacement body, and applying the alteration validates the
-stored kind before publishing any operation. Changing the connector/entity pair requires dropping
+is parsed as that entity's complete replacement body, and an operation that changes one part of
+the body, such as `SET <option>`, `DROP <option>` or `SET MODE`, is parsed by the entity's own
+grammar into that entity's typed change. Applying the alteration validates the stored kind before
+publishing any operation. Changing the connector/entity pair requires dropping
 and creating the boundary node. Addressing uses the node's ordinary identity instead:
 `DESCRIBE INGESTOR`, `DROP EMITTER`, `SHOW CREATE CLIENT`, and placement selections name the Model
 kind and name without repeating a connector/entity head.
@@ -353,9 +355,10 @@ it on the Reqwest 0.13 clients of HTTP polling, Prometheus, Sentry and OTEL HTTP
 trust and identity follow [HTTP client transport](#http-client-transport), as HTTP request emission does. The HTTP request
 emitter resolves each request's target host, or its client's declared proxy's host, itself, as its
 [request transport](#emitter-boundary) describes. Iceberg REST uses a separate Reqwest 0.12 client with that same resolver. Iceberg object
-storage uses OpenDAL 0.57 with a Reqwest 0.13 client that the connector builds with the node
-resolver and installs through `HttpClientLayer`; the layer also supplies HTTP calls made by
-OpenDAL's credential providers through its accessor info. The object-store client's optional
+storage uses OpenDAL 0.58 with a Reqwest 0.13 client that the connector builds with the node
+resolver and installs as the HTTP transport of each operator's `OperationContext`. Every
+operation receives that context, and the S3, GCS and Azure signers send the HTTP calls of
+OpenDAL's credential providers through its transport too. The object-store client's optional
 `timeout_ms`, read through `ConfiguredDeadline`, sets both the operation and I/O timeout of the
 OpenDAL operator, including credential HTTP calls, name resolution, connection and TLS. Without
 the key, metadata and delete operations allow 60 seconds and reads and writes allow 10 seconds.
@@ -693,9 +696,9 @@ JSON protocol's error type `QueueDoesNotExist`. Any other failure to reach the s
 certificate that does not name the configured host, is described by every cause of the driver's
 connection error, which describes the connection and never a record; a service's own response keeps
 its existing description. None of these failures rejects a record or acknowledges input. Both
-directions keep the SDK's own retries disabled, so the SDK makes each request once and the host
-retries a failed one on the entity's declared backoff alone. A request that runs out of `timeout_ms`
-keeps the contract's `DeadlineElapsed` as its innermost cause, naming the request and the key.
+directions keep the SDK's own retries disabled, so the SDK makes each request once. The host owns
+retry scheduling for resume, read, acknowledgement and publish failures. A request that runs out of
+`timeout_ms` keeps the contract's `DeadlineElapsed` as its innermost cause, naming the request and the key.
 Pooled connections stay open when their host's answer changes or expires; the next connection
 resolves again.
 
@@ -2943,6 +2946,18 @@ sequenceDiagram
   assignment changes without reading node-wide state or execution registries. The Kafka commit and
   acknowledgement boundary remains the state's highest durable replica progress.
 
+- **Kafka client build.** Kafka clients, ingestors and emitters run librdkafka 2.12.1 through
+  Nervix's fork of `rust-rdkafka`, `nervix-io/rust-rdkafka`, which carries the librdkafka backport
+  of the duplicate `FETCH_STOP` fix and builds librdkafka's TLS on AWS-LC instead of OpenSSL. Its
+  `aws-lc` feature compiles librdkafka with CMake against the libcrypto and libssl that
+  `aws-lc-sys` builds with its `ssl` feature: the same `aws-lc-sys` `aws-lc-rs` links, so Kafka
+  TLS, SASL SCRAM and OAUTHBEARER share the product's one AWS-LC. The fork's build reads the
+  `links` metadata of the AWS-LC crate its backend selects under that crate's versioned key, so a
+  new `aws-lc-sys` release changes only the version the fork requires. An upgrade of `aws-lc-rs`
+  that moves to another `aws-lc-sys` moves the fork in the same change, because `just ratchet`
+  refuses a product that links two; [Cryptography](cryptography.md) owns that rule and lists what
+  librdkafka and the libcurl of its OAUTHBEARER token requests implement themselves.
+
 - **Pulsar client.** The Pulsar ingestor and emitter build on Nervix's fork of `pulsar-rs`,
   `nervix-io/pulsar-rs`, because the released crate discards delivered redelivery counts and
   `CommandConnected`, and returns from an
@@ -3049,7 +3064,10 @@ sequenceDiagram
   that can produce a null. Every commit plans again against the table's current schema and lays each
   staged batch out as the table's columns, in the table's order, before the Parquet writer, which
   pairs a batch's columns with a data file's by position: a mapped column lands in the column of its
-  name and an optional column `VALUES` leaves out is written as null. Staging does not complete an
+  name and an optional column `VALUES` leaves out is written as null. A commit reloads the table
+  before it writes a data file and again before it appends, and refuses a table whose properties
+  declare `encryption.key-id`, whatever its format version: the emitter writes its data files and
+  manifests unencrypted, so such a table receives neither. Staging does not complete an
   ACK; successful catalog commit does. The emitter retains ACKs and its client while a failed commit is
   retried. A commit reads its staged batches back in groups the bulk memory class can hold at once,
   and a single staged batch larger than the class alone, charged with the whole class. It charges

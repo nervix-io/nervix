@@ -20,7 +20,7 @@ The observability listener exposes:
 
 - `/livez`: process liveness
 - `/readyz`: readiness once a leader is known
-- `/metrics`: Prometheus text output for graph, interconnection, and allocator metrics
+- `/metrics`: Prometheus text output for graph, command history, interconnection, and allocator metrics
 
 Use the node's observability address, not the data-plane HTTP listener:
 
@@ -139,6 +139,16 @@ Nervix records these raw metric families:
   acknowledgement window
 - `nervix_client_ingestor_submissions_total`: batches the ingestor answered, by `outcome` and
   `cause`
+- `nervix_sessions`: client sessions the node serves now
+- `nervix_sessions_opened_total`: client sessions the node has served
+- `nervix_session_requests_total`: requests the node's client sessions decoded, by `request`
+- `nervix_session_rejections_total`: requests those sessions answered with a rejection, by
+  `rejection`
+- `nervix_session_cancellations_total`: requests a cancellation ended, by `stage`
+- `nervix_session_transfer_parts_total`: transfer parts those sessions queued for replies larger
+  than one frame
+- `nervix_client_authentications_total`: calls the node's client listeners authenticated or
+  refused, by `outcome`
 - `nervix_jemalloc_active_bytes`: bytes in active allocator pages
 - `nervix_jemalloc_allocated_bytes`: bytes allocated by the process
 - `nervix_jemalloc_mapped_bytes`: bytes mapped by active allocator extents
@@ -176,9 +186,68 @@ first observation. Their labels and counting contracts are unchanged.
 
 The two session-subscription families use `domain` and `relay` labels and describe the node that
 exports them: the subscriptions its sessions hold and the rows those sessions lost. A client is told
-of its own losses directly, as described in [Sessions](sessions.md). The server exports no other
-session metrics; [Client Session Protocol](./client-session-protocol.md#observability) describes
-what clients and operators observe instead.
+of its own losses directly, as described in [Sessions](sessions.md). The rest of a node's session
+traffic, and the authentication attempts its client listeners judge, are described under
+[Client Traffic](#client-traffic).
+
+## Client Traffic
+
+Seven families describe the traffic the node's two client listeners carry, the native gRPC listener
+and the web console listener, which the `transport` label names as `grpc` or `console`. They
+describe the node that exports them: a session counts on the node its client connected to, and a
+call counts on the node that judged its credentials. Every other label is drawn from a set fixed at
+compile time. No label carries a user name, a session, request or execution identity, a domain, or
+a payload value, and every child is registered at zero when the node starts, so each series appears
+before its first observation.
+
+| Family | Kind | Labels | Counts |
+| --- | --- | --- | --- |
+| `nervix_sessions` | gauge | `transport` | Sessions the node serves now, from the moment a session's call is authenticated until the session has released its subscriptions and its transaction binding. |
+| `nervix_sessions_opened_total` | counter | `transport` | Sessions the node has served. |
+| `nervix_session_requests_total` | counter | `transport`, `request` | Requests the sessions decoded, by kind: `command`, `suggest`, `choice`, `list_domains`, `select_domain`, `attach_transaction`, `inspect_transaction`, `subscribe`, `unsubscribe`, `cancel`, `attach_domain_clock`, `detach_domain_clock`, `open_ingestor`, `submit_batch`, `close_ingestor`, `open_emitter`, `read_emitter_batch`, `settle_emitter_batch` or `close_emitter`. A frame that does not decode names no kind and counts only as a rejection. |
+| `nervix_session_rejections_total` | counter | `transport`, `rejection` | Requests answered with a rejection, by its reason: `invalid_request`, `unsupported_request`, `unsupported_value`, `duplicate_request_id`, `reply_too_large`, `too_many_requests_in_flight` or `server_busy`. A reply replaced by a rejection because it could not be encoded counts under the replacement's reason. |
+| `nervix_session_cancellations_total` | counter | `transport`, `stage` | Requests a cancellation ended, by whether it found them `before_admission` or `after_admission`. A cancellation whose target was already answered ended nothing and is not counted here; the cancel request itself counts under `request="cancel"`. |
+| `nervix_session_transfer_parts_total` | counter | `transport` | Transfer parts queued for replies larger than one frame. |
+| `nervix_client_authentications_total` | counter | `transport`, `outcome` | Calls whose authentication ended `authenticated`, `missing` (no readable Basic credentials), `rejected` (an unknown user, a wrong password, or a stored hash the node could not verify) or `unavailable` (the node could not judge the credentials now). Every call counts: a session, an upload, a download and a restore, and on the console a `/console/auth` check and a resource upload. |
+
+`rejected` deliberately does not tell an unknown user from a wrong password. The observability
+listener is unauthenticated, and that distinction is what enumerating the cluster's users would
+look for; an unknown user also costs the node the same credentials work, as
+[Authentication](./client-session-protocol.md#authentication) describes. A rate of `rejected`
+attempts is the sign of a client guessing passwords, and the `warn` record of each names the address
+it came from.
+
+## Command Execution History
+
+Every node exposes its applied command history through these bounded metric families:
+
+| Family | Kind and labels | Meaning |
+| --- | --- | --- |
+| `nervix_command_execution_records` | Gauge, `state` is `applying`, `finished` or `expired` | Retained executions in each state, including compact expiry tombstones. |
+| `nervix_command_execution_retry_fence_timestamp_seconds` | Gauge, no labels | The durable retry fence as Unix seconds, absent until a fence has been committed. |
+| `nervix_command_execution_admission_refusals_total` | Counter, `reason` is `expired`, `future`, `missing_timestamp` or `capacity` | Definitive admission refusals handled by this node process. |
+
+The record counts and fence come from one applied revision at scrape time. Reading the three
+existing history indexes takes constant time and does not scan executions or advance the fence.
+Followers expose their own applied revision, so they may briefly trail the leader. These gauges
+describe replicated state: use the leader's values for a cluster total rather than summing copies
+across nodes. A restart restores them from the recovered history and fence. `time() -
+nervix_command_execution_retry_fence_timestamp_seconds` shows the fence's age against the scraper's
+clock, including an unexpectedly advanced fence.
+
+Refusal counters are process-local and start at zero for all four reasons. They count refused
+attempts, including a retry whose compact tombstone is still retained, rather than unique execution
+references. `future` means the UUIDv7 creation time exceeds the accepted five-minute clock skew or
+the timestamp range; `missing_timestamp` means the reference carries no UUIDv7 creation time.
+Follower application of a refused proposal adds no event, and a leadership change neither copies
+nor resets counters on either live process. Sum their rates across nodes to follow refusals as
+leadership moves; a process restart resets its counters. Completion and background recovery add no
+admission event, including when history maintenance has expired the completed outcome. Recovered
+successful outcomes, reference content conflicts, redirects and uncertain admission outcomes add
+no refusal event to these four reasons. No execution identity, domain or user appears in their labels.
+
+See [Bounded History And Expired Identities](./client-session-protocol.md#bounded-history-and-expired-identities)
+for retention and admission semantics.
 
 ## Client Ingestors
 

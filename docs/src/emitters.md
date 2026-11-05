@@ -564,8 +564,8 @@ should receive a stable key taken from the record, such as
 `uuid_v4()`, stays the same across these retries but not across an upstream redelivery.
 
 `ALTER HTTP REQUEST EMITTER ... SET TO` restates the complete method, path, mode and body selection.
-`SET CLIENT` changes the referenced client, `SET MODE` changes the retry policy, and `SET ENCODE
-USING` selects a codec body. `DROP ENCODE` is invalid for HTTP; use a complete `SET TO <client> METHOD ...
+`SET CLIENT` changes the referenced client, `SET METHOD` and `SET PATH` change what each request
+names, `SET MODE` changes the retry policy, and `SET ENCODE USING` selects a codec body. `DROP ENCODE` is invalid for HTTP; use a complete `SET TO <client> METHOD ...
 WITHOUT BODY` replacement. The retained construction and error scopes must be valid for the new
 selection.
 
@@ -939,10 +939,25 @@ ALTER <CONNECTOR> <ENTITY> EMITTER <emitter>
   | ALTER FROM <relay> SET WHERE <expr>
   | ALTER FROM <relay> DROP WHERE
   | SET TO <complete destination body>
-  | SET MODE <transport-specific mode body>
   | SET CLIENT <client>
+  | SET <locator>
+  | SET <option>
+  | DROP <option>
+  | SET MODE <publishing mode>
   | SET ENCODE USING <codec>
   | DROP ENCODE
+  | SET <envelope clause>
+  | DROP <envelope clause keywords>
+  | SET PROPERTIES { '<key>' = <expression>, ... }
+  | DROP PROPERTIES
+  | SET INHERIT <inheritance>
+  | DROP INHERIT
+  | ADD SET <field> = <expression>
+  | DROP SET <field>
+  | ADD INVOKE <call>
+  | DROP INVOKE <n>
+  | SET WHERE <expression>
+  | DROP WHERE
   | SET COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]
   | DROP COLLECT
   | SET ATTACHED
@@ -951,7 +966,8 @@ ALTER <CONNECTOR> <ENTITY> EMITTER <emitter>
   | DROP BATCH
   | SET FLUSH EACH <duration> MAX BATCH SIZE <bytes>
   | SET FLUSH IMMEDIATE
-  | SET COMMIT EACH <duration> MAX SIZE <bytes>
+  | SET GENERAL ERROR IGNORE
+  | SET GENERAL ERROR LOG
   [, ...];
 ```
 
@@ -964,11 +980,46 @@ options, required `MODE`, its codec, direct `VALUES` mapping or explicit `WITHOU
 [envelope clauses](#envelope-clauses). It replaces the payload selection and the envelope. An
 explicitly written construction replaces the construction; omitting construction keeps the existing
 one. Batching and flush policies remain in place.
-`SET MODE` accepts only policies that entity represents. `SET CLIENT` changes its client reference.
-`SET COMMIT` is available for Iceberg. `SET ENCODE USING` and `DROP ENCODE` are available only for
-encoded destinations; dropping an absent codec fails, and HTTP requires an explicit body selection.
-`SET BATCH` adds or replaces a clause, while `DROP BATCH` fails if it is absent or required by the
-entity. These operations validate atomically against the complete candidate graph.
+
+The other operations change one part of the stored emitter and keep the rest of it as it was:
+
+- `SET CLIENT` changes the client reference of an entity that writes through a client.
+- `SET <locator>` writes the locator the entity declares, such as `SET TOPIC 'orders'`,
+  `SET QUEUE 'orders'` or `SET TABLE 'public.orders'`.
+- `SET <option>` writes one option the entity declares, in a form its body accepts, such as
+  `SET FIFO GROUP tenant`, `SET SEND BATCH`, `SET METHOD 'PUT'`, `SET ROUTING KEY input.region`,
+  `SET ON CONFLICT ('id') DO UPDATE`, `SET NAMESPACE 'Analytics.Events'`, `SET COMMIT EACH 1m MAX
+  SIZE 512MiB`, `SET ATTRIBUTES { … }` or `SET METRIC '…' UNIT '…' GAUGE`. `DROP <option>` removes
+  an optional option, such as `DROP FIFO GROUP`, `DROP PLATFORM`, `DROP ON CONFLICT` or
+  `DROP SCOPE`. Dropping an option the stored body does not write is refused, for example with
+  `the stored SQS QUEUE emitter writes no FIFO GROUP, so there is no FIFO GROUP to drop`, and a
+  required option has no `DROP`. An `ON CONFLICT` clause is checked against the stored `VALUES`
+  mapping as the body that writes both would be.
+- `SET MODE` writes one of the publishing modes the entity declares, with its complete policy.
+  Completion offers exactly those modes, and any other is refused where it is written.
+- `SET ENCODE USING` and `DROP ENCODE` are available only for encoded destinations; dropping an
+  absent codec fails, and HTTP requires an explicit body selection.
+- `SET <envelope clause>` writes one [envelope clause](#envelope-clauses) the entity declares, such
+  as `SET TIMESTAMP input.occurred_at`, `SET DELAY 5s` or the flag `SET MANDATORY`, in place of what
+  the envelope wrote for it. `DROP` followed by the clause's keywords removes it, such as
+  `DROP DELAY` or `DROP MANDATORY`. `SET PROPERTIES` replaces the properties the envelope sets and
+  `DROP PROPERTIES` removes them, under an entity that declares properties. A clause or a property
+  set the entity does not declare is refused where it is written, and dropping one the envelope
+  does not write is refused.
+- `SET INHERIT`, `DROP INHERIT`, `ADD SET`, `DROP SET <field>`, `ADD INVOKE`, `DROP INVOKE <n>`,
+  `SET WHERE` and `DROP WHERE` change the emitter's construction where it stands, as
+  [Codec-emitter construction](#codec-emitter-construction) describes it: `ADD SET` and
+  `ADD INVOKE` append after what the construction writes, `DROP SET` removes the one assignment to
+  the field, and `DROP INVOKE` removes the `n`th call counted from one in written order. A direct
+  `VALUES` emitter writes its values itself, so it offers `SET WHERE` and `DROP WHERE` alone. A
+  `DROP` of a part the construction does not write is refused.
+- `SET BATCH` adds or replaces a clause, while `DROP BATCH` fails if it is absent or required by
+  the entity.
+- `SET GENERAL ERROR` replaces the emitter's general error policy.
+
+An operation whose result the entity does not keep is refused once every operation of the
+statement has applied, by the registry checks every `CREATE` result also passes. These operations
+validate atomically against the complete candidate graph.
 
 `ADD FROM` rejects an already configured relay. `DROP FROM` cannot remove the final input.
 `ALTER FROM ... SET WHERE` adds or replaces that source's predicate; `ALTER FROM ... DROP WHERE`
@@ -976,8 +1027,8 @@ fails when the source has no predicate.
 
 Changing only `FLUSH` is a `DYNAMIC` update. The live emitter keeps its pending Arrow batches,
 installs the new cadence, and receives a force-flush kick, so buffered output is neither discarded
-nor re-encoded. Source-predicate, emitter, publishing-mode, client, codec, collection, batching, and
-attachment changes use
+nor re-encoded. Source-predicate, destination, option, publishing-mode, client, codec, envelope,
+construction, collection, batching, attachment and general error policy changes use
 `ENTITY_PAUSE`: Nervix gates all of the emitter's source relays, drains collected input and pending
 emitter output, replaces that emitter task, and releases the gates. Changing source membership uses
 `DOMAIN_PAUSE` because it changes graph topology. Other relays continue flowing during an entity
@@ -1130,11 +1181,13 @@ declares `DELAY` and `DEDUPLICATION ID`, which [SQS](#sqs) sends with each messa
 [RabbitMQ](#rabbitmq) entities declare `PERSISTENT`, `MANDATORY`, `TIMESTAMP` and their AMQP
 `PROPERTIES` below. Every emitter refuses clauses and keys its entity does not declare.
 
-For the forms its entity declares, `ALTER` offers `SET PERSISTENT` and `DROP PERSISTENT`,
-`SET TIMESTAMP <expression>` and `DROP TIMESTAMP`, and `SET PROPERTIES { … }` and `DROP PROPERTIES`.
-`SET PROPERTIES` replaces the complete nonempty property set. Each targeted operation preserves
-the envelope fields it does not name. Inside a property set, completion offers the declared keys
-that have not yet been written.
+For each clause its entity declares, `ALTER` offers `SET` with the clause written in full and
+`DROP` with its keywords, such as `SET PERSISTENT`, `SET TIMESTAMP <expression>` or `DROP DELAY`,
+and `SET PROPERTIES { … }` and `DROP PROPERTIES` where it declares properties; see
+[Altering emitters](#altering-emitters). `SET PROPERTIES` replaces the complete nonempty property
+set. Each operation preserves the envelope fields it does not name, and a `DROP` of a clause or of
+properties the envelope does not write is refused. Inside a property set, completion offers the
+declared keys that have not yet been written.
 
 | Clause | Written with | Value every record carries |
 | --- | --- | --- |
@@ -1166,8 +1219,9 @@ connector answers for it, so every attempt, including the one after an unknown o
 envelope the first attempt sent. `DESCRIBE EMITTER` prints the envelope on its `envelope:` line as
 the statement writes it, or `envelope: none`, and `SHOW CREATE` writes it in the destination's
 section. `ALTER … SET TO` replaces the envelope with the rest of the destination body, so a body
-that writes no envelope clause removes them. A changed envelope is a destination change, applied
-with `ENTITY_PAUSE`.
+that writes no envelope clause removes them, while `SET <envelope clause>`, `DROP` with a clause's
+keywords and `SET|DROP PROPERTIES` change one part and keep the rest. A changed envelope is a
+destination change, applied with `ENTITY_PAUSE`.
 
 ## TLS Client Configuration
 
@@ -1920,10 +1974,12 @@ offers only the modes the written quality of service pairs with, and a statement
 another is refused with the mode underlined and what it writes named, such as
 `MQTT TOPIC emitters name MODE NO ACK only with QOS 0; the statement writes QOS 1`.
 
-`ALTER` holds every result to the same pairing. `SET MODE` changes the mode within a quality of
-service, so `SET MODE ACK PARALLEL MAX 8 ...` is accepted at `QOS 1` and `SET MODE NO ACK ...` is
-refused there. `SET TO` changes the quality of service, or moves it and the mode together, through
-the complete destination body.
+`ALTER` holds every result to the same pairing, once every operation of the statement has applied.
+`SET MODE` changes the mode within a quality of service, so `SET MODE ACK PARALLEL MAX 8 ...` is
+accepted at `QOS 1` and `SET MODE NO ACK ...` is refused there. `SET QOS` changes the quality of
+service: alone between `QOS 1` and `QOS 2`, and beside the mode it pairs with across `QOS 0`, such
+as `SET QOS 2, SET MODE ACK SEQUENTIAL ...` on a `NO ACK` emitter, because no mode pairs with both.
+`SET TO` moves them together through the complete destination body.
 
 QoS 0 acknowledges client acceptance. When the emitter stops, it waits within the stop or shutdown
 deadline for its client to send the publishes it still holds, which a client cut off from its
@@ -3720,11 +3776,12 @@ meanwhile wait for that open, and the emitter commits them once it opens:
 | A catalog that fails the load | `failed to load ICEBERG table 'orders' in namespace 'Analytics.Events'`, followed by the catalog's error |
 | A catalog that does not hold the table, then fails the namespace lookup | `failed to look up ICEBERG namespace 'Analytics.Events'`, followed by the catalog's error |
 
-To move an emitter to a table in another namespace, `ALTER ICEBERG TABLE EMITTER ... SET TO`
-restates the complete destination with the new `NAMESPACE` and that table's `LOCATION`, as
-[Altering emitters](#altering-emitters) describes for every entity. The replaced emitter opens the
-table in the new namespace, which must already exist, and `SHOW CREATE EMITTER` and
-`DESCRIBE EMITTER` show the new namespace.
+To move an emitter to a table in another namespace, `ALTER ICEBERG TABLE EMITTER` writes the new
+`NAMESPACE` and that table's `LOCATION` in one statement, such as
+`SET NAMESPACE 'Analytics.Archive', SET LOCATION 's3://warehouse/archive/orders'`, or restates the
+complete destination with `SET TO`, as [Altering emitters](#altering-emitters) describes for every
+entity. The replaced emitter opens the table in the new namespace, which must already exist, and
+`SHOW CREATE EMITTER` and `DESCRIBE EMITTER` show the new namespace.
 
 #### Iceberg table schema
 
@@ -3846,7 +3903,8 @@ with every writer the emitter starts, and the five-digit count of the files that
 from `00000`. Each opening of the emitter therefore names its files apart from every other's. A
 commit appends its data files in one fast-append snapshot whose summary carries
 `nervix.emitter.append-id`, the identity a retry looks for, as
-[Iceberg retries](#iceberg-retries) describes.
+[Iceberg retries](#iceberg-retries) describes. The snapshot's manifest and manifest list go to the
+table's `write.metadata.path` property, and to `<table location>/metadata` when it is unset.
 
 The emitter writes nothing else:
 
@@ -3859,6 +3917,13 @@ The emitter writes nothing else:
   commit too.
 - **Schema changes.** The emitter never changes the table's schema; provision every column it
   maps, as [Iceberg table schema](#iceberg-table-schema) describes.
+- **Encryption.** The emitter writes no encrypted data files or manifests. A table whose
+  properties declare `encryption.key-id` opens and stages rows, but every commit fails before it
+  writes a data file, with `the Iceberg table declares an encryption key, and the emitter writes
+  no encrypted files`, and is retried on the declared retry policy, keeping its staged rows and
+  their acknowledgements. A format-version 3 table that declares one fails the open instead, as a
+  catalog that fails the load, because Nervix gives the catalog library no key management client
+  to read it with.
 - **Deletes and upserts.** A commit only appends data files. The emitter writes no equality or
   position deletes, replaces no rows and overwrites no files.
 - **Other catalogs.** The emitter commits through an Iceberg REST catalog, its `ICEBERG_REST`

@@ -377,6 +377,29 @@ Feature: MQTT TOPIC declarations
       options: QOS 0
       mode: NO ACK RETRY POLICY BACKOFF 1s MAX 30s
       """
+    When these Plexus commands fail
+      """
+      ALTER MQTT TOPIC EMITTER publishing SET QOS 1;
+      """
+    Then the last command error contains
+      """
+      MQTT TOPIC emitters name MODE NO ACK only with QOS 0; the statement writes QOS 1
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      ALTER MQTT TOPIC EMITTER publishing
+        SET QOS 2, SET MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s;
+      ALTER MQTT TOPIC EMITTER publishing SET QOS 1;
+      SHOW CREATE EMITTER publishing;
+      """
+    Then the last command output contains
+      """
+      TOPIC 'devices/orders' QOS 1
+      """
+    And the last command output contains
+      """
+      MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s
+      """
 
     Examples:
       | cluster_size |

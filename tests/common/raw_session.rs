@@ -345,8 +345,9 @@ pub(crate) struct TestUpload<'a> {
     pub(crate) parts: Vec<TestUploadPart>,
 }
 
-/// Streams one upload to `server` and returns the server's reply.
-pub(crate) async fn send_upload(server: &str, upload: TestUpload<'_>) -> io::Result<UploadReply> {
+/// Streams one upload to `server` and returns the server's reply. The upload stays the caller's,
+/// so a refusal that decides nothing can send the same frames again.
+pub(crate) async fn send_upload(server: &str, upload: &TestUpload<'_>) -> io::Result<UploadReply> {
     let limits = SessionLimits::DEFAULT;
     let channel = session_channel(server).await?;
     let mut client = tonic::client::Grpc::new(channel)
@@ -830,8 +831,29 @@ impl TestSession {
 
     /// Captures identity before the first attempt can change the retained transaction status.
     pub(crate) fn prepare_command(&self, query: &str, reference: &str) -> PreparedCommand {
+        self.prepare_command_with_position(query, reference, self.expected_position())
+    }
+
+    /// Captures identity like [`Self::prepare_command`] for a request a step sends at the
+    /// transaction position it names, as a replay of an earlier append does.
+    pub(crate) fn prepare_command_at_position(
+        &self,
+        query: &str,
+        reference: &str,
+        expected_transaction_position: usize,
+    ) -> PreparedCommand {
+        let position = TransactionPosition::new(expected_transaction_position);
+        self.prepare_command_with_position(query, reference, Some(position))
+    }
+
+    fn prepare_command_with_position(
+        &self,
+        query: &str,
+        reference: &str,
+        expected_transaction_position: Option<TransactionPosition>,
+    ) -> PreparedCommand {
         PreparedCommand {
-            request: self.command_request(query, reference, self.expected_position()),
+            request: self.command_request(query, reference, expected_transaction_position),
             authorization: self.authorization.clone(),
             transaction_id: self
                 .transaction

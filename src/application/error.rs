@@ -67,6 +67,12 @@ pub enum AppError {
     MissingGrpcHttpsListenAddress,
     #[error("gRPC https mode requires an https advertise address")]
     MissingGrpcHttpsAdvertiseAddress,
+    #[error("gRPC https mode requires a TLS certificate")]
+    MissingGrpcTlsCertificate,
+    #[error("gRPC https mode requires a TLS private key")]
+    MissingGrpcTlsPrivateKey,
+    #[error("gRPC TLS certificate/key requires https mode")]
+    GrpcTlsRequiresHttps,
     #[error("web console https listener requires a TLS certificate")]
     MissingWebConsoleTlsCertificate,
     #[error("web console https listener requires a TLS private key")]
@@ -122,14 +128,6 @@ pub enum AppError {
     InitMemoryPressureMonitor,
     #[error("gRPC server failed")]
     Serve,
-    #[error("HTTP server failed")]
-    ServeHttp,
-    #[error("HTTPS server failed")]
-    ServeHttps,
-    #[error("observability server failed")]
-    ServeObservability,
-    #[error("web console server failed")]
-    ServeWebConsole,
     #[error("failed to initialize tracing")]
     InitTracing,
     #[error("failed to register termination signal handlers")]

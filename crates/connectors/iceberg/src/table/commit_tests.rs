@@ -606,6 +606,69 @@ async fn a_staged_batch_larger_than_the_whole_bulk_class_commits_once_the_whole_
     );
 }
 
+/// Declares in the fixture table the master key its files are encrypted under.
+async fn declare_encryption_key(catalog: &dyn Catalog) {
+    let table = catalog
+        .load_table(&table_ident())
+        .await
+        .assured("the fixture table exists");
+    let transaction = Transaction::new(&table);
+    let declaration = transaction.update_table_properties().set(
+        TableProperties::PROPERTY_ENCRYPTION_KEY_ID.to_string(),
+        "fixture-master-key".to_string(),
+    );
+    declaration
+        .apply(transaction)
+        .assured("a property update applies to the fixture table")
+        .commit(catalog)
+        .await
+        .assured("the in-memory catalog records the table property");
+}
+
+#[nervix_primitives::test]
+async fn a_table_that_declares_an_encryption_key_refuses_the_commit_and_keeps_its_staged_rows() {
+    let catalog: StdArc<dyn Catalog> = StdArc::new(memory_catalog().await);
+    let mut connector = fixture_emitter(StdArc::clone(&catalog), Executor::default()).await;
+    let acknowledgements = StdArc::new(RecordedAcknowledgements::default());
+    stage(&mut connector, &[1, 2], &acknowledgements).await;
+    declare_encryption_key(catalog.as_ref()).await;
+
+    let refused = connector
+        .commit()
+        .await
+        .err()
+        .assured("the emitter writes no encrypted files, so it refuses an encrypted table");
+
+    assert_eq!(
+        refused.current_context(),
+        &EmitterWriteError::Commit { connector: ICEBERG }
+    );
+    assert_eq!(
+        description(&refused),
+        Some(
+            "the Iceberg table declares an encryption key, and the emitter writes no encrypted \
+             files"
+                .to_string()
+        )
+    );
+    assert_eq!(
+        connector.client.data_file_sequence, 0,
+        "a refused table receives no data file"
+    );
+    assert_eq!(
+        committed_user_ids(catalog.as_ref()).await,
+        Vec::<i64>::new()
+    );
+    assert_eq!(connector.staged_rows, 2);
+    assert_eq!(
+        staging_files(&connector),
+        1,
+        "a refused commit keeps its staging file"
+    );
+    assert_eq!(acknowledgements.acknowledged(), 0);
+    assert_eq!(acknowledgements.rejected(), 0);
+}
+
 #[nervix_primitives::test]
 async fn rows_staged_after_a_refused_append_are_written_before_they_are_acknowledged() {
     let catalog: StdArc<dyn Catalog> = StdArc::new(RefusingFirstAppend {

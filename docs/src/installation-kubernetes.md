@@ -72,6 +72,8 @@ spec:
   image: ghcr.io/nervix-io/nervix:debian-latest
   replicas: 3
   clusterId: nervix-kube
+  initialClusterParameters:
+    replicaCount: 2
   initialDefaultUserPasswordSecretRef:
     name: nervix-initial-password
     key: password
@@ -107,8 +109,9 @@ One operator can manage multiple Nervix clusters. Create each cluster as a separ
 
 Cluster parameters, such as the replica count, are policy the whole cluster shares. The operator
 passes no cluster parameter option to any node. Restarting a pod, recreating it on its persistent
-volume, rolling the StatefulSet and scaling it therefore change no parameter, and a new cluster
-starts with the server's defaults.
+volume, rolling the StatefulSet and scaling it therefore change no parameter. The shipped
+three-node example requests two replicas, so each piece of runtime state is replicated to both
+other nodes. Parameters left out of the request keep the server's defaults.
 
 To start a new cluster with other values, request them in `spec.initialClusterParameters`:
 
@@ -127,9 +130,8 @@ bootstrap pod accepts the initial password and before the operator removes it. R
 pod's own `nervix-cli`, it reads the committed values with `DESCRIBE CLUSTER` and commits every
 requested value that differs with one `ALTER CLUSTER SET`. It decides the outcome from the committed
 values it reads back, so an initialization that resumes after the bootstrap pod or the operator
-restarted commits each value once. The cluster stays initializing until the request is committed. A
-server without `ALTER CLUSTER SET` refuses the statement, and the refusal is reported. The operator's
-ClusterRole lets it exec into pods for this.
+restarted commits each value once. The cluster stays initializing until the request is committed,
+and reports any refusal. The operator's ClusterRole lets it exec into pods for this.
 
 `status.initialClusterParameters` records the values the operator committed. The
 `InitialClusterParametersCommitted` condition reports on the request: `Pending`, or `Uncommitted`
@@ -219,12 +221,21 @@ Each check resolves the server image built by that run and the published operato
 digests, records the chart and example's `main` revision, and changes only the example's server
 image. It waits for user initialization, all three pods running that exact image, and a leader with
 three Raft voters reported by `SHOW CLUSTER STATUS` through the bootstrap NodePort. The CLI comes
-from the tested server image. Image identities, Kubernetes observations, command output and current
-and previous pod logs are retained as workflow artifacts, and the check deletes its own minikube
-profile after success, failure or cancellation.
+from the tested server image. Through `DESCRIBE CLUSTER`, the check requires the example's replica
+count of 2 to be committed and running at its committed revision on all three nodes. It then
+deletes the bootstrap pod, waits for a new pod identity on the same persistent volume claim and
+for all three pods to be ready on the tested image, and verifies the three-voter membership and
+the same replica policy revision again. A missing request, unapplied value or changed revision
+fails the check.
+
+Image identities, Kubernetes observations, policy descriptions before and after the restart,
+the recorded revision and pod and volume claim identities, command output and current and
+previous pod logs are retained as workflow artifacts. The check deletes its own minikube profile
+after success, failure or cancellation.
 
 This qualifies the default deployment's startup command, interconnect certificates, memory limits
-and initialization sequence. Minikube's hostpath provisioner reports the host filesystem's capacity;
+and initialization sequence, and retention of the committed replica policy across the bootstrap
+pod's restart. Minikube's hostpath provisioner reports the host filesystem's capacity;
 it does not enforce the example's `20Gi` claim as a filesystem size. A passing deployment therefore
 does not qualify volume-size enforcement, another storage provisioner, or production availability.
 The [startup preflight](node-settings.md#the-startup-preflight) retains its separate volume tests.

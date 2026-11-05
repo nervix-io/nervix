@@ -393,9 +393,9 @@ impl WireSchemaLookup for WireSchemas {
 #[cfg(test)]
 mod tests {
     use nervix_models::{
-        AvroType, BranchEviction, BranchName, CodecJaqFormat, CodecJaqTransformations,
+        AvroType, BranchEviction, BranchName, CborType, CodecJaqFormat, CodecJaqTransformations,
         CodecProtobufConfig, CodecWireFormat, CreateBranch, CreateCodec, CreateEndpoint,
-        CreateVhost, CreateWireSchema, FieldName, JsonType, Model, ModelKind, ModelName, NodeRef,
+        CreateVhost, CreateWireSchema, FieldName, Model, ModelKind, ModelName, NodeRef,
         RelayBranching, ResolvedBranching, ScheduledNode, ScheduledNodes, SchemaFingerprint,
         SignalingWireFormat, VhostTlsResource, WireSchemaField,
     };
@@ -466,7 +466,7 @@ mod tests {
                 strictness: Default::default(),
                 fields: vec![WireSchemaField {
                     name: named::<FieldName>("value"),
-                    ty: JsonType::String,
+                    ty: CborType::String,
                     optional: false,
                 }],
             }),

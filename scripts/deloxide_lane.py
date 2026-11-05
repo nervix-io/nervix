@@ -1865,8 +1865,8 @@ class Lane:
         }
         if prepared.driver is not None:
             environment["NERVIX_PACED_SIMULATION_PATH"] = str(prepared.driver)
-            library = self.workspace.prepared / "debug" / "libnervix_client_ffi.so"
-            environment["NERVIX_CLIENT_LIBRARY"] = str(library)
+            python = self.workspace.prepared / "paced-simulation" / "python" / "bin" / "python"
+            environment["NERVIX_PACED_SIMULATION_PYTHON"] = str(python)
         evidence = self.attempt / "evidence" / invocation.id
         if invocation.evidence:
             evidence.mkdir(parents=True, exist_ok=True)

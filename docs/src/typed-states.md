@@ -69,6 +69,13 @@ required, validates it there, and passes the resulting typed value to the next l
 the registry, execution plans, runtime, clients, and diagnostics from assigning different meanings
 to the same raw value.
 
+The resolved node identity distinguishes a plaintext gRPC transport from an HTTPS transport that
+carries its listen and advertised addresses and both provisioned TLS paths. The CLI edge refuses
+incomplete pairs and TLS material in HTTP mode before constructing that identity. File availability,
+PEM parsing and key consistency are checked at startup before stores or listeners open; invalid
+material is a typed failure, never a substituted identity. The [Client Session Protocol](client-session-protocol.md#native-grpc)
+owns the listener and certificate lifetime.
+
 Materialized relay inspection requires the payload schema and resolved branching from its
 captured schedule. Incomplete scheduled metadata is an inspection failure, never an empty
 sensitivity set. The prepared sensitivity governs local, stored and remote record rendering;
@@ -293,16 +300,19 @@ platform string; connector preparation uses it only when the codec's event omits
 A polled HTTP request's header holds a literal or names a client secret as two states of one enum,
 so a value cannot be both or neither, and the Model that names a secret holds its key and never its
 value.
-The registry's `NERVIX SUB TYPES` archive signature identifies the current Model layout, including a
-Pulsar subscription's required type, an owned Pulsar subscription's required start position, a Kafka
+The registry's `NERVIX WIRE TYPE` archive signature identifies the current Model layout, including
+the separate JSON and CBOR wire type enums, the AVRO representation types, explicit `BASE64`
+codec encoding, a Pulsar subscription's required type, an owned Pulsar subscription's required
+start position, a Kafka
 consumer group's required start position, the required branch partition count, Sentry platform, an
 ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the
 receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of
 service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC
 emitter writes beside its publishing mode, a `REDIS PUBSUB` ingestor's subscription, which is either
-a `CHANNEL` or a `PATTERN`, and that header state. Consensus's `raft_subscription_types_` keyspaces
-and current state metadata encoding identify its stored shapes. An unrecognized signature, namespace
-or encoding fails with the owning storage error and requires the stored data to be recreated.
+a `CHANNEL` or a `PATTERN`, and that header state. Consensus's `raft_wire_alter_` keyspaces and
+current state metadata encoding identify its stored shapes, the statements a transaction keeps
+included. An unrecognized signature, namespace or encoding fails with the owning storage error and
+requires the stored data to be recreated.
 
 ## Absence And Distinct States
 
@@ -457,6 +467,12 @@ expired, while a settlement sent before losing its answer is separately uncertai
 `START` generation and endpoint contract fingerprint are required values on every successful
 consumer open, so absence cannot be mistaken for a matching contract.
 
+The browser retains an uncertain command's complete original request and issue order. Its retry
+availability is explicitly waiting or ready, with a bounded delay retained for the next attempt.
+The current connection owns the timer futures; ending it releases those waits for recovery on
+the replacement connection. A terminal reply removes the command's retry record. No timestamp or
+request-number sentinel stands for either state, and retry metadata carries no second payload.
+
 **Expression scopes and errors.** The VM frontend receives a scope policy that says whether a
 bare field may be read, written, both, or neither. A generated or set-only route reports an
 unavailable `message` or `input` scope during lowering, rather than inventing a namespace that
@@ -515,8 +531,12 @@ pair is read from the Model and never stored beside it. An ingestor alteration i
 way: its head selects one connector and entity, and the operations of that entity set a source of
 that entity's own Model, so `ALTER KAFKA TOPIC INGESTOR` cannot carry a Redis channel and no kind
 field sits beside the source it sets. Only a transport's operations include the codec that decodes
-its payloads, so a client producer alteration cannot hold one. A stored ingestor of another pair is
-refused by comparing the two kinds. The names an external system owns, such as a Kafka topic or a NATS subject, are distinct
+its payloads, so a client producer alteration cannot hold one. A targeted change, such as
+`SET TOPIC`, `SET MODE` or `DROP HEADERS`, is a value of the entity's own change enum, so a change
+can name only a part that entity's body writes, and an emitter's change is nested by connector and
+then entity in the same way. A change to a construction where it stands is one shared
+`ConstructionAlteration`, which an ingestor applies to the route it names and an emitter to its own
+construction. A stored ingestor of another pair is refused by comparing the two kinds. The names an external system owns, such as a Kafka topic or a NATS subject, are distinct
 types from Nervix names: each is checked against its entity's own rule once, when it is parsed or
 decoded, and keeps its text exactly as written, case included, so a connector sends what the
 statement says. What every source or emitter of a pair
@@ -834,6 +854,14 @@ FlatBuffers encoding preserves these optional fields and typed variants across t
 [Client Session Protocol](./client-session-protocol.md#verification-before-reading) defines how a
 receiver keeps an absent optional value distinct from a present zero.
 
+The console distinguishes an awaited sent request from a superseded lookup whose result it no
+longer needs. The latter retains its request identity and capacity place until its terminal reply,
+without retaining the request text or partial reply. A latest lookup is either held under its issue
+order or sent under its request identity. A transaction attachment keeps its issue order while
+held and in flight, so ordered work cannot run before a queued attachment completes. A held
+connection request distinguishes setup from ordinary controls: setup precedes ordered work, while
+ordinary controls share issue order with ready commands.
+
 The shared C binding gives clock observations their own `nx_clock_event_kind` and installations
 their own `nx_clock_state`. Only `NX_CLOCK_PACED` has a mapping for `nx_clock_event_paced`; tick and
 end-reason accessors likewise require their corresponding event kinds. An interruption or a refused
@@ -1060,7 +1088,10 @@ string is only a presentation of the state and never an input to execution.
 Replicated command admission distinguishes a reference that has expired from one bound to a
 different owner, domain, transaction position, or content in its typed conflict result. The
 session carries that distinction into the public command disposition; rendering its message does
-not choose the disposition.
+not choose the disposition. Future-time, missing-timestamp and capacity admission refusals also
+remain typed through the consensus response, so bounded metric reasons come from the actual
+refusal rather than from its rendered text. History observations keep an unestablished retry fence
+as `None`; exposition omits that timestamp instead of inventing an epoch fence.
 
 Error-route branch validation carries the node, source route, error relay, and both branch
 declarations as typed data. Direct emitter `VALUES` validation identifies a sensitive external
@@ -1194,6 +1225,11 @@ owns established connection tasks and queued frames; source close ends that reta
 The testing capability shares one named listener-fault request between the connector and host:
 the selected bound address and its acknowledgement belong to that same armed request.
 
+The consensus append-submission test control is idle, armed for one follower, or delivered with
+that nonempty request's previous and last log identities and entry count. The delivered variant
+owns its observation, so it cannot also remain armed. A scoped stream control retains its target;
+the ordinary build's inert control is zero-sized and retains no target or shared state.
+
 A Syslog frame's peer is a UDP address, a TCP address or a shared TLS connection identity. Only the
 TLS variant can hold a verified client-certificate subject, whose absence represents a connection
 without client authentication. Subject decoding happens after successful TLS verification; a
@@ -1236,3 +1272,12 @@ String properties retain their exact declared type and cross the AMQP short-stri
 message is sent. Targeted emitter alterations represent setting and dropping persistence,
 timestamps and the whole property set as separate semantic operations, and preserve the envelope
 fields each operation does not address.
+
+The JVM binding's package-private JNI edge encodes owned native allocations in Java `long` values
+and an omitted native handle as zero only at that boundary. Public Java classes expose optional
+objects as `null` and typed enum variants and exceptions. A handle's private State serializes its
+short borrows and unique release. Its open/closing/closed state ends admission on close and
+defers native release until an admitted short call returns; it refuses nested access so a mutable
+borrow cannot overlap itself. Blocking calls own independent leases. A `Fields` lease is a
+complete validated description snapshot, while a mutable builder has no shared lease. Direct
+read-only buffers retain the native allocation through their root rather than a raw unowned address.

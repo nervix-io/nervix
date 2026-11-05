@@ -1,5 +1,45 @@
 Feature: Pipelined raft replication and bounded log retention
 
+  Scenario: A new leader recovers one failed append submission without rewinding its probe
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And client "owner" is connected to the leader node
+    When client "owner" executes these Plexus commands
+      """
+      BEGIN;
+      CREATE SCHEMA append_recovery (value STRING);
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    When 128 domains named "append_history" are created on the leader node
+    Then within "60s" every node has applied 128 domains named "append_history"
+    And the current leader node is saved as placeholder "old_leader"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    And a node other than placeholders "old_leader" and "new_leader" is saved as placeholder "lagging_follower"
+    When node "{{lagging_follower}}" is stopped
+    And 40 domains named "append_backlog" are created on the leader node
+    Given node "{{new_leader}}" will fail its next data append submission to node "{{lagging_follower}}"
+    When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
+    And node "{{lagging_follower}}" is started without waiting for it to catch up
+    Then node "{{new_leader}}" failed one append submission to node "{{lagging_follower}}" above the replay batch boundary
+    Given client "resumed" is connected to node "{{new_leader}}" with cluster seeds
+    When client "resumed" attaches to transaction "{{transaction_id}}"
+    And client "resumed" attempts to commit its transaction
+    Then client "resumed" commit was refused because its expected preview is stale
+    And transaction "{{transaction_id}}" eventually has state "OPEN"
+    When client "resumed" executes these Plexus commands
+      """
+      COMMIT;
+      """
+    Then transaction "{{transaction_id}}" eventually has state "COMMITTED"
+    And within "60s" every node has applied 40 domains named "append_backlog"
+    When 4 domains named "append_after_failure" are created on the leader node
+    Then within "60s" every node has applied 4 domains named "append_after_failure"
+    And node "{{new_leader}}" confirms a linearizable read beyond its failed append submission
+
   Scenario: A paced follower recovers an occupied listener before its catch-up start
     Given a 3 node nervix cluster is started
     When node "node-3" is stopped

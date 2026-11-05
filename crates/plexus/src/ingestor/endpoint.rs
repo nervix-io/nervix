@@ -31,12 +31,10 @@ pub(super) struct EndpointIntake {
 }
 
 /// The endpoint's delivery mode and the quiesce clause that mode can honor.
-pub(super) fn intake<'src>()
--> impl Parser<'src, &'src [Token], EndpointIntake, extra::Err<ParseError<'src>>> + Clone {
-    let unacknowledged = no_ack()
-        .to(EndpointIngestMode::NoAck)
-        .then(endpoint_quiesce_clause());
-    let acknowledged = kw(Identifier::Ack)
+/// `ACK MAX <n> ACK TIMEOUT <d>`: up to `n` requests wait on their records' acknowledgements.
+fn acknowledged_mode<'src>()
+-> impl Parser<'src, &'src [Token], EndpointIngestMode, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Ack)
         .ignore_then(kw(Identifier::Max))
         .ignore_then(
             nonzero_u64_value("request_window", "endpoint MAX must be greater than 0").try_map(
@@ -48,7 +46,21 @@ pub(super) fn intake<'src>()
         )
         .then(ack_timeout())
         .map(|(max, timeout)| EndpointIngestMode::Ack { max, timeout })
-        .then(endpoint_ack_quiesce_clause());
+}
+
+/// The delivery modes of an endpoint: `NO ACK` or `ACK MAX <n> ACK TIMEOUT <d>`, read beside no
+/// quiesce mode, so whether the two pair is checked on the complete ingestor.
+pub(super) fn mode<'src>()
+-> impl Parser<'src, &'src [Token], EndpointIngestMode, extra::Err<ParseError<'src>>> + Clone {
+    choice((no_ack().to(EndpointIngestMode::NoAck), acknowledged_mode()))
+}
+
+pub(super) fn intake<'src>()
+-> impl Parser<'src, &'src [Token], EndpointIntake, extra::Err<ParseError<'src>>> + Clone {
+    let unacknowledged = no_ack()
+        .to(EndpointIngestMode::NoAck)
+        .then(endpoint_quiesce_clause());
+    let acknowledged = acknowledged_mode().then(endpoint_ack_quiesce_clause());
     endpoint_ref()
         .then_ignore(kw(Identifier::Mode))
         .then(choice((unacknowledged, acknowledged)))
