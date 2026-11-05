@@ -67,6 +67,18 @@ where
     result
 }
 
+/// Requests the node's stop once a listener that cannot fail returns, which it does only once the
+/// node closes admission.
+pub(in crate::application) async fn request_shutdown_on_return<F>(
+    listener: F,
+    shutdown: ShutdownCoordinator,
+) where
+    F: Future<Output = ()>,
+{
+    listener.await;
+    shutdown.request_stop();
+}
+
 /// What joining the public listeners reported once admission closed.
 pub(in crate::application) struct JoinedListeners {
     /// The error a listener returned, or the failure of the task that ran the listeners.

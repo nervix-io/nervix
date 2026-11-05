@@ -5515,6 +5515,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "java-locator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09c46c1fe465c59b1474e665e85e1256c3893dd00927b8d55f63b09044c1e64f"
+dependencies = [
+ "glob",
+]
+
+[[package]]
 name = "jiff"
 version = "0.2.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5578,8 +5587,10 @@ checksum = "5efd9a482cf3a427f00d6b35f14332adc7902ce91efb778580e180ff90fa3498"
 dependencies = [
  "cfg-if",
  "combine",
+ "java-locator",
  "jni-macros",
  "jni-sys",
+ "libloading 0.8.9",
  "log",
  "simd_cesu8",
  "thiserror 2.0.21",
@@ -6854,6 +6865,22 @@ dependencies = [
  "nervix-recovery",
  "strum 0.26.3",
  "uuid",
+]
+
+[[package]]
+name = "nervix-client-jvm"
+version = "0.1.0-dev"
+dependencies = [
+ "bolero",
+ "bytes",
+ "jni",
+ "meticulous",
+ "nervix-client-core",
+ "nervix-client-host",
+ "nervix-models",
+ "nervix-primitives",
+ "thiserror 2.0.21",
+ "url",
 ]
 
 [[package]]

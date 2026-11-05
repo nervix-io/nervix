@@ -85,15 +85,17 @@ async fn a_refusal_against_an_absent_transaction_keeps_its_failure() {
     std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
 }
 
-/// The original coordinator of a standalone command looks its transaction up and finds none, and is
-/// held there while another coordinator applies the same command to completion, as a leader that
-/// takes over the applying execution does. Its preflight is then refused by the command's own
-/// effect; it must recover the committed transaction instead of recording that refusal.
+/// Another coordinator completes the same command while its original coordinator is held, either
+/// after looking its transaction up or after a failed commit attempt. The first coordinator must
+/// recover the recorded completion rather than accept its stale preflight or commit refusal.
 #[cfg(feature = "testing")]
+#[rstest::rstest]
+#[case::after_lookup(crate::fault_injection::StandaloneTransactionBoundary::Lookup)]
+#[case::after_commit_failure(crate::fault_injection::StandaloneTransactionBoundary::CommitFailure)]
 #[nervix_primitives::test]
-async fn a_coordinator_recovers_the_command_another_coordinator_committed_after_its_lookup() {
-    use crate::fault_injection::StandaloneTransactionBoundary;
-
+async fn a_coordinator_recovers_the_command_another_coordinator_committed(
+    #[case] boundary: crate::fault_injection::StandaloneTransactionBoundary,
+) {
     let fault_injection = crate::FaultInjection::default();
     let TestService {
         service,
@@ -107,11 +109,13 @@ async fn a_coordinator_recovers_the_command_another_coordinator_committed_after_
     let node = service.inner.consensus.local_node_id().clone();
     let domain =
         DomainName::parse("default").assured("the fixture domain name is an accepted literal");
-    fault_injection.pause_standalone_transaction(
-        node.clone(),
-        domain.clone(),
-        StandaloneTransactionBoundary::Lookup,
-    );
+    fault_injection.pause_standalone_transaction(node.clone(), domain.clone(), boundary);
+    if let crate::fault_injection::StandaloneTransactionBoundary::CommitFailure = boundary {
+        fault_injection.refuse_next_model_publication(
+            domain.clone(),
+            crate::fault_injection::ModelPublicationRefusalKind::SaturatedLog,
+        );
+    }
     let request = CommandRequest {
         execution_reference: test_execution_reference(),
         ..test_command_request("CREATE SCHEMA recovered ( key I64 );", "default")
@@ -128,11 +132,7 @@ async fn a_coordinator_recovers_the_command_another_coordinator_committed_after_
         })
     };
     fault_injection
-        .wait_for_standalone_transaction_pause(
-            &node,
-            &domain,
-            StandaloneTransactionBoundary::Lookup,
-        )
+        .wait_for_standalone_transaction_pause(&node, &domain, boundary)
         .await;
 
     let execution = service
@@ -169,11 +169,7 @@ async fn a_coordinator_recovers_the_command_another_coordinator_committed_after_
         "the second coordinator applies the command: {successor:?}"
     );
 
-    fault_injection.release_standalone_transaction_pause(
-        &node,
-        &domain,
-        StandaloneTransactionBoundary::Lookup,
-    );
+    fault_injection.release_standalone_transaction_pause(&node, &domain, boundary);
     let result = original
         .await
         .assured("the original command task runs to its end");
@@ -182,6 +178,14 @@ async fn a_coordinator_recovers_the_command_another_coordinator_committed_after_
         result.succeeded(),
         "the original coordinator recovers the committed command: {result:?}"
     );
+    assert_eq!(result.disposition, successor.disposition);
+    assert_eq!(result.message, successor.message);
+    assert_eq!(result.diagnostics, successor.diagnostics);
+    assert_eq!(
+        result.transaction_admission,
+        successor.transaction_admission
+    );
+    assert!(result.transaction.is_none());
     let transaction = service
         .inner
         .consensus

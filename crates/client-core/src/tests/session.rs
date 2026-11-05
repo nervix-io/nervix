@@ -1074,6 +1074,107 @@ async fn an_unanswered_command_ends_with_a_reusable_uncertain_identity() {
 }
 
 #[nervix_primitives::test]
+async fn an_uncertain_command_deadline_names_its_last_server_answer() {
+    let mut server = TestServer::start().await;
+    let client = server
+        .connect_with(ConnectOptions {
+            request_timeout: Duration::from_secs(2),
+            retry_timeout: Duration::from_millis(800),
+            ..ConnectOptions::default()
+        })
+        .await;
+    let mut exchange = server.next_exchange().await;
+    let execution = client.prepare_execution("SHOW CLUSTER STATUS;").await;
+    let expected = execution.reference().clone();
+    let mut command =
+        nervix_primitives::task::spawn(async move { client.execute_prepared(&execution).await });
+
+    let (error, answered) = nervix_primitives::time::timeout(Duration::from_secs(3), async {
+        let mut answered = 0;
+        loop {
+            nervix_primitives::select! {
+                biased;
+                result = &mut command => {
+                    let error = result
+                        .assured("the command task completes")
+                        .expect_err("unresolved answers do not establish an outcome");
+                    break (error, answered);
+                }
+                request = exchange.next_request() => {
+                    let ClientRequest::Command(sent) = request.request else {
+                        panic!("only the command is retried");
+                    };
+                    assert_eq!(sent.execution_reference, expected);
+                    let (disposition, message) = if answered == 0 {
+                        (
+                            CommandDisposition::NotLeader(LeaderRedirect { leader: None }),
+                            "no leader is elected".to_string(),
+                        )
+                    } else {
+                        (
+                            CommandDisposition::OutcomeUnknown(
+                                crate::wire::UnknownOutcomeCause::LeadershipLost,
+                            ),
+                            format!("the lease could not be confirmed on attempt {}", answered + 1),
+                        )
+                    };
+                    exchange
+                        .reply(
+                            request.request_id,
+                            command_outcome(&expected, disposition, &message),
+                            &limits(),
+                        )
+                        .await;
+                    answered += 1;
+                }
+            }
+        }
+    })
+    .await
+    .assured("the command retry deadline ends the test");
+
+    assert!(answered >= 2, "the server answered two distinct attempts");
+    let ClientError::UncertainCommand { reference } = error.current_context() else {
+        panic!("the deadline leaves the command uncertain: {error:?}");
+    };
+    assert_eq!(reference, &expected);
+    let mut contexts = error
+        .frames()
+        .filter_map(|frame| frame.downcast_ref::<ClientError>());
+    assert!(matches!(
+        contexts.next(),
+        Some(ClientError::UncertainCommand { .. })
+    ));
+    let Some(ClientError::LastUnresolvedAnswer {
+        disposition,
+        message,
+    }) = contexts.next()
+    else {
+        panic!("the last answer is a typed context: {error:?}");
+    };
+    assert_eq!(
+        disposition,
+        &CommandDisposition::OutcomeUnknown(crate::wire::UnknownOutcomeCause::LeadershipLost)
+    );
+    assert_eq!(
+        message,
+        &format!("the lease could not be confirmed on attempt {answered}")
+    );
+    assert!(matches!(contexts.next(), Some(ClientError::RetryDeadline)));
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains("OutcomeUnknown(LeadershipLost)"),
+        "the disposition that remained unresolved belongs in the chain: {rendered}"
+    );
+    assert!(
+        rendered.contains(&format!(
+            "the lease could not be confirmed on attempt {answered}"
+        )),
+        "the last answer's message belongs in the chain: {rendered}"
+    );
+}
+
+#[nervix_primitives::test]
 async fn backup_waits_beyond_ordinary_request_and_retry_deadlines() {
     for prepared in [false, true] {
         nervix_primitives::task::consume_budget().await;

@@ -40,14 +40,14 @@ Feature: HTTP codec ingestion
         enabled boolean,
         text string,
         occurred_at string,
-        body bytes,
+        body string,
         nested array,
         optional_note string OPTIONAL
       );
       CREATE CODEC json_value_codec
         FROM WIRE JSON SCHEMA json_value_wire
         TO SCHEMA json_value
-        ENCODE occurred_at AS RFC3339;
+        ENCODE occurred_at AS RFC3339, body AS BASE64;
       CREATE RELAY json_values SCHEMA json_value UNBRANCHED;
       CREATE VHOST edge json-values-{{test_id}}.example.com;
       CREATE ENDPOINT json_values_endpoint ON edge PATH '/ingest' TYPE HTTP;
@@ -158,7 +158,7 @@ Feature: HTTP codec ingestion
       | 1            | VEC<ARRAY<I16, 2>> |
       | 3            | VEC<ARRAY<I16, 2>> |
 
-  Scenario Outline: A <wire_format> codec binds every exact wire type to the internal type of its name
+  Scenario Outline: A CBOR codec binds every exact wire type to the internal type of its name
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -180,7 +180,7 @@ Feature: HTTP codec ingestion
         f64_value F64,
         occurred_at DATETIME
       );
-      CREATE WIRE <wire_format> SCHEMA exact_value_wire MODE STRICT (
+      CREATE WIRE CBOR SCHEMA exact_value_wire MODE STRICT (
         u8_max U8,
         i8_min I8,
         u16_max U16,
@@ -194,7 +194,7 @@ Feature: HTTP codec ingestion
         occurred_at DATETIME
       );
       CREATE CODEC exact_value_codec
-        FROM WIRE <wire_format> SCHEMA exact_value_wire
+        FROM WIRE CBOR SCHEMA exact_value_wire
         TO SCHEMA exact_value;
       CREATE RELAY exact_values SCHEMA exact_value UNBRANCHED;
       CREATE VHOST edge exact-values-{{test_id}}.example.com;
@@ -211,7 +211,7 @@ Feature: HTTP codec ingestion
       CREATE SUBSCRIPTION exact_values_subscription TO exact_values;
       START;
       """
-    When http payload encoded as "<wire_format>" is posted to host "exact-values-{{test_id}}.example.com" path "/ingest"
+    When http payload encoded as "CBOR" is posted to host "exact-values-{{test_id}}.example.com" path "/ingest"
       """
       {"u8_max":255,"i8_min":-128,"u16_max":65535,"i16_min":-32768,"u32_max":4294967295,"i32_min":-2147483648,"u64_max":18446744073709551615,"i64_min":-9223372036854775808,"f32_value":1.25,"f64_value":-2.5,"occurred_at":"2024-02-29T12:34:56.123456789Z"}
       """
@@ -219,7 +219,7 @@ Feature: HTTP codec ingestion
       """
       {"f32_value":1.25,"f64_value":-2.5,"i16_min":-32768,"i32_min":-2147483648,"i64_min":-9223372036854775808,"i8_min":-128,"occurred_at":"2024-02-29T12:34:56.123456789+00:00","u16_max":65535,"u32_max":4294967295,"u64_max":18446744073709551615,"u8_max":255}
       """
-    When http payload encoded as "<wire_format>" is posted to host "exact-values-{{test_id}}.example.com" path "/ingest"
+    When http payload encoded as "CBOR" is posted to host "exact-values-{{test_id}}.example.com" path "/ingest"
       """
       {"u8_max":256,"i8_min":0,"u16_max":0,"i16_min":0,"u32_max":0,"i32_min":0,"u64_max":0,"i64_min":0,"f32_value":0.5,"f64_value":0.5,"occurred_at":"2024-02-29T12:34:56Z"}
       """
@@ -229,11 +229,9 @@ Feature: HTTP codec ingestion
       """
 
     Examples:
-      | cluster_size | wire_format |
-      | 1            | JSON        |
-      | 3            | JSON        |
-      | 1            | CBOR        |
-      | 3            | CBOR        |
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   Scenario Outline: A <wire_format> number reads as the F32 whose shortest decimal it is
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"

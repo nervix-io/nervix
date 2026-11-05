@@ -2197,6 +2197,10 @@ column builder, TLS rebinding of every HTTPS listener, batched inference over in
 a restarted voter's ownership, and graceful shutdown with a slow cordon release and diagnostic
 server processes that stop gracefully, and its
 `stress-paced-simulation` invocation of the paced-driver scenarios with the stressed Rust driver.
+The Python companion uses the ordinary `nervix_client` package installed with the prerequisites.
+The runner selects that prepared interpreter explicitly, independently of its diagnostic Cargo
+target directory. The detector observes the diagnostic nodes those scenarios drive; it does not
+track synchronization inside the Python host or its ordinary client package.
 Endpoint ACK lifecycle examples carry `@deloxide_stress_endpoint_ack` and run in the separate
 `stress-endpoint-acknowledgement` invocation. Its serial process has a 900-second bound, including
 the existing 360-second teardown reserve. The baseline lifecycle process has a 3,960-second bound,
@@ -2266,6 +2270,14 @@ registrations reach the transaction impact recorder's tracked locks. The lookup,
 resume barriers use the existing async pause owner, whose ordering remains outside Deloxide's
 observation; the public outcome and dependent mutation assert recovery under the original
 execution reference.
+
+The `@client_wire_standalone_completion` one- and three-node examples hold a coordinator after a
+failed commit attempt until transaction reconciliation commits the same command. The testing
+hook reads its node/domain point in `FaultInjectionState::command_pauses` once per failed attempt,
+clones the watch-backed pause and ends the map guard before waiting. The resumed coordinator
+removes the one-shot point after release. Both this DashMap and the watch wait are untracked by
+Deloxide. The owner test and
+public examples assert the original response and exact replay without changing commit ordering.
 
 The registered `@pulsar_message_metadata` workloads cover source metadata in all three delivery
 modes, branch-local event-time windows, broker redelivery and independent broker-stored batches.
@@ -2603,6 +2615,14 @@ the tracked lock activity that was recorded; the complete scenario verdict also 
 delivery and recovery behavior that the external runner observes.
 
 ## Deterministic Concurrency Verification
+
+The consensus failed-submission fixture retains one async-mutex-owned state: idle, armed for a
+follower, or delivered with the complete request boundary. Each append stream retains its scoped
+control, so submission reaches no concurrent registry. Only a nonempty request to the armed
+follower consumes it, and later requests proceed. The unit control check and three-node public
+regression qualify that fault and recovery; they make no memory-ordering or lock-free notification
+claim. Deloxide does not observe the async mutex. The fixture adds no tracked acquisition and is
+inert outside test builds.
 
 The relay interaction's ordinary output-wake test stages a collected batch through the production
 admission path and awaits its domain-owned collection deadline before making the output wake

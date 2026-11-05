@@ -375,6 +375,29 @@ pub enum JsonType {
     String,
     Number,
     Integer,
+    Array,
+    Boolean,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+    EnumIter,
+)]
+#[strum(serialize_all = "lowercase")]
+pub enum CborType {
+    String,
+    Number,
+    Integer,
     Object,
     Array,
     Boolean,
@@ -393,8 +416,6 @@ pub enum JsonType {
     Bytes,
 }
 
-pub type CborType = JsonType;
-
 #[derive(
     Debug,
     Clone,
@@ -411,7 +432,6 @@ pub type CborType = JsonType;
 )]
 #[strum(serialize_all = "lowercase")]
 pub enum AvroType {
-    Null,
     Boolean,
     Int,
     Long,
@@ -419,11 +439,7 @@ pub enum AvroType {
     Double,
     Bytes,
     String,
-    Record,
-    Enum,
     Array,
-    Map,
-    Fixed,
 }
 
 #[derive(
@@ -766,7 +782,7 @@ mod tests {
                 },
                 AlterWireSchemaOperation::SetFieldType {
                     field: field("message"),
-                    ty: JsonType::Object,
+                    ty: JsonType::String,
                 },
                 AlterWireSchemaOperation::SetFieldOptional {
                     field: field("message"),
@@ -781,7 +797,7 @@ mod tests {
             schema.fields[1],
             WireSchemaField {
                 name: field("message"),
-                ty: JsonType::Object,
+                ty: JsonType::String,
                 optional: true,
             }
         );
@@ -884,7 +900,7 @@ mod tests {
             (
                 AlterWireSchemaOperation::SetFieldType {
                     field: field("missing"),
-                    ty: JsonType::Object,
+                    ty: JsonType::String,
                 },
                 AlterWireSchemaError::FieldNotFound {
                     field: field("missing"),

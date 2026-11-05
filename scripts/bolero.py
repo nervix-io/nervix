@@ -765,11 +765,18 @@ def metadata(
     (path / "metadata.json").write_text(json.dumps(data, indent=2) + "\n")
 
 
+def prepare_host_binding(target: Target) -> None:
+    """Build the Java classes before embedding the JVM with the harness's native methods."""
+    if target.package == "nervix-client-jvm":
+        command(["just", "build-client-jvm-tests"], timeout=1800)
+
+
 def build_harness(target: Target, built: set[tuple[str, ...]]) -> None:
     """Compile the ordinary harness that runs `target`, unless `built` already holds it."""
     harness = tuple(cargo_test_args(target))
     if harness in built:
         return
+    prepare_host_binding(target)
     print(f"{target.id}: ordinary build deadline 1800s", flush=True)
     command([*harness, "--no-run"], timeout=1800)
     built.add(harness)
@@ -926,6 +933,7 @@ def resolved_test_target(target: Target) -> tuple[pathlib.Path, pathlib.Path, st
 def build_instrumented(
     inventory: Inventory, target: Target, path: pathlib.Path, *, timeout: int | None = None
 ) -> pathlib.Path:
+    prepare_host_binding(target)
     budget_name = "BOLERO_BUILD_TIMEOUT_SECONDS"
     try:
         build_timeout = int(os.environ.get(budget_name, "1800")) if timeout is None else timeout

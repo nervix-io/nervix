@@ -1,8 +1,8 @@
 Feature: Cross-language client conformance
   Every client runtime reads the same rows, answers and failures through the finalized session
   protocol and prints the same report, so one expected report is the oracle for every language.
-  The shared Rust binding is driven through its C ABI from C, C++, Java and Ruby and in process,
-  and from CPython through the Python package on the same host session runtime; Go over native
+  The shared Rust binding is driven through its C ABI from C, C++ and Ruby and in process,
+  from Java 21 through JNI, and from CPython through the Python package on the same host session runtime; Go over native
   gRPC and TypeScript on Node.js and Bun over the binary WebSocket are independent implementations
   generated from the schema. Every binding host also attaches to a
   paced domain clock that is already running, reads the clock the attach reported before it uses a
@@ -56,7 +56,7 @@ Feature: Cross-language client conformance
         f64v number,
         flag boolean,
         text string,
-        raw BYTES,
+        raw string,
         at string,
         maybe integer OPTIONAL,
         secret string
@@ -64,7 +64,7 @@ Feature: Cross-language client conformance
       CREATE CODEC typed_row_codec
         FROM WIRE JSON SCHEMA typed_row_wire
         TO SCHEMA typed_row
-        ENCODE at AS RFC3339;
+        ENCODE at AS RFC3339, raw AS BASE64;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY typed_rows SCHEMA typed_row BRANCHED BY by_tenant;
@@ -170,7 +170,7 @@ Feature: Cross-language client conformance
       | python  | 3            |
 
     @client_conformance_toolchain @client_probe_java
-    Examples: Java over the shared Rust binding
+    Examples: Java 21 over the JNI library
       | runtime | cluster_size |
       | java    | 1            |
       | java    | 3            |
@@ -274,7 +274,7 @@ Feature: Cross-language client conformance
       | python  | 3            | node-2      | node-1     |
 
     @client_conformance_toolchain @client_probe_java
-    Examples: Java over the shared Rust binding
+    Examples: Java 21 over the JNI library
       | runtime | cluster_size | clock_owner | entry_node |
       | java    | 1            | node-1      | node-1     |
       | java    | 3            | node-2      | node-1     |
@@ -504,7 +504,7 @@ Feature: Cross-language client conformance
       | python  | 3            | VEC<STRING> | ARRAY<I16, 2, 2> | VEC<ARRAY<DATETIME, 2>> |
 
     @client_conformance_toolchain @client_probe_java
-    Examples: Java over the shared Rust binding
+    Examples: Java 21 over the JNI library
       | runtime | cluster_size | tags_type   | grid_type        | spans_type              |
       | java    | 1            | VEC<STRING> | ARRAY<I16, 2, 2> | VEC<ARRAY<DATETIME, 2>> |
       | java    | 3            | VEC<STRING> | ARRAY<I16, 2, 2> | VEC<ARRAY<DATETIME, 2>> |

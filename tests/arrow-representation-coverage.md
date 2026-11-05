@@ -97,6 +97,11 @@ branch fingerprint.
 
 ## Codec Domains
 
+JSON fields use their five representation types, and AVRO fields their eight. Generated JSON
+`string` byte fields declare `BASE64`; generated AVRO byte fields use either `bytes` directly or
+`string` with `BASE64`. The row, payload-group and bounded-encoding properties preserve the bytes
+through both declared representations. CBOR keeps its own current wire vocabulary.
+
 - `WIRE JSON` and `WIRE CBOR` preserve every value of every field type except a non-finite float:
   JSON has no number for one, and the CBOR decoder reads values through the JSON model. The JSON
   encoder writes a non-finite float as `null`, which reads back as a null of an optional field and
