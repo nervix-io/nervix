@@ -533,8 +533,11 @@ def upload(
 
 
 def fetch(bucket: Bucket, run: str, name: str, destination: Path) -> None:
+    print(f"{name}: fetching manifest", flush=True)
     manifest = json.loads(bucket.get_bytes(manifest_key(run, name)))
     parts = [Part(**part) for part in manifest["parts"]]
+    total = sum(part.length for part in parts)
+    print(f"{name}: downloading {total} bytes in {len(parts)} parts", flush=True)
     prefix = manifest["prefix"]
     upload_id = manifest["upload"]
     destination.mkdir(parents=True, exist_ok=True)
@@ -542,14 +545,21 @@ def fetch(bucket: Bucket, run: str, name: str, destination: Path) -> None:
         paths = [Path(directory) / f"part-{index}" for index in range(len(parts))]
 
         def receive(index: int) -> None:
+            started = time.monotonic()
             key = f"{prefix}/{run}/{name}/{upload_id}/part-{index}"
             bucket.get_file(key, paths[index], parts[index].length, parts[index].sha256)
+            print(
+                f"{name}: verified part {index + 1}/{len(parts)}, "
+                f"{parts[index].length} bytes in {time.monotonic() - started:.1f}s",
+                flush=True,
+            )
 
         try:
             with ThreadPoolExecutor(CONCURRENT_TRANSFERS) as transfers:
                 list(transfers.map(receive, range(len(parts))))
         except Missing as error:
             raise ArtifactError(f"{name} of run {run} has expired: its parts are gone") from error
+        print(f"{name}: all parts verified; extracting into {destination}", flush=True)
         with contextlib.closing(PartReader(paths)) as reader:
             with tarfile.open(fileobj=reader, mode="r|*") as archive:
                 archive.extractall(destination, filter="data")
