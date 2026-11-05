@@ -136,6 +136,20 @@ impl ClusterStatus {
     }
 }
 
+fn parse_membership_line(line: &str) -> Option<(String, String)> {
+    let item = line.strip_prefix("- ")?;
+    let (node_id, rest) = item.split_once(" [")?;
+    let (role, _) = rest.split_once(']')?;
+    Some((node_id.to_string(), role.to_string()))
+}
+
+fn parse_interconnect_line(line: &str) -> Option<(String, String)> {
+    let item = line.strip_prefix("- ")?;
+    let (node_id, rest) = item.split_once(": ")?;
+    let (_, status) = rest.split_once("status=")?;
+    Some((node_id.to_string(), status.to_string()))
+}
+
 #[cfg(test)]
 mod membership_status_tests {
     use super::{BTreeSet, ClusterStatus};
@@ -175,18 +189,4 @@ mod membership_status_tests {
         assert_eq!(status.has_ready_voters(&expected), ready);
         assert_eq!(status.is_ready_voter("node-3"), ready);
     }
-}
-
-fn parse_membership_line(line: &str) -> Option<(String, String)> {
-    let item = line.strip_prefix("- ")?;
-    let (node_id, rest) = item.split_once(" [")?;
-    let (role, _) = rest.split_once(']')?;
-    Some((node_id.to_string(), role.to_string()))
-}
-
-fn parse_interconnect_line(line: &str) -> Option<(String, String)> {
-    let item = line.strip_prefix("- ")?;
-    let (node_id, rest) = item.split_once(": ")?;
-    let (_, status) = rest.split_once("status=")?;
-    Some((node_id.to_string(), status.to_string()))
 }
