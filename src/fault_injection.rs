@@ -50,6 +50,7 @@ mod backup_cut;
 #[cfg(test)]
 mod backup_cut_tests;
 mod client_inspection;
+mod command_reconciliation;
 mod command_reply;
 mod consensus;
 mod domain_clock;
@@ -484,6 +485,10 @@ enum CommandPausePoint {
     ApplicationRevisionResponse(ClusterNodeName),
     ReferenceLookup(ClusterNodeName),
     DurableAdmission(ClusterNodeName),
+    Reconciliation {
+        node: ClusterNodeName,
+        reference: CommandExecutionReference,
+    },
     Finalization(ClusterNodeName),
     RelocationPublication(DomainName),
     ResponseDelivery(ClusterNodeName),
