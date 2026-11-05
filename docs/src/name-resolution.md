@@ -489,9 +489,11 @@ options builder. Token, user NKey and mounted credentials-file authentication ad
 or dialling hook: the NATS driver still resolves the parsed server address itself, and a
 `tls://` address requires TLS on both sides while retaining that server name for verification.
 
-The pinned async-nats flush correction drains queued bytes before completing a local flush and
-exposes its successful-connection generation. It retains this driver's resolver, address-attempt
-policy and dependency features; the pin does not move NATS resolution onto the node's resolver.
+The pinned async-nats driver drains queued bytes before completing a local flush, exposes its
+successful-connection generation, preserves header pair order and lends its delivery metadata
+parser without a client. It retains this driver's resolver, address-attempt policy and dependency
+features. A `tls://` NATS client requires TLS in both ingestion and emission, including connections
+to discovered servers. NATS resolution remains on the driver's Tokio path.
 
 Postgres observation clients in the test harness use that same SQLx resolution path. Their suite
 environment retains the plaintext and TLS pools and their certificate-authority files through
