@@ -50,6 +50,7 @@ mod backup_cut;
 #[cfg(test)]
 mod backup_cut_tests;
 mod client_inspection;
+mod command_pause_point;
 mod command_reply;
 mod consensus;
 mod domain_clock;
@@ -98,6 +99,7 @@ mod wasm_reset_publication;
 
 pub use backup_cut::BackupCutBoundary;
 use backup_cut::{BackupCutGate, BackupCutGateKey};
+use command_pause_point::CommandPausePoint;
 use command_reply::CommandReplyScript;
 pub use command_reply::ForeignExecutionObservation;
 use domain_clock::DomainClockProgressPausePoint;
@@ -466,59 +468,6 @@ enum RemoteAcknowledgementLoss {
 enum HandoffEngagementTransportFailure {
     Armed,
     Delivered,
-}
-
-/// The command boundary a test controls without racing an election against a request.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum CommandPausePoint {
-    TransactionCleanup {
-        node: ClusterNodeName,
-        domain: DomainName,
-    },
-    StandaloneTransaction {
-        node: ClusterNodeName,
-        domain: DomainName,
-        boundary: StandaloneTransactionBoundary,
-    },
-    DomainResume {
-        node: ClusterNodeName,
-        domain: DomainName,
-        boundary: DomainResumeBoundary,
-    },
-    Admission(ClusterNodeName),
-    ClientInspectionAdmission(DomainName),
-    RuntimeInstallation(ClusterNodeName),
-    InitialClusterParameters(ClusterNodeName),
-    ForcedRecoveryMissingSchedule(ClusterNodeName),
-    RuntimePreparation(ClusterNodeName),
-    ApplicationRevisionResponse(ClusterNodeName),
-    ReferenceLookup(ClusterNodeName),
-    DurableAdmission(ClusterNodeName),
-    Finalization(ClusterNodeName),
-    RelocationPublication(DomainName),
-    ResponseDelivery(ClusterNodeName),
-    SubscriptionResponseDelivery(ClusterNodeName),
-    ResourceInstallation(ClusterNodeName),
-    ResourceSourceDiscovery(ClusterNodeName),
-    RestoreStep {
-        node_id: ClusterNodeName,
-        step: RestoreStep,
-    },
-    BackupDownload(ClusterNodeName),
-    RestoreStatePublication {
-        domain: DomainName,
-        coordinator: ClusterNodeName,
-    },
-    RestoreBranchStateConversion(DomainName),
-    IngestorRoutePoll(DomainNodeRef),
-    OwnershipHandoffFlush(DomainName),
-    OwnershipHandoffActivation(DomainName),
-    GracefulDrain(ClusterNodeName),
-    TransactionCommit {
-        node_id: ClusterNodeName,
-        domain: String,
-        completed_statements: usize,
-    },
 }
 
 /// How far one WASM guest-state checkpoint has come when a scenario holds it.
