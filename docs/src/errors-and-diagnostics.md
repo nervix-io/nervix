@@ -2819,7 +2819,11 @@ failure names an archive file the browser could not read or that is empty, a tra
 stall, a missing reply, a reply that does not decode or answers another request or reference, or a
 restore whose outcome stayed unknown through its repetitions, which the dialog reports naming the
 execution reference. A refusal of the stream is shown as `restore refused (<failure>): <message>`,
-and the restore's own outcome as the dispatcher renders any command's. The console WebSocket
+and the restore's own outcome as the dispatcher renders any command's. A session reply whose
+command outcome names another execution reference than its command's is a protocol violation: the
+dispatcher reports `protocol violation: the reply to command execution '<own>' names execution
+'<other>'` in the terminal, shows nothing of that outcome as the command's, stops reading the
+connection, and recovers the command under its own reference on the next one. The console WebSocket
 transport closes a call whose client broke its framing with the codec's close code, a second
 download request with `1008`, an answer that does not fit a frame with `1011`, and every call when
 the node stops with `1001`.
