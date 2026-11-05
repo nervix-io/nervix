@@ -335,9 +335,17 @@ older voter's run the same way, without changing the membership.
 [Prerequisites At Join](node-settings.md#prerequisites-at-join) describes the verdicts the leader
 publishes and what a refused node does. Each membership reconciliation gives a blocking learner
 catch-up attempt ten seconds. Promotion to voter is proposed only after that attempt reports the
-learner caught up; the membership change has its own ten-second bound. A timeout leaves the node a
-learner, records `raft membership reconciliation failed`, and the one-second reconciliation loop
-tries again while ordinary replication continues.
+learner caught up; the membership change has its own ten-second bound. A catch-up timeout leaves
+the node a learner. A failed reconciliation records `raft membership reconciliation failed`, and
+the one-second reconciliation loop tries again while ordinary replication continues.
+
+A voter change first commits a joint configuration and then commits its uniform target. The joint
+configuration requires a majority of each constituent voter set; its union is not a uniform quorum.
+If the second step is refused or interrupted, reconciliation finishes the recorded target before
+planning another admission or address update. It preserves existing learners and completes the
+removal of voters excluded by a `DROP NODE`, rather than deriving a replacement target from the
+joint union or from gossip. A timed wait counts as success only when the expected uniform target
+is committed. Leadership changes and retries can continue the same committed joint transition.
 
 When discovery reports a different interconnect endpoint for an existing member, reconciliation
 replaces that member's recorded Raft address. A returning voter keeps its voter role; it is not
@@ -348,7 +356,10 @@ contact hints; Raft traffic resolves the authenticated node identity through the
 The consensus event stream and `info` log record `raft add learner`, `raft wait for learner`,
 `raft update address`, `raft promote voters`, and `raft membership updated` transitions.
 `SHOW CLUSTER STATUS` reports the local `raft.last_log_index`, `raft.last_applied`, and each member's
-learner or voter role and recorded address.
+learner or voter role and recorded address. `raft.membership_joint` says whether the effective
+configuration still requires multiple majorities; `raft.membership_committed` says whether that
+effective configuration is committed. A converged voter list requires `membership_joint: false`
+and `membership_committed: true`, as well as the expected voter identities.
 
 ## Bounded Log Reading
 

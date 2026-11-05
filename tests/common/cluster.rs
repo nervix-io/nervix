@@ -1531,6 +1531,16 @@ impl Cluster {
             .map_err(io::Error::other)
     }
 
+    /// Start a new member without accepting a joint voter union as convergence.
+    pub(crate) async fn add_node_without_waiting_for_voters(
+        &mut self,
+        node_id: &str,
+    ) -> io::Result<()> {
+        self.register_new_node(node_id)?;
+        self.start_node_without_waiting_for_raft_catch_up(node_id)
+            .await
+    }
+
     pub(crate) async fn add_node(&mut self, node_id: &str) -> io::Result<()> {
         self.register_new_node(node_id)?;
         self.start_node(node_id).await?;
@@ -1626,7 +1636,7 @@ impl Cluster {
                 return Ok(JoinAttempt::Stopped(outcome.to_string()));
             }
             if let Ok(status) = handle.cluster_status(deadline).await
-                && status.is_voter(node_id)
+                && status.is_ready_voter(node_id)
             {
                 return Ok(JoinAttempt::Admitted);
             }
@@ -2292,16 +2302,8 @@ impl Cluster {
             .iter()
             .map(|value| (*value).to_string())
             .collect::<BTreeSet<_>>();
-        self.wait_until(node_id, |status| {
-            status
-                .membership
-                .iter()
-                .filter(|(_, role)| role == &&"voter".to_string())
-                .map(|(node, _)| node.clone())
-                .collect::<BTreeSet<_>>()
-                == expected
-        })
-        .await
+        self.wait_until(node_id, |status| status.has_ready_voters(&expected))
+            .await
     }
 
     pub(crate) async fn wait_for_kafka_consumer_group_members(
@@ -5629,6 +5631,8 @@ struct ClusterStatus {
     raft_state: Option<String>,
     last_applied: Option<u64>,
     membership: BTreeMap<String, String>,
+    membership_joint: Option<bool>,
+    membership_committed: Option<bool>,
     interconnect: BTreeMap<String, String>,
 }
 
@@ -5639,6 +5643,8 @@ impl ClusterStatus {
         let mut raft_state = None;
         let mut last_applied = None;
         let mut membership = BTreeMap::new();
+        let mut membership_joint = None;
+        let mut membership_committed = None;
         let mut interconnect = BTreeMap::new();
         let mut in_membership = false;
         let mut in_interconnect = false;
@@ -5664,6 +5670,13 @@ impl ClusterStatus {
                 if trimmed != "(none)" {
                     last_applied = trimmed.parse::<u64>().ok();
                 }
+            }
+
+            if let Some(value) = line.strip_prefix("raft.membership_joint: ") {
+                membership_joint = value.trim().parse().ok();
+            }
+            if let Some(value) = line.strip_prefix("raft.membership_committed: ") {
+                membership_committed = value.trim().parse().ok();
             }
 
             if line == "raft.membership:" {
@@ -5702,6 +5715,8 @@ impl ClusterStatus {
             raft_state,
             last_applied,
             membership,
+            membership_joint,
+            membership_committed,
             interconnect,
         }
     }
@@ -5716,8 +5731,28 @@ impl ClusterStatus {
         Some(ReportedLeadership { leader, term })
     }
 
-    /// Whether the membership this status reports holds `node_id` as a voter.
-    fn is_voter(&self, node_id: &str) -> bool {
+    fn membership_is_ready(&self) -> bool {
+        self.membership_joint == Some(false) && self.membership_committed == Some(true)
+    }
+
+    fn has_ready_voters(&self, expected: &BTreeSet<String>) -> bool {
+        if !self.membership_is_ready() {
+            return false;
+        }
+        let mut observed = BTreeSet::new();
+        for (node, role) in &self.membership {
+            if role == "voter" {
+                observed.insert(node.clone());
+            }
+        }
+        &observed == expected
+    }
+
+    /// Whether a committed uniform membership holds `node_id` as a voter.
+    fn is_ready_voter(&self, node_id: &str) -> bool {
+        if !self.membership_is_ready() {
+            return false;
+        }
         match self.membership.get(node_id) {
             Some(role) => role == "voter",
             None => false,
@@ -5731,6 +5766,35 @@ pub(crate) fn interconnect_status_from_text(raw: &str, peer: &str) -> Option<Str
         .interconnect
         .get(peer)
         .cloned()
+}
+
+#[cfg(test)]
+mod membership_status_tests {
+    use super::{BTreeSet, ClusterStatus};
+
+    #[rstest::rstest]
+    #[case(true, true, false)]
+    #[case(true, false, false)]
+    #[case(false, false, false)]
+    #[case(false, true, true)]
+    fn voter_readiness_requires_a_committed_uniform_membership(
+        #[case] joint: bool,
+        #[case] committed: bool,
+        #[case] ready: bool,
+    ) {
+        let expected = BTreeSet::from([
+            "node-1".to_string(),
+            "node-2".to_string(),
+            "node-3".to_string(),
+        ]);
+        let status = ClusterStatus::parse(format!(
+            "raft.membership_joint: {joint}\nraft.membership_committed: \
+             {committed}\nraft.membership:\n- node-1 [voter] 127.0.0.1:41001\n- node-2 [voter] \
+             127.0.0.1:41002\n- node-3 [voter] 127.0.0.1:41003"
+        ));
+        assert_eq!(status.has_ready_voters(&expected), ready);
+        assert_eq!(status.is_ready_voter("node-3"), ready);
+    }
 }
 
 fn parse_membership_line(line: &str) -> Option<(String, String)> {

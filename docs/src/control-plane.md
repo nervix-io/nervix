@@ -384,7 +384,11 @@ The current leader owns membership changes and serializes them one at a time. Le
 catch-up and voting-membership changes each have a ten-second wait deadline. When that deadline
 expires, Nervix stops waiting and observes effective committed membership again before a later
 retry. It does not infer that the change was rolled back: an admitted learner may continue catching
-up after the timed wait ends.
+up after the timed wait ends, and an applied joint configuration may still need its uniform step.
+Reconciliation completes that recorded transition before calculating another change. A voter union
+alone never establishes convergence; the expected uniform configuration must be committed. See
+[Follower Catch-Up And Learner Promotion](consensus-storage-and-replication.md#follower-catch-up-and-learner-promotion)
+for the quorum and status contract.
 
 An automatic schedule candidate carries the leader identity and term under which it was computed,
 plus the full applied control-plane revision of its inputs. Publication succeeds only during the

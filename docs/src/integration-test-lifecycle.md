@@ -57,6 +57,31 @@ before runtime initialization.
 The harness joins that attempt and retries on a fresh observability port within the same readiness
 budget. The pacer's advertised endpoint, private target and retained connections stay in place.
 
+## Interrupted Membership Fixture
+
+The membership-recovery outline starts two stable voters and arms a one-shot interruption of the
+third node's promotion. The existing storage fault owner pauses an applied write after its durable
+sync. While that pause prevents the first membership step's reply, the fixture drives OpenRaft's
+caller until its effective joint configuration appears, then stops polling that caller. It releases
+the worker and observes the joint membership's applied log entry before refusing the caller's
+continuation with the same no-leader redirect as an unconfirmed lease. The uniform step is never
+submitted by that interrupted call. A retained witness contains both actual voter sets and the
+applied index; no fabricated membership or transport outage establishes the precondition.
+
+The storage pause's existing RAII release handles cancellation, and the complete fixture stays
+inside the existing membership mutation deadline. Its arming and witness observations clone node
+controls from the test registry before awaiting; ordinary builds delegate directly to the usual
+OpenRaft change. The public assertions wait for uniform membership, stop each possible voter in a
+separate example, and require both survivors to apply new commands. The registered diagnostic
+workloads also reach the storage pause's tracked condition-variable wait and release.
+
+Harness voter-convergence waits require the expected voters, `raft.membership_joint: false`, and
+`raft.membership_committed: true` together. A union that matches the requested identities while
+still joint, or a uniform entry that has not committed, cannot complete cluster construction or a
+new member's convergence wait. Real-process start and relaunch convergence require the same
+membership observations alongside agreement on the leader and fresh connected peer targets.
+Missing status observations are not treated as successful readiness.
+
 ## Wide Subscription Row Input
 
 The native client's near-frame-limit outline establishes its input through an acknowledged HTTP

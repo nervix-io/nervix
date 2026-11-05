@@ -782,7 +782,10 @@ Choose checks relevant to the configured graph:
   `nx_session_domain_clock` before it uses a tick, and reads later states and ticks with
   `nx_session_next_clock_event`. The clock's projections give the logical time, the wait until a
   logical target, and the `TIMESTAMP AT` values the ingestor admits.
-- `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable.
+- `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable. Follow
+  [the membership status contract](https://docs.nervix.io/consensus-storage-and-replication.html#follower-catch-up-and-learner-promotion)
+  when deciding whether an observed voter list has converged; a joint configuration's union is
+  insufficient.
 - `DESCRIBE CLUSTER;` lists the prerequisites every live node brings and the nodes whose Raft
   heartbeat, gossip interval or clock-skew tolerance differs from the leader's. A node refused as it
   joins, or by its startup checks, names the setting and both values; read

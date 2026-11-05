@@ -1257,6 +1257,13 @@ waits to catch up before promotion. The recorded address is a startup contact hi
 traffic uses authenticated discovery by node identity. A node removed from membership stays out
 until it returns with a newer incarnation.
 
+Discovery does not flatten a joint Raft configuration into its voter union. Membership
+reconciliation first finishes the recorded uniform target, including an interrupted removal,
+before considering further discoveries. `SHOW CLUSTER STATUS` exposes whether the effective
+membership is joint and whether it is committed; the
+[consensus chapter](consensus-storage-and-replication.md#follower-catch-up-and-learner-promotion)
+defines those observations and their quorum meaning.
+
 A redirect to the leader names only the advertised endpoints discovery has established. A client
 redirected during an election that has not yet observed the new leader's client endpoint receives
 the leader identity without a redirect target rather than a guessed address, and retries until an

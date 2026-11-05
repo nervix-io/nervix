@@ -947,6 +947,27 @@ impl FaultInjection {
         state.test_probe.restore_connectivity();
     }
 
+    /// Interrupt a promotion on whichever current node leads, after its joint entry applies.
+    pub async fn interrupt_voter_promotion(&self, joining: ClusterNodeName) {
+        for probe in self.consensus_test_probes() {
+            nervix_primitives::task::consume_budget().await;
+            probe.interrupt_voter_promotion(joining.clone()).await;
+        }
+    }
+
+    pub async fn interrupted_membership(
+        &self,
+        joining: &ClusterNodeName,
+    ) -> Option<nervix_consensus::InterruptedMembership> {
+        for probe in self.consensus_test_probes() {
+            nervix_primitives::task::consume_budget().await;
+            if let Some(witness) = probe.interrupted_membership(joining).await {
+                return Some(witness);
+            }
+        }
+        None
+    }
+
     /// Makes whichever node proposes `reference`'s next `write` refuse it the way a leader whose
     /// lease lapsed refuses a write: before appending it, naming no leader, while it keeps leading
     /// its term. Only the leader proposes a command execution's writes, so every node is armed.

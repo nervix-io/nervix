@@ -1448,6 +1448,8 @@ mod tests {
             "raft.cordoned_nodes: (none)".to_string(),
             "raft.last_log_index: 40".to_string(),
             "raft.last_applied: 40".to_string(),
+            "raft.membership_joint: false".to_string(),
+            "raft.membership_committed: true".to_string(),
             "raft.membership:".to_string(),
             "- node-1 [voter] 127.0.0.1:41001".to_string(),
             "- node-2 [voter] 127.0.0.1:41002".to_string(),
@@ -2642,7 +2644,8 @@ mod tests {
     async fn a_one_member_cluster_converges_without_peers() {
         let alone = StandInNode::serve(StandInBehavior::Answer(command_result(
             completed(),
-            "raft.current_leader: node-1\nraft.membership:\n- node-1 [voter] \
+            "raft.current_leader: node-1\nraft.membership_joint: \
+             false\nraft.membership_committed: true\nraft.membership:\n- node-1 [voter] \
              127.0.0.1:41001\n\n[interconnect]\n- (none)",
         )))
         .await;
@@ -2703,6 +2706,8 @@ mod tests {
             let garbled = status.garbled;
             let text = [
                 "raft.current_leader: node-1",
+                "raft.membership_joint: false",
+                "raft.membership_committed: true",
                 "raft.membership:",
                 status.voter,
                 "",
