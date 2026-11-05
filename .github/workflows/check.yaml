@@ -1111,15 +1111,11 @@ jobs:
         with:
           tool: just@latest,cargo-llvm-cov
 
-      # Playwright's global install goes into the Node.js this step pins.
+      # JavaScript clients use this Node.js; the scenario archive supplies its Playwright driver.
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "24"
-
-      - name: Install playwright
-        run: |
-          npm install -g playwright
 
       - name: Setup uv for Python driver coverage
         uses: astral-sh/setup-uv@v6
