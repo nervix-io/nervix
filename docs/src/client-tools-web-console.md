@@ -62,9 +62,28 @@ The console is one screen with three regions:
 - the **execution graph** in the upper right
 - the **REPL** below it, which also hosts any relay subscriptions you open
 
-The top bar carries the websocket connection state, the global **Create** menu, the **Backups**
-button, the domain lifecycle button, the selected clock state, and the theme picker. The clock panel below the domain
-selector shows the selected domain's clock in detail.
+The top bar carries the websocket connection state, the node panel, the global **Create** menu, the
+**Backups** button, the domain lifecycle button, the selected clock state, and the theme picker. The
+clock panel below the domain selector shows the selected domain's clock in detail.
+
+### Following cluster events
+
+The **Events** button beside the connection state counts the cluster events the console has
+received, and opens the node panel that lists them, newest first. They are the membership and
+leadership notices of the node the console is connected to: a node that joined, left or restarted
+as a new incarnation, the node's Raft transitions, and the membership operations it proposes while
+it leads. A membership event repeated within one session is shown once with its count, for example
+`node 'node-3' left ×2`. The panel keeps the events of earlier sessions after a reconnect, up to its
+newest 64 entries; the count on the button keeps every event received.
+
+```text
+node 'node-3' joined (incarnation 1793845627114630656)
+node 'node-3' left
+raft transition: state=Follower leader=node-2 term=3 last_log_index=41 last_applied=41
+```
+
+These events never enter the REPL transcript. Runtime and control-plane failures and committed
+cluster-parameter revisions still appear there as notice lines, beside the command outcomes.
 
 Sidebar entries are counted per kind and each group collapses. Selecting an endpoint runs its
 `DESCRIBE` in the REPL; selecting a resource does the same and opens its version dialog.

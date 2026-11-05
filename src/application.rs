@@ -2709,7 +2709,10 @@ impl Application {
                                     );
                             }
                             Envelope::Control(ControlEnvelope::RuntimeErrorEvent(event)) => {
-                                service_for_interconnect.broadcast_error(event.message);
+                                service_for_interconnect
+                                    .inner
+                                    .events
+                                    .report_peer_runtime_error(event.message);
                             }
                         }
                     }
@@ -2725,7 +2728,7 @@ impl Application {
                 nervix_primitives::select! {
                     _ = cluster_events_shutdown.cancelled() => break,
                     received = cluster_event_rx.recv() => match received {
-                        Ok(message) => cluster_events.relay_info(message),
+                        Ok(change) => cluster_events.relay_membership(&change),
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             warn!(skipped, "cluster event relay fell behind the event bus");
                         }
@@ -2743,7 +2746,7 @@ impl Application {
                 nervix_primitives::select! {
                     _ = consensus_events_shutdown.cancelled() => break,
                     received = consensus_event_rx.recv() => match received {
-                        Ok(message) => consensus_events.relay_info(message),
+                        Ok(message) => consensus_events.relay_leadership(message),
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             warn!(skipped, "consensus event relay fell behind the event bus");
                         }

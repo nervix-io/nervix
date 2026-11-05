@@ -13,23 +13,33 @@ use super::{
 };
 use crate::{
     ClusterObserved, DomainEntity, DomainInfo, DomainSnapshotObserved, DomainsObserved,
-    LeaderRedirect, Leadership, LeadershipObserved, NoticeLevel, RowsSkippedCause, ServerEvent,
+    LeaderRedirect, Leadership, LeadershipObserved, NoticeKind, NoticeLevel, RowsSkippedCause,
+    ServerEvent,
     ServerMessage, ServerNotice, SessionEndReason, SessionEnding, SubscriptionDeliveryLost,
     SubscriptionEndReason, SubscriptionEnded, SubscriptionRowsSkipped, WireDecodeError, wire,
 };
 
 #[test]
-fn notices_round_trip_at_every_level() {
+fn notices_round_trip_at_every_level_and_kind() {
     for level in [NoticeLevel::Info, NoticeLevel::Warning, NoticeLevel::Error] {
-        let notice = ServerNotice {
-            level,
-            message: "connected to leader 'node-1'".to_string(),
-        };
-        let frame = notice.encode(&limits()).assured("a notice fits the limits");
-        let ServerEvent::Notice(decoded) = decode_event(frame) else {
-            panic!("a notice decodes as a notice");
-        };
-        assert_eq!(decoded, notice);
+        for kind in [
+            NoticeKind::Membership,
+            NoticeKind::Leadership,
+            NoticeKind::ClusterParameters,
+            NoticeKind::Runtime,
+            NoticeKind::ControlPlane,
+        ] {
+            let notice = ServerNotice {
+                level,
+                kind,
+                message: "node 'node-2' left".to_string(),
+            };
+            let frame = notice.encode(&limits()).assured("a notice fits the limits");
+            let ServerEvent::Notice(decoded) = decode_event(frame) else {
+                panic!("a notice decodes as a notice");
+            };
+            assert_eq!(decoded, notice);
+        }
     }
 }
 
@@ -204,6 +214,7 @@ fn unsolicited_messages_never_name_a_request() {
     let frames = [
         ServerNotice {
             level: NoticeLevel::Info,
+            kind: NoticeKind::Membership,
             message: String::new(),
         }
         .encode(&limits()),
@@ -229,7 +240,11 @@ fn unsolicited_messages_never_name_a_request() {
     }
 }
 
-fn notice_frame(body_type: wire::ServerBody, level: Option<wire::NoticeLevel>) -> bytes::Bytes {
+fn notice_frame(
+    body_type: wire::ServerBody,
+    level: Option<wire::NoticeLevel>,
+    kind: Option<wire::NoticeKind>,
+) -> bytes::Bytes {
     let mut builder = FlatBufferBuilder::new();
     builder.force_defaults(true);
     let message = builder.create_string("notice");
@@ -237,6 +252,7 @@ fn notice_frame(body_type: wire::ServerBody, level: Option<wire::NoticeLevel>) -
         &mut builder,
         &wire::ServerNoticeArgs {
             level,
+            kind,
             message: Some(message),
         },
     );
@@ -257,7 +273,11 @@ fn malformed_events_are_refused() {
         wire::ServerBody(17),
         wire::ServerBody(255),
     ] {
-        let frame = raw_server(notice_frame(discriminant, Some(wire::NoticeLevel::Info)));
+        let frame = raw_server(notice_frame(
+            discriminant,
+            Some(wire::NoticeLevel::Info),
+            Some(wire::NoticeKind::Runtime),
+        ));
         assert_eq!(
             decode_error(ServerMessage::decode(&frame)),
             WireDecodeError::UnknownUnionVariant {
@@ -266,7 +286,11 @@ fn malformed_events_are_refused() {
             }
         );
     }
-    let frame = raw_server(notice_frame(wire::ServerBody::ServerNotice, None));
+    let frame = raw_server(notice_frame(
+        wire::ServerBody::ServerNotice,
+        None,
+        Some(wire::NoticeKind::Runtime),
+    ));
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),
         WireDecodeError::MissingField {
@@ -276,12 +300,36 @@ fn malformed_events_are_refused() {
     let frame = raw_server(notice_frame(
         wire::ServerBody::ServerNotice,
         Some(wire::NoticeLevel(3)),
+        Some(wire::NoticeKind::Runtime),
     ));
     assert_eq!(
         decode_error(ServerMessage::decode(&frame)),
         WireDecodeError::UnknownEnumValue {
             field: "ServerNotice.level",
             value: 3,
+        }
+    );
+    let frame = raw_server(notice_frame(
+        wire::ServerBody::ServerNotice,
+        Some(wire::NoticeLevel::Info),
+        None,
+    ));
+    assert_eq!(
+        decode_error(ServerMessage::decode(&frame)),
+        WireDecodeError::MissingField {
+            field: "ServerNotice.kind",
+        }
+    );
+    let frame = raw_server(notice_frame(
+        wire::ServerBody::ServerNotice,
+        Some(wire::NoticeLevel::Info),
+        Some(wire::NoticeKind(5)),
+    ));
+    assert_eq!(
+        decode_error(ServerMessage::decode(&frame)),
+        WireDecodeError::UnknownEnumValue {
+            field: "ServerNotice.kind",
+            value: 5,
         }
     );
 }

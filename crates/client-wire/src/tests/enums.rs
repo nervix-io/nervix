@@ -18,7 +18,7 @@ use crate::{
     },
     domain::ALL_DOMAIN_STATUSES,
     domain_clock::ALL_DOMAIN_CLOCK_ATTACHMENT_END_REASONS,
-    event::ALL_NOTICE_LEVELS,
+    event::{ALL_NOTICE_KINDS, ALL_NOTICE_LEVELS},
     impact::{
         ALL_ACTIVATION_ACTIONS, ALL_DOMAIN_LIFECYCLE_ACTIONS, ALL_IMPACT_DIAGNOSTIC_KINDS,
         ALL_IMPACT_EDGE_KINDS, ALL_MODEL_CHANGE_ASPECTS, ALL_REBUILD_REASONS,
@@ -113,6 +113,7 @@ fn every_enum_maps_exactly_to_its_schema_enum() {
     );
     assert_exact_mapping(ALL_DOMAIN_STATUSES, wire::DomainStatus::ENUM_VALUES);
     assert_exact_mapping(ALL_NOTICE_LEVELS, wire::NoticeLevel::ENUM_VALUES);
+    assert_exact_mapping(ALL_NOTICE_KINDS, wire::NoticeKind::ENUM_VALUES);
     assert_exact_mapping(
         ALL_IMPACT_DIAGNOSTIC_KINDS,
         wire::ImpactDiagnosticKind::ENUM_VALUES,
@@ -244,6 +245,10 @@ fn every_undeclared_enum_byte_is_refused() {
     assert_undeclared_refused::<crate::NoticeLevel, _>(
         wire::NoticeLevel::ENUM_MAX,
         wire::NoticeLevel,
+    );
+    assert_undeclared_refused::<crate::NoticeKind, _>(
+        wire::NoticeKind::ENUM_MAX,
+        wire::NoticeKind,
     );
     assert_undeclared_refused::<nervix_models::ImpactDiagnosticKind, _>(
         wire::ImpactDiagnosticKind::ENUM_MAX,

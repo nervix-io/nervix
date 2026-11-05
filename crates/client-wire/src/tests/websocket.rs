@@ -37,6 +37,7 @@ fn a_binary_message_carries_exactly_one_frame() {
     }
     let notice = crate::ServerNotice {
         level: crate::NoticeLevel::Info,
+        kind: crate::NoticeKind::Leadership,
         message: "connected".to_string(),
     };
     let payload = server.encode(notice.encode(&limits()).assured("a notice fits"));

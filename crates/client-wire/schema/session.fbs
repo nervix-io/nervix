@@ -2305,9 +2305,25 @@ enum NoticeLevel : ubyte {
   Error
 }
 
+/// What a notice reports, so a reader routes it without reading its text.
+enum NoticeKind : ubyte {
+  /// A node of the serving node's live set joined, left, or became a new incarnation.
+  Membership,
+  /// A Raft transition of the serving node, or a membership operation it proposes as leader.
+  Leadership,
+  /// A committed cluster-parameter revision the serving node installed.
+  ClusterParameters,
+  /// A failure the runtime of the serving node, or of another node, recovered from.
+  Runtime,
+  /// A control-plane failure the serving node recovered from.
+  ControlPlane
+}
+
 table ServerNotice {
   /// Required.
   level: NoticeLevel = null;
+  /// Required.
+  kind: NoticeKind = null;
   message: string (required);
 }
 

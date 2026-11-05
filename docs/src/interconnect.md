@@ -1234,6 +1234,17 @@ Each node's Chitchat live set is its own failure-detector estimate. An isolated 
 listed live until its missing heartbeats are observed, even after its links stop carrying requests;
 application probes provide the separate signal that eventually makes its work eligible for failover.
 
+Chitchat wakes the node's membership task whenever any live member's state changes, including every
+key a member publishes. The task republishes subscription interest, prerequisites and routes from
+each value it receives, and compares the value's live set with the one it saw before. It keeps that
+set as its own state, keyed by node name with the highest incarnation listed live for it, so an old
+and a new incarnation that are briefly both live count as one member. Only a node that joined, left,
+or became a new incarnation produces an event: the task logs it at `info` with the node and its
+incarnation, and offers it to the sessions attached to the node as a `Membership` notice, such as
+`node 'node-3' left` or `node 'node-3' restarted (incarnation 1793845627114630656)`. A value that
+only changes published keys, such as subscription interest, offers nothing. The node's own run is
+its first member, so it never reports itself joining.
+
 Chitchat continues to select known dead peers for exchanges during its 24-hour dead-node retention
 period. When application health has retired one of those peers from the outbound pool, a gossip
 exchange reinstalls its known route before sending. The replacement connection still authenticates

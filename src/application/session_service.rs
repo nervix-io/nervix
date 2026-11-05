@@ -20,7 +20,8 @@ use futures_util::future::BoxFuture;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection, ChoiceStatus,
-    ChoiceTarget, ChoiceValue, CommandRequest, DomainPaceChoice, NoticeLevel, ServerNotice,
+    ChoiceTarget, ChoiceValue, CommandRequest, DomainPaceChoice, NoticeKind, NoticeLevel,
+    ServerNotice,
     SuggestOutcome, SuggestRequest, Suggestion, SuggestionKind, SuggestionStatus, TextEdit,
 };
 use nervix_consensus::{Administrator, CommandExecutionTransactionTarget, Observer, Proposer};
@@ -111,23 +112,50 @@ impl SessionEvents {
     }
 
     /// Report a control-plane failure this node recovered from.
-    fn report_error(&self, message: impl Into<String>) {
+    fn report_control_plane_error(&self, message: impl Into<String>) {
         let message = message.into();
-        warn!(error = %message, "server error reported to sessions");
-        self.publish(NoticeLevel::Error, message);
+        warn!(error = %message, kind = "control plane", "server error reported to sessions");
+        self.publish(NoticeLevel::Error, NoticeKind::ControlPlane, message);
     }
 
-    /// Offer a transition the cluster or consensus bus has already recorded.
+    /// Report a runtime failure another node recovered from and fanned out to this one.
     ///
-    /// Those buses write their own `info` line before handing the text here, so this is a relay
-    /// rather than a report and it logs nothing of its own.
-    pub(in crate::application) fn relay_info(&self, message: String) {
-        self.publish(NoticeLevel::Info, message);
+    /// The failing node traces its own report only at `debug` once an observer takes it, so this
+    /// node's `warn` line is where an operator of its sessions finds it.
+    pub(in crate::application) fn report_peer_runtime_error(&self, message: String) {
+        warn!(error = %message, kind = "runtime", "server error reported to sessions");
+        self.publish(NoticeLevel::Error, NoticeKind::Runtime, message);
     }
 
-    fn publish(&self, level: NoticeLevel, message: String) {
+    /// Offer a change of this node's live set that the membership task has already recorded.
+    ///
+    /// The cluster layer writes its own `info` line before handing the change here, so this is a
+    /// relay rather than a report and it logs nothing of its own.
+    pub(in crate::application) fn relay_membership(&self, change: &cluster::MembershipChange) {
+        self.publish(NoticeLevel::Info, NoticeKind::Membership, change.to_string());
+    }
+
+    /// Offer a consensus transition the consensus bus has already recorded in its `info` line.
+    pub(in crate::application) fn relay_leadership(&self, message: String) {
+        self.publish(NoticeLevel::Info, NoticeKind::Leadership, message);
+    }
+
+    /// Offer a committed cluster-parameter revision this node installed and has already logged.
+    pub(in crate::application) fn relay_cluster_parameters(&self, revision: std::num::NonZeroU64) {
+        self.publish(
+            NoticeLevel::Info,
+            NoticeKind::ClusterParameters,
+            format!("cluster parameters committed at revision {revision}"),
+        );
+    }
+
+    fn publish(&self, level: NoticeLevel, kind: NoticeKind, message: String) {
         self.sender
-            .send(ServerNotice { level, message })
+            .send(ServerNotice {
+                level,
+                kind,
+                message,
+            })
             .discarded("the record this event carries is written before it is offered");
     }
 
@@ -1445,7 +1473,7 @@ impl SessionServiceImpl {
 
     /// Report a control-plane failure this node recovered from to the sessions attached to it.
     pub(in crate::application) fn broadcast_error(&self, message: impl Into<String>) {
-        self.inner.events.report_error(message);
+        self.inner.events.report_control_plane_error(message);
     }
 
     /// Resolves one structured control against a single observed application revision.

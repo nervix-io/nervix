@@ -12,7 +12,7 @@ use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
-    ClientMessage, ClientRequest, DomainList, NoticeLevel, Reply, ReplyBody, ReplyDelivery,
+    ClientMessage, ClientRequest, DomainList, NoticeKind, NoticeLevel, Reply, ReplyBody, ReplyDelivery,
     RequestId, ServerEvent, ServerMessage, ServerNotice, SessionLimitSettings, SessionLimits,
     SuggestOutcome, SuggestRequest, Suggestion, SuggestionKind, SuggestionStatus, TextEdit,
     websocket::{ClientWebSocketCodec, ServerWebSocketCodec, WebSocketData, WebSocketError},
@@ -65,6 +65,7 @@ async fn serve_one(listener: TcpListener, limits: SessionLimits) {
             .assured("the handshake completes");
     let notice = ServerNotice {
         level: NoticeLevel::Info,
+        kind: NoticeKind::Leadership,
         message: "connected to leader 'node-1'".to_string(),
     }
     .encode(&limits)

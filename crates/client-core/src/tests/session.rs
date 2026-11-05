@@ -56,7 +56,8 @@ use crate::{
         Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection,
         ChoiceStatus, ChoiceTarget, ChoiceValue, ClientFrame, ClientMessage, ClientRequest,
         DomainInfo, DomainList, DomainPaceChoice, DomainsObserved, EncodedFrame, InspectionOutcome,
-        LeaderRedirect, LeadershipObserved, NodeEndpoints, NoticeLevel, Reply, ReplyBody,
+        LeaderRedirect, LeadershipObserved, NodeEndpoints, NoticeKind, NoticeLevel, Reply,
+        ReplyBody,
         ReplyDelivery, RequestId, RowSchema, ServerFrame, ServerNotice, SessionLimitSettings,
         SessionLimits, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
         SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRowsEncoder,
@@ -779,6 +780,7 @@ async fn a_closed_session_recovers_through_a_configured_seed() {
         .send(
             ServerNotice {
                 level: NoticeLevel::Warning,
+                kind: NoticeKind::Runtime,
                 message: "relay 'orders' is behind".to_string(),
             }
             .encode(&limits())
@@ -790,6 +792,7 @@ async fn a_closed_session_recovers_through_a_configured_seed() {
         .assured("the notice task completes")
         .assured("the notice stream continues on the recovered session");
     assert_eq!(notice.level, NoticeLevel::Warning);
+    assert_eq!(notice.kind, NoticeKind::Runtime);
     assert_eq!(notice.message, "relay 'orders' is behind");
     let recovered_requests = client.inner.exchange.lock().await.requests();
     assert!(matches!(
@@ -1782,6 +1785,7 @@ async fn a_reply_larger_than_a_frame_arrives_in_parts() {
                 .send(
                     ServerNotice {
                         level: NoticeLevel::Info,
+                        kind: NoticeKind::Leadership,
                         message: "raft transition: state=Leader".to_string(),
                     }
                     .encode(&limits())
@@ -1801,6 +1805,7 @@ async fn a_reply_larger_than_a_frame_arrives_in_parts() {
         .await
         .assured("the notice between the parts is delivered");
     assert_eq!(notice.level, NoticeLevel::Info);
+    assert_eq!(notice.kind, NoticeKind::Leadership);
     assert_eq!(notice.message, "raft transition: state=Leader");
 }
 

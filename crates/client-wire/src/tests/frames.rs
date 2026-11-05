@@ -15,7 +15,8 @@ use super::{
 };
 use crate::{
     CellView, CellWriter, CellsView, ClientFrame, ClientMessage, ClientRequest, CommandDisposition,
-    CommandRequest, FrameError, FrameViolation, InspectionOutcome, NoticeLevel, Reply, ReplyBody,
+    CommandRequest, FrameError, FrameViolation, InspectionOutcome, NoticeKind, NoticeLevel, Reply,
+    ReplyBody,
     ReplyDelivery, RowBranch, RowSchema, ServerEvent, ServerFrame, ServerMessage, ServerNotice,
     SessionLimitSettings, SessionLimits, SubscribeDisposition, SubscribeOutcome,
     SubscriptionOpened, SubscriptionRowsEncoder, SubscriptionType, UploadChunk, UploadDisposition,
@@ -726,6 +727,7 @@ fn request_identity_is_read_before_decoding() {
 
     let notice = ServerNotice {
         level: NoticeLevel::Warning,
+        kind: NoticeKind::ControlPlane,
         message: "no request".to_string(),
     }
     .encode(&limits())

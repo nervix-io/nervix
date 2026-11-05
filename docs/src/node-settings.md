@@ -420,7 +420,7 @@ transition, even when a later command has changed another parameter.
 
 `DESCRIBE CLUSTER` reports committed values and each node's running revision and values. A node
 that has not applied the current record remains visibly behind. Sessions receive an informational
-notice after their node successfully installs a parameter revision. The installation supervisor
+`ClusterParameters` notice after their node successfully installs a parameter revision. The installation supervisor
 retries a failed graph installation; a retry of the same revision sends no additional parameter
 notice. A joining or returning node obtains the
 live cluster's published record before activating services that consume it and verifies that

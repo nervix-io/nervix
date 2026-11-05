@@ -953,6 +953,22 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 		}
 		return []string{fmt.Sprintf("EVENT PRODUCER_ENDED producer=%d reason=%s message=%s",
 			ended.Producer(), session.EnumNamesProducerEndReason[*reason], text(ended.Message()))}, nil
+	case session.ServerBodyServerNotice:
+		notice := new(session.ServerNotice)
+		if err := union(message.Body, notice); err != nil {
+			return nil, err
+		}
+		level := notice.Level()
+		if level == nil {
+			return nil, errors.New("a notice has no level")
+		}
+		kind := notice.Kind()
+		if kind == nil {
+			return nil, errors.New("a notice has no kind")
+		}
+		return []string{fmt.Sprintf("EVENT NOTICE level=%s kind=%s message=%s",
+			session.EnumNamesNoticeLevel[*level], session.EnumNamesNoticeKind[*kind],
+			text(notice.Message()))}, nil
 	}
 	return nil, fmt.Errorf("the corpus holds no %s message", message.BodyType())
 }
