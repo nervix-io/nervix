@@ -674,11 +674,7 @@ pub(in crate::application) fn format_planned_ownership_move(
     } else {
         moved.replicas.join(",")
     };
-    let unit = match moved.unit {
-        Unit::Single => String::new(),
-        Unit::Partition(partition) => format!(" unit=partition:{partition}"),
-        Unit::Instance(instance) => format!(" unit=instance:{instance}"),
-    };
+    let unit = moved.unit.status_field();
     format!(
         "- kind={} name={}{} from={} to={} replicas={} promoted_replica={}",
         moved.entity.kind.as_ref(),
@@ -1414,11 +1410,16 @@ impl SessionServiceImpl {
                     request.entity.identifier.as_str()
                 ))
             })?;
-        if scheduled.primary_node() != Some(&request.source) {
+        let unit_primary = match scheduled.unit(request.unit) {
+            Some(unit) => unit.primary_node.as_ref(),
+            None => None,
+        };
+        if unit_primary != Some(&request.source) {
             return Err(OwnershipHandoffError::participant(format!(
-                "{} '{}' is no longer owned by source node '{}'",
+                "{} '{}'{} is no longer owned by source node '{}'",
                 request.entity.kind.as_str(),
                 request.entity.identifier.as_str(),
+                request.unit.label_suffix(),
                 request.source
             )));
         }
@@ -1879,11 +1880,16 @@ impl SessionServiceImpl {
                                     request.entity.identifier.as_str()
                                 ))
                             })?;
-                        if scheduled.primary_node() != Some(&request.source) {
+                        let unit_primary = match scheduled.unit(request.unit) {
+                            Some(unit) => unit.primary_node.as_ref(),
+                            None => None,
+                        };
+                        if unit_primary != Some(&request.source) {
                             return Err(OwnershipHandoffError::participant(format!(
-                                "{} '{}' is no longer owned by source node '{}'",
+                                "{} '{}'{} is no longer owned by source node '{}'",
                                 request.entity.kind.as_str(),
                                 request.entity.identifier.as_str(),
+                                request.unit.label_suffix(),
                                 request.source
                             )));
                         }

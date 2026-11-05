@@ -413,18 +413,18 @@ impl Runtime {
                     ModelName::from(&relay.name),
                 ))
                 .assured("the domain plan contains exactly the scheduled relays");
-            // A relay this node owns shares its presence with the relay's state placement, which
-            // outlives this execution; any other relay starts from a presence of its own.
-            let branch_presence =
-                if node.executes_on(local_node_id) && branch_relays.contains(&relay.name) {
-                    self.relay_branch_presence(domain, &relay.name)
-                        .change_context_lazy(|| ExecutionBuildError::RelayBranchPresence {
-                            relay: relay.name.clone(),
-                        })
-                        .change_context_lazy(build)?
-                } else {
-                    Arc::new(BranchPresence::new())
-                };
+            // A unit this node owns shares its presence with the unit's state placement, which
+            // outlives this execution; every other unit starts from a presence of its own.
+            let partitioning = RelayPartitioning::of(Some(&relay.branching));
+            let branch_relay = branch_relays.contains(&relay.name);
+            let branch_presences = self
+                .relay_branch_presences(domain, &relay.name, partitioning, |unit| {
+                    branch_relay && node.unit_executes_on(unit, local_node_id)
+                })
+                .change_context_lazy(|| ExecutionBuildError::RelayBranchPresence {
+                    relay: relay.name.clone(),
+                })
+                .change_context_lazy(build)?;
             let fanout = Box::pin(self.relay_boundary_fanout_with_capacity(
                 domain,
                 &relay.name,
@@ -438,7 +438,7 @@ impl Runtime {
                     fanout,
                     attached_runtime_consumer_count: 0,
                     detached_runtime_consumer_count: 0,
-                    branch_presence,
+                    branch_presences,
                     remote_runtime_consumers: Vec::new(),
                 },
             );
@@ -453,7 +453,8 @@ impl Runtime {
                         relay.branching.clone(),
                     ),
                 );
-                materialized_stream_owner_nodes.insert(relay.name.clone(), None);
+                materialized_stream_owner_nodes
+                    .insert(relay.name.clone(), RelayOwnerRoutes::default());
             }
         }
 
@@ -464,24 +465,27 @@ impl Runtime {
             nervix_primitives::task::consume_budget().await;
             let state = PlacedNodeState::of(node, &revision);
             if let Some(PlacedNodeState::MaterializedRelay(schema)) = state.as_ref() {
-                let state_placement = self
-                    .state_placement(
-                        domain,
-                        RuntimeStateKind::MaterializedRelay,
-                        ModelKind::Relay,
-                        RelayName::from(&node.identifier),
-                        None,
-                    )
-                    .change_context_lazy(|| ExecutionBuildError::PlaceState {
-                        node: node.identity(),
-                    })
-                    .change_context_lazy(build)?;
-                Box::pin(self.prepare_materialized_stream_restore(&state_placement, schema))
-                    .await
-                    .change_context_lazy(|| ExecutionBuildError::PrepareMaterializedRestore {
-                        relay: RelayName::from(&node.identifier),
-                    })
-                    .change_context_lazy(build)?;
+                for unit in node.units.keys() {
+                    let state_placement = self
+                        .state_placement_for_unit(
+                            domain,
+                            RuntimeStateKind::MaterializedRelay,
+                            ModelKind::Relay,
+                            RelayName::from(&node.identifier),
+                            *unit,
+                            None,
+                        )
+                        .change_context_lazy(|| ExecutionBuildError::PlaceState {
+                            node: node.identity(),
+                        })
+                        .change_context_lazy(build)?;
+                    Box::pin(self.prepare_materialized_stream_restore(&state_placement, schema))
+                        .await
+                        .change_context_lazy(|| ExecutionBuildError::PrepareMaterializedRestore {
+                            relay: RelayName::from(&node.identifier),
+                        })
+                        .change_context_lazy(build)?;
+                }
             }
             let placement = self
                 .build_scheduled_node_placement(domain, &shutdown_tx, node, local_node_id, state)
@@ -489,8 +493,11 @@ impl Runtime {
             if let Some(state) = placement.kafka_offset_state {
                 kafka_offset_states.insert(RelayName::from(&node.identifier), state);
             }
-            if let Some(state) = placement.materialized_state {
-                materialized_states.insert(RelayName::from(&node.identifier), state);
+            for (unit, state) in placement.materialized_states {
+                materialized_states.insert(
+                    RelayUnitRef::new(RelayName::from(&node.identifier), unit),
+                    state,
+                );
             }
             if !placement.tasks.is_empty() {
                 placement_tasks.insert(node.identity(), placement.tasks);
@@ -505,20 +512,27 @@ impl Runtime {
                     .get(&relay_name)
                     .verified("the domain plan covers every scheduled relay");
                 if planned.materialized {
-                    materialized_stream_owner_nodes
-                        .insert(relay_name.clone(), node.execution_node().cloned());
+                    materialized_stream_owner_nodes.insert(
+                        relay_name.clone(),
+                        RelayOwnerRoutes::new(node.unit_execution_nodes()),
+                    );
                     let relay = relay_builders
                         .get_mut(&relay_name)
                         .verified("the relay boundary was installed from this domain plan");
-                    if node.executes_on(local_node_id) {
-                        let Some(state) = materialized_states.remove(&relay_name) else {
+                    for unit in node.units_executing_on(local_node_id) {
+                        let key = RelayUnitRef::new(relay_name.clone(), unit);
+                        let Some(state) = materialized_states.remove(&key) else {
                             return Err(Report::new(
-                                ExecutionBuildError::MissingMaterializedState { relay: relay_name },
+                                ExecutionBuildError::MissingMaterializedState {
+                                    relay: relay_name.clone(),
+                                },
                             )
                             .change_context(build()));
                         };
                         relay_state_specs.push(RelayStateTaskSpec {
-                            relay: relay_name,
+                            relay: relay_name.clone(),
+                            unit,
+                            partitioning: relay.branch_presences.partitioning(),
                             state,
                             retention: planned.retention,
                             receiver: relay.runtime_consumer_fan_in_for_mode(AckMode::Detached),
@@ -643,16 +657,17 @@ impl Runtime {
         }
 
         for relay in relay_builders.keys() {
-            if !revision
+            let Some(node) = revision
                 .nodes
                 .get(&NodeRef::new(ModelKind::Relay, ModelName::from(relay)))
-                .is_some_and(|node| node.executes_on(local_node_id))
-            {
+            else {
                 continue;
+            };
+            for unit in node.units_executing_on(local_node_id) {
+                self.inner
+                    .metrics
+                    .register_global_stream(domain, relay, unit, Some(local_node_id));
             }
-            self.inner
-                .metrics
-                .register_global_stream(domain, relay, Some(local_node_id));
         }
         let relay_services = relay_builders
             .into_iter()
@@ -665,48 +680,42 @@ impl Runtime {
                         relay.detached_runtime_consumer_count,
                         relay.remote_runtime_consumers,
                         remote_dispatcher.clone(),
-                        relay.branch_presence,
+                        relay.branch_presences,
                         self.domain_ack_root_tracker(domain),
                     )),
                 )
             })
             .collect::<HashMap<_, _>>();
         for (relay, services) in &relay_services {
-            let owner_node = if let Some(node) = revision
+            let routes = match revision
                 .nodes
                 .get(&NodeRef::new(ModelKind::Relay, ModelName::from(relay)))
-                && let Some(owner) = node.execution_node()
             {
-                Some(owner.clone())
-            } else {
-                None
+                Some(node) => RelayOwnerRoutes::new(node.unit_execution_nodes()),
+                None => RelayOwnerRoutes::default(),
             };
-            services.replace_owner_node(owner_node);
+            services.replace_owner_routes(routes);
         }
-        let mut relay_owner_tasks = HashMap::new();
+        let mut relay_owner_tasks = BTreeMap::new();
         for node in revision.nodes.values() {
-            if node.kind() != ModelKind::Relay || !node.executes_on(local_node_id) {
+            if node.kind() != ModelKind::Relay {
                 continue;
             }
-            let services = relay_services
-                .get(&RelayName::from(&node.identifier))
-                .cloned()
-                .verified(
+            let relay = RelayName::from(&node.identifier);
+            for unit in node.units_executing_on(local_node_id) {
+                let services = relay_services.get(&relay).cloned().verified(
                     "these maps were built from the same scheduled relay nodes this loop walks",
                 );
-            relay_owner_tasks.insert(
-                RelayName::from(&node.identifier),
-                self.spawn_relay_owner_task(
-                    domain,
-                    &RelayName::from(&node.identifier),
-                    services,
-                    activation_plan
-                        .relays
-                        .get(&RelayName::from(&node.identifier))
-                        .verified("the domain plan covers every scheduled relay")
-                        .retention,
-                ),
-            );
+                let retention = activation_plan
+                    .relays
+                    .get(&relay)
+                    .verified("the domain plan covers every scheduled relay")
+                    .retention;
+                let task = self
+                    .spawn_relay_owner_task(domain, &relay, unit, services, retention)
+                    .change_context_lazy(build)?;
+                relay_owner_tasks.insert(RelayUnitRef::new(relay.clone(), unit), task);
+            }
         }
 
         let lookup_runtimes = lookup_specs.iter().cloned().collect::<HashMap<_, _>>();
@@ -792,11 +801,11 @@ impl Runtime {
             );
         }
 
-        let mut relay_state_tasks = HashMap::new();
+        let mut relay_state_tasks = BTreeMap::new();
         for spec in relay_state_specs {
-            let relay = spec.relay.clone();
+            let key = RelayUnitRef::new(spec.relay.clone(), spec.unit);
             let task = self.spawn_relay_state_task(domain, spec);
-            relay_state_tasks.insert(relay, task);
+            relay_state_tasks.insert(key, task);
         }
 
         for (emitter, inputs) in emitter_specs {
@@ -937,13 +946,14 @@ impl Runtime {
                     RelaySubscriptionDefinition::new(relay.schema.clone(), relay.branching.clone()),
                 )
                 .await;
+            let partitioning = RelayPartitioning::of(Some(&relay.branching));
             relay_builders.insert(
                 relay.name.clone(),
                 RelayBoundaryBuilder {
                     fanout,
                     attached_runtime_consumer_count: 0,
                     detached_runtime_consumer_count: 0,
-                    branch_presence: Arc::new(BranchPresence::new()),
+                    branch_presences: RelayBranchPresences::fresh(partitioning),
                     remote_runtime_consumers: Vec::new(),
                 },
             );
@@ -965,8 +975,10 @@ impl Runtime {
                         ModelName::from(&relay.name),
                     ))
                     .assured("the domain plan contains exactly the scheduled relays");
-                materialized_stream_owner_nodes
-                    .insert(relay.name.clone(), node.execution_node().cloned());
+                materialized_stream_owner_nodes.insert(
+                    relay.name.clone(),
+                    RelayOwnerRoutes::new(node.unit_execution_nodes()),
+                );
             }
         }
 
@@ -1000,7 +1012,7 @@ impl Runtime {
                         relay.detached_runtime_consumer_count,
                         relay.remote_runtime_consumers,
                         None,
-                        relay.branch_presence,
+                        relay.branch_presences,
                         self.domain_ack_root_tracker(domain),
                     )),
                 )
@@ -1055,8 +1067,8 @@ impl Runtime {
             generator_tasks: HashMap::default(),
             reingestor_tasks: HashMap::default(),
             placement_tasks: HashMap::default(),
-            relay_state_tasks: HashMap::default(),
-            relay_owner_tasks: HashMap::default(),
+            relay_state_tasks: BTreeMap::default(),
+            relay_owner_tasks: BTreeMap::default(),
             tasks: Vec::new(),
         })
     }

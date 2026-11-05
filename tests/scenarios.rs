@@ -235,6 +235,7 @@ mod mqtt_subscription_refusal;
 mod mysql_isolation;
 mod nats_authentication;
 mod nats_delivery;
+mod nats_stream_consumers;
 mod paced_replication;
 mod paced_simulation;
 mod postgres_fixtures;
@@ -247,6 +248,7 @@ mod pulsar_subscription_types;
 mod pulsar_subscriptions;
 mod rabbitmq_envelope;
 mod rabbitmq_properties;
+mod relay_partitions;
 mod restarted_voter;
 mod session_protocol;
 mod session_tls;
@@ -255,6 +257,7 @@ mod web_console_command_retry;
 mod web_console_connections;
 mod web_console_request_window;
 mod websocket_lifecycle;
+mod wide_row_intake;
 
 const SCENARIOS_PATH: &str = "tests/features";
 const TEST_LOG_DIR: &str = "tests/logs";
@@ -7322,6 +7325,110 @@ fn given_consensus_commits_on_every_node_take(world: &mut ScenarioWorld, duratio
         );
         world.consensus_commit_delays.insert(node_id, duration);
     }
+}
+
+/// Hold only the follower's answer, after it has accepted the heartbeat. The followers therefore
+/// keep hearing the same leader while its acknowledgements arrive later than one heartbeat period.
+#[when(expr = "follower heartbeat answers take {string} while the leader idles for {string}")]
+async fn when_follower_heartbeat_answers_are_late(
+    world: &mut ScenarioWorld,
+    delay: String,
+    idle: String,
+) {
+    let delay = parse_duration_text(&delay).expect("heartbeat answer delay must be valid");
+    let idle = parse_duration_text(&idle).expect("heartbeat idle period must be valid");
+    let timings =
+        nervix_consensus::RaftTimings::resolve(Some(world.cluster_config.raft_heartbeat_interval))
+            .expect("the configured heartbeat interval must be valid");
+    assert!(
+        delay > world.cluster_config.raft_heartbeat_interval
+            && delay < timings.election_timeout_max(),
+        "the answer must be later than a heartbeat but inside the leader lease"
+    );
+    assert!(
+        idle > timings.election_timeout_max(),
+        "the idle observation must span one leader lease"
+    );
+
+    let leader = current_leader_node(world).await;
+    let before = world
+        .cluster()
+        .current_leadership(&leader)
+        .await
+        .expect("the leader must report its term before the delay");
+    let followers = world
+        .cluster()
+        .node_ids()
+        .into_iter()
+        .filter(|node| node != &leader)
+        .collect::<Vec<_>>();
+    assert_eq!(followers.len(), 2, "this regression requires three voters");
+    let observed_after = Instant::now() + idle;
+    for follower in &followers {
+        world
+            .fault_injection
+            .set_consensus_heartbeat_response_delay(
+                &crate::common::cluster::node_name(follower),
+                delay,
+            );
+    }
+
+    nervix_primitives::time::timeout(idle + Duration::from_secs(5), async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let both_received = followers.iter().all(|follower| {
+                world.fault_injection.delayed_consensus_heartbeat_requests(
+                    &crate::common::cluster::node_name(follower),
+                ) >= 2
+            });
+            if Instant::now() >= observed_after && both_received {
+                break;
+            }
+            nervix_primitives::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("both followers must receive delayed heartbeats across one leader lease");
+    let after = world
+        .cluster()
+        .current_leadership(&leader)
+        .await
+        .expect("the leader must report its term after the delay");
+    assert_eq!(after, before, "the same node must still lead in its term");
+    for follower in &followers {
+        let received = world
+            .fault_injection
+            .delayed_consensus_heartbeat_requests(&crate::common::cluster::node_name(follower));
+        assert!(
+            received >= 2,
+            "follower '{follower}' delayed only {received} heartbeats"
+        );
+    }
+    world.placeholders.insert("lease_leader".into(), leader);
+}
+
+#[then(expr = "the delayed-heartbeat leader creates domain {string} within {string}")]
+async fn then_delayed_heartbeat_leader_creates_domain(
+    world: &mut ScenarioWorld,
+    name: String,
+    budget: String,
+) {
+    let name = expand_placeholders(world, &name);
+    let budget = parse_duration_text(&budget).expect("command budget must be valid");
+    let leader = world
+        .placeholders
+        .get("lease_leader")
+        .expect("the preceding step saved the delayed-heartbeat leader");
+    let command = format!("CREATE DOMAIN {name};");
+    nervix_primitives::time::timeout(
+        budget,
+        world.cluster().run_command(leader, &world.domain, &command),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("the still-leading node '{leader}' did not commit '{name}': {error}")
+    })
+    .unwrap_or_else(|error| panic!("the still-leading node '{leader}' refused '{name}': {error}"));
 }
 
 #[given(expr = "{int} sessions keep creating domains named {string} through the leader node")]
@@ -30189,48 +30296,6 @@ async fn when_http_payload_is_acknowledged(
     .await
     .unwrap_or_else(|error| panic!("HTTP payload was not acknowledged: {error}"));
     append_cucumber_log_line("http publish completed: acknowledged");
-}
-
-#[when(
-    expr = "http payload begins acknowledged posting within {string} to node {string} with host \
-            {string} path {string}"
-)]
-async fn when_http_payload_begins_acknowledged_posting(
-    world: &mut ScenarioWorld,
-    wait: String,
-    node_id: String,
-    host: String,
-    path: String,
-    #[step] step: &Step,
-) {
-    assert!(
-        world.background_http_publish.is_none(),
-        "a background http publish is already active"
-    );
-    let wait = parse_duration_text(&wait)
-        .assured("the scenario declares a valid HTTP acknowledgement bound");
-    let node_id = expand_placeholders(world, &node_id);
-    let host = expand_placeholders(world, &host);
-    let path = expand_placeholders(world, &path);
-    let payload = expand_placeholders(world, docstring(step));
-    let publisher = world
-        .cluster()
-        .acknowledged_http_publisher(&node_id, &host, &path, wait);
-    let task =
-        nervix_primitives::task::spawn(async move { publisher.publish_bounded(&payload).await });
-    world.background_http_publish = Some(AbortOnDropHandle::new(task));
-}
-
-#[then("the background acknowledged http publish succeeds")]
-async fn then_the_background_acknowledged_http_publish_succeeds(world: &mut ScenarioWorld) {
-    let task = world
-        .background_http_publish
-        .take()
-        .assured("the preceding step started this scenario's acknowledged HTTP publish");
-    task.await
-        .unwrap_or_else(|error| panic!("acknowledged HTTP publish task failed: {error}"))
-        .unwrap_or_else(|error| panic!("HTTP payload was not acknowledged: {error}"));
-    append_cucumber_log_line("background http publish completed: acknowledged");
 }
 
 #[when(

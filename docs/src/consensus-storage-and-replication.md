@@ -292,13 +292,24 @@ commit updates, rejected probes and a batch the stream cannot submit after an an
 public catch-up scenarios retain their stream-count and
 time assertions and change no product deadline.
 
-Heartbeats keep the shorter deadline derived from the configured heartbeat interval, capped at five
-seconds. With the default 250 ms heartbeat, the current soft deadline is 187.5 ms. Replication
-answers also prove leader contact, so sustained writes suppress redundant heartbeats for an
-automatically derived window. The window is no longer than the heartbeat interval or half the gap
-between that interval and the minimum election timeout, which, with the election timeouts derived
-at six heartbeats, is one heartbeat interval. This keeps the heartbeat interval plus the
-suppression window below the minimum election timeout.
+One heartbeat request remains in flight per follower. Its worker and management request wait up to
+the leader lease, the maximum election timeout (twelve heartbeat intervals, three seconds at the
+default 250 ms heartbeat). An acknowledgement received inside that bound renews the lease by the
+request's sending time. An answer that exceeds that request's lease-sized deadline is discarded;
+the lease check still uses the acknowledged request's sending time. Initial empty replication
+probes retain the shorter soft request deadline, capped at five seconds; they do not maintain the
+heartbeat worker's lease. Replication answers also prove leader contact, so sustained writes
+suppress redundant heartbeats for an automatically derived window. The window is no longer than the
+heartbeat interval or half the gap between that interval and the minimum election timeout, which,
+with the election timeouts derived at six heartbeats, is one heartbeat interval. This keeps the
+heartbeat interval plus the suppression window below the minimum election timeout. The heartbeat
+scheduling interval and both election timeouts are unchanged by the longer answer wait.
+
+Nervix pins the maintained OpenRaft alpha.33 worker correction because that worker owns an
+independent response timeout. Extending only the interconnect request would still lose the answer
+when the worker stopped waiting after one heartbeat interval. The pin keeps the worker and
+interconnect response waits within the same lease-sized bound while retaining the registry runtime
+and macro support crates.
 
 The independent paths matter when a follower has slow storage: its append answer may take much
 longer than a heartbeat deadline, while management traffic still prevents an election. Changing the
@@ -310,7 +321,7 @@ When only a bare quorum of voters is reachable, such as two of three while the t
 commit needs all of them and the leader's link to each. When such a link loses packets but stays up,
 TCP recovers them by retransmission under the host kernel's retransmission timeout, which grows
 exponentially while the losses continue; Nervix does not tune it. An exchange whose deadline passes
-before its retransmission arrives fails and is retried: a heartbeat at its soft deadline, and an
+before its retransmission arrives fails and is retried: a heartbeat at the leader lease, and an
 append stream at its five-second setup or progress bound. Commits can therefore stall, leadership
 can move between the reachable voters, and a control command, which needs several commits in
 sequence, can time out.
@@ -480,26 +491,28 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The dedicated database owns exactly four current keyspaces: `raft_wire_alter_logs`,
-`raft_wire_alter_meta`, `raft_wire_alter_state`, and `raft_wire_alter_snapshots`. Opening it
-validates the complete keyspace namespace before reading any records. This namespace identifies the
-current Model shape, including the separate JSON and CBOR wire type enums, AVRO representation
-types, explicit `BASE64` codec encoding, and a Pulsar subscription's required type, an owned Pulsar
+The dedicated database owns exactly four current keyspaces: `raft_jetstream_logs`,
+`raft_jetstream_meta`, `raft_jetstream_state`, and `raft_jetstream_snapshots`. Opening it validates
+the complete keyspace namespace before reading any records. This namespace identifies the current
+Model shape, including the separate JSON and CBOR wire type enums, AVRO representation types,
+explicit `BASE64` codec encoding, a Pulsar subscription's required type, an owned Pulsar
 subscription's required start position, a Kafka consumer group's required start position, the
-serialized Sentry platform field, an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS
-QUEUE emitter's `SEND` request shape, the receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX`
-declares, the session and quality of service an MQTT TOPIC ingestor writes beside its delivery
-mode, the quality of service an MQTT TOPIC emitter writes beside its publishing mode, a
-`REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription, and whether a polled HTTP request's
-header holds a literal or names a client secret. It identifies the current statement shape as well,
-which the statements a transaction keeps are stored in: an `ALTER INGESTOR` or `ALTER EMITTER`
-operation that changes one part of its entity's body, an envelope clause or the properties, or one
-part of a construction where it stands. Its state metadata requires the current `ClusterState`
-encoding, including committed cluster parameters, the durable restore installation gate and the
-unit-keyed
-committed schedule. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
-are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery
-and snapshot installation therefore retain their complete magnitudes. See
+serialized Sentry platform field, an ingestor's `TIMESTAMP AT metadata.<field>` source, the `NATS
+STREAM` ingestor entity, an SQS QUEUE emitter's `SEND` request shape, the receive count an SQS QUEUE
+ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an MQTT TOPIC ingestor
+writes beside its delivery mode, the quality of service an MQTT TOPIC emitter writes beside its
+publishing mode, a `REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription, whether a polled
+HTTP request's header holds a literal or names a client secret, and the branch partition count every
+resolved branch declaration of the committed schedule carries. It identifies the current statement
+shape as well, which the statements a transaction keeps are stored in: `ALTER BRANCH` among those
+statements, and an `ALTER INGESTOR` or `ALTER EMITTER` operation that changes one part of its
+entity's body, an envelope clause or the properties, or one part of a construction where it stands.
+Its state metadata requires the current `ClusterState` encoding, including committed cluster
+parameters, the durable restore installation gate and the unit-keyed committed schedule in which a
+relay of a partitioned branch is scheduled as one unit per partition. Native counts in commands,
+queued transactions, progress, outcomes, and plan, report and topology headers are archived as
+fixed-width 64-bit values with checked native decoding. Log replay, state recovery and snapshot
+installation therefore retain their complete magnitudes. See
 [Archived Counts](./typed-states.md#archived-counts).
 
 The committed domain schedule stores the current unit map on every scheduled node. Each unit owns
@@ -615,7 +628,7 @@ environment variables:
 
 | Argument | Environment | Default | Effect |
 | --- | --- | --- | --- |
-| `--raft-heartbeat-interval` | `NERVIX_RAFT_HEARTBEAT_INTERVAL` | `250ms` | Period for leader liveness probes and basis for their soft deadline, and for the randomized follower election timeout, which runs from six to twelve heartbeat intervals, `1.5s` to `3s` by default. It does not set the append-stream idle bound. |
+| `--raft-heartbeat-interval` | `NERVIX_RAFT_HEARTBEAT_INTERVAL` | `250ms` | Period for leader liveness probes and basis for the randomized follower election timeout, which runs from six to twelve heartbeat intervals, `1.5s` to `3s` by default. The maximum election timeout also bounds each heartbeat answer and the leader lease. It does not set the append-stream idle bound. |
 | `--raft-snapshot-entry-threshold` | `NERVIX_RAFT_SNAPSHOT_ENTRY_THRESHOLD` | `10000` | Applied entries since the last completed snapshot that request the next build. |
 | `--raft-snapshot-byte-threshold` | `NERVIX_RAFT_SNAPSHOT_BYTE_THRESHOLD` | `64MiB` | Appended entry bytes since the last completed snapshot that request the next build. |
 | `--raft-covered-log-entries-retained` | `NERVIX_RAFT_COVERED_LOG_ENTRIES_RETAINED` | `1000` | Newest snapshot-covered entries retained for log catch-up. |

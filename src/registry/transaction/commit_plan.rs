@@ -134,7 +134,10 @@ impl PlannedTransactionStepKind {
                 .nodes
                 .get_mut(&moved.node.node)
                 .verified("an admitted ownership move names a node in its exact target schedule");
-            node.single_unit_mut().ownership_transition = Some(OwnershipTransition {
+            let unit = node.units.get_mut(&moved.unit).verified(
+                "an admitted ownership move names a unit of its node in its exact target schedule",
+            );
+            unit.ownership_transition = Some(OwnershipTransition {
                 id: transition_id.to_string(),
                 source: moved.source.clone(),
                 destination: moved.destination.clone(),

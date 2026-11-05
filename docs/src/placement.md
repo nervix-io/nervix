@@ -265,8 +265,16 @@ unavailable.
 
 Placement constrains primary owners. It does not control replica count or replica placement. An
 ordinary relay has no replicas; a materialized relay's replicas contain only materialized state.
-Branches also have no separate placement dimension: every concrete relay branch is owned by its
-relay owner, and every processor branch executes within that processor's assignment.
+Concrete branches have no separate placement dimension: every concrete relay branch is owned by the
+owner of its relay, and every processor branch executes within that processor's assignment.
+
+A relay whose branch declares several partitions is placed one partition at a time. Each partition
+is a unit with its own primary and replicas; the scheduler places the units least loaded first and
+then round-robin, so a relay's partitions spread over the eligible cluster nodes. Inside a
+`REQUIRE COLOCATION` group every partition stays with the group's cluster node. `PREFER COLOCATION`,
+`SUGGEST SEPARATION` and upstream locality do not move partitions. Failover and drain move each
+partition on its own: losing a node moves only the partitions that node owned, and the relay's other
+partitions keep flowing. See [Relay Partitions](relay.md#relay-partitions).
 
 ## Relocating Runtime Nodes
 
@@ -583,8 +591,9 @@ Placement policies do not provide:
 
 `RELOCATE` moves work onto a named cluster node once. It is not pinning: nothing keeps the moved
 runtime node there, and a later failover, drain, or hard-group consolidation may move it again. It
-also does not relocate endpoint or Syslog ingestors, an individual replica, an individual branch, or
-a unit spanning domains, and it never applies a unit in part.
+also does not relocate endpoint or Syslog ingestors, an individual replica, an individual branch, a
+relay divided into partitions, which has no one owner to move, or a unit spanning domains, and it
+never applies a unit in part.
 
 Use `SUGGEST SEPARATION` as a performance hint only. Security, tenant isolation, and failure-domain
 requirements need controls outside placement policies.

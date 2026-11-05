@@ -992,6 +992,7 @@ impl ChoicePageBasis {
             ChoiceTarget::ProcessorCompatibleInputRelay => 33,
             ChoiceTarget::ProcessorInputBranchRelay => 34,
             ChoiceTarget::ProcessorMaterializedRelay => 35,
+            ChoiceTarget::IngestNatsStreamSource => 36,
         }]);
         hash_choice_text(&mut hasher, request.search());
         for dependency in request.dependencies() {
@@ -1229,6 +1230,7 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
         | ChoiceTarget::IngestPulsarSource
         | ChoiceTarget::IngestMqttSource
         | ChoiceTarget::IngestNatsSource
+        | ChoiceTarget::IngestNatsStreamSource
         | ChoiceTarget::IngestRabbitMqSource
         | ChoiceTarget::IngestRedisPubSubSource
         | ChoiceTarget::IngestPrometheusSource
@@ -1486,6 +1488,7 @@ impl SessionServiceImpl {
             | ChoiceTarget::IngestPulsarSource
             | ChoiceTarget::IngestMqttSource
             | ChoiceTarget::IngestNatsSource
+            | ChoiceTarget::IngestNatsStreamSource
             | ChoiceTarget::IngestRabbitMqSource
             | ChoiceTarget::IngestRedisPubSubSource
             | ChoiceTarget::IngestPrometheusSource

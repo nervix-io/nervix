@@ -725,6 +725,14 @@ stays applying. The finalization boundary returns that disposition unchanged and
 under the original reference to determine the terminal outcome. Reconciliation follows the same
 rule when an attempt is interrupted after admission.
 
+An ordinary model command applies through its own durable transaction. A failed commit attempt
+does not decide the command's result when another coordinator has already finished that
+transaction: the serving coordinator recovers its recorded outcome, including the command's
+message, diagnostics and admission. A committed transaction answers success; a recorded terminal
+failure keeps that failure. A transaction still committing answers `OutcomeUnknown` with cause
+`StillApplying`, and a typed leadership loss retains the leader-recovery response. The original
+execution reference and completion barrier govern all of these paths.
+
 A transaction's configured tombstone age cannot shorten an applying execution's recovery lifetime.
 An applying transaction request retains its finished target; an applying ordinary command retains
 its internal transaction and every planning refresh attempt through their recorded mutation owner.
@@ -888,19 +896,25 @@ configuration until the commit.
 is soft state in the leader's memory: it routes commands, and it is gone after a leader change or
 when the session ends. An open transaction that expires takes its binding with it. A transaction
 that finishes otherwise, such as a commit that another request admitted before this session attached,
-keeps the binding of the session that holds it: that session's next request for the transaction is
-answered from the transaction's recorded outcome, and that answer ends the binding. A session binds
-an existing transaction with `AttachTransactionRequest`,
-which the leader grants only to the transaction's owner; the reply is `TransactionAttached` with the
-current status, `TransactionAlreadyFinished` with the final status and aggregate outcome while its
-tombstone is retained, or a failure for an identity that is unknown or retained no longer. A leader
-that holds no binding for the session's transaction answers the session's next transaction request
-with `TransactionDetached`, and the client attaches again and repeats the request under the same
+keeps the binding of the session that holds it. While the tombstone remains, that session's next
+request for the transaction is answered from its recorded outcome and ends the binding. Once the
+tombstone has been removed, a COMMIT or REVERT from that session reports the transaction unknown,
+ends the binding, and lets the session begin another transaction. A session binds an existing
+transaction with `AttachTransactionRequest`, which the leader grants only to the transaction's
+owner; the reply is `TransactionAttached` with the current status, `TransactionAlreadyFinished`
+with the final status and aggregate outcome while its
+tombstone is retained, or a failure for an identity that is unknown or retained no longer. An attach
+that reports an identity unknown also ends any binding that this same session still holds for that
+identity. A leader that holds no binding for the session's transaction answers the session's next
+transaction request with `TransactionDetached`, and the client attaches again and repeats the request under the same
 reference. An attach that reports the transaction already finished binds nothing, and a session that
 still named that transaction no longer holds it. A finished or failed attach does not resolve
 commands whose replies were lost: the client repeats each under its own execution reference and
-expected position. The leader returns a
-recorded outcome before planning a new request; a command it never admitted receives a failure.
+expected position. The leader returns a recorded outcome before planning a new request; a command
+it never admitted receives a failure.
+The unknown-transaction failure of a new request does not establish the outcome of an earlier
+request whose reply was lost. Its execution reference still determines whether that earlier
+outcome can be recovered; after the reference expires, its outcome remains unknown.
 Attaching from a second session takes the binding over, and the displaced session's next
 transaction request receives `TransactionTakenOver` before anything is admitted. While a session
 holds a transaction, the server refuses the requests that belong to the session rather than the
@@ -1019,7 +1033,10 @@ that outlives `request_timeout` is the client's only sign that its session may b
 every request still waiting on that session, and the next request opens a new one. While an
 election converges it retries with a delay that starts at 100 milliseconds and doubles up to one
 second. When a call's deadline passes before a command's outcome is known, and the command may have
-been admitted, the call fails as uncertain and names the execution reference. The console never
+been admitted, the call fails as uncertain and names the execution reference. When a nonterminal
+server answer arrived before the deadline, the Rust client's report also retains the last such
+answer's typed disposition and message beneath the uncertainty and above the deadline. That answer
+does not establish the command's outcome. The console never
 sends `CancelRequest`. The Rust client sends one only for a call made through
 `execute_prepared_with_cancellation`, when its caller cancels the call while the command waits for
 its reply, and it keeps waiting for the command's terminal reply: `RequestCancelled` before
@@ -2282,7 +2299,10 @@ The protocol makes a client's view of its own work explicit rather than inferred
   command whose outcome is unknown, and the upload identity of such an upload, and sends it again
   under that identity when the operator runs the same statement again at the prompt or passes it to
   `--execution-reference` or `--upload-identity`, so the later attempt recovers the outcome rather
-  than starting another command.
+  than starting another command. The serving node's ordered-request debug event names the request
+  identity and, for a command, its execution reference and the disposition it queued. A command
+  cancelled before admission or whose reply could not be queued has no answered disposition in that
+  event.
 - **Dispositions and origin.** A command outcome states its disposition, and whether it was executed
   now or recovered from the durable record. `OutcomeUnknown` names its cause, a conflict names what
   differed, and a stale preview names both identities.

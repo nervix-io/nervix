@@ -19,6 +19,20 @@
 # thread count, work and lifetime bound here.
 
 [[permission]]
+bound = "Three modeled contenders per Shuttle execution, each completing two synchronous keyed transactions and joined before the execution ends."
+items = ["thread::spawn"]
+owner = "The rate-limit key-store production-owner check."
+path = "crates/rate-limit/src/shuttle_tests.rs"
+reason = "The contenders run the production store inside Shuttle, not node work admitted to the executor."
+
+[[permission]]
+bound = "Three diagnostic contenders per disposable test process, each completing two synchronous keyed transactions and joined before state restoration and test completion."
+items = ["thread::spawn"]
+owner = "The rate-limit keyed-store diagnostic workload."
+path = "crates/rate-limit/src/diagnostic_tests.rs"
+reason = "These bounded external test participants exercise tracked locks on real threads after installing the diagnostic run; they execute no node jobs."
+
+[[permission]]
 bound = "Three model threads per execution: two claim one fixed pool slot and one retires it; all are joined before the bounded Shuttle execution ends."
 items = ["thread::spawn"]
 owner = "The retained transport pool-slot lifetime model."

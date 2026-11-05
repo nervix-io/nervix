@@ -1236,11 +1236,14 @@ impl Runtime {
         Ok(status)
     }
 
-    pub(crate) fn entity_gate_operation_owns_entity(
+    /// Whether `coordination` holds the gate of `purpose` over `entity`. An ownership handoff moves
+    /// one `unit` of it, and the freeze it took is held per unit.
+    pub(crate) fn entity_gate_operation_owns_unit(
         &self,
         coordination: &CoordinationIdentity,
         domain: &DomainName,
         entity: &NodeRef,
+        unit: Unit,
         purpose: EntityGatePurpose,
     ) -> bool {
         let Some(operation) = self.inner.entity_gate_holds.get(coordination) else {
@@ -1252,8 +1255,10 @@ impl Runtime {
             && scope.purpose == purpose
             && scope.affected_entities.binary_search(entity).is_ok()
             && (purpose != EntityGatePurpose::OwnershipHandoff
-                || self
-                    .ownership_handoff_entity_is_frozen_by(&entity.in_domain(domain), coordination))
+                || self.ownership_handoff_unit_is_frozen_by(
+                    &DomainNodeUnitRef::new(entity.in_domain(domain), unit),
+                    coordination,
+                ))
     }
 
     pub(crate) async fn release_entity_gate_operation(
@@ -2785,10 +2790,11 @@ mod tests {
             )
             .expect("the engaged operation reports its pending flush");
         assert_eq!(status.node_work_items, 1);
-        assert!(!runtime.entity_gate_operation_owns_entity(
+        assert!(!runtime.entity_gate_operation_owns_unit(
             &coordination,
             &domain,
             &entity,
+            Unit::Single,
             EntityGatePurpose::OwnershipHandoff,
         ));
         let freeze = OwnershipHandoffFreezeWatch::new(&runtime, entity.in_domain(&domain));

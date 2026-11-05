@@ -2182,6 +2182,15 @@ impl ConsensusTestProbe {
         self.inner.storage_fault.set_after_sync_delay(delay);
     }
 
+    /// Delay each empty append answer after the follower has processed it.
+    pub fn set_heartbeat_response_delay(&self, delay: Duration) {
+        self.inner.connectivity.set_heartbeat_response_delay(delay);
+    }
+
+    pub fn delayed_heartbeat_requests(&self) -> u64 {
+        self.inner.connectivity.delayed_heartbeat_requests()
+    }
+
     pub fn append_stream_open_count(&self, target: &ClusterNodeName) -> u64 {
         let counts = self.inner.append_stream_counts.lock();
         match counts.get(target) {
@@ -2605,10 +2614,10 @@ impl Consensus {
                         }
                     };
                     {
-                        let mapping_input = receiver
-                            .append_entries(request)
-                            .await
-                            .map(wire::AppendEntriesResponseRecord::from);
+                        let response = receiver.append_entries(request).await;
+                        #[cfg(feature = "testing")]
+                        receiver.inner.connectivity.after_heartbeat_append().await;
+                        let mapping_input = response.map(wire::AppendEntriesResponseRecord::from);
                         match mapping_input {
                             Ok(mapped_value) => Ok(mapped_value),
                             Err(mapping_error) => {
@@ -4885,7 +4894,7 @@ where
                     .request_with_timeout(
                         &self.target,
                         wire::HeartbeatRequest(record),
-                        replication::heartbeat_deadline(&option),
+                        replication::append_request_deadline(&option, self.append_path),
                     )
                     .await
                     .map_err(io_error);

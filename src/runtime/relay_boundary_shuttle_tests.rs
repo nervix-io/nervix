@@ -39,6 +39,7 @@ fn shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves() {
                         .fanout_owner_batch(
                             &owner_domain,
                             &relay,
+                            Unit::Single,
                             &batch,
                             &ConfiguredFaultInjection::default(),
                         )
@@ -100,6 +101,7 @@ fn shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves() {
                     .fanout_owner_batch(
                         &domain("default"),
                         &named("orders"),
+                        Unit::Single,
                         &retry,
                         &ConfiguredFaultInjection::default(),
                     )
