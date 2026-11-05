@@ -28,7 +28,7 @@ runs:
         COMPRESSION_LEVEL: ${{ inputs.compression-level }}
         RETENTION: ${{ inputs.retention }}
       run: >-
-        python3 "${GITHUB_WORKSPACE}/scripts/ci_artifacts.py" upload
+        exec python3 "${GITHUB_WORKSPACE}/scripts/ci_artifacts.py" upload
         --name "${ARTIFACT_NAME}"
         --path "${ARTIFACT_PATH}"
         --if-no-files-found "${IF_NO_FILES_FOUND}"

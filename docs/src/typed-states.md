@@ -319,17 +319,17 @@ The HTTP kind carries no signaling field. The same kind carries a selected refer
 a protocol name in the activation plan, and the compiled protocol in a runtime route; its
 `endpoint_type()` projection supplies the discriminant ingestor capabilities require.
 
-A NATS ingestor Model is one of two entities, `NATS SUBJECT` or `NATS STREAM`, so a stored ingestor
-holds the archived union of both. The registry's `NERVIX KIND NJS!` archive signature identifies the
-current Model layout, including that union and the endpoint kind, the separate JSON and CBOR wire
-type enums, the AVRO representation types, explicit `BASE64` codec encoding, a Pulsar subscription's required type, an
+A NATS ingestor or emitter Model is one of two entities, `NATS SUBJECT` or `NATS STREAM`,
+so a stored declaration holds the archived union of both. The registry's `NERVIX KIND NATS` archive signature identifies the
+current Model layout, including those unions and the endpoint kind, the separate JSON and CBOR wire type enums, the AVRO
+representation types, explicit `BASE64` codec encoding, a Pulsar subscription's required type, an
 owned Pulsar subscription's required start position, a Kafka consumer group's required start
 position, the required 16-bit branch partition count, Sentry platform, an ingestor's `TIMESTAMP AT
 metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the receive count an SQS
 QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an MQTT TOPIC
 ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter writes beside
 its publishing mode, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a
-`PATTERN`, and that header state. Consensus's `raft_kind_` keyspaces and current state
+`PATTERN`, and that header state. Consensus's `raft_head_` keyspaces and current state
 metadata encoding identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule and the statements a transaction keeps. The runtime state
 store's `unit-labelled-metric-checkpoint-segments` format identifies the checkpoints it keeps,

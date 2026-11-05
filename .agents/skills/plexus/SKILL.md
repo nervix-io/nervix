@@ -43,6 +43,13 @@ For Pulsar source identity, keys, redelivery and event-time windows, read
 `TIMESTAMP AT metadata.event_time` or `TIMESTAMP AT metadata.publish_time` deliberately: an absent
 event time stays null, while an explicit epoch time is preserved.
 
+For NATS publication, choose `NATS SUBJECT EMITTER` with `MODE NO ACK` for Core NATS, or
+`NATS STREAM EMITTER` with a provisioned `STREAM`, a literal `SUBJECT` captured by that stream,
+and `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX <n>` for a JetStream PubAck. The stream
+emitter may set `MESSAGE ID <expression>` for server deduplication across retries. Read
+[Emitters → NATS](../../../docs/src/emitters.md#nats) for the complete clause order, failure
+outcomes and retry boundary.
+
 For RabbitMQ consumption choose `MODE NO ACK`, `MODE ACK SEQUENTIAL`, or
 `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
 Parallel `MAX` is 1 through 65,535 and is the broker prefetch per instance. Each delivery settles

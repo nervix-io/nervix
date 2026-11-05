@@ -1195,8 +1195,8 @@ mod tests {
         ClientPoolBounds, CreateClientHttp, CreateClientKafka, CreateClientMqtt, CreateClientNats,
         CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
         CreateClientSqs, CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq,
-        CreateEndpoint, EndpointType, FlushPolicy, GeneralErrorPolicy, IngestorName, MqttQos,
-        MqttSession, NodeRef, OutputBranch, ProcessorOutputs, PrometheusQueryIngestor,
+        CreateEndpoint, FlushPolicy, GeneralErrorPolicy, IngestorName, MqttQos, MqttSession,
+        NodeRef, OutputBranch, ProcessorOutputs, PrometheusQueryIngestor,
         PulsarSubscriptionOwnership,
     };
     use nonzero_ext::nonzero;

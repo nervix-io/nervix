@@ -3086,11 +3086,6 @@ impl EmitterPublishing<'_> {
                 ack_timeout,
                 retry_policy,
             } => confirmed("ACK", window, ack_timeout, retry_policy),
-            EmitterPublishing::NatsJetStream {
-                window,
-                ack_timeout,
-                retry_policy,
-            } => confirmed("JETSTREAM ACK", window, ack_timeout, retry_policy),
             EmitterPublishing::RequestAck { retry_policy } => {
                 format!("ACK {}", retry(retry_policy))
             }
