@@ -496,12 +496,15 @@ a test job keeps its archive, and a rerun of `scenarios-build` replaces both.
 A transfer reports every ten seconds how much it moved and how fast, how many parts are done,
 moving, waiting to retry or queued, and which moving part is the slowest, so the step's log shows a
 transfer that crawls as well as one that stopped. A connection that does not open within 20 s, one
-that moves nothing for 60 s, and a part that moves less than 256 KiB/s over 30 s are cut off and
-tried again, and a part being downloaded resumes after the bytes it already holds. Retries back off
-from 2 s to 30 s, at random by up to half again, and six failures in a row without a byte kept fail
-the transfer. A transfer that needed retries ends with a warning in the run's summary, and one that
-is cancelled reports how far it got as its error. `just test-ci-artifacts` runs the script's tests
-against a local fake of the bucket.
+that moves nothing for 60 s, and a part that moves less than 256 KiB/s over 30 s are cut off. R2
+sometimes serves an object at a few KiB/s to every request for it, so a part downloaded too slowly
+is not asked for again as it was: what is left of it is split into four byte ranges, each a request
+of its own on a connection of its own, and a range still too slow is split again, down to 2 MiB and
+up to 16 ranges a part. A range that cannot be split resumes after the bytes it already holds.
+Failed requests are retried after 2 s doubling to 30 s, at random by up to half again, and six
+failures in a row without a byte kept fail the transfer. A transfer that needed retries ends with a
+warning in the run's summary, and one that is cancelled reports how far it got as its error. `just
+test-ci-artifacts` runs the script's tests against a local fake of the bucket.
 
 | Repository setting | Kind | Value |
 | --- | --- | --- |
