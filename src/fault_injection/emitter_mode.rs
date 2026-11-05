@@ -55,6 +55,15 @@ impl FaultInjection {
         );
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the scenario consumes its one-shot unknown-record answer",
+            key = "one test emitter",
+            bound = "one conditional keyed removal; no guard survives the synchronous operation"
+        )
+    )]
     pub(crate) fn received_emitter_record_outcome(
         &self,
         emitter: &EmitterName,

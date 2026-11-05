@@ -192,7 +192,7 @@ Feature: Emitter metrics
       emitter="metrics_out"
       operation="publish"
       """
-    And client "publisher" is connected to the leader node
+    Given client "publisher" is connected to the leader node
     When client "publisher" opens producer "events" on ingestor "events_in" expecting fields "seq I64"
     And emitter "metrics_out" enters stall mode
     And producer "events" submits batch "first" with rows
