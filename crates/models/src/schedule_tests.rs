@@ -1,4 +1,4 @@
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain};
 use nonzero_ext::nonzero;
 
