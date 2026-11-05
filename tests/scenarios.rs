@@ -5919,6 +5919,28 @@ async fn then_cli_repl_eventually_displays(world: &mut ScenarioWorld, expected: 
     }
 }
 
+/// Counts what the REPL displayed so far. A preceding step waits for a later line, so the count is
+/// taken after the events it bounds were printed rather than read from a quiet terminal.
+#[then(expr = "the CLI REPL displays {string} exactly {int} times")]
+async fn then_cli_repl_displays_exactly_times(
+    world: &mut ScenarioWorld,
+    expected: String,
+    expected_count: usize,
+) {
+    let expected = expand_placeholders(world, &expected);
+    let terminal = world
+        .cli_terminal
+        .as_ref()
+        .verified("a preceding step started the CLI REPL");
+    let count = terminal.occurrences(&expected);
+    assert_eq!(
+        count,
+        expected_count,
+        "the CLI REPL displayed {expected:?} {count} times; it displayed:{}",
+        terminal.transcript()
+    );
+}
+
 /// Rows a relay publishes while the cluster is still converging after a node restart can be lost in
 /// transit, so the payload is posted again until the interactive CLI displays the row it expects.
 #[when(
@@ -21326,6 +21348,34 @@ async fn then_selector_contains_docstring(
         );
         nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// The elements `selector` matches, one per docstring line and in its order. A preceding step waits
+/// for the outcome these lines must sit beside, so a line that should not be there has arrived by
+/// the time the elements are compared.
+#[then(regex = r#"^selector "([^"]+)" shows exactly these lines$"#)]
+async fn then_selector_shows_exactly_these_lines(
+    world: &mut ScenarioWorld,
+    selector: String,
+    #[step] step: &Step,
+) {
+    let expected = expand_placeholders(world, docstring(step).trim());
+    let expected = expected.lines().map(str::trim).collect::<Vec<_>>();
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before selector assertions");
+    let selector = expand_placeholders(world, &selector);
+    let texts = page
+        .locator(&selector)
+        .all_inner_texts()
+        .await
+        .expect("selector text must be readable");
+    let shown = texts.iter().map(|text| text.trim()).collect::<Vec<_>>();
+    assert_eq!(
+        shown, expected,
+        "expected selector '{selector}' to show exactly these lines"
+    );
 }
 
 #[then(expr = "selector {string} contains {string} for {int} milliseconds")]
