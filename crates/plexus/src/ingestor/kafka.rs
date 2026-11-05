@@ -314,6 +314,42 @@ mod tests {
         );
     }
 
+    #[rstest]
+    #[case::fixed_count("3")]
+    #[case::maximum_count("18446744073709551615")]
+    #[case::partition_following("PER PARTITION")]
+    fn source_replacement_and_topic_change_preserve_the_complete_instancing_body(
+        #[case] instances: &str,
+    ) {
+        let mut ingestor = created_ingestor(DOMAIN_OFFSETS);
+        let mut expected = ingestor.clone();
+        let IngestorInput::Transport(input) = &mut expected.input else {
+            panic!("Kafka is a transport");
+        };
+        let source = statement("changed", DOMAIN_OFFSETS, "NO ACK")
+            .replace("INSTANCES 2", &format!("INSTANCES {instances}"));
+        input.source = IngestorEntity::Kafka(KafkaIngestor::Topic(created_source(&source)));
+
+        let alter = alteration(&format!(
+            "ALTER KAFKA TOPIC INGESTOR intake SET FROM kafka_main TOPIC 'replacement' OFFSET BY \
+             DOMAIN INSTANCES {instances} MODE NO ACK ON QUIESCE SUSPEND, SET TOPIC 'changed'"
+        ));
+        let statement = Statement::AlterIngestor(alter.clone());
+        let canonical = statement
+            .to_canonical_plexus()
+            .verified("the current alteration renders");
+        assert_eq!(
+            crate::statement::parse_statement(&canonical)
+                .verified("the complete alteration reparses"),
+            statement
+        );
+
+        ingestor
+            .apply_alter(&alter)
+            .verified("the replacement and entity change apply in order");
+        assert_eq!(ingestor, expected);
+    }
+
     #[test]
     fn a_domain_offset_ingestor_refuses_a_start_position_and_stays_as_it_was() {
         let mut ingestor = created_ingestor(DOMAIN_OFFSETS);
@@ -391,6 +427,11 @@ mod tests {
         }
         assert_offers_exactly(
             &format!("{HEAD} 'orders' {DOMAIN_OFFSETS} INSTANCES "),
+            &["PER PARTITION", "instance_count"],
+        );
+        assert_offers_exactly(
+            "ALTER KAFKA TOPIC INGESTOR intake SET FROM kafka_main TOPIC 'orders' OFFSET BY \
+             DOMAIN INSTANCES ",
             &["PER PARTITION", "instance_count"],
         );
     }

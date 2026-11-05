@@ -106,15 +106,9 @@ contracts.
 For Kafka domain offsets, retain the documented native checkpoint quorum budget and at-least-once
 retry boundary when explaining source recovery.
 For intake parallelism, read [Ingestors → Instancing](../../../docs/src/ingestors.md#instancing).
-Kafka, Pulsar, RabbitMQ, SQS, NATS and MQTT declare `INSTANCES <positive-u64>` and
-`INSTANCES PER PARTITION`. For Pulsar parallelism, choose `SHARED` or `KEY_SHARED`; `FAILOVER` and
-`EXCLUSIVE` require one fixed instance. Fixed counts are independent globally indexed placement
-units; Nervix refuses an unaddressable unit count before placement. The
-partition form colocates instance `p` with constructed relay partition `p` and requires one key
-structure across constructing routes. Kafka requires `OFFSET BY DOMAIN` for that form. A
-domain-offset unit-count change preserves recorded positions while running or stopped through
-the unit-layout handoff. `DESCRIBE INGESTOR` lists every
-instance and its node, and source metrics carry `instance`.
+Check the entity's instancing capability, Pulsar subscription type, Kafka offset mode and constructing
+routes before setting a count or following branch partitions. Use `DESCRIBE INGESTOR` to verify
+the planned instance placement.
 
 ## Assemble the graph
 
@@ -476,7 +470,8 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   tier, and equal-rank different-policy claims conflict.
 - Treat every relay unit as scheduled work with one owner. A direct branch's `PARTITIONS n`
   gives its relay one unit per partition. `CAPACITY` bounds each unit's owner buffer, while each
-  producer node and remote consumer node contributes one fixed in-flight dispatch slot. Materialized state adds state replicas to that relay; it does not add a
+  producer node and remote consumer node contributes one fixed in-flight dispatch slot. Materialized
+  state adds state replicas to that relay; it does not add a
   separate runtime-node kind. All relays are valid placement members and corridor hops.
   On native 64-bit targets, `CAPACITY` accepts positive integers through `18446744073709551615`;
   creation and alteration preserve the exact capacity through storage, replay, and restart.
