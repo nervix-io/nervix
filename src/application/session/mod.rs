@@ -1125,7 +1125,7 @@ async fn serve_command(
             .inner
             .runtime
             .fault_injection()
-            .substitute_uncertain_command_reply(&reply_script_request, &mut outcome);
+            .substitute_command_reply(&reply_script_request, &mut outcome);
         outcome
     };
     shared

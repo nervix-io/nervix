@@ -97,6 +97,7 @@ mod wasm_reset_publication;
 pub use backup_cut::BackupCutBoundary;
 use backup_cut::{BackupCutGate, BackupCutGateKey};
 use command_reply::CommandReplyScript;
+pub use command_reply::ForeignExecutionObservation;
 use domain_clock::DomainClockProgressPausePoint;
 pub use domain_resume::DomainResumeBoundary;
 use entity_drain::ForcedEntityDrainTimeout;
