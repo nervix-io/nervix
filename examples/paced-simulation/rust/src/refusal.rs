@@ -4,7 +4,7 @@
 //! - **Depends on.** The client's producer and consumer refusals.
 //! - **Must not know.** Sessions or how an open is retried.
 //!
-//! The shared C binding reports producer and consumer refusals as one set; the Rust client keeps
+//! The Python package reports producer and consumer refusals as one set; the Rust client keeps
 //! them apart. The driver speaks the binding's set, so the Rust and Python drivers print the same
 //! refusal for the same open.
 

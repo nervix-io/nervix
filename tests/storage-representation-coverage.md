@@ -32,9 +32,14 @@ instance for a type that reads through one consumer. The Model, registry and con
 preserve those complete values.
 
 KAFKA TOPIC ingestor generators draw domain-owned offsets, with no position, and a consumer group
-with either required `START AT` position. The Model, registry and consensus properties preserve
-those complete values. The `NERVIX PART INGS` registry signature identifies this current Model
-layout before decoding.
+with either required `START AT` position. Statement generators mix typed `SET START AT` with shared
+ingestor operations. The Model, registry and consensus properties preserve those complete values.
+
+Wire-schema generators carry each format's declared types, and codec generators carry explicit
+`BASE64` byte-text rules alongside `RFC3339` datetime-text rules. JSON, CBOR and AVRO retain their
+own wire type enums. The Model/archive, registry and consensus properties preserve those complete
+values. The `NERVIX PART INGS` registry signature and `raft_partition_ingestor_` consensus namespace
+identify the current Model layout before decoding.
 
 `ALTER INGESTOR` and `ALTER EMITTER` statement generators draw, for every entity, each change its
 own grammar writes: a locator, a declared option and the `DROP` of an optional one, `SET MODE`,

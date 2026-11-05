@@ -63,7 +63,8 @@ Feature: Web console visual schema and branch creation
     And selector ".create-mode-options [data-value='LOOSE']" is clicked
     And selector ".create-add-field" is clicked
     And selector ".create-field-name" is filled with "payload"
-    And selector ".create-field-type [data-type='<type>']" is clicked
+    Then selector ".create-field-type button" has at most <type_count> elements
+    When selector ".create-field-type [data-type='<type>']" is clicked
     And selector ".create-field-optional" is clicked
     Then selector ".create-preview" contains "CREATE WIRE <format> SCHEMA visual_wire MODE LOOSE"
     And selector ".create-preview" contains "payload <canonical_type> OPTIONAL"
@@ -73,12 +74,24 @@ Feature: Web console visual schema and branch creation
     And selector ".prompt-row input" is filled with "SHOW CREATE WIRE <format> SCHEMA visual_wire;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "CREATE WIRE <format> SCHEMA visual_wire MODE LOOSE" exactly 2 times
+    And selector ".terminal" contains "payload <canonical_type> OPTIONAL" exactly 2 times
 
     Examples:
-      | kind             | format | type   | canonical_type |
-      | wire-json-schema | JSON   | string | STRING         |
-      | wire-cbor-schema | CBOR   | string | STRING         |
-      | wire-avro-schema | AVRO   | string | STRING         |
+      | kind             | format | type    | canonical_type | type_count |
+      | wire-json-schema | JSON   | string  | STRING         | 5          |
+      | wire-json-schema | JSON   | number  | NUMBER         | 5          |
+      | wire-json-schema | JSON   | integer | INTEGER        | 5          |
+      | wire-json-schema | JSON   | boolean | BOOLEAN        | 5          |
+      | wire-json-schema | JSON   | array   | ARRAY          | 5          |
+      | wire-cbor-schema | CBOR   | string  | STRING         | 19         |
+      | wire-avro-schema | AVRO   | boolean | BOOLEAN        | 8          |
+      | wire-avro-schema | AVRO   | int     | INT            | 8          |
+      | wire-avro-schema | AVRO   | long    | LONG           | 8          |
+      | wire-avro-schema | AVRO   | float   | FLOAT          | 8          |
+      | wire-avro-schema | AVRO   | double  | DOUBLE         | 8          |
+      | wire-avro-schema | AVRO   | string  | STRING         | 8          |
+      | wire-avro-schema | AVRO   | bytes   | BYTES          | 8          |
+      | wire-avro-schema | AVRO   | array   | ARRAY          | 8          |
 
   Scenario: Wire formats retain separate identities when their names coincide
     Given a 1 node nervix cluster is started

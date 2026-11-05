@@ -28,8 +28,8 @@ use crate::{
     AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
     AlterWireSchemaOperation, Assignment, AssignmentTarget, AssignmentTargetScope, AvroType,
     Backup, BackupCapture, BackupResources, BackupScope, BinaryOperator, BranchEviction,
-    BranchPartitions, BranchSelection, ClickHouseValueMapping, ClientConfigEntry, ClientIngestMode,
-    ClientResourceMount, CodecEncoding, CodecEncodingRule, CodecJaqTransformations, CodecName,
+    BranchPartitions, BranchSelection, CborType, ClickHouseValueMapping, ClientConfigEntry,
+    ClientIngestMode, ClientResourceMount, CodecEncodingRule, CodecJaqTransformations, CodecName,
     CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob,
     CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
     CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
@@ -1443,7 +1443,7 @@ pub fn alter_json_wire_schema_to_canonical_plexus(
 }
 
 pub fn alter_cbor_wire_schema_to_canonical_plexus(
-    alter: &AlterWireSchema<JsonType>,
+    alter: &AlterWireSchema<CborType>,
 ) -> error_stack::Result<String, CanonicalPlexusError> {
     alter_wire_schema_to_plexus("CBOR", alter)
 }
@@ -1817,17 +1817,7 @@ fn codec_jaq_transformations_to_plexus(
 }
 
 fn codec_encoding_rule_to_plexus(rule: &CodecEncodingRule) -> String {
-    format!(
-        "{} AS {}",
-        rule.field.as_str(),
-        codec_encoding_to_plexus(rule.encoding)
-    )
-}
-
-fn codec_encoding_to_plexus(encoding: CodecEncoding) -> &'static str {
-    match encoding {
-        CodecEncoding::Rfc3339 => "RFC3339",
-    }
+    format!("{} AS {}", rule.field.as_str(), rule.encoding.as_ref())
 }
 
 impl CreateBranch {
@@ -3764,7 +3754,7 @@ mod tests {
             strictness: crate::WireSchemaStrictness::Loose,
             fields: vec![WireSchemaField {
                 name: named("active"),
-                ty: JsonType::Boolean,
+                ty: crate::CborType::Boolean,
                 optional: false,
             }],
         });

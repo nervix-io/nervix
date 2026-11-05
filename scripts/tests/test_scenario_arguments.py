@@ -124,7 +124,7 @@ class ScenarioArgumentTests(unittest.TestCase):
         ).stdout.strip()
         tool_variables = (
             "ORT_DYLIB_PATH", "NERVIX_DEADLOCK_REPORT_TOOL", "NERVIX_TEST_CLI_PATH",
-            "NERVIX_PACED_SIMULATION_PATH", "NERVIX_CLIENT_LIBRARY",
+            "NERVIX_PACED_SIMULATION_PATH", "NERVIX_PACED_SIMULATION_PYTHON", "NERVIX_CLIENT_LIBRARY",
             "NERVIX_TESTCONTAINERS_MODE",
         )
         with tempfile.TemporaryDirectory(prefix="coverage arguments ") as directory:
@@ -161,6 +161,7 @@ class ScenarioArgumentTests(unittest.TestCase):
                 "NERVIX_DEADLOCK_REPORT_TOOL": str(target / "llvm-cov-target/debug/nervix-deadlock-report"),
                 "NERVIX_TEST_CLI_PATH": str(target / "llvm-cov-target/debug/nervix-cli"),
                 "NERVIX_PACED_SIMULATION_PATH": str(target / "llvm-cov-target/debug/nervix-paced-simulation"),
+                "NERVIX_PACED_SIMULATION_PYTHON": str(target / "paced-simulation/python/bin/python"),
                 "NERVIX_CLIENT_LIBRARY": str(target / "llvm-cov-target/debug/libnervix_client_ffi.so"),
             })
             output = str(root / "report 'with spaces.lcov")

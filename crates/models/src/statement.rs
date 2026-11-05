@@ -1736,9 +1736,13 @@ pub struct CodecEncodingRule {
     Archive,
     RkyvSerialize,
     RkyvDeserialize,
+    AsRefStr,
+    EnumIter,
 )]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum CodecEncoding {
     Rfc3339,
+    Base64,
 }
 
 #[derive(

@@ -9,9 +9,10 @@ delivery attempt. An attached client-to-client path completes its input only aft
 ACK. Endpoint configuration survives a restart. Payloads, attachments, delivery attempts and ACK
 state are volatile, so applications own replayable input and idempotent effects.
 
-The native endpoints, automatic restoration, shared C binding, and Rust/Python paced drivers are
-implemented. This chapter connects their delivered contracts. The following chapters remain the
-owners of their respective rules:
+The native endpoints, automatic restoration, shared C binding, native Python package, and
+Rust/Python paced drivers are implemented. This chapter connects their delivered contracts. The
+Python paced driver uses the package's typed endpoint, batch, cancellation and clock objects;
+Python owns their lifetimes. The following chapters remain the owners of their respective rules:
 
 | Contract | Authoritative documentation |
 | --- | --- |

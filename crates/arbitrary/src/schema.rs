@@ -4,9 +4,9 @@ use std::{collections::BTreeSet, num::NonZeroU32, str::FromStr as _};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    AvroType, CreateAvroWireSchema, CreateJsonWireSchema, CreateSchema, CreateUdf, FieldName,
-    JsonType, ParseAsType, SchemaField, UdfArgument, UdfLanguage, UdfReturn, WireSchemaField,
-    WireSchemaStrictness,
+    AvroType, CborType, CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema,
+    CreateSchema, CreateUdf, CreateWireSchema, FieldName, JsonType, ParseAsType, SchemaField,
+    UdfArgument, UdfLanguage, UdfReturn, WireSchemaField, WireSchemaStrictness,
 };
 
 use crate::{Arbitrary, text::GeneratedName};
@@ -48,30 +48,37 @@ pub fn fields_of_every_type() -> Vec<SchemaField> {
     fields
 }
 
-const JSON_TYPES: [JsonType; 19] = [
+const JSON_TYPES: [JsonType; 5] = [
     JsonType::String,
     JsonType::Number,
     JsonType::Integer,
-    JsonType::Object,
     JsonType::Array,
     JsonType::Boolean,
-    JsonType::Null,
-    JsonType::U8,
-    JsonType::I8,
-    JsonType::U16,
-    JsonType::I16,
-    JsonType::U32,
-    JsonType::I32,
-    JsonType::U64,
-    JsonType::I64,
-    JsonType::Datetime,
-    JsonType::F32,
-    JsonType::F64,
-    JsonType::Bytes,
 ];
 
-const AVRO_TYPES: [AvroType; 13] = [
-    AvroType::Null,
+const CBOR_TYPES: [CborType; 19] = [
+    CborType::String,
+    CborType::Number,
+    CborType::Integer,
+    CborType::Object,
+    CborType::Array,
+    CborType::Boolean,
+    CborType::Null,
+    CborType::U8,
+    CborType::I8,
+    CborType::U16,
+    CborType::I16,
+    CborType::U32,
+    CborType::I32,
+    CborType::U64,
+    CborType::I64,
+    CborType::Datetime,
+    CborType::F32,
+    CborType::F64,
+    CborType::Bytes,
+];
+
+const AVRO_TYPES: [AvroType; 8] = [
     AvroType::Boolean,
     AvroType::Int,
     AvroType::Long,
@@ -79,11 +86,7 @@ const AVRO_TYPES: [AvroType; 13] = [
     AvroType::Double,
     AvroType::Bytes,
     AvroType::String,
-    AvroType::Record,
-    AvroType::Enum,
     AvroType::Array,
-    AvroType::Map,
-    AvroType::Fixed,
 ];
 
 impl Arbitrary<'_> {
@@ -183,26 +186,20 @@ impl Arbitrary<'_> {
 
     /// A JSON wire schema, which is also the shape of a CBOR wire schema.
     pub fn json_wire_schema(&mut self) -> CreateJsonWireSchema {
-        let name = self.name();
-        let strictness = self.wire_strictness();
-        let names = self.distinct_names(1, FIELDS);
-        let mut fields = Vec::with_capacity(names.len());
-        for field in names {
-            fields.push(WireSchemaField {
-                name: field,
-                ty: self.entropy.pick(JSON_TYPES),
-                optional: self.entropy.flag(),
-            });
-        }
-        CreateJsonWireSchema {
-            name,
-            strictness,
-            fields,
-        }
+        self.wire_schema(JSON_TYPES)
+    }
+
+    /// A CBOR wire schema in its declared vocabulary.
+    pub fn cbor_wire_schema(&mut self) -> CreateCborWireSchema {
+        self.wire_schema(CBOR_TYPES)
     }
 
     /// An Avro wire schema.
     pub fn avro_wire_schema(&mut self) -> CreateAvroWireSchema {
+        self.wire_schema(AVRO_TYPES)
+    }
+
+    fn wire_schema<T: Clone, const N: usize>(&mut self, types: [T; N]) -> CreateWireSchema<T> {
         let name = self.name();
         let strictness = self.wire_strictness();
         let names = self.distinct_names(1, FIELDS);
@@ -210,11 +207,11 @@ impl Arbitrary<'_> {
         for field in names {
             fields.push(WireSchemaField {
                 name: field,
-                ty: self.entropy.pick(AVRO_TYPES),
+                ty: self.entropy.pick(types.clone()),
                 optional: self.entropy.flag(),
             });
         }
-        CreateAvroWireSchema {
+        CreateWireSchema {
             name,
             strictness,
             fields,

@@ -9,7 +9,7 @@ emitters, all on one session.
 | --- | --- |
 | `paced_simulation.plexus` | The graph: a paced domain, client ingestors with `TIMESTAMP AT` and `TIMESTAMP NOW`, a branched relay, and attached client emitters for readings and rejection notices |
 | `rust/` | The Rust driver, `nervix-paced-simulation`, built on the Rust client library |
-| `python/paced_simulation.py` | The Python driver, built on the shared C binding through `ctypes` and the standard library alone |
+| `python/paced_simulation.py` | The Python driver, built on the native `nervix_client` Python package over the Rust client |
 
 Both drivers take the same options, print the same report, and write the same ledger and effect
 store. [Paced Simulation Drivers](../../docs/src/paced-simulation-drivers.md) explains the graph,
@@ -39,7 +39,7 @@ Run the Rust driver:
 just paced-simulation --username default --password "$NERVIX_PASSWORD" --ticks 100 --sensors 3
 ```
 
-Run the Python driver, which builds the shared binding first:
+Run the Python driver, which builds and installs the native package wheel first:
 
 ```bash
 just paced-simulation-python --username default --password "$NERVIX_PASSWORD" --ticks 100

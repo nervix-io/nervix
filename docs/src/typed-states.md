@@ -300,13 +300,14 @@ platform string; connector preparation uses it only when the codec's event omits
 A polled HTTP request's header holds a literal or names a client secret as two states of one enum,
 so a value cannot be both or neither, and the Model that names a secret holds its key and never its
 value.
-The registry's `NERVIX PART INGS` archive signature identifies the current Model layout, including a
-Pulsar subscription's required type, an owned Pulsar subscription's required start position, a Kafka
-consumer group's required start position, the required 16-bit branch partition count, Sentry
-platform, an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND`
-request shape, the receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session
-and quality of service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of
-service an MQTT TOPIC emitter writes beside its publishing mode, a `REDIS PUBSUB` ingestor's
+The registry's `NERVIX PART INGS` archive signature identifies the current Model layout, including
+the separate JSON and CBOR wire type enums, the AVRO representation types, explicit `BASE64` codec
+encoding, a Pulsar subscription's required type, an owned Pulsar subscription's required start
+position, a Kafka consumer group's required start position, the required 16-bit branch partition
+count, Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's
+`SEND` request shape, the receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the
+session and quality of service an MQTT TOPIC ingestor writes beside its delivery mode, the quality
+of service an MQTT TOPIC emitter writes beside its publishing mode, a `REDIS PUBSUB` ingestor's
 subscription, which is either a `CHANNEL` or a `PATTERN`, and that header state. Consensus's
 `raft_partition_ingestor_` keyspaces and current state metadata encoding identify its stored shapes,
 including the partition count of every resolved branch declaration in the committed schedule and the
@@ -1225,6 +1226,11 @@ presence. An absent socket after accept failure requires rebind, while the same 
 owns established connection tasks and queued frames; source close ends that retained state.
 The testing capability shares one named listener-fault request between the connector and host:
 the selected bound address and its acknowledgement belong to that same armed request.
+
+The consensus append-submission test control is idle, armed for one follower, or delivered with
+that nonempty request's previous and last log identities and entry count. The delivered variant
+owns its observation, so it cannot also remain armed. A scoped stream control retains its target;
+the ordinary build's inert control is zero-sized and retains no target or shared state.
 
 A Syslog frame's peer is a UDP address, a TCP address or a shared TLS connection identity. Only the
 TLS variant can hold a verified client-certificate subject, whose absence represents a connection

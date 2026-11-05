@@ -382,6 +382,13 @@ CI runs the complete gate for every pull request: the `checks` job's two shards 
 `just validate-ci 4 1/2` and `just validate-ci 4 2/2` on runners of their own, four recipes at a
 time through kache. The second lints the Shuttle and Loom modes and the compiler tooling and runs
 `just ratchet` after its lints, and the first runs every other source and lint check.
+`ValidationEntrypointTests` in `scripts/tests/test_ratchet.py`, part of `just test-ratchet-units`,
+hold the job to that split. Through just's own evaluation of the job's shard matrix, exactly one
+shard names the gate itself and runs `python3 -m scripts.ratchet`, with no argument, on the
+checked-out revision once its lints have finished, and the Validate step that runs it is neither
+skipped nor allowed to fail. Together the shards run every check `just validate` runs, with
+formatting checked instead of applied, so a shard that dropped the gate, a lane or a validation
+fails them.
 The tooling's own qualification is selected by labels in the `extra-tests` job. A pull request
 labeled `extra-compiler` runs `just coverage-native-extras test-typed-ratchet`, which runs
 `just test-typed-ratchet` with its ordinary part under native coverage and its product doctests and

@@ -29,7 +29,7 @@ CREATE CODEC syslog_codec
 
 `SYSLOG` itself is the reference to the singleton wire schema. It has no user-defined name or
 separate `CREATE`, `SHOW CREATE`, `ALTER`, or `DROP` lifecycle. A codec using it does not accept
-`WITH JAQ TRANSFORMATIONS` or `ENCODE <field> AS RFC3339` rules.
+`WITH JAQ TRANSFORMATIONS` or field `ENCODE` rules.
 
 ### Fixed field contract
 

@@ -94,10 +94,16 @@ use sorted_vec::SortedSet;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
+mod append_submission_fault;
 #[cfg(test)]
 mod archive_count_tests;
 mod cluster_parameters;
 mod command_execution;
+#[cfg(any(test, feature = "testing"))]
+pub use append_submission_fault::AppendSubmissionFailure;
+use append_submission_fault::AppendSubmissionFault;
+#[cfg(feature = "testing")]
+use append_submission_fault::AppendSubmissionFaults;
 pub use cluster_parameters::ClusterParameterPlanningInputs;
 mod connectivity_fault;
 mod domain_mutation;
@@ -2146,6 +2152,7 @@ struct ConsensusTestProbeState {
     append_stream_counts: Mutex<BTreeMap<ClusterNodeName, AppendStreamCounts>>,
     connectivity: ConnectivityFault,
     lease_refusal: LeaseRefusal,
+    append_submission_fault: AppendSubmissionFaults,
 }
 
 #[cfg(feature = "testing")]
@@ -2157,6 +2164,15 @@ struct AppendStreamCounts {
 
 #[cfg(feature = "testing")]
 impl ConsensusTestProbe {
+    /// Fail this node's next nonempty append submission to `target`, then allow later traffic.
+    pub async fn fail_next_append_submission(&self, target: ClusterNodeName) {
+        self.inner.append_submission_fault.arm(target).await;
+    }
+
+    pub async fn append_submission_failure(&self) -> Option<AppendSubmissionFailure> {
+        self.inner.append_submission_fault.delivered().await
+    }
+
     pub fn storage_fault(&self) -> StorageFault {
         self.inner.storage_fault.clone()
     }
@@ -2233,6 +2249,9 @@ trait AppendStreamOpenRecorder: Clone + Send + Sync + 'static {
     fn record_append_stream_attempt(&self, target: &ClusterNodeName);
     fn connectivity_fault(&self) -> ConnectivityFault;
     fn lease_refusal(&self) -> LeaseRefusal;
+    fn append_submission_fault(&self, _target: &ClusterNodeName) -> AppendSubmissionFault {
+        AppendSubmissionFault::default()
+    }
 }
 
 impl AppendStreamOpenRecorder for () {
@@ -2250,6 +2269,10 @@ impl AppendStreamOpenRecorder for () {
 
 #[cfg(feature = "testing")]
 impl AppendStreamOpenRecorder for ConsensusTestProbe {
+    fn append_submission_fault(&self, target: &ClusterNodeName) -> AppendSubmissionFault {
+        self.inner.append_submission_fault.for_target(target)
+    }
+
     fn record_append_stream_open(&self, target: &ClusterNodeName) {
         ConsensusTestProbe::record_append_stream_open(self, target);
     }

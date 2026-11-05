@@ -513,7 +513,7 @@ impl Arbitrary<'_> {
                 })
             }
             StatementVariant::AlterWireCborSchema => {
-                let operations = self.operations(Self::alter_json_wire_schema_operation);
+                let operations = self.operations(Self::alter_cbor_wire_schema_operation);
                 Statement::AlterWireCborSchema(AlterWireSchema {
                     schema: self.name(),
                     operations,
@@ -975,36 +975,27 @@ impl Arbitrary<'_> {
         &mut self,
     ) -> AlterWireSchemaOperation<nervix_models::JsonType> {
         let schema = self.json_wire_schema();
-        let field = schema
-            .fields
-            .into_iter()
-            .next()
-            .assured("a wire schema declares a field");
-        match self.entropy.byte() % 6 {
-            0 => AlterWireSchemaOperation::SetMode {
-                mode: schema.strictness,
-            },
-            1 => AlterWireSchemaOperation::AddField { field },
-            2 => AlterWireSchemaOperation::DropField { field: self.name() },
-            3 => AlterWireSchemaOperation::RenameField {
-                field: self.name(),
-                to: self.name(),
-            },
-            4 => AlterWireSchemaOperation::SetFieldType {
-                field: self.name(),
-                ty: field.ty,
-            },
-            _ => AlterWireSchemaOperation::SetFieldOptional {
-                field: self.name(),
-                optional: self.entropy.flag(),
-            },
-        }
+        self.alter_wire_schema_operation(schema)
+    }
+
+    fn alter_cbor_wire_schema_operation(
+        &mut self,
+    ) -> AlterWireSchemaOperation<nervix_models::CborType> {
+        let schema = self.cbor_wire_schema();
+        self.alter_wire_schema_operation(schema)
     }
 
     fn alter_avro_wire_schema_operation(
         &mut self,
     ) -> AlterWireSchemaOperation<nervix_models::AvroType> {
         let schema = self.avro_wire_schema();
+        self.alter_wire_schema_operation(schema)
+    }
+
+    fn alter_wire_schema_operation<T>(
+        &mut self,
+        schema: nervix_models::CreateWireSchema<T>,
+    ) -> AlterWireSchemaOperation<T> {
         let field = schema
             .fields
             .into_iter()
