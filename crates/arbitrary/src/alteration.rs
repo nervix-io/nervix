@@ -193,6 +193,16 @@ impl Arbitrary<'_> {
         }
     }
 
+    /// A change to the body of a `NATS STREAM` ingestor.
+    pub fn nats_stream_change(&mut self) -> NatsStreamIngestorChange {
+        let source = self.nats_stream_source();
+        match self.entropy.byte() % 3 {
+            0 => NatsStreamIngestorChange::Stream(source.stream),
+            1 => NatsStreamIngestorChange::Consumer(source.consumer),
+            _ => NatsStreamIngestorChange::Mode(source.mode),
+        }
+    }
+
     /// A change to the body of a `RABBITMQ QUEUE` ingestor.
     pub fn rabbitmq_queue_change(&mut self) -> RabbitMqQueueIngestorChange {
         let source = self.rabbitmq_queue_source();

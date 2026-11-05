@@ -487,7 +487,7 @@ reading any records. This namespace identifies the current Model shape, includin
 and CBOR wire type enums, AVRO representation types, explicit `BASE64` codec encoding, a Pulsar
 subscription's required type, an owned Pulsar subscription's required start position, a Kafka
 consumer group's required start position, the serialized Sentry platform field, an ingestor's
-`TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the receive
+`TIMESTAMP AT metadata.<field>` source, the separate `NATS STREAM` ingestor entity, an SQS QUEUE emitter's `SEND` request shape, the receive
 count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an
 MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter
 writes beside its publishing mode, its retained-publication flag and MQTT 5 property mappings, a

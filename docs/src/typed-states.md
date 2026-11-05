@@ -309,9 +309,11 @@ The Sentry event Model keeps an omitted `PLATFORM` as `None`, separately from an
 written string, including an empty string or `other`. Its serialized field is required and holds
 either that string or an explicit null. Planning resolves the declared default into a required
 platform string; connector preparation uses it only when the codec's event omits the field.
+
 A polled HTTP request's header holds a literal or names a client secret as two states of one enum,
 so a value cannot be both or neither, and the Model that names a secret holds its key and never its
 value.
+A NATS ingestor Model distinguishes `NATS SUBJECT` and `NATS STREAM` entities in its archived union.
 The registry's `NERVIX UNIT RANK` archive signature identifies the current Model layout, including
 the separate JSON and CBOR wire type enums, AVRO representation types, explicit `BASE64` codec
 encoding, a Pulsar subscription's required type and an owned subscription's required start position,
@@ -333,7 +335,8 @@ registry's instancing boundary checks native count conversion and the layout of 
 unit entries before materialization. An unaddressable declaration is a typed validation failure;
 its full-width Model remains representable independently of the target's execution capacity. The
 client placement union carries an instance index as an unsigned 64-bit value. Backup format
-major `5` and its unit-bearing record versions own an eight-byte primitive unit rank. The native `NervixKafkaState` checkpoint contains
+major `5` and its unit-bearing record versions own an eight-byte primitive unit rank. The native
+`NervixKafkaState` checkpoint contains
 positions and an optional applied explicit-start generation. Pending canonical starts and
 subsequent unit-owned progress use that current shape. An unrecognized signature, namespace or
 encoding fails with the owning storage error and requires the stored data to be recreated.

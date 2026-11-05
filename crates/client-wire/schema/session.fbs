@@ -183,7 +183,9 @@ enum ChoiceTarget : ubyte {
   /// Relays with the same exact branch as one selected input relay.
   ProcessorInputBranchRelay,
   /// Materialized relays with the same exact branch as one selected input relay.
-  ProcessorMaterializedRelay
+  ProcessorMaterializedRelay,
+  /// The configured NATS clients a NATS STREAM source reads a durable consumer through.
+  IngestNatsStreamSource
 }
 
 enum DomainPaceChoice : ubyte {

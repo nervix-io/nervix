@@ -148,6 +148,7 @@ fn the_source_kinds_name_every_pair_once_with_its_phrase() {
             "PULSAR TOPIC",
             "MQTT TOPIC",
             "NATS SUBJECT",
+            "NATS STREAM",
             "RABBITMQ QUEUE",
             "REDIS PUBSUB",
             "PROMETHEUS QUERY",
@@ -232,6 +233,7 @@ fn a_source_form_names_its_pair_by_key_and_label() {
         ("pulsar-topic", "Pulsar"),
         ("mqtt-topic", "MQTT"),
         ("nats-subject", "NATS"),
+        ("nats-stream", "NATS JetStream"),
         ("rabbitmq-queue", "RabbitMQ"),
         ("redis-pubsub", "Redis Pub/Sub"),
         ("prometheus-query", "Prometheus"),
@@ -326,6 +328,10 @@ fn source_declaration(kind: IngestorEntityKind) -> IngestorDeclaration {
             reference: IngestorReferenceKind::Client(ConnectorKind::Mqtt),
         },
         IngestorEntityKind::Nats(NatsIngestorEntity::Subject) => headers_only(
+            Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
+            ConnectorKind::Nats,
+        ),
+        IngestorEntityKind::Nats(NatsIngestorEntity::Stream) => headers_only(
             Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
             ConnectorKind::Nats,
         ),
@@ -510,6 +516,7 @@ fn a_transport_source_states_what_its_pair_declares() {
 #[case::kafka(IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic), [true, false, false, false, false])]
 #[case::pulsar(IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic), [true, false, false, false, false])]
 #[case::nats(IngestorEntityKind::Nats(NatsIngestorEntity::Subject), [false, true, true, false, false])]
+#[case::nats_stream(IngestorEntityKind::Nats(NatsIngestorEntity::Stream), [true, true, true, false, false])]
 #[case::rabbitmq(IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue), [true, false, false, false, false])]
 #[case::redis(IngestorEntityKind::Redis(RedisIngestorEntity::PubSub), [false, true, true, false, false])]
 #[case::prometheus(IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query), [true, true, false, false, false])]

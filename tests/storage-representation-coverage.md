@@ -26,6 +26,12 @@ Ingestor generators draw every timestamp source, `TIMESTAMP AT metadata.<field>`
 Plexus properties preserve the metadata source distinctly from a payload field of the same name,
 and the same signature and namespace fence that shape.
 
+NATS ingestor generators draw both entities, `NATS SUBJECT` and `NATS STREAM`, the stream source
+with its stream and consumer names, both acknowledged modes and every quiesce mode it declares. The
+Model/archive, registry, consensus, canonical Plexus, presentation and console-draft properties
+preserve the complete stream source, and the advanced archive signature and keyspace namespace
+fence the archived union that holds it.
+
 Pulsar subscription generators draw both required owned creation positions, `EARLIEST` and
 `LATEST`, provisioned subscriptions without a position, and all four subscription types, with one
 instance for a type that reads through one consumer. The Model, registry and consensus properties
