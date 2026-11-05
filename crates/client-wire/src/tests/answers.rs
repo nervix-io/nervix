@@ -1,8 +1,6 @@
 //! Which replies answer which requests: the outcome each request is served with, the rejection that
 //! can refuse any of them, and the cancellation that ends every request a cancellation can reach.
 
-use std::collections::HashSet;
-
 use strum::IntoEnumIterator as _;
 
 use crate::{ClientRequestKind, ReplyBodyKind};
@@ -59,28 +57,30 @@ const UNCANCELLABLE: [ClientRequestKind; 2] =
 
 #[test]
 fn the_table_names_every_request_and_gives_every_outcome_to_exactly_one_of_them() {
-    let requests: HashSet<ClientRequestKind> =
-        OUTCOMES.iter().map(|(request, _)| *request).collect();
-    let every_request: HashSet<ClientRequestKind> = ClientRequestKind::iter().collect();
-    assert_eq!(requests, every_request);
+    let requests: Vec<ClientRequestKind> = OUTCOMES.iter().map(|(request, _)| *request).collect();
+    let every_request: Vec<ClientRequestKind> = ClientRequestKind::iter().collect();
+    assert_eq!(
+        requests, every_request,
+        "the table names every request, in the order the contract declares them"
+    );
 
-    let outcomes: HashSet<ReplyBodyKind> = OUTCOMES.iter().map(|(_, outcome)| *outcome).collect();
-    assert_eq!(
-        outcomes.len(),
-        OUTCOMES.len(),
-        "no outcome answers two requests"
-    );
-    let mut shared = Vec::new();
+    // Both tables are fixed: every reply kind is compared with the nineteen requests' outcomes.
     for reply in ReplyBodyKind::iter() {
-        if !outcomes.contains(&reply) {
-            shared.push(reply);
+        let mut answered = Vec::new();
+        for (request, outcome) in OUTCOMES {
+            if outcome == reply {
+                answered.push(request);
+            }
         }
+        let shared = matches!(reply, ReplyBodyKind::Cancelled | ReplyBodyKind::Rejected);
+        let owners = if shared { 0 } else { 1 };
+        assert_eq!(
+            answered.len(),
+            owners,
+            "a {reply} reply is the outcome of {answered:?}; only a cancellation and a rejection \
+             are no request's own outcome"
+        );
     }
-    assert_eq!(
-        shared,
-        [ReplyBodyKind::Cancelled, ReplyBodyKind::Rejected],
-        "every reply but a cancellation and a rejection is one request's outcome"
-    );
 }
 
 #[test]
