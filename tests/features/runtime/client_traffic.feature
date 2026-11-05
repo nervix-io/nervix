@@ -49,6 +49,26 @@ Feature: Client traffic
       | 1            |
       | 3            |
 
+  Scenario Outline: Repeated refused credentials are paced for <username> on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE USER pacing_user WITH PASSWORD 'created-password';
+      """
+    Then the current leader node is saved as placeholder "leader"
+    And a burst of 30 refused native sessions as "<username>" on node "{{leader}}" takes at least 2 seconds
+
+    Examples:
+      | cluster_size | username    |
+      | 1            | pacing_user |
+      | 3            | pacing_user |
+      | 1            | nobody      |
+      | 3            | nobody      |
+      | 1            | not a user  |
+      | 3            | not a user  |
+
   Scenario Outline: A node counts the sessions it serves, the requests they decode and how the requests end
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"

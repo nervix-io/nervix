@@ -2861,16 +2861,31 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/expiry-map/src/__fuzz__/tests__bolero_operation_sequences_match_a_safe_reference_model/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "expiry-map-operations"
-invariant = "Bounded sequences of inserts, shared-key inserts, keyed and oldest removals, lookups, shared-key copies and clears over a small key space leave the map's iteration order, lengths, oldest entry, lookups and shared key allocations equal to an IndexMap reference, and drop every stored value exactly once."
+invariant = "Bounded sequences of inserts, shared-key inserts, keyed and oldest removals, lookups, renewals, shared-key copies and clears over a small key space leave the map's iteration order, lengths, oldest entry, lookups and shared key allocations equal to an IndexMap reference, and drop every stored value exactly once."
 manifest = "Cargo.toml"
 max_input_bytes = 1024
 package = "nervix-expiry-map"
 random_iterations = 256
 source = "crates/expiry-map/src/lib.rs"
 test = "tests::bolero_operation_sequences_match_a_safe_reference_model"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/application/authentication/pacing/__fuzz__/application__authentication__pacing__tests__bolero_quota_reanchoring_preserves_governors_complete_state/corpus"
+domain_version = 1
+features = []
+id = "authentication-quota-clock"
+invariant = "Reanchoring a per-name authentication bucket at each selected monotonic instant preserves every governor decision, exact refusal wait and complete theoretical arrival mark of a persistent governor limiter over bounded monotonic clock advances."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-server"
+random_iterations = 256
+source = "src/application/authentication/pacing/tests.rs"
+test = "application::authentication::pacing::tests::bolero_quota_reanchoring_preserves_governors_complete_state"
 test_target = "lib"
 
 [[target]]

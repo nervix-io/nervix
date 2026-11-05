@@ -503,3 +503,19 @@ The command-pause fault map also gates one initial live-parameter discovery look
 launch, after public listeners start. The observer borrows that one testing control once;
 release permits the ordinary live-policy lookup to finish. This is a startup control, absent
 from product builds and never reached from record or acknowledgement execution.
+
+## Failed authentication names
+
+`AuthenticationPacing::names` owns an access-ordered `ExpiryMap` under an async mutex, scoped to
+one node's session service. Credential-call admission checks the selected name, a judged refusal
+records its quota, and a success removes that name. Each operation may reclaim one oldest full
+bucket; a new name enters only after a judged refusal. The largest burst-recovery working set and
+live attempts bound retained state, and active debt is never evicted for another name.
+
+All accesses are control-plane call admission. Guards end before password work and quota sleeps.
+The expiry map renews existing entries without replacing their key or value allocations, and
+indexed removal hashes its query once. An admitted attempt shares its bucket's immutable key;
+pointer identity distinguishes its receipt from a bucket recreated after success or full recovery.
+The receipt pins only that key allocation and relies on no reference-count ordering. Node teardown
+owns final disposal. No record, batch or
+acknowledgement path reaches this state; the async mutex is untracked by Deloxide.

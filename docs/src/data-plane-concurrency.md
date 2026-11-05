@@ -1681,6 +1681,31 @@ only, so the acknowledgement shares a publication reserves for its attached cons
 its deliveries, and a routed delivery, which holds no dispatch permit, cannot resolve a share it
 never reserved.
 
+## Failed Authentication Pacing
+
+The control plane's authentication owner keeps one access-ordered `ExpiryMap` of failed names
+behind an async mutex. A bucket holds governor's theoretical arrival mark. Its decision is made from
+one selected monotonic instant through governor's synchronous state-store interface; waits use the
+primitive boundary's timers. Credential verification and quota sleeps hold no map guard. A name
+with an outstanding quota therefore delays only its own attempts.
+
+Each admission operation may reclaim one oldest bucket whose quota has fully replenished. An
+operation adds at most one bucket, after a judged refusal. If the oldest bucket still holds debt,
+its last access was within a complete burst-recovery horizon, and access order places every other
+retained name within that horizon too. Reclaiming one full bucket before an insertion keeps the
+stored count from growing while stale entries remain; growth is limited to the largest recovery
+working set and live attempts. An active bucket is never displaced by a spray of other names.
+Success removes only that name. An admitted attempt shares the bucket's immutable key allocation
+as its receipt. A refusal skips a second charge only when pointer identity names that same active
+bucket; success or full recovery gives a fresh bucket a distinct allocation. No reference-count
+ordering is involved. Node teardown drops the owner and its volatile state.
+
+These are call-admission accesses. The async mutex and timers are outside Deloxide's tracked
+thread-blocking locks. Owner tests and public one- and three-node authentication scenarios verify
+the policy and its waits. The bounded `authentication-quota-clock` property compares every quota
+decision, exact wait and complete arrival mark with a persistent governor limiter. The expiry map's
+operation-sequence oracle and Miri qualify its relinking and allocation lifetimes.
+
 ## Ratchet And Review
 
 `just ratchet`, `just validate` and `just validate-ci` require the pinned compiler's Nervix

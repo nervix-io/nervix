@@ -27,7 +27,6 @@ use argon2::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use error_stack::{Report, ResultExt as _};
-use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use http_body_util::Full;
 use hyper::{
     Request as HyperRequest, Response as HyperResponse, StatusCode,
@@ -55,7 +54,9 @@ const BASIC_AUTH_REALM: &str = "Nervix";
 
 const AUTH_RATE_LIMIT_PER_SECOND: u32 = 10;
 
-pub(in crate::application) type AuthRateLimiter = DefaultKeyedRateLimiter<String>;
+mod pacing;
+
+pub(in crate::application) use pacing::AuthenticationPacing;
 
 /// The credentials a `Basic` authorization token carries, or `None` when it carries none.
 ///
@@ -360,12 +361,11 @@ pub(in crate::application) async fn user_credentials(
 }
 
 impl SessionServiceImpl {
-    pub(in crate::application) fn new_auth_rate_limiter() -> AuthRateLimiter {
-        let quota = Quota::per_second(
+    pub(in crate::application) fn new_authentication_pacing() -> AuthenticationPacing {
+        AuthenticationPacing::new(
             NonZeroU32::new(AUTH_RATE_LIMIT_PER_SECOND)
                 .assured("AUTH_RATE_LIMIT_PER_SECOND is a positive constant"),
-        );
-        RateLimiter::keyed(quota)
+        )
     }
 
     /// Authenticates the Basic credentials a call presented, or refuses a call that presented none.
@@ -389,23 +389,42 @@ impl SessionServiceImpl {
         &self,
         credentials: &BasicAuthCredentials,
     ) -> Result<UserName, AuthenticationRefusal> {
-        let Ok(user_name) = UserName::parse(&credentials.username) else {
+        let user_name = UserName::parse(&credentials.username).ok();
+        let name = user_name.as_ref().map_or_else(
+            || credentials.username.to_ascii_lowercase(),
+            |name| name.as_str().to_owned(),
+        );
+        let admission = self
+            .inner
+            .authentication_pacing
+            .before_verification(&name)
+            .await;
+        let outcome = self.verify_basic_credentials(credentials, user_name).await;
+        match &outcome {
+            Ok(_) => self.inner.authentication_pacing.authenticated(&name).await,
+            Err(AuthenticationRefusal::Rejected) => {
+                self.inner
+                    .authentication_pacing
+                    .refused(name, admission)
+                    .await;
+            }
+            Err(AuthenticationRefusal::Missing | AuthenticationRefusal::Unavailable) => {}
+        }
+        outcome
+    }
+
+    /// Verifies credentials only after their presented name's quota has admitted the attempt.
+    async fn verify_basic_credentials(
+        &self,
+        credentials: &BasicAuthCredentials,
+        user_name: Option<UserName>,
+    ) -> Result<UserName, AuthenticationRefusal> {
+        let Some(user_name) = user_name else {
             return self.refuse_unknown_user(credentials).await;
         };
         let Some(user) = self.inner.consensus.current_user(&user_name).await else {
             return self.refuse_unknown_user(credentials).await;
         };
-        let auth_rate_limit_key = user_name.as_str().to_string();
-        if self
-            .inner
-            .failed_auth_rate_limit_keys
-            .contains_key(&auth_rate_limit_key)
-        {
-            self.inner
-                .auth_rate_limiter
-                .until_key_ready(&auth_rate_limit_key)
-                .await;
-        }
         let verified = verify_password_hash(
             self.inner.runtime.executor(),
             user.password_hash,
@@ -426,14 +445,8 @@ impl SessionServiceImpl {
             }
         };
         if matched {
-            self.inner
-                .failed_auth_rate_limit_keys
-                .remove(&auth_rate_limit_key);
             return Ok(user_name);
         }
-        self.inner
-            .failed_auth_rate_limit_keys
-            .insert(auth_rate_limit_key, ());
         Err(AuthenticationRefusal::Rejected)
     }
 
@@ -569,10 +582,13 @@ impl SessionServiceImpl {
 
 #[cfg(all(test, feature = "testing"))]
 mod tests {
+    use std::time::Duration;
+
     #[cfg(feature = "testing")]
     use nervix_consensus::{ConsensusTestProbe, StorageBoundary};
     use nervix_execution::OperationLimits;
     use nervix_models::{CreateStatement, CreateUser, UserName};
+    use nervix_recovery::Discarded as _;
 
     use super::*;
     #[cfg(feature = "testing")]
@@ -819,7 +835,7 @@ mod tests {
         let refused = service.authenticate_basic_credentials(&credentials).await;
         assert_eq!(refused, Err(AuthenticationRefusal::Unavailable));
         // Nothing judged the credentials, so the user is not paced as after a failed attempt.
-        assert!(service.inner.failed_auth_rate_limit_keys.is_empty());
+        assert!(service.inner.authentication_pacing.is_empty().await);
 
         let unknown = BasicAuthCredentials {
             username: "unknown_user".to_string(),
@@ -831,6 +847,16 @@ mod tests {
             Err(AuthenticationRefusal::Unavailable),
             "a name that names no user is not judged either while the node has no room"
         );
+        assert!(service.inner.authentication_pacing.is_empty().await);
+        let invalid = BasicAuthCredentials {
+            username: "not a user".to_string(),
+            password: "busy-secret".to_string(),
+        };
+        assert_eq!(
+            service.authenticate_basic_credentials(&invalid).await,
+            Err(AuthenticationRefusal::Unavailable)
+        );
+        assert!(service.inner.authentication_pacing.is_empty().await);
 
         filled.release().await;
         let accepted = service.authenticate_basic_credentials(&credentials).await;
@@ -932,5 +958,39 @@ mod tests {
             "a call without credentials has nothing to verify"
         );
         let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[nervix_primitives::test]
+    async fn unknown_names_are_paced_after_their_first_refusal() {
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(false).await;
+        for username in ["unknown_user", "not a user name"] {
+            let credentials = BasicAuthCredentials {
+                username: username.to_string(),
+                password: "any-secret".to_string(),
+            };
+            assert_eq!(
+                service.authenticate(Some(&credentials)).await,
+                Err(AuthenticationRefusal::Rejected)
+            );
+            let started = nervix_primitives::time::Instant::now();
+            for _ in 0..21 {
+                nervix_primitives::task::consume_budget().await;
+                assert_eq!(
+                    service.authenticate(Some(&credentials)).await,
+                    Err(AuthenticationRefusal::Rejected)
+                );
+            }
+            assert!(
+                started.elapsed() >= Duration::from_secs(1),
+                "repeated refusals for {username:?} must wait on that name's quota"
+            );
+        }
+        tokio::fs::remove_dir_all(&path)
+            .await
+            .discarded("the test's temporary database is cleaned up on a best-effort basis");
     }
 }
