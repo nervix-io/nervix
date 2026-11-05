@@ -1,5 +1,5 @@
 Feature: NATS ingestion
-  Scenario Outline: NATS ingestor delivers JSON payloads from literal and wildcard subjects
+  Scenario Outline: NATS ingestor delivers JSON payloads to a subscribed relay
     Given NATS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
