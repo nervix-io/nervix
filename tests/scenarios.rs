@@ -21350,17 +21350,19 @@ async fn then_selector_contains_docstring(
     }
 }
 
-/// The elements `selector` matches, one per docstring line and in its order. A preceding step waits
-/// for the outcome these lines must sit beside, so a line that should not be there has arrived by
-/// the time the elements are compared.
-#[then(regex = r#"^selector "([^"]+)" shows exactly these lines$"#)]
-async fn then_selector_shows_exactly_these_lines(
+/// The elements `selector` matches, one per docstring line, in whatever order they arrived: replies
+/// to requests a connection sends together are shown as they come. A preceding step waits for the
+/// outcome these lines must sit beside, so a line that should not be there has arrived by the time
+/// the elements are compared.
+#[then(regex = r#"^selector "([^"]+)" shows exactly these lines in any order$"#)]
+async fn then_selector_shows_exactly_these_lines_in_any_order(
     world: &mut ScenarioWorld,
     selector: String,
     #[step] step: &Step,
 ) {
     let expected = expand_placeholders(world, docstring(step).trim());
-    let expected = expected.lines().map(str::trim).collect::<Vec<_>>();
+    let mut expected = expected.lines().map(str::trim).collect::<Vec<_>>();
+    expected.sort_unstable();
     let page = world
         .browser_page
         .as_ref()
@@ -21371,10 +21373,11 @@ async fn then_selector_shows_exactly_these_lines(
         .all_inner_texts()
         .await
         .expect("selector text must be readable");
-    let shown = texts.iter().map(|text| text.trim()).collect::<Vec<_>>();
+    let mut shown = texts.iter().map(|text| text.trim()).collect::<Vec<_>>();
+    shown.sort_unstable();
     assert_eq!(
         shown, expected,
-        "expected selector '{selector}' to show exactly these lines"
+        "expected selector '{selector}' to show exactly these lines in any order"
     );
 }
 

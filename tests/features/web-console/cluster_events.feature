@@ -17,10 +17,10 @@ Feature: Web console cluster events
     And selector ".prompt-row" contains "{{domain}}"
     When selector ".prompt-row input" is filled with "START;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "started domain '{{domain}}'"
+    Then selector ".terminal" contains "starting domain '{{domain}}'"
     When selector ".prompt-row input" is filled with "CREATE RELAY audit SCHEMA source_event UNBRANCHED;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "created relay 'audit'"
+    Then selector ".terminal" contains "quiesce level: DOMAIN_PAUSE; planned relocations: 0"
     When selector ".prompt-row input" is filled with "CREATE SUBSCRIPTION live_events TO events;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".subscription-tab[data-subscription-state='active']" contains "EVENTS"
@@ -31,9 +31,12 @@ Feature: Web console cluster events
     When selector ".prompt-row input" is filled with "LIST DOMAINS;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "{{domain}} pace=UNPACED"
-    And selector ".terminal .term-line.info" shows exactly these lines
+    And selector ".terminal .term-line.info" shows exactly these lines in any order
       """
       connected to leader '{{leader}}'
+      using domain '{{domain}}'
+      domain clock [{{domain}}] attached: attached to the clock of domain '{{domain}}': generation 0, stopped
+      domain clock [{{domain}}]: generation 1, unpaced
       """
     And selector ".node-panel-toggle[data-event-count='0']" exists
 
@@ -55,7 +58,7 @@ Feature: Web console cluster events
     Then selector ".node-panel" contains "node '{{departing}}' joined (incarnation "
     And selector ".node-panel .node-event[data-occurrences='1']" contains "node '{{departing}}' left" exactly 1 times
     And selector ".terminal" contains "connected to leader '{{observer}}'"
-    And selector ".terminal .term-line.info" shows exactly these lines
+    And selector ".terminal .term-line.info" shows exactly these lines in any order
       """
       connected to leader '{{observer}}'
       """
