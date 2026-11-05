@@ -179,6 +179,7 @@ fn the_emitter_kinds_name_every_pair_once_with_its_phrase() {
             "REDIS PUBSUB",
             "MQTT TOPIC",
             "NATS SUBJECT",
+            "NATS STREAM",
             "ZEROMQ PUSH",
             "SQS QUEUE",
             "SENTRY EVENT",
@@ -749,7 +750,11 @@ fn emitter_declaration(kind: EmitterEntityKind) -> EmitterDeclaration {
         ),
         EmitterEntityKind::Nats(NatsEmitterEntity::Subject) => codec(
             Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
-            &["NoAck", "NatsJetStream"],
+            &["NoAck"],
+        ),
+        EmitterEntityKind::Nats(NatsEmitterEntity::Stream) => codec(
+            Some(HeaderModel::exact(HeaderLayout::RepeatsByName)),
+            &["BrokerAck"],
         ),
         EmitterEntityKind::Sqs(SqsEmitterEntity::Queue) => EmitterDeclaration {
             batch: EmitterBatchLegality::Optional {
