@@ -25,6 +25,9 @@ use strum::AsRefStr;
 
 use super::{CounterSeries, RuntimeMetrics, format_number, format_optional, physical_node_label};
 
+mod ingestor;
+pub(crate) use ingestor::IngestorInteractionMetrics;
+
 #[cfg(test)]
 mod interaction_metrics;
 
