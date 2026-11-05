@@ -4428,10 +4428,9 @@ impl Administrator {
         if before.effective.membership().get_joint_config()
             != after.effective.membership().get_joint_config()
         {
-            self.inner.events.report(format!(
-                "raft membership updated: {:?}",
-                after.effective.membership().get_joint_config()
-            ));
+            self.inner
+                .events
+                .report(format!("raft membership updated: {:?}", after.voter_ids()));
         }
         Ok(())
     }
@@ -4598,10 +4597,16 @@ impl Administrator {
         operation: String,
         observed: &MembershipSnapshot,
     ) -> ConsensusError {
+        let nodes = observed
+            .effective
+            .nodes()
+            .map(|(node_id, node)| (node_id, &node.addr))
+            .collect::<BTreeMap<_, _>>();
         self.inner.events.report(format!(
             "raft membership wait timed out after {MEMBERSHIP_MUTATION_TIMEOUT:?}: {operation}; \
-             observed effective membership {:?} and committed membership {:?}",
-            observed.effective, observed.committed
+             observed effective voters {:?} and nodes {:?}",
+            observed.voter_ids(),
+            nodes
         ));
         ConsensusError::MembershipChangeTimeout {
             operation,
