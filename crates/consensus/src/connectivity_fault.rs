@@ -25,6 +25,7 @@ pub use enabled::ConnectivityFault;
 mod enabled {
     use std::time::Duration;
 
+    use meticulous::ResultExt as _;
     use nervix_primitives::sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -63,7 +64,7 @@ mod enabled {
 
         pub(crate) fn set_heartbeat_response_delay(&self, delay: Duration) {
             let milliseconds = u64::try_from(delay.as_millis())
-                .expect("the fixture's heartbeat answer delay fits milliseconds");
+                .verified("the fixture's heartbeat answer delay fits milliseconds");
             self.heartbeat_response_delay
                 .milliseconds
                 .store(milliseconds, Ordering::Relaxed);
