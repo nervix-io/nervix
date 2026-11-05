@@ -54,7 +54,7 @@ pub(crate) struct Subscription {
 /// on, if any, and the bytes it carries, its header block first when it has one.
 pub(crate) struct Publish {
     pub(crate) subject: String,
-    reply: Option<String>,
+    pub(crate) reply: Option<String>,
     pub(crate) message: Vec<u8>,
 }
 
@@ -274,6 +274,27 @@ impl ScriptedConnection {
             payload.len()
         )
         .into_bytes();
+        message.extend_from_slice(payload);
+        message.extend_from_slice(b"\r\n");
+        self.send(&message).await;
+    }
+
+    /// Delivers one explicit transport header block before its payload.
+    pub(crate) async fn deliver_headers(
+        &mut self,
+        subscription: &Subscription,
+        headers: &[u8],
+        payload: &[u8],
+    ) {
+        let mut message = format!(
+            "HMSG {} {} {} {}\r\n",
+            subscription.subject,
+            subscription.sid,
+            headers.len(),
+            headers.len() + payload.len()
+        )
+        .into_bytes();
+        message.extend_from_slice(headers);
         message.extend_from_slice(payload);
         message.extend_from_slice(b"\r\n");
         self.send(&message).await;
