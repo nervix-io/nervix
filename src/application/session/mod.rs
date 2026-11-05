@@ -64,15 +64,15 @@ use meticulous::OptionExt as _;
 use nervix_client_wire::{
     AttachDomainClockRequest, AttachTransactionRequest, CancelOutcome, CancelRequest, CancelState,
     CancellationStage, ChoiceLookupRequest, ClientFrame, ClientMessage, ClientRequest,
-    CloseEmitterRequest, CommandRequest, DetachDomainClockRequest, DomainClockAttachDisposition,
-    DomainClockAttachOutcome, DomainClockDetachDisposition, DomainClockDetachOutcome, DomainList,
-    DomainSelection, EncodedFrame, InspectTransactionRequest, InspectionOutcome,
-    MAX_IN_FLIGHT_REQUESTS, OpenEmitterRequest, OpenIngestorRequest, ReadEmitterBatchRequest,
-    Reply, ReplyBody, ReplyDelivery, RequestCancelled, RequestId, RequestRejected,
-    RequestRejection, SelectDomainRequest, ServerFrame, SessionEndReason, SessionEnding,
-    SessionLimits, SettleEmitterBatchRequest, SubscribeDisposition, SubscribeOutcome,
-    SubscribeRequest, SubscriptionType, SuggestRequest, UnsubscribeDisposition, UnsubscribeOutcome,
-    UnsubscribeRequest, VerifiedFrame, WireDecodeError, WireEncodeError,
+    CloseEmitterRequest, CommandDisposition, CommandRequest, DetachDomainClockRequest,
+    DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockDetachDisposition,
+    DomainClockDetachOutcome, DomainList, DomainSelection, EncodedFrame, InspectTransactionRequest,
+    InspectionOutcome, MAX_IN_FLIGHT_REQUESTS, OpenEmitterRequest, OpenIngestorRequest,
+    ReadEmitterBatchRequest, Reply, ReplyBody, ReplyDelivery, RequestCancelled, RequestId,
+    RequestRejected, RequestRejection, SelectDomainRequest, ServerFrame, SessionEndReason,
+    SessionEnding, SessionLimits, SettleEmitterBatchRequest, SubscribeDisposition,
+    SubscribeOutcome, SubscribeRequest, SubscriptionType, SuggestRequest, UnsubscribeDisposition,
+    UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame, WireDecodeError, WireEncodeError,
 };
 use nervix_execution::{AdmissionError, CpuClass, ExecutionError, MemoryClass};
 use nervix_models::{
@@ -939,11 +939,29 @@ async fn run_ordered_lane(
         }
         let request_id = item.request_id;
         let request: &'static str = (&item.request).into();
+        let execution_reference = if tracing::enabled!(tracing::Level::DEBUG) {
+            match &item.request {
+                OrderedRequest::Command(command) => Some(command.execution_reference.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let mut answered_disposition = None;
         let started = nervix_primitives::time::Instant::now();
-        serve_ordered(&shared, item, &mut subscriptions, &mut clock_attachments).await;
+        serve_ordered(
+            &shared,
+            item,
+            &mut subscriptions,
+            &mut clock_attachments,
+            &mut answered_disposition,
+        )
+        .await;
         debug!(
             %request_id,
             request,
+            execution_reference = ?execution_reference,
+            disposition = ?answered_disposition,
             elapsed = ?started.elapsed(),
             "served an ordered session request"
         );
@@ -958,6 +976,7 @@ async fn serve_ordered(
     item: OrderedWork,
     subscriptions: &mut SessionSubscriptions,
     clock_attachments: &mut ClockAttachments,
+    answered_disposition: &mut Option<CommandDisposition>,
 ) {
     let OrderedWork {
         request_id,
@@ -966,7 +985,8 @@ async fn serve_ordered(
     } = item;
     match request {
         OrderedRequest::Command(command) => {
-            serve_command(shared, request_id, &admission, command, subscriptions).await;
+            *answered_disposition =
+                serve_command(shared, request_id, &admission, command, subscriptions).await;
         }
         OrderedRequest::Attach(attach) => {
             if admission.admit().is_err() {
@@ -1082,7 +1102,7 @@ async fn serve_command(
     admission: &RequestAdmission,
     command: CommandRequest,
     subscriptions: &mut SessionSubscriptions,
-) {
+) -> Option<CommandDisposition> {
     let execution_reference = command.execution_reference.clone();
     #[cfg(feature = "testing")]
     let reply_script_request = command.clone();
@@ -1095,7 +1115,7 @@ async fn serve_command(
         _ = admission.cancelled_before_admission() => Err(CancelledBeforeAdmission),
     };
     let Ok(response) = processed else {
-        return;
+        return None;
     };
     let outcome = command_outcome(execution_reference, response);
     #[cfg(feature = "testing")]
@@ -1109,9 +1129,19 @@ async fn serve_command(
             .substitute_uncertain_command_reply(&reply_script_request, &mut outcome);
         outcome
     };
-    shared
+    let disposition = if tracing::enabled!(tracing::Level::DEBUG) {
+        Some(outcome.disposition.clone())
+    } else {
+        None
+    };
+    let queued = shared
         .finish_with(request_id, ReplyBody::Command(Box::new(outcome)))
         .await;
+    if queued == QueuedReply::Reply {
+        disposition
+    } else {
+        None
+    }
 }
 
 async fn serve_subscribe(

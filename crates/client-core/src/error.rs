@@ -15,7 +15,8 @@
 )]
 
 use nervix_client_wire::{
-    CancellationStage, ClientRequest, EmitterOpenRefusal, ReplyBody, RequestRejection,
+    CancellationStage, ClientRequest, CommandDisposition, EmitterOpenRefusal, ReplyBody,
+    RequestRejection,
 };
 use nervix_models::{ClientProducerRefusal, CommandExecutionReference, ResourceUploadIdentity};
 use thiserror::Error;
@@ -148,6 +149,13 @@ pub enum ClientError {
     RequestInterrupted { request: RequestKind },
     #[error("session retry deadline expired")]
     RetryDeadline,
+    /// The last server answer that still required repeating a command. It stays beneath the
+    /// uncertain command and above the deadline or failure that ended its retry.
+    #[error("last unresolved command answer was {disposition:?}: {message}")]
+    LastUnresolvedAnswer {
+        disposition: CommandDisposition,
+        message: String,
+    },
     /// The command may have been admitted under `reference`, and its outcome did not arrive. The
     /// failure that left it unknown is beneath; running the same execution handle again recovers
     /// the outcome.
