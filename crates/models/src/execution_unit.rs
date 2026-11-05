@@ -83,10 +83,10 @@ impl Unit {
     }
 
     pub fn try_instance(index: u64) -> Result<Self, UnitIndexError> {
-        index
-            .checked_add(INSTANCE_START)
-            .map(Self::from_rank)
-            .ok_or(UnitIndexError { index })
+        match index.checked_add(INSTANCE_START) {
+            Some(rank) => Ok(Self::from_rank(rank)),
+            None => Err(UnitIndexError { index }),
+        }
     }
 
     pub fn kind(self) -> UnitKind {
