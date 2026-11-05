@@ -96,8 +96,13 @@ impl Generation {
                     let mut identities = BTreeSet::new();
                     let mut previous: Option<&KeyGeneration> = None;
                     for key in keys {
+                        let charged_horizon = key
+                            .age
+                            .checked_add(key.remaining)
+                            .ok_or_else(|| Report::new(AdmissionError::GenerationState))?;
                         if key.remaining.is_zero()
                             || key.remaining > quota.horizon
+                            || charged_horizon > quota.horizon
                             || key.age >= options.ttl
                             || key.ordinal == u64::MAX
                             || !identities.insert(key.key)

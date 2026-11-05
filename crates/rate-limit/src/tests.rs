@@ -481,6 +481,40 @@ fn invalid_generations_and_utc_overflow_are_typed_refusals() {
 }
 
 #[test]
+fn generation_refuses_a_key_whose_age_and_debt_exceed_its_burst_horizon() {
+    use super::{AdmissionError, Generation, KeyGeneration};
+    let now = Instant::now();
+    let quota = quota(1, 50, 2);
+    let options = KeyedOptions::new(Duration::from_nanos(u64::MAX), 1, NonZeroUsize::MIN)
+        .assured("bounded TTL");
+    for age in [
+        Duration::from_nanos(91),
+        Duration::from_nanos(u64::MAX - 1),
+        Duration::MAX,
+    ] {
+        let generation = Generation {
+            clauses: vec![ClauseGeneration::Keyed {
+                quota,
+                options,
+                keys: vec![KeyGeneration {
+                    key: KeyFingerprint::from([1; 16]),
+                    remaining: Duration::from_nanos(10),
+                    age,
+                    ordinal: 0,
+                }],
+            }],
+        };
+        assert_eq!(
+            *Limiter::from_generation(generation, now)
+                .err()
+                .assured("a charged horizon is at most a full burst after its last use")
+                .current_context(),
+            AdmissionError::GenerationState
+        );
+    }
+}
+
+#[test]
 fn bolero_quota_bounds_match_wide_integer_arithmetic() {
     bolero::check!()
         .with_iterations(256)

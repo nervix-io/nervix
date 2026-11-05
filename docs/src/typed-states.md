@@ -9,6 +9,8 @@ is a real instant at its epoch, denoting full replenishment, rather than missing
 direct horizon uses `Option<Duration>` for live debt; keyed generations carry every retained
 fingerprint, positive remaining horizon, age and LRU ordinal. Generation validation refuses
 duplicate identities, capacity excess, invalid horizon or age bounds, and unordered ordinals.
+Each retained key's age plus remaining debt fits its quota's burst horizon, as every accepted
+charge did when its last-use instant was recorded.
 Restoration creates fresh stores only from a validated generation. UTC conversion omits elapsed
 horizons and expired keys instead of reconstructing allowance debt from absent state.
 
