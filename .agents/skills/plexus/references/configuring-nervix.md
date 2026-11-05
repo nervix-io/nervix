@@ -69,7 +69,7 @@ For the CLI's `subscribe` and `domain-clock` shell streams and their line format
 documentation version as the selected index; this client chapter is outside the curated Plexus index.
 
 For browser controls waiting behind commands, lookup replacement, uncertain-command recovery on
-the open session and reconnect behavior, read
+the open session, a reply that names another execution, and reconnect behavior, read
 [Web Console](https://docs.nervix.io/client-tools-web-console.html#bounded-buffers) and
 [Client Session Protocol](https://docs.nervix.io/client-session-protocol.html#restoration-and-bounded-consumers)
 directly. Follow the same documentation version as the selected index; these client chapters are
@@ -229,8 +229,10 @@ current connection, retry and deadline limits.
   client reference in `Connector Capabilities` names those keys. Read `Common` → `Syslog` →
   `Ingestor` for transport metadata and when a TLS connection exposes a verified client subject.
 - Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
-  owner-buffer bound, not a per-branch or per-consumer bound; nonowner producer and remote consumer
-  nodes each have one additional fixed dispatch slot.
+  owner-buffer bound, once per partition when its branch declares `PARTITIONS <n>`, not a
+  per-branch or per-consumer bound; nonowner producer and remote consumer nodes each have one
+  additional fixed dispatch slot. A branch's partition count changes only on a stopped domain
+  (`ALTER BRANCH <branch> SET PARTITIONS <n>`); read `Streams And State` → `Relay Partitions`.
   On native 64-bit targets, its positive integer range ends at `18446744073709551615`, and stored,
   replicated, and restarted definitions retain the exact accepted capacity.
 - Every ordinary processor input/output uses the same named branch, or all are unbranched.
@@ -672,8 +674,10 @@ coverage limits, including requested-read historical edges and untracked async s
 Choose checks relevant to the configured graph:
 
 - `SHOW CREATE <kind> <name>;` confirms the stored canonical definition.
-- `DESCRIBE RELAY <relay>;` reports the relay owner and optional materialized-state replicas;
-  `DESCRIBE RELAY <relay> WHERE (...);` is owner-authoritative for concrete branch state.
+- `DESCRIBE RELAY <relay>;` reports the relay owner and optional materialized-state replicas, or
+  one owner line per partition of a partitioned relay;
+  `DESCRIBE RELAY <relay> WHERE (...);` is owner-authoritative for concrete branch state and names
+  the key's partition and its owner.
 - `SHOW RELAY <relay> MATERIALIZED STATE;` inspects materialized data and placement, masking
   `SENSITIVE` payload fields and branch-key fields on both the owner and other nodes.
 - `DESCRIBE INGESTOR`, `DESCRIBE JUNCTION`, other processor-specific `DESCRIBE` commands, and
@@ -794,6 +798,8 @@ Choose checks relevant to the configured graph:
   outside the curated Plexus index.
 - `SHOW TRANSACTIONS;` checks open/committing progress and retained commit, revert, failure, or
   expiry outcomes.
+- Recover an interrupted command under its original execution reference. A transaction's state
+  alone does not establish that command's outcome; follow `Client Session Protocol` → `Exact Recovery`.
 
 For a parse error, follow the reported expected token and compare clause order with the relevant
 public example. For an MQTT QoS, session or mode pairing refusal, use the underlined token and the
