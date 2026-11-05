@@ -155,6 +155,11 @@ pub(crate) enum ConnectorDeclarationIssue {
     },
     #[error("{0}")]
     Envelope(nervix_models::EnvelopeDeclarationError),
+    #[error(
+        "{} REPLY TO requires a valid publication subject",
+        ConnectorKind::Nats
+    )]
+    NatsReplySubject,
     #[error("{0}")]
     Delivery(nervix_models::UnmetDeliveryRequirement),
     #[error("{0}")]

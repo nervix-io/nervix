@@ -319,6 +319,12 @@ The HTTP kind carries no signaling field. The same kind carries a selected refer
 a protocol name in the activation plan, and the compiled protocol in a runtime route; its
 `endpoint_type()` projection supplies the discriminant ingestor capabilities require.
 
+The NATS driver's ordered transport header projection owns either validated frame bytes with
+checked compact ranges or the emitter's owned ordered pairs. Names, values and payloads keep
+their ownership through publication; neither a cast nor a fabricated range stands for a failed
+transport offset conversion. The SDK's indexed authoring and typed-inspection views preserve
+empty JSON value arrays. These driver representations never enter semantic Models or plans.
+
 A NATS ingestor or emitter Model is one of two entities, `NATS SUBJECT` or `NATS STREAM`,
 so a stored declaration holds the archived union of both. The registry's `NERVIX KIND NATS` archive signature identifies the
 current Model layout, including those unions and the endpoint kind, the separate JSON and CBOR wire type enums, the AVRO
@@ -980,6 +986,14 @@ the required runtime-state identity. Runtime owners enforce transitions that dep
 execution or recovery. Connectors and the session edge validate external representations when
 they decode or publish them. A caller does not compensate for a failed lookup, absent required
 field, type mismatch, or conversion by supplying a default zero, empty value, or null.
+
+NATS stream metadata crosses that boundary with nonzero stream sequence and delivery counts and
+a typed publication timestamp. Requested fields are decoded from the opaque acknowledgement during
+a synchronous metadata visit. An invalid field retains its typed cause as `IngestMetadataFailure`,
+with one immutable failure identity shared by capture and replay; its equality identifies that same
+failure instance. A Core message's absent reply subject remains absent and reads as a typed null;
+a conversion failure is a distinct state and refuses a row only where the field is read. Deferred
+field producers emit exactly one value, and the host validates that boundary.
 
 The Iceberg emitter validates its configured location into a URL before creating its storage factory.
 The initialized operator belongs to that storage root: a later object path must match its scheme,
