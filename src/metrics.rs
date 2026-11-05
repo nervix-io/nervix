@@ -23,6 +23,7 @@
 )]
 
 use std::{
+    borrow::Cow,
     cmp::Ordering,
     collections::{BTreeMap, VecDeque},
     num::NonZeroU64,
@@ -36,7 +37,7 @@ use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_dataflow_graph::{DataflowBranchStatistics, DataflowMetricRef, DataflowStatistics};
 use nervix_models::{
     BranchKeyFingerprint, BranchName, ClusterNodeName, DomainName, EmitterName, IngestorName,
-    ModelKind, ModelName, RelayName, Timestamp,
+    ModelKind, ModelName, RelayName, Timestamp, Unit,
 };
 use nervix_primitives::{
     collections::{DashMap, dash_map::Entry},
@@ -142,6 +143,7 @@ const PROMETHEUS_LABELS: &[&str] = &[
     "relay",
     "peer_kind",
     "peer",
+    "partition",
 ];
 const BRANCH_PROMETHEUS_LABELS: &[&str] = &["domain", "branch", "physical_node_id"];
 const BRANCH_EVICTION_PROMETHEUS_LABELS: &[&str] =
@@ -178,6 +180,9 @@ struct MetricKey {
     peer_kind: String,
     peer: String,
     direction: String,
+    /// The unit of the target that records this series: one partition of a partitioned relay,
+    /// and the `Single` unit of every other target.
+    unit: Unit,
     metric: &'static str,
 }
 
@@ -185,6 +190,7 @@ impl MetricKey {
     fn relay(
         domain: &DomainName,
         relay: &RelayName,
+        unit: Unit,
         physical_node_id: Option<&ClusterNodeName>,
         direction: &'static str,
         metric: &'static str,
@@ -198,6 +204,7 @@ impl MetricKey {
             peer_kind: String::new(),
             peer: String::new(),
             direction: direction.to_string(),
+            unit,
             metric,
         }
     }
@@ -220,6 +227,7 @@ impl MetricKey {
             peer_kind: "RELAY".to_string(),
             peer: relay.as_str().to_string(),
             direction: direction.to_string(),
+            unit: Unit::Single,
             metric,
         }
     }
@@ -241,6 +249,7 @@ impl MetricKey {
             peer_kind: String::new(),
             peer: String::new(),
             direction: direction.to_string(),
+            unit: Unit::Single,
             metric,
         }
     }
@@ -257,10 +266,11 @@ impl MetricKey {
         self.metric == RELAY_BUFFER_LEN
     }
 
-    fn belongs_to_relay(&self, domain: &DomainName, relay: &RelayName) -> bool {
+    fn belongs_to_relay_unit(&self, domain: &DomainName, relay: &RelayName, unit: Unit) -> bool {
         self.domain == domain.as_str()
             && self.target_kind == "RELAY"
             && self.target == relay.as_str()
+            && self.unit == unit
     }
 }
 
@@ -2641,6 +2651,7 @@ impl MetricSnapshotKey {
             peer_kind: arbitrary.string(),
             peer: arbitrary.string(),
             direction: arbitrary.string(),
+            unit: arbitrary.unit(),
             metric: arbitrary.string(),
         }
     }
@@ -2706,6 +2717,7 @@ struct MetricSnapshotKey {
     peer_kind: String,
     peer: String,
     direction: String,
+    unit: Unit,
     metric: String,
 }
 
@@ -3143,6 +3155,7 @@ impl RuntimeMetrics {
         &self,
         domain: &DomainName,
         relay: &RelayName,
+        unit: Unit,
         physical_node_id: Option<&ClusterNodeName>,
         direction: &'static str,
         branch: Option<BranchKeyFingerprint>,
@@ -3151,6 +3164,7 @@ impl RuntimeMetrics {
             inner: Arc::new(self.resolve_relay_metric_recorders(
                 domain,
                 relay,
+                unit,
                 physical_node_id,
                 direction,
                 branch,
@@ -3162,6 +3176,7 @@ impl RuntimeMetrics {
         &self,
         domain: &DomainName,
         relay: &RelayName,
+        unit: Unit,
         physical_node_id: Option<&ClusterNodeName>,
         direction: &'static str,
         branch: Option<BranchKeyFingerprint>,
@@ -3170,14 +3185,25 @@ impl RuntimeMetrics {
             Some(branch) => RecordingScope::GlobalAndBranch(branch),
             None => RecordingScope::Global,
         };
-        let messages_key =
-            MetricKey::relay(domain, relay, physical_node_id, "received", MESSAGES_TOTAL);
+        let messages_key = MetricKey::relay(
+            domain,
+            relay,
+            unit,
+            physical_node_id,
+            "received",
+            MESSAGES_TOTAL,
+        );
+        let buffer_key = MetricKey::relay(
+            domain,
+            relay,
+            unit,
+            physical_node_id,
+            direction,
+            RELAY_BUFFER_LEN,
+        );
         RelayMetricRecorders {
             batch: self.resolve_batch_metric_recorders(messages_key, scope),
-            buffer: self.resolve_histogram_recorders(
-                MetricKey::relay(domain, relay, physical_node_id, direction, RELAY_BUFFER_LEN),
-                scope,
-            ),
+            buffer: self.resolve_histogram_recorders(buffer_key, scope),
         }
     }
 
@@ -3857,27 +3883,33 @@ impl RuntimeMetrics {
         ));
     }
 
+    /// Registers the received-messages series of one unit of a relay this node owns, so it is
+    /// exposed at zero before the unit's owner records its first batch.
     pub fn register_global_stream(
         &self,
         domain: &DomainName,
         relay: &RelayName,
+        unit: Unit,
         physical_node_id: Option<&ClusterNodeName>,
     ) {
         self.register_counter(MetricKey::relay(
             domain,
             relay,
+            unit,
             physical_node_id,
             "received",
             MESSAGES_TOTAL,
         ));
     }
 
-    pub(crate) fn remove_relay(&self, domain: &DomainName, relay: &RelayName) {
+    /// Withdraws every series one unit of a relay recorded on this node, as its owner ends. The
+    /// relay's other units keep theirs.
+    pub(crate) fn remove_relay_unit(&self, domain: &DomainName, relay: &RelayName, unit: Unit) {
         let counter_keys = self
             .series
             .counters
             .iter()
-            .filter(|entry| entry.key().belongs_to_relay(domain, relay))
+            .filter(|entry| entry.key().belongs_to_relay_unit(domain, relay, unit))
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for key in counter_keys {
@@ -3888,7 +3920,7 @@ impl RuntimeMetrics {
             .series
             .histograms
             .iter()
-            .filter(|entry| entry.key().belongs_to_relay(domain, relay))
+            .filter(|entry| entry.key().belongs_to_relay_unit(domain, relay, unit))
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for key in histogram_keys {
@@ -3897,10 +3929,10 @@ impl RuntimeMetrics {
         }
         self.series
             .branch_counters
-            .retain(|key, _| !key.key.belongs_to_relay(domain, relay));
+            .retain(|key, _| !key.key.belongs_to_relay_unit(domain, relay, unit));
         self.series
             .branch_histograms
-            .retain(|key, _| !key.key.belongs_to_relay(domain, relay));
+            .retain(|key, _| !key.key.belongs_to_relay_unit(domain, relay, unit));
     }
 
     pub fn prometheus_text(&self) -> String {
@@ -4516,6 +4548,8 @@ impl RuntimeMetrics {
                 peer_kind: String::new(),
                 peer: String::new(),
                 direction: key.direction.clone(),
+                // A domain aggregate covers every unit of the targets it sums.
+                unit: Unit::Single,
                 metric: key.metric,
             };
             if let Some((_, summary)) = counters
@@ -4555,6 +4589,8 @@ impl RuntimeMetrics {
                 peer_kind: String::new(),
                 peer: String::new(),
                 direction: key.direction.clone(),
+                // A domain aggregate covers every unit of the targets it sums.
+                unit: Unit::Single,
                 metric: key.metric,
             };
             if let Some((_, summary)) = histograms
@@ -4591,6 +4627,7 @@ impl From<MetricKey> for MetricSnapshotKey {
             peer_kind: key.peer_kind,
             peer: key.peer,
             direction: key.direction,
+            unit: key.unit,
             metric: key.metric.to_string(),
         }
     }
@@ -4609,6 +4646,7 @@ impl TryFrom<MetricSnapshotKey> for MetricKey {
             peer_kind: key.peer_kind,
             peer: key.peer,
             direction: key.direction,
+            unit: key.unit,
             metric: metric_name_to_static(&key.metric).ok_or(())?,
         })
     }
@@ -4655,6 +4693,7 @@ impl Ord for MetricSnapshotKey {
             &self.peer_kind,
             &self.peer,
             &self.direction,
+            &self.unit,
             &self.metric,
         )
             .cmp(&(
@@ -4666,6 +4705,7 @@ impl Ord for MetricSnapshotKey {
                 &other.peer_kind,
                 &other.peer,
                 &other.direction,
+                &other.unit,
                 &other.metric,
             ))
     }
@@ -4979,12 +5019,13 @@ fn duration_nanos_i64(duration: Duration) -> i64 {
 
 fn format_counter_metric_line(prefix: &str, key: &MetricKey, summary: &CounterSummary) -> String {
     format!(
-        "{prefix}{} {} relay={} physical_node={} total={} wall_rate_per_sec={} \
+        "{prefix}{} {} relay={}{} physical_node={} total={} wall_rate_per_sec={} \
          domain_rate_per_sec={} wall_rate_ema_1m_per_sec={} wall_rate_ema_15m_per_sec={} \
          domain_rate_ema_1m_per_sec={} domain_rate_ema_15m_per_sec={}",
         key.metric,
         key.direction,
         empty_as_dash(&key.relay),
+        partition_field(key.unit),
         physical_node_label(key.physical_node_id.as_ref()),
         summary.value,
         format_number(summary.wall_rate_per_sec),
@@ -5105,12 +5146,13 @@ fn format_histogram_metric_line(
         None => String::new(),
     };
     format!(
-        "{prefix}{} {} relay={} physical_node={}{} p50_1m={} p90_1m={} p99_1m={} p50_15m={} \
+        "{prefix}{} {} relay={}{} physical_node={}{} p50_1m={} p90_1m={} p99_1m={} p50_15m={} \
          p90_15m={} p99_15m={} domain_p50_1m={} domain_p90_1m={} domain_p99_1m={} \
          domain_p50_15m={} domain_p90_15m={} domain_p99_15m={}",
         key.metric,
         key.direction,
         empty_as_dash(&key.relay),
+        partition_field(key.unit),
         physical_node_label(key.physical_node_id.as_ref()),
         capacity,
         format_histogram_optional(summary.rolling_histograms.wall_1m.p50),
@@ -5164,17 +5206,37 @@ fn format_histogram_metric_line(
     )
 }
 
-fn prometheus_label_values(key: &MetricKey) -> [&str; 8] {
+fn prometheus_label_values(key: &MetricKey) -> [Cow<'_, str>; 9] {
     [
-        key.domain.as_str(),
-        key.target_kind.as_str(),
-        key.target.as_str(),
-        physical_node_label(key.physical_node_id.as_ref()),
-        key.direction.as_str(),
-        empty_as_dash(&key.relay),
-        empty_as_dash(&key.peer_kind),
-        empty_as_dash(&key.peer),
+        Cow::Borrowed(key.domain.as_str()),
+        Cow::Borrowed(key.target_kind.as_str()),
+        Cow::Borrowed(key.target.as_str()),
+        Cow::Borrowed(physical_node_label(key.physical_node_id.as_ref())),
+        Cow::Borrowed(key.direction.as_str()),
+        Cow::Borrowed(empty_as_dash(&key.relay)),
+        Cow::Borrowed(empty_as_dash(&key.peer_kind)),
+        Cow::Borrowed(empty_as_dash(&key.peer)),
+        partition_label(key.unit),
     ]
+}
+
+/// How the partition a series belongs to is spelled as a label value: the index of a relay
+/// partition, and the same `-` absent marker as the other optional labels for every series of a
+/// target that is not divided into partitions.
+fn partition_label(unit: Unit) -> Cow<'static, str> {
+    match unit {
+        Unit::Partition(partition) => Cow::Owned(partition.to_string()),
+        Unit::Single | Unit::Instance(_) => Cow::Borrowed("-"),
+    }
+}
+
+/// The ` partition=p` field a `DESCRIBE` metric line carries for a series of one relay partition,
+/// and nothing for a series of a target that is not divided into partitions.
+fn partition_field(unit: Unit) -> String {
+    match unit {
+        Unit::Partition(partition) => format!(" partition={partition}"),
+        Unit::Single | Unit::Instance(_) => String::new(),
+    }
 }
 
 fn empty_as_dash(value: &str) -> &str {
@@ -5614,6 +5676,7 @@ mod tests {
             MetricKey::relay(
                 domain,
                 relay,
+                Unit::Single,
                 Some(physical_node_id),
                 "received",
                 MESSAGES_TOTAL,
@@ -5853,8 +5916,14 @@ mod tests {
         let domain = DomainName::parse("main").expect("valid domain");
         let relay = RelayName::parse("events").expect("valid identifier");
         let physical_node = ClusterNodeName::parse("node-1").expect("valid name");
-        let relay_metrics =
-            metrics.resolve_relay_metrics(&domain, &relay, Some(&physical_node), "concrete", None);
+        let relay_metrics = metrics.resolve_relay_metrics(
+            &domain,
+            &relay,
+            Unit::Single,
+            Some(&physical_node),
+            "concrete",
+            None,
+        );
         relay_metrics.observe_buffer(2, 3);
         relay_metrics.observe_batch(2, 64, None);
 
@@ -6100,6 +6169,7 @@ mod tests {
             .resolve_relay_metrics(
                 &domain,
                 &relay,
+                Unit::Single,
                 Some(&ClusterNodeName::parse("node-1").expect("valid name")),
                 "concrete",
                 None,
@@ -6177,6 +6247,7 @@ mod tests {
         let relay_metrics = metrics.resolve_relay_metrics(
             &domain,
             &relay,
+            Unit::Single,
             Some(&ClusterNodeName::parse("node-1").expect("valid name")),
             "concrete",
             Some(tenant_branch("acme")),
@@ -6184,7 +6255,7 @@ mod tests {
         relay_metrics.observe_batch(2, 64, None);
         relay_metrics.observe_buffer(1, 2);
 
-        metrics.remove_relay(&domain, &relay);
+        metrics.remove_relay_unit(&domain, &relay, Unit::Single);
 
         assert!(
             metrics
@@ -6215,6 +6286,92 @@ mod tests {
                 .all(|entry| entry.key().key.target != relay.as_str())
         );
         assert!(!metrics.prometheus_text().contains("target=\"events\""));
+    }
+
+    #[test]
+    fn partition_series_carry_their_partition_and_end_with_their_owner() {
+        let metrics = RuntimeMetrics::default();
+        let domain = DomainName::parse("main").expect("valid domain");
+        let relay = RelayName::parse("events").expect("valid identifier");
+        let node = ClusterNodeName::parse("node-1").expect("valid name");
+        for unit in [Unit::Partition(0), Unit::Partition(3)] {
+            let partition =
+                metrics.resolve_relay_metrics(&domain, &relay, unit, Some(&node), "concrete", None);
+            partition.observe_batch(2, 64, None);
+            // A relay's DESCRIBE lists its buffer series, which each partition's owner observes.
+            partition.observe_buffer(1, 2);
+        }
+
+        let rendered = metrics.prometheus_text();
+        let received = |partition: &str| {
+            rendered.lines().any(|line| {
+                line.starts_with("nervix_messages_total{")
+                    && line.contains("target=\"events\"")
+                    && line.contains(&format!("partition=\"{partition}\""))
+                    && line.ends_with(" 2")
+            })
+        };
+        assert!(
+            received("0"),
+            "partition 0 records its own series: {rendered}"
+        );
+        assert!(
+            received("3"),
+            "partition 3 records its own series: {rendered}"
+        );
+        let described = metrics.describe_global_target(&domain, "RELAY", &relay);
+        assert!(
+            described
+                .iter()
+                .any(|line| line.contains("relay=events partition=3 physical_node=node-1")),
+            "a DESCRIBE line names its partition: {described:?}"
+        );
+
+        metrics.remove_relay_unit(&domain, &relay, Unit::Partition(0));
+        let rendered = metrics.prometheus_text();
+        assert!(!rendered.contains("partition=\"0\""), "{rendered}");
+        assert!(
+            rendered.contains("partition=\"3\""),
+            "the other partition keeps its series"
+        );
+    }
+
+    #[test]
+    fn a_series_of_a_target_without_partitions_labels_its_partition_absent() {
+        let metrics = RuntimeMetrics::default();
+        let domain = DomainName::parse("main").expect("valid domain");
+        let relay = RelayName::parse("events").expect("valid identifier");
+        let node = ClusterNodeName::parse("node-1").expect("valid name");
+        let owner = metrics.resolve_relay_metrics(
+            &domain,
+            &relay,
+            Unit::Single,
+            Some(&node),
+            "concrete",
+            None,
+        );
+        owner.observe_batch(1, 8, None);
+        owner.observe_buffer(1, 2);
+
+        let rendered = metrics.prometheus_text();
+        assert!(
+            rendered
+                .lines()
+                .filter(|line| line.starts_with("nervix_messages_total{"))
+                .all(|line| line.contains("partition=\"-\"")),
+            "{rendered}"
+        );
+        let described = metrics.describe_global_target(&domain, "RELAY", &relay);
+        assert!(
+            described
+                .iter()
+                .any(|line| line.contains("relay=events physical_node=node-1")),
+            "the owner's buffer series is described: {described:?}"
+        );
+        assert!(
+            described.iter().all(|line| !line.contains("partition=")),
+            "{described:?}"
+        );
     }
 
     #[test]
@@ -6462,7 +6619,14 @@ mod tests {
         )
         .observe(9, 128, None);
         metrics
-            .resolve_relay_metrics(&domain, &relay, Some(&physical_node), "concrete", None)
+            .resolve_relay_metrics(
+                &domain,
+                &relay,
+                Unit::Single,
+                Some(&physical_node),
+                "concrete",
+                None,
+            )
             .observe_batch(2, 64, None);
 
         let snapshot = metrics.snapshot_global_target(
@@ -6496,7 +6660,14 @@ mod tests {
         )
         .observe(9, 128, None);
         metrics
-            .resolve_relay_metrics(&domain, &relay, Some(&physical_node), "concrete", None)
+            .resolve_relay_metrics(
+                &domain,
+                &relay,
+                Unit::Single,
+                Some(&physical_node),
+                "concrete",
+                None,
+            )
             .observe_batch(2, 64, None);
 
         let snapshot = metrics.snapshot_branch_target(

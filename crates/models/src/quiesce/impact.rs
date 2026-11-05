@@ -32,7 +32,7 @@ use super::{ModelChangeAspect, QuiesceLevel, StatePurge};
 use crate::ModelName;
 use crate::{
     BranchName, ClusterNodeName, DomainName, ModelKind, NodeRef, RelayName,
-    RequestedResourceVersion, ResourceName,
+    RequestedResourceVersion, ResourceName, Unit,
 };
 
 /// The one-based public identity of an accepted operation in a transaction.
@@ -664,6 +664,16 @@ impl BranchKeyFingerprint {
 
     pub const fn fingerprint(&self) -> &[u8; 32] {
         &self.0
+    }
+
+    /// The seed the key this fingerprint names is partitioned by: the digest's first eight bytes,
+    /// read little-endian.
+    pub fn partition_seed(&self) -> crate::PartitionSeed {
+        let first = self
+            .0
+            .first_chunk::<8>()
+            .assured("a 32-byte digest begins with eight bytes");
+        crate::PartitionSeed::from_le_bytes(*first)
     }
 }
 
@@ -1367,6 +1377,9 @@ pub struct DomainLifecycleImpact {
 )]
 pub struct OwnershipMoveImpact {
     pub node: ImpactNodeCoverage,
+    /// The unit of the node that moves: its one unit, or the one partition of a partitioned relay
+    /// whose owner changes.
+    pub unit: Unit,
     pub source: ClusterNodeName,
     pub destination: ClusterNodeName,
     pub attribution: ImpactAttribution,
@@ -1950,6 +1963,35 @@ mod impact_report_tests {
         for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
     {
         N::try_from(raw).assured("the test passes a valid Nervix name")
+    }
+
+    /// A key's partition seed is the first eight bytes of its fingerprint read little-endian, so
+    /// the golden key lands in the same partition on every node and in every release.
+    #[test]
+    fn a_key_lands_in_the_partition_its_fingerprint_seed_names() {
+        let fingerprint = BranchKeyFingerprint::of_canonical_text(r#"{"tenant":"acme-secret"}"#);
+        let seed = fingerprint.partition_seed();
+        assert_eq!(seed.get(), 0x26c2_a362_2b11_2535);
+        let four = crate::BranchPartitions::Direct(
+            std::num::NonZeroU16::new(4).assured("four is not zero"),
+        );
+        assert_eq!(four.unit_of(seed), Unit::Partition(1));
+        assert_eq!(crate::BranchPartitions::ONE.unit_of(seed), Unit::Single);
+        assert_eq!(
+            four.units(),
+            vec![
+                Unit::Partition(0),
+                Unit::Partition(1),
+                Unit::Partition(2),
+                Unit::Partition(3)
+            ]
+        );
+        assert_eq!(crate::BranchPartitions::ONE.units(), vec![Unit::Single]);
+        let largest = crate::BranchPartitions::Direct(std::num::NonZeroU16::MAX);
+        let Unit::Partition(partition) = largest.unit_of(seed) else {
+            panic!("a branch of many partitions places a key in one of them");
+        };
+        assert!(partition < u32::from(u16::MAX));
     }
 
     /// A stored or transmitted operation range whose last operation comes before its first is
