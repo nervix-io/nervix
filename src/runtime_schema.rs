@@ -9007,6 +9007,22 @@ mod tests {
     }
 
     #[test]
+    fn cbor_f32_signaling_nan_is_read_as_a_quiet_nan_with_its_payload() {
+        let codec = one_field_cbor_codec(ParseAsType::F32, CborType::Float);
+        let payload = [
+            0xa1, 0x65, b'v', b'a', b'l', b'u', b'e', 0xfa, 0x7f, 0xa0, 0x00, 0x01,
+        ];
+        let decoded = decode_one(&codec, &payload).expect("the CBOR float is accepted");
+        let column = decoded
+            .batch()
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .expect("the field is an F32 Arrow column");
+        assert_eq!(column.value(0).to_bits(), 0x7fe0_0001);
+    }
+
+    #[test]
     fn cbor_integers_are_range_checked_at_every_internal_width() {
         use ciborium::value::Value as CborValue;
 

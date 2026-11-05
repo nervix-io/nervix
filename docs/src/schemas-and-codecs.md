@@ -369,7 +369,9 @@ values, and nulls of optional fields. The formats themselves set the bounds of t
   decimal a writer prints for an `F32` reads back as that same `F32`, also where the number lies
   exactly halfway between two of them once read as a 64-bit float. A number beyond the type's range
   rounds to an infinity. Every finite float the codec writes reads back to its exact bits. A CBOR
-  float narrows directly to `F32` when that is the internal field type.
+  float narrows directly to `F32` when that is the internal field type. Ciborium widens an `F32`
+  before writing CBOR, so an `F32` signaling NaN becomes a quiet NaN with the same sign and payload;
+  other `F32` bits are preserved.
 - `WIRE AVRO` keeps every float bit pattern. It writes an unsigned element of an `ARRAY` or `VEC` as
   an Avro `long`, so an element above 9223372036854775807 fails to encode.
 - A datetime travels as RFC 3339 text in UTC; text written with another offset reads as the same

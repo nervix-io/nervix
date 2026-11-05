@@ -402,6 +402,68 @@ fn cbor_wire_type(ty: &ParseAsType) -> CborType {
     }
 }
 
+/// Ciborium widens an `F32` before writing it, which quiets a signaling NaN while retaining its
+/// sign and payload. The CBOR codec preserves every other float bit, including signed zero, so
+/// only that one conversion belongs in the expected value of a generated row.
+fn cbor_value_as_written(value: LogicalValue) -> LogicalValue {
+    match value {
+        LogicalValue::F32(bits)
+            if bits & 0x7f80_0000 == 0x7f80_0000
+                && bits & 0x007f_ffff != 0
+                && bits & 0x0040_0000 == 0 =>
+        {
+            LogicalValue::F32(bits | 0x0040_0000)
+        }
+        LogicalValue::Array(values) => LogicalValue::Array(
+            values
+                .into_iter()
+                .map(|value| value.map(cbor_value_as_written))
+                .collect(),
+        ),
+        LogicalValue::Vec(values) => LogicalValue::Vec(
+            values
+                .into_iter()
+                .map(|value| value.map(cbor_value_as_written))
+                .collect(),
+        ),
+        value => value,
+    }
+}
+
+fn assert_schemaful_batch(
+    actual: &arrow_array::RecordBatch,
+    expected: &arrow_array::RecordBatch,
+    format: SchemafulFormat,
+) {
+    if format != SchemafulFormat::Cbor {
+        assert_same_batch(actual, expected);
+        return;
+    }
+    assert_eq!(
+        actual.schema(),
+        expected.schema(),
+        "the schema is preserved"
+    );
+    assert_eq!(
+        actual.num_rows(),
+        expected.num_rows(),
+        "every row is preserved"
+    );
+    let expected_rows: Vec<Vec<Option<LogicalValue>>> = LogicalValue::rows(expected)
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|value| value.map(cbor_value_as_written))
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        LogicalValue::rows(actual),
+        expected_rows,
+        "every CBOR value and null is preserved after signaling F32 NaNs are quieted"
+    );
+}
+
 /// The Avro wire type the registry binds to an internal field of type `ty`, which the Avro domain
 /// generates only at the top level.
 fn avro_wire_type(ty: &ParseAsType) -> AvroType {
@@ -427,9 +489,9 @@ fn avro_wire_type(ty: &ParseAsType) -> AvroType {
 
 /// Every row a schemaful codec encodes decodes back into exactly that row: the payloads of a whole
 /// batch, decoded in order into one builder as an ingest group decodes them, form a batch of the
-/// codec's schema holding every value and null of the original, floats by their bits, datetimes to
-/// the nanosecond, bytes, Unicode text and nested lists, whatever order the wire schema lists the
-/// fields in.
+/// codec's schema holding every value and null of the original, floats by their bits except for
+/// ciborium's signaling `F32` NaN quieting, datetimes to the nanosecond, bytes, Unicode text and
+/// nested lists, whatever order the wire schema lists the fields in.
 #[test]
 fn bolero_schemaful_codecs_decode_every_row_they_encode() {
     bolero::check!()
@@ -446,7 +508,7 @@ fn bolero_schemaful_codecs_decode_every_row_they_encode() {
                 decoded.accepted.iter().all(|accepted| *accepted),
                 "every encoded row decodes"
             );
-            assert_same_batch(decoded.batch.batch(), &rows);
+            assert_schemaful_batch(decoded.batch.batch(), &rows, case.format);
         });
 }
 
@@ -807,7 +869,7 @@ fn bolero_damaged_payloads_leave_a_group_as_its_payloads_decode_alone() {
                 );
                 if let Some(row) = original {
                     assert!(alone.accepted[0], "a payload the codec wrote decodes");
-                    assert_same_batch(alone.batch.batch(), &rows.slice(*row, 1));
+                    assert_schemaful_batch(alone.batch.batch(), &rows.slice(*row, 1), case.format);
                 }
                 if alone.accepted[0] {
                     expected_rows.extend(LogicalValue::rows(alone.batch.batch()));
