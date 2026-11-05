@@ -83,8 +83,10 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   LATEST creation position, the subscription's TYPE, endpoints, delivery/ACK expectations,
   emitter publishing mode, confirmation window and timeout where applicable, retry pacing,
   ordering, and offsets.
-- Isolation: unbranched or a concrete branch key, branch TTL, and optional instance limit. A branch
-  currently has one direct execution partition; do not write a `PARTITIONS` clause.
+- Isolation: unbranched or a concrete branch key, branch TTL, optional instance limit, and the
+  branch's partition count when one relay owner per branch would funnel too much traffic (see
+  [Relay Partitions](https://docs.nervix.io/relay.html#relay-partitions)); the count changes only
+  while the domain is stopped.
 - Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference,
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
   repartitioning.
@@ -230,6 +232,12 @@ staging only; `COMMIT` supplies the full usable-effect boundary. CLI, Rust-clien
 flows retain command execution references, upload identities, transaction append positions, and
 commit identity through redirects or reconnects. Do not manufacture a new identity for an
 uncertain admitted operation.
+
+If a session's COMMIT, REVERT, or attach reports that its transaction is unknown after the retained
+tombstone is removed, that session can begin another transaction. Keep the original execution
+reference for any earlier command whose outcome is uncertain; the new failure does not identify
+that earlier outcome. Follow [Exact Recovery](https://docs.nervix.io/client-session-protocol.html#exact-recovery)
+for its recovery window and expiry.
 
 For storage failures or uncertain administrative outcomes, consult `Control Plane` → `Durability
 and recovery` before suggesting a retry, and

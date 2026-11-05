@@ -1012,6 +1012,58 @@ Feature: Plexus transactions
       | 1            |
       | 3            |
 
+  @transaction_reclaimed_binding
+  Scenario Outline: A session begins another transaction after the one it held loses its tombstone
+    Given the transaction tombstone retention is configured as "2s"
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given client "owner" is connected to node "{{leader}}"
+    When client "owner" executes these Plexus commands
+      """
+      BEGIN;
+      START;
+      """
+    Then client "owner" transaction id is saved as placeholder "finished_transaction"
+    Given transaction commit on node "{{leader}}" pauses after 1 statement
+    When client "owner" begins executing these Plexus commands in the background
+      """
+      COMMIT;
+      """
+    Then the transaction commit pause on node "{{leader}}" after 1 statement is reached
+    And transaction "{{finished_transaction}}" eventually has state "COMMITTING"
+    Then the background Plexus execution is discarded
+    When client "owner" closes its session cleanly
+    Given client "resumed" is connected to node "{{leader}}"
+    When client "resumed" attaches to transaction "{{finished_transaction}}"
+    And the transaction commit pause on node "{{leader}}" after 1 statement is released
+    Then transaction "{{finished_transaction}}" eventually has state "COMMITTED"
+    And transaction "{{finished_transaction}}" is eventually removed
+    When client "resumed" attempts to commit its transaction
+    Then the last command error contains
+      """
+      transaction '{{finished_transaction}}' is unknown
+      """
+    When client "resumed" executes these Plexus commands
+      """
+      BEGIN;
+      """
+    Then client "resumed" transaction state is "OPEN"
+    When client "resumed" executes these Plexus commands
+      """
+      REVERT;
+      """
+    Then client "resumed" transaction state is "REVERTED"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @transaction_failed_resume
   Scenario: A failing resumed commit records the failing step and preserves its prefix
     Given a 3 node nervix cluster is started

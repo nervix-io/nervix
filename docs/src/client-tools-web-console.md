@@ -35,7 +35,7 @@ connected to leader 'node-2'
 ```
 
 The console reports the leader each time its session connects, so the notice appears again when
-the session reconnects: after a lost connection, after a command whose outcome is not yet known, or
+the session reconnects: after a lost connection, after a reply that breaks the session contract, or
 after a leader change. A reconnect keeps the session's place: the console connects again where the
 redirect took it, selects its domain, attaches its clock, restores its subscription tabs and
 attaches its transaction again, and then sends its pending commands under their execution
@@ -153,7 +153,9 @@ share a name. The preview and submitted command come from the completed semantic
 canonical renderer, just as they do for the earlier forms.
 
 A branch form selects an internal key schema from a server-backed, searchable, paged list, then
-requires a TTL. It may set a positive maximum instance count with LRU eviction. The schema list
+requires a TTL. Its partition count starts at 1 and accepts a whole number from 1 through 65535; the
+preview omits `PARTITIONS 1` as `SHOW CREATE BRANCH` does. It may set a positive maximum instance
+count with LRU eviction. The schema list
 uses the draft's captured domain and the session's attached transaction prefix, so a schema staged
 earlier in the same transaction is selectable. Changing the captured domain keeps a previous
 selection visible but marks it invalid until it is selected again. An invalid branch key schema,
@@ -249,7 +251,7 @@ commands under the same session and domain.
 
 An ingestor form offers every connector and entity an ingestor reads through a transport:
 `HTTP REQUEST`, `HTTP ENDPOINT`, `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC`, `NATS SUBJECT`,
-`RABBITMQ QUEUE`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `SQS QUEUE`,
+`NATS STREAM`, `RABBITMQ QUEUE`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `SQS QUEUE`,
 `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER`. Its client or endpoint is a
 typed choice limited to that pair: clients of its connector, or endpoints of the `TYPE` its head
 names. The preview writes the statement under that pair's head. The entity declaration supplies
@@ -472,7 +474,12 @@ follows leadership. When its outcome is not known yet, the console repeats it on
 after a wait that starts at 250 milliseconds and doubles to at most five seconds. The command keeps
 its position ahead of later held commands, while session messages continue to arrive. The selected
 domain, clock and relay tabs keep their existing attachments. A redirect or an ended connection
-triggers recovery; an uncertain reply alone leaves the connection open. The transaction id and
+triggers recovery; an uncertain reply alone leaves the connection open. A reply whose outcome names
+another execution reference than its command's is a protocol violation: the console reports it with
+both references, takes nothing from that reply, neither its result nor its redirect, transaction or
+retry, and stops reading the connection. It reconnects as after a lost connection and sends the
+command again in its place under its own reference, so the leader answers with the command's own
+outcome; a Create form shows **Queued until reconnect** until then. The transaction id and
 status are replicated. If the WebSocket closes
 unexpectedly or leadership changes, the console reconnects and attaches that id before resuming a
 pending command. Each append is matched by its reference and expected position, and an outstanding

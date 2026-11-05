@@ -353,6 +353,7 @@ members = [
   "crates/models",
   "crates/primitives",
   "crates/primitives/macros",
+  "crates/rate-limit",
   "crates/recovery",
   "crates/simd-kernels",
   "crates/test-environment",
@@ -589,6 +590,7 @@ nervix-plexus = { package = "nervix-plexus", path = "crates/plexus", features = 
 ] }
 nervix-primitives = { package = "nervix-primitives", path = "crates/primitives" }
 nervix-primitives-macros = { package = "nervix-primitives-macros", path = "crates/primitives/macros" }
+nervix-rate-limit = { path = "crates/rate-limit" }
 nervix-recovery = { package = "nervix-recovery", path = "crates/recovery" }
 nervix-roto = { package = "nervix-roto", path = "crates/nervix-roto" }
 nervix-server = { package = "nervix-server", path = "." }
@@ -781,6 +783,9 @@ zeroize = "1.9"
 zeromq = "0.4"
 
 [patch.crates-io]
+# The alpha.33 heartbeat worker stopped waiting after one heartbeat interval, discarding follower
+# answers that still arrived inside the leader lease. Keep its response wait aligned with that lease.
+openraft = { git = "https://github.com/glebpom/openraft.git", rev = "f54a099019f2d5090393209942e88eb0701b05f9" }
 # A flush must drain async-nats' queued bytes before flushing the transport. The connection
 # generation lets a Core NATS write reject a replacement connection's flush after buffer loss.
 async-nats = { git = "https://github.com/glebpom/nats.rs.git", rev = "d131b7bc954fc57b8447e0d402a896b4b67010b1" }

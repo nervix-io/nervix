@@ -46,9 +46,9 @@ use nervix_models::{
     DescribeRelay, DescribeReorderer, DescribeResource, DescribeUdf, DescribeWasmProcessor,
     DescribeWindowProcessor, DomainName, DomainStatus, EmitterName, FieldName, IngestorName,
     InspectionFormat, LookupName, LookupQuery, Model, ModelKind, ModelName, NodeRef, ParseAsType,
-    RelayName, ResourceDescription, ResourceId, ResourceName, ResourceUsage, ResourceVersion,
+    ResourceDescription, ResourceId, ResourceName, ResourceUsage, ResourceVersion,
     ResourceVersionDescription, ResourceVersionEntries, ScheduledNode, SchemaName,
-    UniquelyKindedModel, WasmStateInspection,
+    UniquelyKindedModel, Unit, WasmStateInspection,
 };
 use nervix_vm::window::{WindowAggregateProgram, lower_window_assignments};
 use tracing::{debug, warn};
@@ -79,8 +79,12 @@ use super::{
     },
 };
 use crate::{
-    registry::RegistryError, runtime::IngestorDescribe as RuntimeIngestorDescribe, runtime_schema,
+    registry::RegistryError,
+    runtime::{IngestorDescribe as RuntimeIngestorDescribe, RelayPartitioning},
+    runtime_schema,
 };
+
+mod relay_units;
 
 const REMOTE_DESCRIBE_RELAY_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -247,6 +251,10 @@ impl SessionServiceImpl {
                 return command_error(format!("{message:#}"));
             }
         };
+        let unit = match RelayPartitioning::of(Some(&branching)).unit_of(&key) {
+            Ok(unit) => unit,
+            Err(error) => return command_error(format!("{error:#}")),
+        };
 
         if let Some(domain_state) = self.inner.consensus.current_domain(domain).await
             && let DomainStatus::Stopped = domain_state.status
@@ -254,13 +262,14 @@ impl SessionServiceImpl {
             return command_ok("not exists".to_string());
         }
 
-        let owner_nodes = self
-            .scheduled_stream_owner_nodes(domain, &describe.relay)
+        // Only the owner of the key's unit holds the key's branch.
+        let owner = self
+            .scheduled_stream_unit_owner(domain, &describe.relay, unit)
             .await;
 
         let local_node_id = self.inner.consensus.local_node_id().clone();
         let mut exists = false;
-        if owner_nodes.is_empty() || owner_nodes.iter().any(|owner| owner == &local_node_id) {
+        if owner.as_ref().is_none_or(|owner| owner == &local_node_id) {
             match self
                 .inner
                 .runtime
@@ -272,10 +281,9 @@ impl SessionServiceImpl {
                 }
             }
         }
-        for owner in owner_nodes {
-            if owner == local_node_id {
-                continue;
-            }
+        if let Some(owner) = owner.clone()
+            && owner != local_node_id
+        {
             let response = self
                 .inner
                 .interconnect
@@ -306,7 +314,6 @@ impl SessionServiceImpl {
                         error = %format_args!("{error:#}"),
                         "timed out waiting for remote DESCRIBE RELAY response"
                     );
-                    continue;
                 }
             }
         }
@@ -316,6 +323,12 @@ impl SessionServiceImpl {
         } else {
             "not exists".to_string()
         }];
+        if let Unit::Partition(partition) = unit {
+            lines.push(format!("partition: {partition}"));
+            if let Some(owner) = &owner {
+                lines.push(format!("owner: {owner}"));
+            }
+        }
         if exists {
             lines.push(format!("capacity: {}", ack_model.buffer));
         }
@@ -340,8 +353,7 @@ impl SessionServiceImpl {
         &self,
         request: RemoteDescribeRelayRequest,
     ) -> Result<bool, RemoteOperationFailure> {
-        self.prepare_stream_owner_control_request(&request.domain, &request.relay)
-            .await?;
+        self.prepare_control_request_domain(&request.domain).await?;
         let subject = RemoteOperationSubject::Entity {
             domain: request.domain.clone(),
             entity: NodeRef::new(ModelKind::Relay, request.relay.clone()),
@@ -373,6 +385,18 @@ impl SessionServiceImpl {
                 reason: format!("{reason:#}"),
             }
         })?;
+        let unit = RelayPartitioning::of(Some(&branching))
+            .unit_of(&key)
+            .map_err(|reason| RemoteOperationFailure::Failed {
+                subject: subject.clone(),
+                reason: format!("{reason:#}"),
+            })?;
+        let owner = self
+            .scheduled_stream_unit_owner(&request.domain, &request.relay, unit)
+            .await;
+        if owner.as_ref() != Some(self.inner.consensus.local_node_id()) {
+            return Err(RemoteOperationFailure::Rejected { subject });
+        }
         match self
             .inner
             .runtime
@@ -1005,6 +1029,11 @@ impl SessionServiceImpl {
         let Some(node) = scheduled_node else {
             return Ok(self.local_runtime_describe(domain, kind, identifier, &metric_kind));
         };
+        if node.is_partitioned() {
+            return self
+                .describe_partitioned_runtime(domain, kind, identifier, node)
+                .await;
+        }
         let local_node_id = self.inner.consensus.local_node_id();
         if node.executes_on(local_node_id) {
             return Ok(self.local_runtime_describe(domain, kind, identifier, &metric_kind));
@@ -1012,7 +1041,17 @@ impl SessionServiceImpl {
         let Some(owner) = node.execution_node() else {
             return Ok(self.local_runtime_describe(domain, kind, identifier, &metric_kind));
         };
+        self.remote_runtime_describe(domain, kind, identifier, owner)
+            .await
+    }
 
+    async fn remote_runtime_describe(
+        &self,
+        domain: &DomainName,
+        kind: ModelKind,
+        identifier: ModelName,
+        owner: &ClusterNodeName,
+    ) -> error_stack::Result<RemoteDescribeMetricsEnvelope, ObservationError> {
         self.inner
             .interconnect
             .request(
@@ -1749,24 +1788,6 @@ impl SessionServiceImpl {
             return Err(RemoteOperationFailure::Rejected { subject });
         }
         Ok(node)
-    }
-
-    async fn prepare_stream_owner_control_request(
-        &self,
-        domain: &DomainName,
-        relay: &RelayName,
-    ) -> Result<(), RemoteOperationFailure> {
-        self.prepare_control_request_domain(domain).await?;
-        let subject = RemoteOperationSubject::Entity {
-            domain: domain.clone(),
-            entity: NodeRef::new(ModelKind::Relay, relay.clone()),
-        };
-        let owner_nodes = self.scheduled_stream_owner_nodes(domain, relay).await;
-        let local_node_id = self.inner.consensus.local_node_id();
-        if !owner_nodes.iter().any(|owner| owner == local_node_id) {
-            return Err(RemoteOperationFailure::Rejected { subject });
-        }
-        Ok(())
     }
 
     pub(in crate::application) async fn prepare_control_request_domain(

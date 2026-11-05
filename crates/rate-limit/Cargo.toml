@@ -1,0 +1,49 @@
+[package]
+description = "Unit-owned rate admission, bounded key stores and clock-independent allowance generations"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-rate-limit"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[[test]]
+harness = false
+name = "admission"
+
+[features]
+default = []
+deloxide = ["nervix-deadlock/deloxide", "nervix-primitives/deloxide"]
+deloxide-order = [
+  "deloxide",
+  "nervix-deadlock/deloxide-order",
+  "nervix-primitives/deloxide-order",
+]
+deloxide-stress = [
+  "deloxide",
+  "nervix-deadlock/deloxide-stress",
+  "nervix-primitives/deloxide-stress",
+]
+loom = ["nervix-model-harness/loom", "nervix-primitives/loom"]
+shuttle = [
+  "nervix-deadlock/shuttle",
+  "nervix-model-harness/shuttle",
+  "nervix-primitives/shuttle",
+]
+turmoil = ["nervix-primitives/turmoil"]
+
+[dependencies]
+chrono = { workspace = true }
+error-stack = { workspace = true }
+governor = { workspace = true }
+meticulous = { workspace = true }
+nervix-expiry-map = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+bolero = { workspace = true }
+cucumber = { workspace = true, features = ["libtest"] }
+nervix-deadlock = { workspace = true }
+nervix-model-harness = { workspace = true }
