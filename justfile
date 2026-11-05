@@ -1225,7 +1225,7 @@ test-client-shuttle check:
 
 # Qualify the complete registered client feature scope, with canonical process supervision.
 test-client-recovery-diagnostic selection: tests-deps
-    NERVIX_PREPARED_TARGET_DIR={{ quote(cargo_target_dir) }} python3 -m scripts.client_recovery_checks {{ quote(selection) }} --target-dir {{ quote(cargo_target_dir + "/client-recovery/" + selection) }}
+    NERVIX_PREPARED_TARGET_DIR={{ quote(cargo_target_dir) }} python3 -m scripts.client_recovery_checks {{ quote(selection) }} --target-dir {{ quote(cargo_target_dir + "/client-recovery") }}
 
 test-client-recovery-runner:
     python3 -m unittest --quiet scripts.tests.test_client_recovery_checks

@@ -39,6 +39,8 @@ register first, then retains all registered workloads in the four feature files 
 client request and exchange owners. Their existing tags, invocations, bounds, supervision and
 accounting remain in force. Each record declares its selected owners and features and sets
 `whole_workspace` to false; this scope cannot enter a whole-workspace coverage collection.
+The selections share a diagnostic build directory, as the canonical lane does, and retain separate
+attempt records for each selection.
 `just test-client-recovery-runner` checks scope completeness against feature discovery.
 
 ## Delayed Consensus Heartbeat Answers

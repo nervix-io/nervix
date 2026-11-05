@@ -93,6 +93,34 @@ async fn a_foreign_restore_reply_ends_its_session_and_reports_its_own_reference_
         !requests.pending.lock().is_open(),
         "the untrusted session ends"
     );
+    within_deadline(client.recover_session(
+        crate::client::RecoveryMode::IfClosed,
+        crate::client::RecoveryDeadline::RetryBudget,
+    ))
+    .await
+    .assured("a stopped restore session can be replaced");
+    let mut replacement = server.next_exchange().await;
+    let listing = {
+        let client = client.clone();
+        nervix_primitives::task::spawn(async move { client.list_domains().await })
+    };
+    let request = replacement.next_request().await;
+    replacement
+        .reply(
+            request.request_id,
+            ReplyBody::DomainList(DomainList {
+                domains: tenant_domains(),
+            }),
+            &limits(),
+        )
+        .await;
+    assert_eq!(
+        within_deadline(listing)
+            .await
+            .assured("the call ends")
+            .assured("the replacement answers"),
+        tenant_domains()
+    );
 }
 
 #[nervix_primitives::test]

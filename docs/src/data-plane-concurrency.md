@@ -1387,6 +1387,13 @@ registry; it cannot leave a request waiting on an ended exchange. The reader rou
 after the mismatch. Dropping its future, including task abortion, closes the remaining waiters and
 ends its exact event and attachment generation.
 
+The exchange retains its reader handle until joining finishes, then clears it. A later close
+cannot poll that completed join again. Cancelling interruption before the join completes keeps
+the handle available for a later close to finish its cleanup.
+The ordinary `a_cancelled_interruption_keeps_cleanup_owned_until_close_finishes` witness cancels
+interruption while the reader has not yet stopped, then requires close to finish generation
+cleanup. The foreign-restore owner witness also requires recovery to serve a new request.
+
 `shuttle_a_foreign_reply_racing_registration_interrupts_every_waiter` drives the production reader
 and pending registry with registration and cancellation racing the mismatched reply. It requires
 every remaining waiter to be interrupted, the first mismatch cause to survive, and the later

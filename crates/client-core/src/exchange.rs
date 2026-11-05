@@ -514,11 +514,11 @@ impl SessionEvents {
     }
 }
 
-/// One open exchange with a server.
+/// One exchange with a server and its reader's lifetime.
 pub(crate) struct Exchange {
     pub(crate) requests: Arc<ExchangeRequests>,
-    /// The task routing the exchange's frames. Dropping the exchange aborts it.
-    pub(crate) reader: JoinHandle<()>,
+    /// The reader still to join. It is cleared after joining; dropping the exchange aborts it.
+    pub(crate) reader: Option<JoinHandle<()>>,
     pub(crate) emitters: EventTargets,
     pub(crate) generation: Arc<()>,
     /// The channel the exchange runs on, which resource uploads share.
@@ -638,7 +638,7 @@ impl Exchange {
         let reader = nervix_primitives::task::spawn(reader.run(response.into_inner()));
         Ok(Self {
             requests: Arc::new(ExchangeRequests { frames, pending }),
-            reader,
+            reader: Some(reader),
             emitters,
             generation,
             channel,
@@ -662,8 +662,13 @@ impl Exchange {
     /// Stops this exact reader and waits for its lifetime cleanup, retaining the exchange handle.
     pub(crate) async fn interrupt(&mut self, end: ExchangeEnd) {
         self.requests.pending.lock().end(end);
-        self.reader.abort();
-        (&mut self.reader).await.discarded(
+        let Some(reader) = &mut self.reader else {
+            return;
+        };
+        reader.abort();
+        let joined = reader.await;
+        self.reader = None;
+        joined.discarded(
             "an aborted reader ends cancelled, and one that ended first already closed its \
              requests",
         );
@@ -675,7 +680,9 @@ impl Drop for Exchange {
         // Nothing reads an exchange's replies once it is gone, and stopping its reader releases
         // the server's session. Its waiters observe the closed session instead of waiting out
         // their deadlines.
-        self.reader.abort();
+        if let Some(reader) = &self.reader {
+            reader.abort();
+        }
         self.requests.pending.lock().close();
     }
 }

@@ -286,7 +286,9 @@ fn detached_exchange(
     let reader = ExchangeReader::new(pending.clone(), emitters.clone(), generation.clone());
     Exchange {
         requests: Arc::new(ExchangeRequests { frames, pending }),
-        reader: nervix_primitives::task::spawn(reader.run(nervix_primitives::stream::pending())),
+        reader: Some(nervix_primitives::task::spawn(
+            reader.run(nervix_primitives::stream::pending()),
+        )),
         emitters,
         generation,
         channel: Channel::from_static("http://127.0.0.1:9").connect_lazy(),

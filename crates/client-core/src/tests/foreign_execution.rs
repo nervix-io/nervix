@@ -116,3 +116,29 @@ async fn an_aborted_reader_interrupts_its_waiters_and_ends_its_generation() {
     };
     assert!(matches!(report.current_context(), EventQueueError::Closed));
 }
+
+#[nervix_primitives::test(flavor = "current_thread")]
+async fn a_cancelled_interruption_keeps_cleanup_owned_until_close_finishes() {
+    use std::{future::Future as _, task::Poll};
+
+    let events = SessionEvents::new();
+    let (frames, _outbound) = mpsc::channel(1);
+    let pending = Arc::new(Mutex::new(PendingReplies::new()));
+    let mut exchange = detached_exchange(frames, pending, events.emitters.clone());
+    let mut interrupt = Box::pin(exchange.interrupt(crate::exchange::ExchangeEnd::Closed));
+    let waiting =
+        std::future::poll_fn(|context| Poll::Ready(interrupt.as_mut().poll(context))).await;
+    assert!(
+        waiting.is_pending(),
+        "the reader has not yet run its cleanup"
+    );
+    drop(interrupt);
+
+    exchange.close().await;
+    let mut next = std::pin::pin!(events.emitters.notices.next());
+    let ended = std::future::poll_fn(|context| Poll::Ready(next.as_mut().poll(context))).await;
+    let Poll::Ready(Err(report)) = ended else {
+        panic!("close must finish the interrupted reader's generation cleanup");
+    };
+    assert!(matches!(report.current_context(), EventQueueError::Closed));
+}
