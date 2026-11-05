@@ -27,7 +27,7 @@ use nervix_interconnect::{
     ApplicationProgress, ApplicationProgressPhase, ApplicationProgressReceipt,
     ApplicationProgressReport, HandlerRegistrationError, Transport,
 };
-use nervix_models::ClusterNodeIdentity;
+use nervix_models::{ClusterNodeIdentity, ClusterNodeName};
 use nervix_primitives::{
     sync::{Arc, CancellationToken, watch},
     task::JoinHandle,
@@ -162,6 +162,30 @@ impl ApplicationProgressState {
             .send_if_modified(|reported| reported.record(report, live));
     }
 
+    /// The receipt this node answers for `report`, which arrived over a connection authenticated
+    /// as `sender`, while this node observes `tenure`. Only an accepted report is held: its sender
+    /// is the node it names, and this node leads the term the sender addressed.
+    fn receipt_for(
+        &self,
+        sender: &ClusterNodeName,
+        report: &ApplicationProgressReport,
+        tenure: Option<&LeaderTenure>,
+    ) -> ApplicationProgressReceipt {
+        if sender != report.progress.identity.node_id() {
+            return ApplicationProgressReceipt::ForeignReporter;
+        }
+        let Some(tenure) = tenure else {
+            return ApplicationProgressReceipt::NotLeader;
+        };
+        let leads_addressed_term = tenure.leader_id() == &report.leader
+            && tenure.term() == report.term
+            && tenure.leader_id() == self.identity().node_id();
+        if !leads_addressed_term {
+            return ApplicationProgressReceipt::NotLeader;
+        }
+        ApplicationProgressReceipt::Accepted
+    }
+
     /// The progress this node holds for `peers`: its own record, and the latest report of each
     /// other peer that reported.
     pub(in crate::application) fn progress_of(
@@ -208,21 +232,13 @@ pub(in crate::application) fn register_application_progress_report_handler(
         let cluster = cluster.clone();
         let consensus = consensus.clone();
         async move {
-            if context.peer_node_id() != report.progress.identity.node_id() {
-                return ApplicationProgressReceipt::ForeignReporter;
+            let tenure = consensus.current_leader_tenure();
+            let receipt = progress.receipt_for(context.peer_node_id(), &report, tenure.as_ref());
+            if receipt == ApplicationProgressReceipt::Accepted {
+                let live = cluster.availability_state().await.live_identities();
+                progress.record_report(report.progress, &live);
             }
-            let Some(tenure) = consensus.current_leader_tenure() else {
-                return ApplicationProgressReceipt::NotLeader;
-            };
-            let leads_addressed_term = tenure.leader_id() == &report.leader
-                && tenure.term() == report.term
-                && tenure.leader_id() == progress.identity().node_id();
-            if !leads_addressed_term {
-                return ApplicationProgressReceipt::NotLeader;
-            }
-            let live = cluster.availability_state().await.live_identities();
-            progress.record_report(report.progress, &live);
-            ApplicationProgressReceipt::Accepted
+            receipt
         }
     })
 }
@@ -343,11 +359,7 @@ impl ProgressReporter {
 #[cfg(not(feature = "testing"))]
 impl crate::ConfiguredFaultInjection {
     /// A build without the test harness holds no progress report.
-    async fn pause_application_progress_report_if_armed(
-        &self,
-        _node: &nervix_models::ClusterNodeName,
-    ) {
-    }
+    async fn pause_application_progress_report_if_armed(&self, _node: &ClusterNodeName) {}
 }
 
 /// Reports this incarnation's record to the leader it observes whenever a phase advances or the
@@ -411,13 +423,17 @@ pub(in crate::application) async fn record_authoritative_progress(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, time::Duration};
 
-    use meticulous::ResultExt as _;
-    use nervix_interconnect::{ApplicationProgress, ApplicationProgressPhase};
+    use meticulous::{OptionExt as _, ResultExt as _};
+    use nervix_interconnect::{
+        ApplicationProgress, ApplicationProgressPhase, ApplicationProgressReceipt,
+        ApplicationProgressReport,
+    };
     use nervix_models::{ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName};
 
     use super::{ApplicationProgressState, ReportedProgress};
+    use crate::application::test_fixtures::{TestService, build_test_service};
 
     fn identity(name: &str, incarnation: u64) -> ClusterNodeIdentity {
         ClusterNodeIdentity::new(
@@ -565,9 +581,76 @@ mod tests {
             reached(reporting, ApplicationProgressPhase::RuntimeReady, 3),
             &live,
         );
-        nervix_primitives::time::timeout(std::time::Duration::from_secs(10), observer.changed())
+        nervix_primitives::time::timeout(Duration::from_secs(10), observer.changed())
             .await
             .assured("a report recorded after the observation wakes the observer at once");
+    }
+
+    #[nervix_primitives::test]
+    async fn a_report_is_held_only_from_the_node_it_names_while_this_node_leads_the_addressed_term()
+    {
+        let bound = Duration::from_secs(30);
+        let TestService { service, path, .. } =
+            nervix_primitives::time::timeout(bound, build_test_service(false))
+                .await
+                .assured("the progress fixture starts within its test deadline");
+        let Some(tenure) = service.inner.consensus.current_leader_tenure() else {
+            panic!("the fixture returns once its node leads its single-node consensus");
+        };
+        let leader = &service.inner.application_progress;
+        let reporter = identity("node-2", 2);
+        let report = ApplicationProgressReport {
+            progress: reached(reporter.clone(), ApplicationProgressPhase::RuntimeReady, 3),
+            leader: tenure.leader_id().clone(),
+            term: tenure.term(),
+        };
+        let later_term = tenure
+            .term()
+            .checked_add(1)
+            .assured("a fresh single-node consensus is far below the last Raft term");
+
+        assert_eq!(
+            leader.receipt_for(reporter.node_id(), &report, Some(&tenure)),
+            ApplicationProgressReceipt::Accepted,
+            "the reporter's own connection reaches the leader of the term it addressed"
+        );
+        assert_eq!(
+            leader.receipt_for(identity("node-3", 3).node_id(), &report, Some(&tenure)),
+            ApplicationProgressReceipt::ForeignReporter,
+            "a connection authenticated as another node cannot report for the reporter"
+        );
+        assert_eq!(
+            leader.receipt_for(reporter.node_id(), &report, None),
+            ApplicationProgressReceipt::NotLeader,
+            "a node that observes no leader holds no report"
+        );
+        let other_term = ApplicationProgressReport {
+            term: later_term,
+            ..report.clone()
+        };
+        assert_eq!(
+            leader.receipt_for(reporter.node_id(), &other_term, Some(&tenure)),
+            ApplicationProgressReceipt::NotLeader,
+            "a report addressed to another term is not held"
+        );
+        let other_leader = ApplicationProgressReport {
+            leader: reporter.node_id().clone(),
+            ..report.clone()
+        };
+        assert_eq!(
+            leader.receipt_for(reporter.node_id(), &other_leader, Some(&tenure)),
+            ApplicationProgressReceipt::NotLeader,
+            "a report addressed to another leader is not held"
+        );
+        let follower = ApplicationProgressState::new(identity("node-4", 4));
+        assert_eq!(
+            follower.receipt_for(reporter.node_id(), &report, Some(&tenure)),
+            ApplicationProgressReceipt::NotLeader,
+            "a node that does not lead the observed term holds no report addressed to its leader"
+        );
+
+        drop(service);
+        std::fs::remove_dir_all(&path).expect("the test database directory is removed");
     }
 }
 
