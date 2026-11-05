@@ -100,6 +100,10 @@ mod node_liveness;
 mod node_startup;
 #[path = "common/node_stop.rs"]
 mod node_stop;
+#[path = "common/paced_publication.rs"]
+mod paced_publication;
+#[path = "common/paced_publication_tests.rs"]
+mod paced_publication_tests;
 #[path = "common/phase_deadline.rs"]
 mod phase_deadline;
 #[path = "common/port_pool.rs"]

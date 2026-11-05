@@ -2,6 +2,14 @@
 
 *Plexus, the Nervix graph definition language.*
 
+The allowance engine returns `Admission` decisions separately from input and conversion errors.
+`WaitUntil`, `NeverAdmissible` and `KeyBudgetExhausted` are ordinary outcomes, not decode failures
+or dropped payloads. `QuotaError` identifies invalid rates, bursts, costs, TTLs and horizon ranges;
+`AdmissionError` identifies charge shape, monotonic regression, clock range, exhausted visit
+sequences and malformed generations. Both retain typed `error_stack::Report` contexts. Key
+fingerprints have a value-free `Debug` implementation, and the engine never receives original
+key values. Host policy and public message-error mapping belong to the caller.
+
 Native session TLS provisioning fails before a node opens its stores or listeners. Missing
 certificate/key paths and TLS files supplied in HTTP mode are distinct application errors. File
 reads retain their `io::Error` beneath `TlsMaterialError::ReadFile`, including the certificate or
@@ -292,6 +300,12 @@ the existing management response. A conflict, higher vote or incomplete acceptan
 before data-stream admission. A management request failure uses the same unreachable-peer error
 as a heartbeat; subsequent data-stream setup failures remain transport failures. Neither path
 retries inside the adapter or changes the caller's retry gate.
+
+A heartbeat worker accepts a follower answer arriving inside the leader lease, even after one
+heartbeat interval, and credits its original sending time. Its management request and worker share
+that lease deadline. A timeout or transport failure still becomes an unreachable-peer outcome;
+the lease check uses the acknowledged request's sending time. Empty replication
+probes retain their shorter soft deadline and existing failure projection.
 
 An ended consensus append input completes normally without a peer operation or a peer error. With
 a first request available, stream setup may return the existing typed admission, membership or
@@ -1285,8 +1299,21 @@ A NATS source whose client loses its connection to the server reports
 received, and each reconnect that fails reports `NatsSubjectIngestorError::Connect` beneath
 `IngestorError::Resume`; the source host shows the deepest cause as the ingestor's transient error.
 The driver's `ConnectError` remains beneath `Connect`, so a peer that closes before its initial
-INFO message is reported as `expected INFO, got nothing`. A
-NATS JetStream publish keeps the driver's `PublishError` beneath `EmitterWriteError::Publish` when the
+INFO message is reported as `expected INFO, got nothing`. A NATS STREAM source reports the
+server's answer that its stream or consumer does not exist as
+`NatsStreamIngestorError::MissingStream` or `MissingConsumer` beneath `IngestorError::Resume`,
+naming the stream and the consumer, and a consumer it cannot read as declared as `PushConsumer` or
+`AcknowledgementPolicy`; a lookup that learned nothing keeps the driver's `ConsumerInfoError`
+beneath `VerifyConsumer`. A pull request the server refuses is `PullRefused` with a `NatsPullRefusal`
+holding the server's status and the description it gave, if any, beneath `IngestorError::Read`, and a lost connection is `ConnectionLost`.
+An acknowledgement or a negative acknowledgement the server does not answer keeps the client's
+`RequestError` beneath `Acknowledge` or `NegativelyAcknowledge`, and one without a connection to
+send it on is `Disconnected`. A
+NATS STREAM opening reports `EmitterOpenError::MissingExternalEntity` with the stream name if its
+lookup finds no stream; its public emitter status uses that typed error's value-free display text
+to name the missing stream. Other lookup failures keep the driver's typed cause beneath `Initialize`.
+A stream publish whose subject the named stream does not capture is a per-record external rejection.
+Other NATS JetStream publish failures keep the driver's `PublishError` beneath `EmitterWriteError::Publish` when the
 client does not take a record within `ACK TIMEOUT` and when a record's `PubAck` fails, each with the
 connector's description of the failure for the emitter's transient error. A message above the
 server's `max_payload` becomes a record rejection with code `external` and operation `publish`, and a
@@ -1533,8 +1560,17 @@ a member that does not exist names the domain and the member, a server-listener 
 ingestor, a corridor whose `FROM`/`TO` pairs are all disconnected, a hard group whose overrides
 request different strategies lists every member of that group, and an override outside the unit
 names its member. The failed command renders the chain, such as `relocation plan failed: junction
-'chain_distant' is not part of the relocation`. See [Control Plane](./control-plane.md) for
-activation and [Typed States And Validation Boundaries](./typed-states.md) for required state.
+'chain_distant' is not part of the relocation`. A relay divided into partitions has no one owner to
+move, so a relocation that selects it is refused with `RelocationError::MemberPartitioned`, naming
+the domain and the relay. See [Control Plane](./control-plane.md) for activation and
+[Typed States And Validation Boundaries](./typed-states.md) for required state.
+
+`ALTER BRANCH <branch> SET PARTITIONS <n>` on a domain that is running or paused is refused before
+anything is committed with `TransactionPlanningError::BranchPartitionsRequireStoppedDomain`, which
+names the operation, the domain and the branch and states the stopped-domain path, such as `branch
+'by_tenant' changes its partition count only while its domain is stopped: STOP domain 'payments',
+run ALTER BRANCH, then START it`. A domain build whose committed schedule lacks a unit its relay
+needs reports `ExecutionBuildError::RelayUnitNotScheduled`, naming the relay and the unit.
 
 Visual schema, branch, relay, and subscription editors report incomplete names, fields, types,
 modes, references, branching, capacities, instance limits, filters and sample rates before
@@ -2285,8 +2321,11 @@ from a failed request. A relay payload that does not decode is `RuntimeError::De
 naming the domain and relay, with the `RemoteRelayDecodeError` that says what the payload got wrong
 beneath it: no admission registration, a body that is not one Arrow section of the relay's schema,
 metadata or acknowledgement sidecars whose row count differs from the body's, acknowledgement
-registrations on a subscription fan-out, a branch key that does not decode, or rows that do not
-assemble into a relay batch. The Arrow body, `BranchKeyError` or relay batch failure stays beneath
+registrations on a subscription fan-out, a branch key that does not decode, a key that lands in
+another partition than the one the payload names (`RemoteRelayDecodeError::Unit`, naming the
+addressed unit), or rows that do not assemble into a relay batch. A batch of a partitioned relay that
+names no concrete key has no partition: the producer refuses it with
+`RelayPartitionError::UnbranchedBatchOfPartitionedRelay` and fails its record acknowledgements. The Arrow body, `BranchKeyError` or relay batch failure stays beneath
 that. An Arrow body that is not one canonical IPC stream framed within its own bytes is
 `ArrowBodyError::Framing`, naming the `IpcFramingDefect`: a message without its continuation
 marker, a stream cut inside a message, a negative length, metadata that is not an Arrow message, a
@@ -2486,10 +2525,13 @@ An ordinary command whose internal transaction is still committing when its comm
 any other report, such as `TransactionCommitError::RecoverQuiescence` above a drain timeout or a
 consensus write refused by a saturated log, answers `OutcomeUnknown` with the `StillApplying` cause
 rather than `Failed`. That report describes one attempt, and the committing transaction keeps the
-command's domain mutation lease until recovery under the same reference records the outcome. A
-model step that adopts its transaction's own pause validates its frozen planning inputs against
-the domain as that pause left it, so `PlanningInputsChanged` names only inputs that another owner
-changed.
+command's domain mutation lease until recovery under the same reference records the outcome. If
+another coordinator has already finished that transaction, the ordinary command recovers its
+recorded outcome instead: an obsolete commit-attempt report cannot replace a committed success or
+the transaction's recorded terminal failure. Typed leadership loss still selects the leader
+response. A model step that adopts its transaction's own pause validates its frozen planning inputs
+against the domain as that pause left it, so `PlanningInputsChanged` names only inputs that another
+owner changed.
 
 An ordinary command's preflight, queue, and commit-planning refusals are reports decided against
 its coordinator's observation of the command's internal transaction. Before the session maps such a
@@ -2810,7 +2852,11 @@ failure names an archive file the browser could not read or that is empty, a tra
 stall, a missing reply, a reply that does not decode or answers another request or reference, or a
 restore whose outcome stayed unknown through its repetitions, which the dialog reports naming the
 execution reference. A refusal of the stream is shown as `restore refused (<failure>): <message>`,
-and the restore's own outcome as the dispatcher renders any command's. The console WebSocket
+and the restore's own outcome as the dispatcher renders any command's. A session reply whose
+command outcome names another execution reference than its command's is a protocol violation: the
+dispatcher reports `protocol violation: the reply to command execution '<own>' names execution
+'<other>'` in the terminal, shows nothing of that outcome as the command's, stops reading the
+connection, and recovers the command under its own reference on the next one. The console WebSocket
 transport closes a call whose client broke its framing with the codec's close code, a second
 download request with `1008`, an answer that does not fit a frame with `1011`, and every call when
 the node stops with `1001`.

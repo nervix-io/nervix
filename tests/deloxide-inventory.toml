@@ -17,6 +17,38 @@
 # the compiler's catalog: a new owner of tracked locks needs a record, and a record whose file no
 # longer acquires one is removed.
 
+[[invocation]]
+bound_seconds = 120
+evidence = true
+id = "rate-limit-store"
+kind = "libtest-each"
+marker = "diagnostic_tests::deloxide_"
+package = "nervix-rate-limit"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+target = "lib"
+
+[[workload]]
+coverage = "The engine's selected blocking shard locks, concurrent key leases, exact rollback, global eviction, TTL removal and fresh keyed-store restoration; governor internals and atomic memory ordering are outside detector evidence."
+id = "owner.rate-limit-keyed-transactions"
+invariant = "Bounded key transactions never exceed the global capacity, retain no refunded charge and restore the complete allowance generation without a tracked deadlock."
+invocation = "rate-limit-store"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+test = "diagnostic_tests::deloxide_keyed_transactions_expire_evict_refund_and_restore"
+
+[[owner]]
+path = "crates/rate-limit/src/keyed.rs"
+workloads = ["owner.rate-limit-keyed-transactions"]
+
 [[workload]]
 coverage = "Kafka records through the real broker and the source host's tracked ingestion and ACK state, with every new metadata field read in NO ACK, ACK SEQUENTIAL and ACK PARALLEL on one and three nodes. Driver polling and borrowed metadata visits are untracked."
 examples = 6
@@ -444,6 +476,7 @@ tags = [
   "@shutdown_emitter_finish",
   "@emitter_finish_at_stop",
   "@nats_core_connection_loss",
+  "@nats_stream_lost_pub_ack",
   "@iceberg_commit_memory",
   "@iceberg_batch_bounds",
   "@zeromq_emitter_open_deadline",
@@ -459,8 +492,10 @@ tags = [
   "@pulsar_ingestor_reconnect",
   "@pulsar_subscription_conflict",
   "@forced_failover_delivery",
+  "@relay_partition_failover",
   "@mqtt_parallel_gather_at_quiesce",
   "@sqs_receive_at_quiesce",
+  "@nats_stream_suspend",
   "@sqs_parallel_batch",
   "@sqs_ingestor_receive_deadline",
   "@kept_ingestor_offsets",
@@ -559,8 +594,12 @@ target = "test:scenarios"
 
 # The capture, restore and checkpoint-transfer scenarios, tagged `@deloxide_stress_restore`, one at
 # a time in the restore selection's lane.
+# Check 41311131846 ran 78 of 80 examples within the former 3840s suite budget after the two
+# NATS STREAM lost-PubAck examples joined this serial selection. Both passed in 30.6s total;
+# the last window example finished its body at 3835s and another remained queued. The current
+# 84-example inventory has a 3960s suite budget and a 360s teardown reserve in this bound.
 [[invocation]]
-bound_seconds = 4200
+bound_seconds = 4320
 concurrency = 1
 evidence = true
 id = "stress-restore-scenarios"
@@ -1217,6 +1256,16 @@ id = "scenario.nats-core-connection-loss-stop"
 invariant = "A lost connection during STOP produces the Core NATS pending-record uncertainty diagnostic rather than certifying that attempt through a replacement connection."
 invocation = "scenarios"
 scenario = "Nervix reports a core NATS connection change during STOP"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "On one and three nodes a NATS STREAM emitter publishes through a controlled endpoint that forwards its first message but drops the PubAck, then resumes replies. The confirmation timeout, retry and host acknowledgement traverse tracked graph lifecycle and cluster locks; the NATS driver and endpoint sockets are outside the detector."
+examples = 2
+feature = "tests/features/runtime/nats_emission.feature"
+id = "scenario.nats-stream-lost-pub-ack"
+invariant = "A stream emitter retries an unconfirmed publication with the same message ID and the stream stores it once."
+invocation = "scenarios"
+scenario = "A NATS STREAM emitter retries a lost PubAck with the same message ID"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -2936,6 +2985,26 @@ scenario = "Nervix reports a core NATS connection change during STOP"
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Under scheduling stress: on one and three nodes a NATS STREAM emitter publishes through a controlled endpoint that forwards its first message but drops the PubAck, then resumes replies. The confirmation timeout, retry and host acknowledgement traverse tracked graph lifecycle and cluster locks; the NATS driver and endpoint sockets are outside the detector."
+examples = 2
+feature = "tests/features/runtime/nats_emission.feature"
+id = "stress.nats-stream-lost-pub-ack"
+invariant = "A stream emitter retries an unconfirmed publication with the same message ID and the stream stores it once."
+invocation = "stress-scenarios"
+scenario = "A NATS STREAM emitter retries a lost PubAck with the same message ID"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: in the restore lane, a NATS STREAM emitter's lost PubAck and retry on one and three nodes exercise tracked graph lifecycle and cluster locks while its driver and endpoint sockets remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/nats_emission.feature"
+id = "stress.nats-stream-lost-pub-ack-restore"
+invariant = "A stream emitter retries an unconfirmed publication with the same message ID and the stream stores it once."
+invocation = "stress-restore-scenarios"
+scenario = "A NATS STREAM emitter retries a lost PubAck with the same message ID"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
 coverage = "Under scheduling stress: a connect-mode ZeroMQ emitter on one and three nodes whose sink open runs out of connect_timeout_ms against a port that refuses every connection, the emitter task's reopen on its retry policy, and the reopen that connects once a peer listens, beside the tracked locks of the Plexus commands, the HTTP endpoint intake and the cluster's teardown. The ZeroMQ driver's connection attempts, the connect deadline and the emitter's retry wait are untracked."
 examples = 2
 feature = "tests/features/runtime/zeromq_emission.feature"
@@ -3253,6 +3322,46 @@ id = "stress.forced-failover-delivery"
 invariant = "The destination delivers the retained input and installs a later revision before the former owner is released, within bounds below the entity gate deadline."
 invocation = "stress-scenarios"
 scenario = "A forced failover and a later revision install while the former owner remains paused"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Failover of the owner of one partition of a partitioned relay: per-unit owner routes, the moved partition's channel retirement and owner task replacement while the other partitions keep their owners, channels and owner tasks. Exercises relay channel ordering, dispatch gate engagement, ACK ownership and consensus lifecycle locks; asynchronous admission and transport waits remain outside Deloxide."
+examples = 1
+feature = "tests/features/cluster/relay_partition_failover.feature"
+id = "scenario.relay-partition-failover"
+invariant = "Losing the owner of some partitions moves only those partitions to surviving nodes, the other partitions keep flowing and keep their owners, and every key's order to the emitter is kept."
+invocation = "scenarios"
+scenario = "Failover of one partition owner moves only its partitions and leaves the other partitions running"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: failover of one partition owner of a partitioned relay, with per-unit owner routes, channel retirement and owner task replacement for only the moved partitions. Asynchronous admission and transport waits remain outside Deloxide."
+examples = 1
+feature = "tests/features/cluster/relay_partition_failover.feature"
+id = "stress.relay-partition-failover"
+invariant = "Losing the owner of some partitions moves only those partitions to surviving nodes, the other partitions keep flowing and keep their owners, and every key's order to the emitter is kept."
+invocation = "stress-scenarios"
+scenario = "Failover of one partition owner moves only its partitions and leaves the other partitions running"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Failover of the owner of some partitions of a materialized relay while a surviving node keeps others: each kept partition's relay-state task stops before the state store's assignment rebinding, and its successor starts with the new originator. Exercises the assignment barrier and the relay's dispatch gate; asynchronous admission and transport waits remain outside Deloxide."
+examples = 1
+feature = "tests/features/cluster/relay_partition_failover.feature"
+id = "scenario.relay-partition-state-failover"
+invariant = "A partition a surviving node keeps goes on applying materialized updates after a sibling partition's owner fails, and the moved partitions' new owners apply theirs."
+invocation = "scenarios"
+scenario = "A partition a surviving node keeps goes on applying its materialized state after another partition's owner fails"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: each kept partition's relay-state task stops before the assignment rebinding a failover performs, and its successor starts with the new originator. Asynchronous admission and transport waits remain outside Deloxide."
+examples = 1
+feature = "tests/features/cluster/relay_partition_failover.feature"
+id = "stress.relay-partition-state-failover"
+invariant = "A partition a surviving node keeps goes on applying materialized updates after a sibling partition's owner fails, and the moved partitions' new owners apply theirs."
+invocation = "stress-scenarios"
+scenario = "A partition a surviving node keeps goes on applying its materialized state after another partition's owner fails"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -4083,6 +4192,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/materialized_state.rs"
 workloads = [
+  "scenario.relay-partition-state-failover",
+  "stress.relay-partition-state-failover",
   "scenario.restore-publication-coordinator",
   "stress.restore-publication-coordinator",
   "owner.materialized-publications",
@@ -4123,10 +4234,14 @@ workloads = [
   "scenario.forced-failover-delivery",
   "scenario.materialized-retention-activation",
   "scenario.materialized-restart-retention",
+  "scenario.relay-partition-failover",
+  "scenario.relay-partition-state-failover",
   "stress.diagnostic-nodes",
   "stress.forced-failover-delivery",
   "stress.materialized-retention-activation",
   "stress.materialized-restart-retention",
+  "stress.relay-partition-failover",
+  "stress.relay-partition-state-failover",
 ]
 
 [[owner]]
@@ -4153,6 +4268,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/state_store.rs"
 workloads = [
+  "scenario.relay-partition-state-failover",
+  "stress.relay-partition-state-failover",
   "scenario.kafka-start-generation",
   "stress.kafka-start-generation",
   "scenario.kafka-start-generation-restore",
@@ -4280,6 +4397,26 @@ invariant = "A receive in flight when its SQS ingestor quiesces completes, and i
 invocation = "scenarios"
 scenario = "An SQS receive in flight when its ingestor quiesces delivers its message without waiting for the visibility timeout"
 selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "An entity hold that quiesces a NATS STREAM ingestor on one and three nodes, through public Plexus commands: the ingestor suspends, lets its durable consumer's pull go and resumes, beside tracked quiesce, schedule and teardown locks. The NATS client, its pull, inbox drain and acknowledgement requests are outside the detector."
+examples = 2
+feature = "tests/features/runtime/nats_ingestion.feature"
+id = "scenario.nats-stream-suspend"
+invariant = "A suspended NATS STREAM ingestor sends no pull request, so what is published meanwhile stays pending in its stream, and it delivers and acknowledges all of it once it resumes, on one and three nodes."
+invocation = "scenarios"
+scenario = "A suspended NATS STREAM ingestor leaves what is published in its stream and delivers it once it resumes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: an entity hold that quiesces a NATS STREAM ingestor on one and three nodes, through public Plexus commands: the ingestor suspends, lets its durable consumer's pull go and resumes, beside tracked quiesce, schedule and teardown locks. The NATS client, its pull, inbox drain and acknowledgement requests are outside the detector."
+examples = 2
+feature = "tests/features/runtime/nats_ingestion.feature"
+id = "stress.nats-stream-suspend"
+invariant = "A suspended NATS STREAM ingestor sends no pull request, so what is published meanwhile stays pending in its stream, and it delivers and acknowledges all of it once it resumes, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "A suspended NATS STREAM ingestor leaves what is published in its stream and delivers it once it resumes"
+selections = ["deloxide-stress"]
 
 [[workload]]
 coverage = "Under scheduling stress: an entity hold that quiesces an SQS ingestor while its receive waits for the service's answer, through public Plexus commands, including tracked quiesce, schedule and teardown locks. The admitted message exercises U32 and DATETIME projection at the quiesce boundary; the bounded ingest-metadata-projection property separately verifies retained-copy replay. The held answer, the SQS client and the read's cancellation are outside the detector."

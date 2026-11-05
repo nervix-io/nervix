@@ -111,18 +111,11 @@ impl SessionEvents {
         }
     }
 
-    /// Report a control-plane failure this node recovered from.
-    fn report_control_plane_error(&self, message: impl Into<String>) {
-        let message = message.into();
-        warn!(error = %message, kind = "control plane", "server error reported to sessions");
-        self.publish(NoticeLevel::Error, NoticeKind::ControlPlane, message);
-    }
-
-    /// Report a runtime failure another node fanned out to this one. Its own node traces it only at
-    /// `debug`, so this `warn` line is where an operator of these sessions finds it.
-    pub(in crate::application) fn report_peer_runtime_error(&self, message: String) {
-        warn!(error = %message, kind = "runtime", "server error reported to sessions");
-        self.publish(NoticeLevel::Error, NoticeKind::Runtime, message);
+    /// Report a failure of `kind` recovered from: a control-plane failure of this node, or a runtime
+    /// failure of any node, which a peer's runtime fans out here and traces only at `debug`.
+    pub(in crate::application) fn report_error(&self, kind: NoticeKind, message: String) {
+        warn!(error = %message, ?kind, "server error reported to sessions");
+        self.publish(NoticeLevel::Error, kind, message);
     }
 
     /// Offer, as `kind`, an event its owner already recorded in its own `info` line (a live-set
@@ -999,6 +992,7 @@ impl ChoicePageBasis {
             ChoiceTarget::ProcessorCompatibleInputRelay => 33,
             ChoiceTarget::ProcessorInputBranchRelay => 34,
             ChoiceTarget::ProcessorMaterializedRelay => 35,
+            ChoiceTarget::IngestNatsStreamSource => 36,
         }]);
         hash_choice_text(&mut hasher, request.search());
         for dependency in request.dependencies() {
@@ -1236,6 +1230,7 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
         | ChoiceTarget::IngestPulsarSource
         | ChoiceTarget::IngestMqttSource
         | ChoiceTarget::IngestNatsSource
+        | ChoiceTarget::IngestNatsStreamSource
         | ChoiceTarget::IngestRabbitMqSource
         | ChoiceTarget::IngestRedisPubSubSource
         | ChoiceTarget::IngestPrometheusSource
@@ -1456,7 +1451,9 @@ impl SessionServiceImpl {
 
     /// Report a control-plane failure this node recovered from to the sessions attached to it.
     pub(in crate::application) fn broadcast_error(&self, message: impl Into<String>) {
-        self.inner.events.report_control_plane_error(message);
+        self.inner
+            .events
+            .report_error(NoticeKind::ControlPlane, message.into());
     }
 
     /// Resolves one structured control against a single observed application revision.
@@ -1492,6 +1489,7 @@ impl SessionServiceImpl {
             | ChoiceTarget::IngestPulsarSource
             | ChoiceTarget::IngestMqttSource
             | ChoiceTarget::IngestNatsSource
+            | ChoiceTarget::IngestNatsStreamSource
             | ChoiceTarget::IngestRabbitMqSource
             | ChoiceTarget::IngestRedisPubSubSource
             | ChoiceTarget::IngestPrometheusSource

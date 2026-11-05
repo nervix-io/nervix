@@ -1285,6 +1285,10 @@ enum SessionStep {
     Redirect(Url),
     /// End the connection and connect again at the same address after the reconnect delay.
     Reconnect,
+    /// Stop reading the connection at once: a reply on it broke the session contract, so nothing
+    /// later on it can be trusted. Its unanswered ordered requests wait for the next connection,
+    /// which opens at the same address after the reconnect delay.
+    Abandon,
 }
 
 /// How a connection ended.
@@ -2499,6 +2503,8 @@ async fn drain_closed_connection(
         received = true;
         match receive_frame(signals, state, requests, &frame) {
             SessionStep::Redirect(leader) => return Some(ConnectionEnd::Redirected(leader)),
+            // Nothing after a reply that broke the session contract is read.
+            SessionStep::Abandon => return Some(ConnectionEnd::Dropped),
             SessionStep::Continue
             | SessionStep::RetryCommand(_)
             | SessionStep::Reattach { .. }
@@ -2644,7 +2650,7 @@ async fn serve_connection(
                 }
             }
             SessionStep::Redirect(leader) => return ConnectionEnd::Redirected(leader),
-            SessionStep::Reconnect => return ConnectionEnd::Dropped,
+            SessionStep::Reconnect | SessionStep::Abandon => return ConnectionEnd::Dropped,
         }
         for message in requests.release_held() {
             if !send_message(&mut socket, &codec, signals, requests, message).await {
@@ -3241,12 +3247,14 @@ fn apply_reply(
 
 /// Applies the outcome of a command.
 ///
-/// A command the serving node could not run because it does not lead is sent again at the leader's
-/// console, and a command the leader could not bind to the session's transaction is sent again
-/// once the transaction is attached. An unknown outcome waits before repeating on the open
-/// connection, which continues serving other messages. Each attempt keeps the command's execution
-/// reference, so the server recovers its recorded outcome
-/// instead of running it twice. A definitive outcome goes to whoever reads the command.
+/// An outcome that names another execution than the command's own is refused before anything it
+/// carries is applied, as [`refuse_foreign_outcome`] describes. A command the serving node could
+/// not run because it does not lead is sent again at the leader's console, and a command the
+/// leader could not bind to the session's transaction is sent again once the transaction is
+/// attached. An unknown outcome waits before repeating on the open connection, which continues
+/// serving other messages. Each attempt keeps the command's execution reference, so the server
+/// recovers its recorded outcome instead of running it twice. A definitive outcome goes to
+/// whoever reads the command.
 fn apply_command_outcome(
     signals: WebConsoleSignals,
     requests: &mut SessionRequests,
@@ -3255,6 +3263,16 @@ fn apply_command_outcome(
     purpose: CommandPurpose,
     mut outcome: CommandOutcome,
 ) -> SessionStep {
+    if outcome.execution_reference != request.execution_reference {
+        return refuse_foreign_outcome(
+            signals,
+            requests,
+            order,
+            request,
+            purpose,
+            outcome.execution_reference,
+        );
+    }
     if let Some(redirect) = command_redirect(&outcome.disposition) {
         if let CommandPurpose::Create(context) = &purpose {
             signals
@@ -3312,6 +3330,54 @@ fn apply_command_outcome(
         }
     }
     SessionStep::Continue
+}
+
+/// A command outcome that names another execution than its command's own, which the session
+/// contract forbids (E-5 of the client implementation manual).
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "protocol violation: the reply to command execution '{expected}' names execution \
+     '{received}'; the console reconnects and sends the command again under its own reference"
+)]
+struct ForeignCommandOutcome {
+    expected: CommandExecutionReference,
+    received: CommandExecutionReference,
+}
+
+/// Refuses a command outcome that names another execution (E-5), before anything it carries is
+/// applied: its result, its redirect, its unknown outcome, its detached transaction or its
+/// transaction status.
+///
+/// The reply broke the session contract, so the console reports the violation and stops reading
+/// the connection, which interrupts every request still waiting on it (F-8). The command keeps
+/// its place in the issue order and its whole original request, so the next connection sends it
+/// again under its own execution reference, and the server answers with the command's own
+/// recorded outcome instead of running it twice (E-3).
+fn refuse_foreign_outcome(
+    signals: WebConsoleSignals,
+    requests: &mut SessionRequests,
+    order: IssueOrder,
+    request: CommandRequest,
+    purpose: CommandPurpose,
+    received: CommandExecutionReference,
+) -> SessionStep {
+    let violation = ForeignCommandOutcome {
+        expected: request.execution_reference.clone(),
+        received,
+    };
+    signals
+        .terminal_lines
+        .update(|lines| lines.push(TermLine::error(violation.to_string())));
+    if let CommandPurpose::Create(context) = &purpose {
+        signals
+            .create
+            .queued_reconnect(context.attempt, context.draft_revision);
+    }
+    requests.hold_again(IssuedRequest {
+        order,
+        request: ConsoleRequest::Command { request, purpose },
+    });
+    SessionStep::Abandon
 }
 
 fn show_create_outcome(
@@ -8137,6 +8203,8 @@ impl TermLineKind {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    mod foreign_execution;
+
     use leptos::prelude::Owner;
     use nervix_client_wire::{
         DomainClockAttachmentEndReason, DomainClockAttachmentEnded, DomainClockObserved,
@@ -11180,6 +11248,7 @@ mod tests {
                 };
                 let original = request.clone();
                 let mut outcome = completed_outcome("the command's outcome is not known yet");
+                outcome.execution_reference = request.execution_reference.clone();
                 outcome.disposition = CommandDisposition::OutcomeUnknown(cause);
                 let step =
                     apply_command_outcome(signals, &mut requests, order, request, purpose, outcome);
@@ -11247,6 +11316,7 @@ mod tests {
             };
             let reference = request.execution_reference.clone();
             let mut outcome = completed_outcome("leadership moved during admission");
+            outcome.execution_reference = reference.clone();
             outcome.disposition = CommandDisposition::OutcomeUnknown(
                 nervix_client_wire::UnknownOutcomeCause::LeadershipLost,
             );
@@ -12680,6 +12750,7 @@ mod tests {
                 panic!("the test issued a create command");
             };
             let mut unknown = completed_outcome("leadership moved during admission");
+            unknown.execution_reference = request.execution_reference.clone();
             unknown.disposition = CommandDisposition::OutcomeUnknown(
                 nervix_client_wire::UnknownOutcomeCause::LeadershipLost,
             );

@@ -69,7 +69,7 @@ For the CLI's `subscribe` and `domain-clock` shell streams and their line format
 documentation version as the selected index; this client chapter is outside the curated Plexus index.
 
 For browser controls waiting behind commands, lookup replacement, uncertain-command recovery on
-the open session and reconnect behavior, read
+the open session, a reply that names another execution, and reconnect behavior, read
 [Web Console](https://docs.nervix.io/client-tools-web-console.html#bounded-buffers) and
 [Client Session Protocol](https://docs.nervix.io/client-session-protocol.html#restoration-and-bounded-consumers)
 directly. Follow the same documentation version as the selected index; these client chapters are
@@ -229,8 +229,10 @@ current connection, retry and deadline limits.
   client reference in `Connector Capabilities` names those keys. Read `Common` → `Syslog` →
   `Ingestor` for transport metadata and when a TLS connection exposes a verified client subject.
 - Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
-  owner-buffer bound, not a per-branch or per-consumer bound; nonowner producer and remote consumer
-  nodes each have one additional fixed dispatch slot.
+  owner-buffer bound, once per partition when its branch declares `PARTITIONS <n>`, not a
+  per-branch or per-consumer bound; nonowner producer and remote consumer nodes each have one
+  additional fixed dispatch slot. A branch's partition count changes only on a stopped domain
+  (`ALTER BRANCH <branch> SET PARTITIONS <n>`); read `Streams And State` → `Relay Partitions`.
   On native 64-bit targets, its positive integer range ends at `18446744073709551615`, and stored,
   replicated, and restarted definitions retain the exact accepted capacity.
 - Every ordinary processor input/output uses the same named branch, or all are unbranched.
@@ -264,7 +266,7 @@ current connection, retry and deadline limits.
   record reported delivered; write `MANDATORY` after the payload, on either entity, to reject such a
   record through `ON MESSAGE ERROR` instead. See
   [Emitters → RabbitMQ](../../../../docs/src/emitters.md#rabbitmq).
-- For Core NATS completion, reconnect retries and finish outcomes, read
+- For Core NATS completion, JetStream PubAck, reconnect retries and finish outcomes, read
   [Emitters → NATS](../../../../docs/src/emitters.md#nats) and
   [Finishing an emitter](../../../../docs/src/connector-contract.md#finishing-an-emitter).
   For NATS client authentication, secret inspection and mounted credentials, read
@@ -511,8 +513,21 @@ current connection, retry and deadline limits.
   attribute that is not UTF-8 does not survive the read.
 - `NATS SUBJECT` ingestors use `NO ACK` with a required `QUEUE GROUP` and `INSTANCES`, and
   `BUFFER` or `DROP` quiesce. Write NATS wildcards only in an ingestor's `SUBJECT`, as whole
-  tokens with `>` last; an emitter's `SUBJECT` is one literal subject. Check both against the NATS
-  sections of `Ingestors` and `Emitters`.
+  tokens with `>` last; a `NATS SUBJECT` emitter uses `MODE NO ACK` and one literal subject.
+  Check both against the NATS sections of `Ingestors` and `Emitters`.
+- A `NATS STREAM` ingestor reads a durable pull consumer an operator provisioned:
+  `STREAM '<stream>' CONSUMER '<consumer>'` with `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL`, and
+  `SUSPEND`, `BUFFER` or `DROP` quiesce. Nervix creates neither the stream nor the consumer, and it
+  refuses a push consumer and one whose acknowledgement policy is not explicit. `SET STREAM` and
+  `SET CONSUMER` move it in place, and it continues from the position of the consumer it then
+  names. Read `Ingestors` → `NATS` for redelivery, `MaxRequestBatch`, `MaxRequestExpires` and
+  `AckWait`.
+- A `NATS STREAM` emitter publishes to an operator-provisioned `STREAM '<stream>'` and a literal
+  `SUBJECT '<subject>'` that stream captures. Use `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX
+  <n>` with an `ACK TIMEOUT` and retry policy. The stream is checked when the emitter opens;
+  a subject the named stream does not capture is rejected per record. `MESSAGE ID <expression>`
+  writes `Nats-Msg-Id` so a retry after a lost PubAck can be deduplicated by JetStream. Read
+  `Emitters` → `NATS` for the full declaration and guarantee boundary.
 - A `PULSAR TOPIC` emitter's `TIMESTAMP <expression>` is each message's event time: an exact,
   non-null, non-sensitive `DATETIME`, written as the millisecond that contains it, and a time before
   `1970-01-01T00:00:00.001Z` rejects its record through `ON MESSAGE ERROR`. Its `DELIVER AFTER
@@ -670,8 +685,10 @@ coverage limits, including requested-read historical edges and untracked async s
 Choose checks relevant to the configured graph:
 
 - `SHOW CREATE <kind> <name>;` confirms the stored canonical definition.
-- `DESCRIBE RELAY <relay>;` reports the relay owner and optional materialized-state replicas;
-  `DESCRIBE RELAY <relay> WHERE (...);` is owner-authoritative for concrete branch state.
+- `DESCRIBE RELAY <relay>;` reports the relay owner and optional materialized-state replicas, or
+  one owner line per partition of a partitioned relay;
+  `DESCRIBE RELAY <relay> WHERE (...);` is owner-authoritative for concrete branch state and names
+  the key's partition and its owner.
 - `SHOW RELAY <relay> MATERIALIZED STATE;` inspects materialized data and placement, masking
   `SENSITIVE` payload fields and branch-key fields on both the owner and other nodes.
 - `DESCRIBE INGESTOR`, `DESCRIBE JUNCTION`, other processor-specific `DESCRIBE` commands, and
@@ -792,6 +809,8 @@ Choose checks relevant to the configured graph:
   outside the curated Plexus index.
 - `SHOW TRANSACTIONS;` checks open/committing progress and retained commit, revert, failure, or
   expiry outcomes.
+- Recover an interrupted command under its original execution reference. A transaction's state
+  alone does not establish that command's outcome; follow `Client Session Protocol` → `Exact Recovery`.
 
 For a parse error, follow the reported expected token and compare clause order with the relevant
 public example. For an MQTT QoS, session or mode pairing refusal, use the underlined token and the

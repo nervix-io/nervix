@@ -173,6 +173,7 @@ impl Runtime {
             IngestorConnectorPlan::Http(HttpIngestorStartPlan::Request(_))
             | IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(_))
             | IngestorConnectorPlan::Nats(NatsIngestorStartPlan::Subject(_))
+            | IngestorConnectorPlan::Nats(NatsIngestorStartPlan::Stream(_))
             | IngestorConnectorPlan::RabbitMq(RabbitMqIngestorStartPlan::Queue(_))
             | IngestorConnectorPlan::Redis(RedisIngestorStartPlan::PubSub(_))
             | IngestorConnectorPlan::Prometheus(PrometheusIngestorStartPlan::Query(_))
@@ -228,6 +229,9 @@ impl Runtime {
                 plan.compose(self, ingestor).await?
             }
             IngestorConnectorPlan::Nats(NatsIngestorStartPlan::Subject(plan)) => {
+                plan.compose(self, ingestor).await?
+            }
+            IngestorConnectorPlan::Nats(NatsIngestorStartPlan::Stream(plan)) => {
                 plan.compose(self, ingestor).await?
             }
             IngestorConnectorPlan::RabbitMq(RabbitMqIngestorStartPlan::Queue(plan)) => {
