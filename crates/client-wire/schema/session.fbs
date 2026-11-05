@@ -599,7 +599,8 @@ enum ModelChangeAspect : ubyte {
   PlacementDefinition,
   EntityReplaced,
   EntityCreated,
-  EntityDropped
+  EntityDropped,
+  BranchPartitions
 }
 
 table ConfigurationReason {
@@ -733,8 +734,30 @@ table DomainLifecycleImpact {
   operations: [ulong] (required);
 }
 
+/// The one unit of a node that is divided into neither partitions nor instances.
+table SingleUnit {}
+
+/// One partition of a relay whose branch declares several partitions.
+table PartitionUnit {
+  partition: uint;
+}
+
+/// One instance of a node that runs several instances.
+table InstanceUnit {
+  instance: uint;
+}
+
+/// The placement unit of a scheduled node that an owner places and moves.
+union PlacementUnit {
+  SingleUnit,
+  PartitionUnit,
+  InstanceUnit
+}
+
 table OwnershipMoveImpact {
   node: NodeCoverage (required);
+  /// The unit of the node that moves.
+  unit: PlacementUnit (required);
   /// The cluster node that owned the node before the move.
   source: string (required);
   /// The cluster node that owns the node after the move.

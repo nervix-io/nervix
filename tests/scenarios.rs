@@ -247,6 +247,7 @@ mod pulsar_subscription_types;
 mod pulsar_subscriptions;
 mod rabbitmq_envelope;
 mod rabbitmq_properties;
+mod relay_partitions;
 mod restarted_voter;
 mod session_protocol;
 mod session_tls;
