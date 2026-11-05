@@ -390,6 +390,10 @@ class Progress:
         with self.lock:
             self.moved[index] = 0
 
+    def held(self, index: int) -> int:
+        with self.lock:
+            return self.moved[index]
+
     def open_attempts(self) -> list[Attempt]:
         with self.lock:
             return [attempt for attempts in self.attempts for attempt in attempts]
@@ -516,6 +520,9 @@ class PartProgress:
     def reset(self) -> None:
         self.progress.reset(self.index)
 
+    def held(self) -> int:
+        return self.progress.held(self.index)
+
     def stop(self) -> None:
         self.progress.stop()
 
@@ -533,12 +540,18 @@ def with_retries(
     part: PartProgress | None = None,
     kept: Callable[[], int] | None = None,
     split: Callable[[], str | None] | None = None,
+    moving: Callable[[], int] | None = None,
 ) -> T:
     """Run a request until it succeeds, fails for a reason a retry does not change, or fails
-    `limits.attempts` times in a row. `kept` counts the bytes the attempts have kept for the next
-    one to continue from, and an attempt that kept more starts a new count of failures in a row.
-    `split` turns what is left of a request cut off as too slow into ranges asked for at once, and
-    says what it asked for, so that the request goes on at once rather than after a wait."""
+    `limits.attempts` times in a row without progress. `kept` counts the bytes the attempts have
+    kept for the next one to continue from. `moving` counts the bytes of what the request is a range
+    of, which every range moves, and defaults to `kept`: an attempt during which it grew starts a new
+    count of failures in a row, so a range R2 starves while the rest of its part moves goes on, and a
+    part that stops moving altogether fails. `split` turns what is left of a request cut off as too
+    slow into ranges asked for at once, and says what it asked for, so that the request goes on at
+    once rather than after a wait."""
+    if moving is None:
+        moving = kept
     stopping = threading.Event() if part is None else part.stopping
     failures = 0
     tries = 0
@@ -546,18 +559,18 @@ def with_retries(
         if stopping.is_set():
             raise Stopped()
         tries += 1
-        before = 0 if kept is None else kept()
+        before = 0 if moving is None else moving()
         attempt = Attempt() if part is None else part.begin()
         try:
             return operation(attempt)
         except (OSError, http.client.HTTPException, Transient) as error:
             if stopping.is_set():
                 raise Stopped() from error
-            after = 0 if kept is None else kept()
-            if after > before:
+            if moving is not None and moving() > before:
                 failures = 1
             else:
                 failures += 1
+            after = 0 if kept is None else kept()
             # A connection the watch cut off fails however its read or write noticed.
             if attempt.cut is None:
                 cause = describe(error)
@@ -1028,7 +1041,15 @@ class Bucket:
             return received.split(span, lambda piece: self.fetch_range(key, received, piece, progress))
 
         try:
-            with_retries(f"reading {key} from {size(span.start)}", request, self.limits, progress, lambda: span.next, split)
+            with_retries(
+                f"reading {key} from {size(span.start)}",
+                request,
+                self.limits,
+                progress,
+                kept=lambda: span.next,
+                split=split,
+                moving=progress.held,
+            )
         finally:
             received.range_done()
 

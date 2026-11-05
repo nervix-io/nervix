@@ -491,7 +491,9 @@ through one R2 bucket, which fails independently of GitHub. Only the steps that 
 them use `.github/actions/ci-artifact-upload` and `.github/actions/ci-artifact-download`.
 `scripts/ci_artifacts.py` states the format: a tar stream cut into 128 MiB parts, each sent and
 retried on its own, and a manifest written last, so an unfinished upload cannot be read. A rerun of
-a test job keeps its archive, and a rerun of `scenarios-build` replaces both.
+a test job keeps its archive, and a rerun of `scenarios-build` replaces both. The archives hold the
+test executables without their debug information, most of a test executable's bytes, as
+[Scenario Shards](integration-test-lifecycle.md#scenario-shards) describes.
 
 A transfer reports every ten seconds how much it moved and how fast, how many parts are done,
 moving, waiting to retry or queued, and which moving part is the slowest, so the step's log shows a

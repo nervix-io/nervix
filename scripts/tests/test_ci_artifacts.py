@@ -350,6 +350,40 @@ class SplitTests(unittest.TestCase):
         self.assertFalse(damaged.verified())
 
 
+class RetryTests(unittest.TestCase):
+    """How many failures in a row a request may have, which its part's progress decides."""
+
+    def run_retries(self, request, part: artifacts.PartProgress) -> str:
+        with mock.patch.object(artifacts, "pause"), contextlib.redirect_stdout(io.StringIO()):
+            return artifacts.with_retries("reading part-0", request, part.limits, part, kept=lambda: 0, moving=part.held)
+
+    def test_a_range_starved_while_the_rest_of_its_part_moves_goes_on(self) -> None:
+        progress = artifacts.Progress("suite", "received", [100], artifacts.Limits(backoff_jitter=0))
+        part = progress.part(0)
+        tries: list[artifacts.Attempt] = []
+
+        def request(attempt: artifacts.Attempt) -> str:
+            tries.append(attempt)
+            if len(tries) <= 2 * artifacts.TRANSFER_ATTEMPTS:
+                # Another range of the part moved while this one received nothing.
+                part.add(1)
+                raise artifacts.Transient("too slow")
+            return "done"
+
+        self.assertEqual(self.run_retries(request, part), "done")
+        self.assertEqual(len(tries), 2 * artifacts.TRANSFER_ATTEMPTS + 1)
+
+    def test_a_range_of_a_part_that_stopped_moving_fails_after_its_attempts(self) -> None:
+        progress = artifacts.Progress("suite", "received", [100], artifacts.Limits(backoff_jitter=0))
+        part = progress.part(0)
+
+        def request(attempt: artifacts.Attempt) -> str:
+            raise artifacts.Transient("too slow")
+
+        with self.assertRaisesRegex(artifacts.ArtifactError, "failed 6 times in a row, last with too slow"):
+            self.run_retries(request, part)
+
+
 class BackoffTests(unittest.TestCase):
     def test_each_backoff_waits_longer_and_at_random_up_to_half_again(self) -> None:
         limits = artifacts.Limits()
