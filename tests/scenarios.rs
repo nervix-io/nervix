@@ -7427,6 +7427,106 @@ async fn given_next_start_has_an_occupied_observability_port(
         .assured("a stopped follower's observability port can be held for its next startup");
 }
 
+#[given(expr = "node {string} will fail its next data append submission to node {string}")]
+async fn given_next_data_append_submission_fails(
+    world: &mut ScenarioWorld,
+    source: String,
+    target: String,
+) {
+    let source = expand_placeholders(world, &source);
+    let target = expand_placeholders(world, &target);
+    let source = crate::common::cluster::node_name(&source);
+    let observer = world.fault_injection.consensus_observer(&source);
+    let retention = observer.raft_log_retention();
+    // With no confirmed match, OpenRaft's midpoint is floor(end / 16) * 8. At end 528,
+    // the probe's previous index is 263, beyond the first replay batch's last index 255.
+    assert!(
+        retention.last_log_index.is_some_and(|index| index >= 527),
+        "the successor needs at least 528 retained entries: {retention:?}"
+    );
+    assert!(
+        retention.purged_index.is_none(),
+        "the regression requires the beginning of the log to remain available: {retention:?}"
+    );
+    world
+        .fault_injection
+        .fail_next_append_submission(&source, crate::common::cluster::node_name(&target))
+        .await;
+}
+
+#[then(
+    expr = "node {string} failed one append submission to node {string} above the replay batch \
+            boundary"
+)]
+async fn then_append_submission_failed_above_replay_boundary(
+    world: &mut ScenarioWorld,
+    source: String,
+    target: String,
+) {
+    let source = expand_placeholders(world, &source);
+    let target = expand_placeholders(world, &target);
+    let source = crate::common::cluster::node_name(&source);
+    let failure = nervix_primitives::time::timeout(Duration::from_secs(60), async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if let Some(failure) = world
+                .fault_injection
+                .append_submission_failure(&source)
+                .await
+            {
+                break failure;
+            }
+            nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        panic!("the successor did not submit data to the restored follower: {error}")
+    });
+    tracing::info!(%source, ?failure, "consensus append submission fault delivered");
+    assert_eq!(failure.target, crate::common::cluster::node_name(&target));
+    let previous = failure
+        .previous
+        .as_ref()
+        .unwrap_or_else(|| panic!("the failed initial probe has no previous entry: {failure:?}"));
+    assert!(
+        previous.index >= 256,
+        "a replay's first 256 entries must end below the probe's previous index: {failure:?}"
+    );
+    assert!(failure.last.index > previous.index);
+    assert!(failure.entries > 0);
+}
+
+#[then(expr = "node {string} confirms a linearizable read beyond its failed append submission")]
+async fn then_failed_append_leader_confirms_linearizable_read(
+    world: &mut ScenarioWorld,
+    source: String,
+) {
+    let source = expand_placeholders(world, &source);
+    let source = crate::common::cluster::node_name(&source);
+    let observer = world.fault_injection.consensus_observer(&source);
+    let failure = world
+        .fault_injection
+        .append_submission_failure(&source)
+        .await
+        .verified("the preceding step observed this node's failed append submission");
+    let answered = nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        observer.admitted_runtime_state(),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("the successor's Raft core did not answer its strict read: {error}")
+    });
+    let read = answered
+        .unwrap_or_else(|error| panic!("the successor's Raft core must still answer: {error:#}"));
+    assert!(
+        read.committed_log_index() > failure.last.index,
+        "the successor must apply the writes following its failed batch, even if leadership \
+         changed"
+    );
+}
+
 #[given(expr = "append-stream setup attempts toward node {string} are observed")]
 fn given_append_setup_attempts_are_observed(world: &mut ScenarioWorld, target: String) {
     let target = expand_placeholders(world, &target);
