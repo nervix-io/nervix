@@ -511,7 +511,9 @@ current connection, retry and deadline limits.
   attribute that is not UTF-8 does not survive the read.
 - `NATS SUBJECT` ingestors use `NO ACK` with a required `QUEUE GROUP` and `INSTANCES`, and
   `BUFFER` or `DROP` quiesce. Write NATS wildcards only in an ingestor's `SUBJECT`, as whole
-  tokens with `>` last; an emitter's `SUBJECT` is one literal subject. Check both against the NATS
+  tokens with `>` last; an emitter's `SUBJECT` is one literal subject. Subject names are at most
+  1,024 UTF-8 bytes and have no whitespace, controls, empty tokens or embedded wildcards; these
+  limits are Nervix's declared contract. Check both against the NATS
   sections of `Ingestors` and `Emitters`.
 - A `PULSAR TOPIC` emitter's `TIMESTAMP <expression>` is each message's event time: an exact,
   non-null, non-sensitive `DATETIME`, written as the millisecond that contains it, and a time before

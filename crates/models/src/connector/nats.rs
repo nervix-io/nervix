@@ -3,8 +3,8 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The NATS client Model, the subject source and emitter Models with their delivery
-//!   mode, the subject and queue group names a source subscribes with and the rules NATS holds
-//!   them to, and what each entity declares.
+//!   mode, Nervix's validated subject and queue group names for a source, and what each entity
+//!   declares.
 //!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared source and emitter declarations and the names a body references.
 //! - **Must not know.** The NATS driver, or how a subject is subscribed or
@@ -19,6 +19,8 @@ use std::num::NonZeroU64;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
+
+mod subject;
 
 use super::{
     bounds::{
@@ -63,8 +65,6 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
     .with_mutually_exclusive(&["credentials_file", "nkey_seed", "token"])
 };
 
-/// The longest subject Nervix subscribes to, in bytes.
-const NATS_SUBJECT_MAX: usize = 1024;
 /// The longest queue group Nervix joins, in bytes.
 const NATS_QUEUE_GROUP_MAX: usize = 255;
 
@@ -94,23 +94,7 @@ fn refuse_whitespace(text: &str) -> Result<(), ExternalNameError> {
 }
 
 fn nats_subject_rule(text: &str) -> Result<(), ExternalNameError> {
-    require_length(text, NATS_SUBJECT_MAX)?;
-    refuse_whitespace(text)?;
-    let mut tokens = text.split('.').peekable();
-    while let Some(token) = tokens.next() {
-        if token.is_empty() {
-            return Err(ExternalNameError::EmptyLevel { separator: '.' });
-        }
-        if token.len() > 1
-            && let Some(wildcard) = token.chars().find(|ch| matches!(ch, '*' | '>'))
-        {
-            return Err(ExternalNameError::WildcardInsideLevel { wildcard });
-        }
-        if token == ">" && tokens.peek().is_some() {
-            return Err(ExternalNameError::WildcardBeforeLastLevel { wildcard: '>' });
-        }
-    }
-    Ok(())
+    subject::SubscriptionPattern::parse(text).map(|_| ())
 }
 
 fn nats_queue_group_rule(text: &str) -> Result<(), ExternalNameError> {
@@ -438,11 +422,7 @@ super::external_name::external_names! {
 }
 
 fn nats_publication_subject(text: &str) -> Result<(), ExternalNameError> {
-    nats_subject_rule(text)?;
-    if let Some(ch) = text.chars().find(|ch| matches!(ch, '*' | '>')) {
-        return Err(ExternalNameError::InvalidChar { ch });
-    }
-    Ok(())
+    subject::SubscriptionPattern::parse(text)?.require_literal()
 }
 
 #[cfg(test)]
