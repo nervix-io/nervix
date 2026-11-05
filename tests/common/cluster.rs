@@ -4097,6 +4097,19 @@ impl Cluster {
         Ok(status.current_leader)
     }
 
+    pub(crate) async fn current_leadership(&self, node_id: &str) -> io::Result<(String, u64)> {
+        let status = self
+            .cluster_status(node_id, PhaseDeadline::after(STATUS_REQUEST_TIMEOUT))
+            .await
+            .map_err(|error| {
+                io::Error::other(format!("node '{node_id}' status request failed: {error:#}"))
+            })?;
+        status
+            .leadership()
+            .map(|leadership| (leadership.leader, leadership.term))
+            .ok_or_else(|| io::Error::other(format!("node '{node_id}' has no reported leadership")))
+    }
+
     /// The leader every reachable node agrees on, ignoring nodes a scenario has stopped.
     pub(crate) async fn wait_for_leader_among_running(&self) -> io::Result<String> {
         let deadline = PhaseDeadline::after(STATUS_WAIT_BUDGET);
