@@ -34,13 +34,13 @@ use nervix_client_wire::{
     DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockDetachDisposition,
     DomainClockDetachOutcome, DomainEntity, DomainInfo, DomainSelection, DomainSnapshotObserved,
     InspectTransactionRequest, InspectionOutcome, LeaderRedirect, Leadership,
-    MAX_IN_FLIGHT_REQUESTS, NoticeKind, NoticeLevel, ReplyBody, RequestCancelled, RequestId, RowBatchView,
-    RowSchema, SelectDomainRequest, ServerEvent, ServerFrame, ServerMessage, ServerNotice,
-    SessionEndReason, SessionLimits, StatementDisposition, StatementOutcome, SubscribeDisposition,
-    SubscribeOutcome, SubscribeRequest, SubscriptionEnded, SubscriptionHandle, SubscriptionOpened,
-    SubscriptionRows, SubscriptionType, SuggestRequest, Suggestion as WireSuggestion,
-    SuggestionKind, SuggestionStatus, TextEdit, TransferAssembly, TransferPart,
-    UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame,
+    MAX_IN_FLIGHT_REQUESTS, NoticeKind, NoticeLevel, ReplyBody, RequestCancelled, RequestId,
+    RowBatchView, RowSchema, SelectDomainRequest, ServerEvent, ServerFrame, ServerMessage,
+    ServerNotice, SessionEndReason, SessionLimits, StatementDisposition, StatementOutcome,
+    SubscribeDisposition, SubscribeOutcome, SubscribeRequest, SubscriptionEnded,
+    SubscriptionHandle, SubscriptionOpened, SubscriptionRows, SubscriptionType, SuggestRequest,
+    Suggestion as WireSuggestion, SuggestionKind, SuggestionStatus, TextEdit, TransferAssembly,
+    TransferPart, UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame,
     websocket::{CONSOLE_SESSION_PATH, ClientWebSocketCodec, WebSocketData},
 };
 use nervix_dataflow_graph::{
@@ -9849,8 +9849,8 @@ mod tests {
                 transcript,
                 vec![
                     "cluster parameters committed at revision 4".to_string(),
-                    "emitter 'redis_orders' publish failed".to_string(),
-                    "resource 'model' failed to load".to_string(),
+                    "error: emitter 'redis_orders' publish failed".to_string(),
+                    "error: resource 'model' failed to load".to_string(),
                 ]
             );
         });

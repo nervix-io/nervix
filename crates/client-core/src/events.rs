@@ -10,9 +10,9 @@
 use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_client_wire::{
-    NoticeKind, NoticeLevel, RowConformanceError, RowSchema, ServerNotice, SubscriptionDeliveryLost,
-    SubscriptionEnded, SubscriptionHandle, SubscriptionRows, SubscriptionRowsSkipped, Suggestion,
-    SuggestionKind, SuggestionStatus,
+    NoticeKind, NoticeLevel, RowConformanceError, RowSchema, ServerNotice,
+    SubscriptionDeliveryLost, SubscriptionEnded, SubscriptionHandle, SubscriptionRows,
+    SubscriptionRowsSkipped, Suggestion, SuggestionKind, SuggestionStatus,
 };
 use nervix_models::{RelayName, SubscriptionDeliveryBehavior};
 use nervix_primitives::sync::Arc;

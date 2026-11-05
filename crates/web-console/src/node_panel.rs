@@ -183,12 +183,15 @@ fn ClusterEventLine(event: ClusterEvent) -> impl IntoView {
     } else {
         None
     };
+    let kind = event.kind_label();
+    let level = event.level_label();
+    let occurrences = event.occurrences.to_string();
     view! {
         <div
             class="node-event"
-            data-kind=event.kind_label()
-            data-level=event.level_label()
-            data-occurrences=event.occurrences.to_string()
+            data-kind=kind
+            data-level=level
+            data-occurrences=occurrences
         >
             <span class="node-event-text">{event.message}</span>
             {repeats}
@@ -221,7 +224,10 @@ mod tests {
     fn a_membership_event_repeated_within_a_session_is_one_entry_with_its_count() {
         let mut log = ClusterEventLog::default();
         log.record(1, notice(NoticeKind::Membership, "node 'node-3' left"));
-        log.record(1, notice(NoticeKind::Leadership, "raft transition: state=Leader"));
+        log.record(
+            1,
+            notice(NoticeKind::Leadership, "raft transition: state=Leader"),
+        );
         log.record(1, notice(NoticeKind::Membership, "node 'node-3' left"));
 
         assert_eq!(log.received(), 3);
@@ -272,7 +278,10 @@ mod tests {
             .checked_add(3)
             .assured("the test log bound is small");
         for index in 0..total {
-            log.record(1, notice(NoticeKind::Leadership, &format!("transition {index}")));
+            log.record(
+                1,
+                notice(NoticeKind::Leadership, &format!("transition {index}")),
+            );
         }
 
         let shown = lines(&log);
@@ -299,7 +308,10 @@ mod tests {
         let mut log = ClusterEventLog::default();
         log.record(1, notice(NoticeKind::Membership, "node 'node-2' left"));
         let first = log.newest_first().remove(0).id;
-        log.record(1, notice(NoticeKind::Leadership, "raft transition: state=Follower"));
+        log.record(
+            1,
+            notice(NoticeKind::Leadership, "raft transition: state=Follower"),
+        );
         log.record(1, notice(NoticeKind::Membership, "node 'node-2' left"));
 
         let newest = log.newest_first().remove(0);

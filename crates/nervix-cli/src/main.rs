@@ -2235,7 +2235,8 @@ mod tests {
                     kind: NoticeKind::Leadership,
                     message: "raft transition: state=Leader leader=node-1 term=2".to_string(),
                 },
-                line: "[events] leadership INFO: raft transition: state=Leader leader=node-1 term=2",
+                line: "[events] leadership INFO: raft transition: state=Leader leader=node-1 \
+                       term=2",
             },
             Printed {
                 notice: ServerEvent {
@@ -2243,7 +2244,8 @@ mod tests {
                     kind: NoticeKind::ClusterParameters,
                     message: "cluster parameters committed at revision 3".to_string(),
                 },
-                line: "[events] cluster parameters INFO: cluster parameters committed at revision 3",
+                line: "[events] cluster parameters INFO: cluster parameters committed at revision \
+                       3",
             },
             Printed {
                 notice: ServerEvent {
@@ -2274,7 +2276,10 @@ mod tests {
             kind: NoticeKind::Runtime,
             message: "raft transition: state=Leader".to_string(),
         });
-        assert_eq!(rendered, "[events] runtime ERROR: raft transition: state=Leader");
+        assert_eq!(
+            rendered,
+            "[events] runtime ERROR: raft transition: state=Leader"
+        );
     }
 
     fn live_subscription() -> nervix_client_core::SubscriptionHandle {

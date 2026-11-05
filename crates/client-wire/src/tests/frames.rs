@@ -16,9 +16,8 @@ use super::{
 use crate::{
     CellView, CellWriter, CellsView, ClientFrame, ClientMessage, ClientRequest, CommandDisposition,
     CommandRequest, FrameError, FrameViolation, InspectionOutcome, NoticeKind, NoticeLevel, Reply,
-    ReplyBody,
-    ReplyDelivery, RowBranch, RowSchema, ServerEvent, ServerFrame, ServerMessage, ServerNotice,
-    SessionLimitSettings, SessionLimits, SubscribeDisposition, SubscribeOutcome,
+    ReplyBody, ReplyDelivery, RowBranch, RowSchema, ServerEvent, ServerFrame, ServerMessage,
+    ServerNotice, SessionLimitSettings, SessionLimits, SubscribeDisposition, SubscribeOutcome,
     SubscriptionOpened, SubscriptionRowsEncoder, SubscriptionType, UploadChunk, UploadDisposition,
     UploadFailure, UploadFrame, UploadMessage, UploadReply, UploadReplyFrame, UploadStart,
     VerifiedFrame, WireEncodeError,

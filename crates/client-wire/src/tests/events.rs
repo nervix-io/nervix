@@ -14,9 +14,9 @@ use super::{
 use crate::{
     ClusterObserved, DomainEntity, DomainInfo, DomainSnapshotObserved, DomainsObserved,
     LeaderRedirect, Leadership, LeadershipObserved, NoticeKind, NoticeLevel, RowsSkippedCause,
-    ServerEvent,
-    ServerMessage, ServerNotice, SessionEndReason, SessionEnding, SubscriptionDeliveryLost,
-    SubscriptionEndReason, SubscriptionEnded, SubscriptionRowsSkipped, WireDecodeError, wire,
+    ServerEvent, ServerMessage, ServerNotice, SessionEndReason, SessionEnding,
+    SubscriptionDeliveryLost, SubscriptionEndReason, SubscriptionEnded, SubscriptionRowsSkipped,
+    WireDecodeError, wire,
 };
 
 #[test]

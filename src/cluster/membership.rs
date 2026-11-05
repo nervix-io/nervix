@@ -258,7 +258,8 @@ mod tests {
         let mut members = members_of("node-1", 7);
         members.observe(&live(&[("node-1", 7), ("node-2", 9)], &[]));
 
-        let restarted = members.observe(&live(&[("node-1", 7), ("node-2", 9), ("node-2", 13)], &[]));
+        let restarted =
+            members.observe(&live(&[("node-1", 7), ("node-2", 9), ("node-2", 13)], &[]));
         let old_run_removed = members.observe(&live(&[("node-1", 7), ("node-2", 13)], &[]));
 
         assert_eq!(

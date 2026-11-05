@@ -18,8 +18,8 @@ use futures_util::StreamExt;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     ClientFrame, ClientMessage, ClientRequest, CommandDisposition, CommandOutcome, CommandRequest,
-    DomainInfo, DomainList, EncodedFrame, InspectTransactionRequest, InspectionOutcome,
-    NoticeKind, NoticeLevel, OutcomeOrigin, Reply, ReplyBody, ReplyDelivery, RequestId, RequestRejected,
+    DomainInfo, DomainList, EncodedFrame, InspectTransactionRequest, InspectionOutcome, NoticeKind,
+    NoticeLevel, OutcomeOrigin, Reply, ReplyBody, ReplyDelivery, RequestId, RequestRejected,
     RequestRejection, ServerEvent, ServerFrame, ServerMessage, ServerNotice, SessionLimitSettings,
     SessionLimits, TransferAssembly, UploadChunk, UploadDisposition, UploadFrame, UploadMessage,
     UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame, WireDecodeError,

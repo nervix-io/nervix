@@ -27,8 +27,8 @@ use error_stack::ResultExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     ClusterObserved, DomainEntity, DomainInfo, DomainSnapshotObserved, DomainsObserved,
-    EncodedFrame, LeaderRedirect as WireLeaderRedirect, Leadership, LeadershipObserved,
-    NoticeKind, NoticeLevel, ServerFrame, ServerNotice, SessionEndReason, SessionLimits,
+    EncodedFrame, LeaderRedirect as WireLeaderRedirect, Leadership, LeadershipObserved, NoticeKind,
+    NoticeLevel, ServerFrame, ServerNotice, SessionEndReason, SessionLimits,
 };
 use nervix_dataflow_graph::DataflowGraph;
 use nervix_execution::{CpuClass, MemoryClass};

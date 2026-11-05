@@ -246,10 +246,7 @@ fn every_undeclared_enum_byte_is_refused() {
         wire::NoticeLevel::ENUM_MAX,
         wire::NoticeLevel,
     );
-    assert_undeclared_refused::<crate::NoticeKind, _>(
-        wire::NoticeKind::ENUM_MAX,
-        wire::NoticeKind,
-    );
+    assert_undeclared_refused::<crate::NoticeKind, _>(wire::NoticeKind::ENUM_MAX, wire::NoticeKind);
     assert_undeclared_refused::<nervix_models::ImpactDiagnosticKind, _>(
         wire::ImpactDiagnosticKind::ENUM_MAX,
         wire::ImpactDiagnosticKind,

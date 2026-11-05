@@ -12,9 +12,10 @@ use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
-    ClientMessage, ClientRequest, DomainList, NoticeKind, NoticeLevel, Reply, ReplyBody, ReplyDelivery,
-    RequestId, ServerEvent, ServerMessage, ServerNotice, SessionLimitSettings, SessionLimits,
-    SuggestOutcome, SuggestRequest, Suggestion, SuggestionKind, SuggestionStatus, TextEdit,
+    ClientMessage, ClientRequest, DomainList, NoticeKind, NoticeLevel, Reply, ReplyBody,
+    ReplyDelivery, RequestId, ServerEvent, ServerMessage, ServerNotice, SessionLimitSettings,
+    SessionLimits, SuggestOutcome, SuggestRequest, Suggestion, SuggestionKind, SuggestionStatus,
+    TextEdit,
     websocket::{ClientWebSocketCodec, ServerWebSocketCodec, WebSocketData, WebSocketError},
 };
 use nervix_primitives::net::{TcpListener, TcpStream};

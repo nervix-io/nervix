@@ -46,17 +46,15 @@ use crate::{
     DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockObserved, DomainClockTicked,
     DomainPaceChoice, EmitterBatchReceived, EmitterCloseDisposition, EmitterOpened,
     EmitterSettlement, LeaderRedirect, NodeEndpoints, NoticeKind, NoticeLevel,
-    OpenEmitterDisposition, OpenEmitterOutcome,
-    OpenIngestorDisposition, OpenIngestorOutcome, ProducerAdmissionChanged, ProducerEnded,
-    ProducerOpened, ReadEmitterBatchOutcome, ReadEmitterDisposition, Reply, ReplyBody,
-    ReplyDelivery, RequestRejected, RequestRejection, RestoreDisposition, RestoreFrame,
-    RestoreMessage, RestoreReply, RestoreReplyFrame, RestoreStart, RestoreUploadFailure,
-    ServerEvent, ServerFrame, ServerMessage, ServerNotice, SettleEmitterBatchOutcome,
-    SubmissionOutcome,
-    SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason, SubscriptionEnded,
-    SubscriptionOpened, SubscriptionType, SuggestOutcome, Suggestion, SuggestionKind,
-    SuggestionStatus, TextEdit, UnknownOutcomeCause, VerifiedFrame, producer::wire_refusal,
-    restore::RestoreChunk, wire,
+    OpenEmitterDisposition, OpenEmitterOutcome, OpenIngestorDisposition, OpenIngestorOutcome,
+    ProducerAdmissionChanged, ProducerEnded, ProducerOpened, ReadEmitterBatchOutcome,
+    ReadEmitterDisposition, Reply, ReplyBody, ReplyDelivery, RequestRejected, RequestRejection,
+    RestoreDisposition, RestoreFrame, RestoreMessage, RestoreReply, RestoreReplyFrame,
+    RestoreStart, RestoreUploadFailure, ServerEvent, ServerFrame, ServerMessage, ServerNotice,
+    SettleEmitterBatchOutcome, SubmissionOutcome, SubscribeDisposition, SubscribeOutcome,
+    SubscriptionEndReason, SubscriptionEnded, SubscriptionOpened, SubscriptionType, SuggestOutcome,
+    Suggestion, SuggestionKind, SuggestionStatus, TextEdit, UnknownOutcomeCause, VerifiedFrame,
+    producer::wire_refusal, restore::RestoreChunk, wire,
 };
 
 const UPDATE_ENV: &str = "NERVIX_UPDATE_CLIENT_WIRE_CORPUS";
@@ -638,7 +636,8 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             notice(
                 NoticeLevel::Info,
                 NoticeKind::Leadership,
-                "raft transition: state=Leader leader=node-1 term=2 last_log_index=7 last_applied=7",
+                "raft transition: state=Leader leader=node-1 term=2 last_log_index=7 \
+                 last_applied=7",
             ),
         ),
         (

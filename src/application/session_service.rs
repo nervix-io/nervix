@@ -21,8 +21,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection, ChoiceStatus,
     ChoiceTarget, ChoiceValue, CommandRequest, DomainPaceChoice, NoticeKind, NoticeLevel,
-    ServerNotice,
-    SuggestOutcome, SuggestRequest, Suggestion, SuggestionKind, SuggestionStatus, TextEdit,
+    ServerNotice, SuggestOutcome, SuggestRequest, Suggestion, SuggestionKind, SuggestionStatus,
+    TextEdit,
 };
 use nervix_consensus::{Administrator, CommandExecutionTransactionTarget, Observer, Proposer};
 use nervix_interconnect::Transport;
@@ -132,7 +132,11 @@ impl SessionEvents {
     /// The cluster layer writes its own `info` line before handing the change here, so this is a
     /// relay rather than a report and it logs nothing of its own.
     pub(in crate::application) fn relay_membership(&self, change: &cluster::MembershipChange) {
-        self.publish(NoticeLevel::Info, NoticeKind::Membership, change.to_string());
+        self.publish(
+            NoticeLevel::Info,
+            NoticeKind::Membership,
+            change.to_string(),
+        );
     }
 
     /// Offer a consensus transition the consensus bus has already recorded in its `info` line.
