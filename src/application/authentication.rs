@@ -390,10 +390,10 @@ impl SessionServiceImpl {
         credentials: &BasicAuthCredentials,
     ) -> Result<UserName, AuthenticationRefusal> {
         let user_name = UserName::parse(&credentials.username).ok();
-        let name = user_name.as_ref().map_or_else(
-            || credentials.username.to_ascii_lowercase(),
-            |name| name.as_str().to_owned(),
-        );
+        let name = match &user_name {
+            Some(name) => name.as_str().to_owned(),
+            None => credentials.username.to_ascii_lowercase(),
+        };
         let admission = self
             .inner
             .authentication_pacing

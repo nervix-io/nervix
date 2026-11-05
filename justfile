@@ -2575,6 +2575,10 @@ cargo-fmt:
 cargo-fmt-package package:
     cargo +nightly fmt --package {{ package }}
 
+# Format one Rust module and its children during a focused edit.
+rustfmt-file file:
+    rustfmt +nightly {{ quote(file) }}
+
 # Ripgrep honors the repository ignore rules, so generated target trees are not formatted.
 taplo-format:
     git ls-files -z --cached --others --exclude-standard '*.toml' | xargs -0 -r taplo format
