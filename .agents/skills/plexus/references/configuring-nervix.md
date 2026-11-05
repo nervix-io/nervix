@@ -75,6 +75,11 @@ the open session, a reply that names another execution, and reconnect behavior, 
 directly. Follow the same documentation version as the selected index; these client chapters are
 outside the curated Plexus index.
 
+For native command or restore recovery after an execution-reference mismatch, read
+[Client Library](https://docs.nervix.io/client-library.html) and the command and restore contracts in
+[Client Implementation Manual](https://docs.nervix.io/client-implementation-manual.html) directly.
+Keep the original execution reference when recovering an uncertain outcome.
+
 Prefer the narrow indexed topic over an old copied snippet. Do not leave the immutable version
 selected by the documentation index when following related material.
 

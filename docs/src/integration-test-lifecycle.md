@@ -16,6 +16,31 @@ node's files, observes the initially loaded leaf on a fresh connection before re
 replacement leaf after restart. CLI and Rust-client operations verify the supplied CA and endpoint
 name, and the console recorder checks an opened WSS connection to the advertised leader.
 
+## Focused Native Command Recovery
+
+`just test-client-foreign-execution` runs exactly the native-client and CLI foreign-reference
+outlines on one and three nodes, with retries disabled. It builds the server's console assets,
+loads the ONNX runtime and builds the CLI before starting the scenario runner. These cases start
+no paced simulation or Python driver, so the focused recipe does not build those tools. The
+ordinary scenario runner and its startup, execution, parallelism and teardown budgets are
+unchanged. Broad `just test-scenarios` and CI keep their complete tool prerequisites.
+The recipe checks that all four cases execute and keeps its output under
+`target/client-foreign-execution`.
+
+The focused client owner can be explored with
+`just test-client-shuttle exchange::shuttle_tests::shuttle_a_foreign_reply_racing_registration_interrupts_every_waiter`.
+It runs that production owner's declared exploration and its nondeterminism check in a separate
+Shuttle build directory, retaining failing schedules. The canonical `just test-shuttle` inventory
+and package-wide discovery still qualify the full selection in CI.
+
+`just test-client-recovery-diagnostic <selection>` uses the canonical Deloxide runner for each of
+`deloxide`, `deloxide-order`, `deloxide-stress` and `deloxide-stress-restore`. It validates the full
+register first, then retains all registered workloads in the four feature files reached by the
+client request and exchange owners. Their existing tags, invocations, bounds, supervision and
+accounting remain in force. Each record declares its selected owners and features and sets
+`whole_workspace` to false; this scope cannot enter a whole-workspace coverage collection.
+`just test-client-recovery-runner` checks scope completeness against feature discovery.
+
 ## Paced Interconnect Fixture
 
 The separate failed-append regression establishes retained history on all three nodes before

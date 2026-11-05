@@ -1315,3 +1315,33 @@ Feature: Client wire failure regressions
       | cluster_size |
       | 1            |
       | 3            |
+
+  @client_foreign_execution @deloxide_stress
+  Scenario Outline: A native command recovers its own execution after a foreign command reply on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given client "recovering" is connected to node "{{leader}}"
+    And the next successful reply to native command "CREATE SCHEMA recovered_identity (value STRING);" names another execution
+    When client "recovering" executes these Plexus commands
+      """
+      CREATE SCHEMA recovered_identity (value STRING);
+      """
+    Then the native command recovered only its own execution reference
+    When client "recovering" executes these Plexus commands
+      """
+      SHOW CREATE SCHEMA recovered_identity;
+      """
+    Then the last command output contains
+      """
+      recovered_identity
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

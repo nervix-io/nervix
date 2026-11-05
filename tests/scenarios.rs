@@ -210,6 +210,7 @@ mod backup;
 mod cli_outcomes;
 mod clickhouse_connections;
 mod client_consumers;
+mod client_foreign_execution;
 mod client_producers;
 mod client_traffic;
 mod common;
