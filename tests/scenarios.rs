@@ -235,6 +235,7 @@ mod mqtt_subscription_refusal;
 mod mysql_isolation;
 mod nats_authentication;
 mod nats_delivery;
+mod nats_stream_consumers;
 mod paced_replication;
 mod paced_simulation;
 mod postgres_fixtures;

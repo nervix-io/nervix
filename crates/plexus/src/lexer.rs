@@ -303,6 +303,7 @@ pub enum Identifier {
     Ttl,
     Topic,
     Subject,
+    Stream,
     Queue,
     Channel,
     Pattern,

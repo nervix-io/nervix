@@ -1321,6 +1321,9 @@ impl Arbitrary<'_> {
             IngestorEntityKind::Nats(NatsIngestorEntity::Subject) => {
                 self.transport_operations(Self::nats_subject_source, Self::nats_subject_change)
             }
+            IngestorEntityKind::Nats(NatsIngestorEntity::Stream) => {
+                self.transport_operations(Self::nats_stream_source, Self::nats_stream_change)
+            }
             IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => {
                 self.transport_operations(Self::rabbitmq_queue_source, Self::rabbitmq_queue_change)
             }
