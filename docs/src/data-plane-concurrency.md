@@ -1829,6 +1829,13 @@ describe test selection, not a product wait deadline. The executor-saturation lo
 testing fault control. The [concurrent map inventory](https://github.com/nervix-io/nervix/blob/main/tests/concurrent-map-inventory-ledger.md)
 records the runtime ownership review; source contracts and expectations are the executable policy.
 
+The console's uncertain-command reply fixture uses a testing-only domain/query map after command
+execution. It substitutes three replies and retains at most four execution references, releases
+each map guard before queuing the reply, and drops the map with the scenario's injector. Its
+DashMap accesses and browser timers are untracked by Deloxide. The browser retry queue has one
+task owner; deterministic owner tests and public one- and three-node scenarios check its ordering,
+backoff and retained session attachments.
+
 ### Complete analysis and qualification
 
 The isolated tooling workspace uses `nightly-2026-09-17`; product builds use stable. The twelve

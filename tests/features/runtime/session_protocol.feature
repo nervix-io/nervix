@@ -208,6 +208,19 @@ Feature: Session protocol
       | 1            |
       | 3            |
 
+  @session_shutdown_unread @deloxide_stress
+  Scenario Outline: A native client reading nothing cannot hold a node stop past the connection grace period
+    Given shutdown timeout is configured as "30s"
+    And a <cluster_size> node nervix cluster is started
+    And a native session on the leader reads nothing until request acceptance waits
+    When the node serving the unread native session is stopped
+    Then the unread native connection ends after its grace period and the stop completes within its deadline
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario: Leadership lost after durable admission leaves an unknown outcome that a retry recovers
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"

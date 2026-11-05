@@ -6,7 +6,8 @@
 //! - **Owns.** One pseudo-terminal, the CLI process attached to its slave side, the working
 //!   directory that holds the REPL's history file, the task that plays the terminal on the master
 //!   side, and the bounded record of what the terminal displayed.
-//! - **Depends on.** Tokio's processes and descriptor readiness, and `nix` for the pseudo-terminal.
+//! - **Depends on.** Tokio's processes and descriptor readiness, and `nix` for the pseudo-terminal
+//!   and the interrupt signal.
 //! - **Must not know.** Scenario state, nodes, Plexus, or what the CLI prints.
 //!
 //! # Playing the terminal
@@ -185,6 +186,21 @@ impl CliTerminal {
             self.type_line("").await?;
             nervix_primitives::time::sleep(PROMPT_INTERVAL).await;
         }
+    }
+
+    /// Delivers SIGINT to the CLI, as a terminal does when its user presses Ctrl-C while the CLI
+    /// runs a statement. The CLI does not hold this terminal as its controlling terminal, so the
+    /// interrupt character typed into it would signal nothing.
+    pub(crate) fn interrupt(&self) -> io::Result<()> {
+        let Some(raw) = self.cli.id() else {
+            return Err(io::Error::other("the CLI has already exited"));
+        };
+        let raw = i32::try_from(raw).map_err(io::Error::other)?;
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(raw),
+            nix::sys::signal::Signal::SIGINT,
+        )
+        .map_err(io::Error::from)
     }
 
     /// Waits for the CLI to exit, and says how it ended.

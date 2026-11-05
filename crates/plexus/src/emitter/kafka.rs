@@ -37,14 +37,29 @@ pub(super) fn topic_body<'src>(
     )
 }
 
+/// `SET TOPIC '<name>'` or `SET MODE <mode>`: one part of a `KAFKA TOPIC` body.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], KafkaTopicEmitterChange, extra::Err<ParseError<'src>>> + Clone {
+    let locator = kw(Identifier::Topic)
+        .ignore_then(external_name::<KafkaTopicName>())
+        .map(KafkaTopicEmitterChange::Topic);
+    let publishing = kw(Identifier::Mode)
+        .ignore_then(mode())
+        .map(KafkaTopicEmitterChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((locator, publishing)))
+        .boxed()
+}
+
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU64;
 
     use meticulous::OptionExt as _;
     use nervix_models::{
-        AckWindow, AlterEmitterOperation, EmitterEntity, EmitterEnvelopeAlteration, KafkaEmitter,
-        KafkaTopicPublishingMode, Model, Statement,
+        AckWindow, AlterEmitterOperation, EmitterEntity, EmitterEnvelopeAlteration,
+        EnvelopeClauseKind, EnvelopeClauseValue, KafkaEmitter, KafkaTopicPublishingMode, Model,
+        Statement,
     };
     use rstest::rstest;
 
@@ -182,13 +197,18 @@ mod tests {
         };
         assert!(matches!(
             alteration.as_ref(),
-            EmitterEnvelopeAlteration::SetTimestamp { .. }
-                | EmitterEnvelopeAlteration::DropTimestamp
+            EmitterEnvelopeAlteration::SetClause {
+                clause: EnvelopeClauseValue::Timestamp(_)
+            } | EmitterEnvelopeAlteration::DropClause {
+                clause: EnvelopeClauseKind::Timestamp
+            }
         ));
         assert_eq!(
             matches!(
                 alteration.as_ref(),
-                EmitterEnvelopeAlteration::SetTimestamp { .. }
+                EmitterEnvelopeAlteration::SetClause {
+                    clause: EnvelopeClauseValue::Timestamp(_)
+                }
             ),
             sets_timestamp
         );

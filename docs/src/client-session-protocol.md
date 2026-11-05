@@ -592,6 +592,15 @@ because a client recovers from both the same way.
 from the durable record of an earlier attempt with the same reference, `Recovered`. A recovered
 failure is the same failure: its message and diagnostics are the ones retained when it happened.
 
+Every `OutcomeUnknown` cause permits a repeat on the existing open session. `LeadershipLost` can
+mean an unconfirmed lease on the node that still leads; it does not by itself identify another
+endpoint. The Rust client and web console back off and repeat there under the same execution
+reference. A subsequent redirect, a session-ending event, or a transport ending supplies the reason
+to reconnect. The console starts its per-command wait at 250 milliseconds, doubles it up to five
+seconds while the answer remains unknown, and keeps processing session messages during the wait.
+Held commands retain their issue order, and the selected domain, clock and subscription tabs keep
+their existing attachments. Only a terminal disposition is rendered as the command's outcome.
+
 For a WASM state reset, loss of Raft leadership during generation publication leaves the durable
 step applying under its original reference. The request can wait for recovery or answer
 `OutcomeUnknown` if its coordinator no longer leads; it does not retain a failed outcome merely
@@ -991,9 +1000,14 @@ that outlives `request_timeout` is the client's only sign that its session may b
 every request still waiting on that session, and the next request opens a new one. While an
 election converges it retries with a delay that starts at 100 milliseconds and doubles up to one
 second. When a call's deadline passes before a command's outcome is known, and the command may have
-been admitted, the call fails as uncertain and names the execution reference. The Rust client, the
-CLI, and the console never send `CancelRequest`: a caller that stops waiting only drops its waiter,
-and the reply, when it comes, is discarded.
+been admitted, the call fails as uncertain and names the execution reference. The console never
+sends `CancelRequest`. The Rust client sends one only for a call made through
+`execute_prepared_with_cancellation`, when its caller cancels the call while the command waits for
+its reply, and it keeps waiting for the command's terminal reply: `RequestCancelled` before
+admission fails the call as cancelled with no effect, and after admission as uncertain under the
+execution reference. The CLI cancels that way when its operator presses Ctrl-C while a command runs;
+see [Interrupting A Statement](./client-tools-cli.md#interrupting-a-statement). Any other caller that
+stops waiting only drops its waiter, and the reply, when it comes, is discarded.
 
 `nervix-cli backup --timeout` sets only each running domain's quiesce timeout; its request and
 retry budgets stay at their defaults, and `--backup-wait-timeout` bounds the overall command wait.
@@ -1065,7 +1079,8 @@ stateDiagram-v2
     Connecting --> Failed: retry deadline passed
     Open --> Open: reply routed by request identity
     Open --> Redirecting: LeaderRedirect names the leader's endpoint
-    Open --> AwaitingLeader: LeaderRedirect names no endpoint, or OutcomeUnknown
+    Open --> AwaitingLeader: LeaderRedirect names no endpoint
+    Open --> Open: OutcomeUnknown, back off and repeat on this session
     AwaitingLeader --> Open: back off, then repeat under the same reference
     Redirecting --> Restoring: new session on the leader
     Open --> Lost: transport failure, session ending, or protocol violation
@@ -1951,6 +1966,14 @@ repeats each outstanding command under its execution reference, which joins the 
 returns its retained outcome, and sends again each upload, restore or download whose call did not
 answer.
 
+The shutdown outlines in `session_protocol.feature` verify both client observations on one and
+three nodes. Reading clients receive their ending and an `OK` end of call, including while an
+admitted command still runs. The unread-client outline first establishes an actual wait for
+response capacity, then measures the connection's ending from the stop request, requires the
+grace-period cut log from that launch and checks that admission completed within the shutdown
+deadline. [Integration Test Lifecycle](./integration-test-lifecycle.md#scenario-driven-stops)
+owns the harness observations and their diagnostic scope.
+
 **Forced ending.** A repeated signal, an expired shutdown deadline, `SIGKILL`, or a crash ends the
 connection without warning. A command whose reply was not received may or may not have been
 admitted, and the client cannot tell which from the connection. It repeats the command under the
@@ -2017,7 +2040,11 @@ The C ABI's lifecycle follows from that choice:
 - **Threads.** Each session runs on a runtime of its own, with two threads the library owns. The
   library never calls host code, so no host function ever runs on a library thread. Every blocking
   call runs on the calling thread until it completes, fails, or is cancelled, and a session may be
-  used from several threads at once; commands of one session still run one at a time. A call made
+  used from several threads at once; commands of one session still run one at a time. The call's
+  futures, and every frame that polls them, live on that thread's stack. A prepared command
+  completes on a thread with a 512 KiB stack in the unoptimized library, half the default stack of
+  a Java thread, as `a_prepared_command_completes_on_a_host_thread_with_half_a_java_stack` in
+  `nervix-client-core` holds. A call made
   from a thread that is itself driving a Tokio runtime cannot block on the library's runtime and
   aborts the process, so a Rust host calls the binding from a blocking thread.
 - **Cancellation and deadlines.** Every blocking call takes an optional `nx_cancel`. A token
@@ -2216,7 +2243,10 @@ The protocol makes a client's view of its own work explicit rather than inferred
 - **Correlation.** Every reply names the request identity it answers, and every command outcome
   names its execution reference. A client that logs both can pair a reply with the request it sent
   and with every later attempt of the same command. The CLI prints the execution reference of a
-  command whose outcome is unknown, so an operator can see what a later retry will recover.
+  command whose outcome is unknown, and the upload identity of such an upload, and sends it again
+  under that identity when the operator runs the same statement again at the prompt or passes it to
+  `--execution-reference` or `--upload-identity`, so the later attempt recovers the outcome rather
+  than starting another command.
 - **Dispositions and origin.** A command outcome states its disposition, and whether it was executed
   now or recovered from the durable record. `OutcomeUnknown` names its cause, a conflict names what
   differed, and a stale preview names both identities.

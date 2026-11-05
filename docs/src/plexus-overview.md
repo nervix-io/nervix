@@ -163,23 +163,35 @@ ALTER <CONNECTOR> <ENTITY> EMITTER <name>
   ALTER FROM <relay> SET WHERE <expr> |
   ALTER FROM <relay> DROP WHERE |
   SET TO <complete entity body including MODE and payload> |
-  SET MODE <transport-specific publishing mode body> |
   SET CLIENT <client> |
+  SET <locator> | SET <option> | DROP <option> |
+  SET MODE <declared publishing mode> |
   SET ENCODE USING <codec> | DROP ENCODE |
+  SET <envelope clause> | DROP <envelope clause> |
+  SET PROPERTIES { ... } | DROP PROPERTIES |
+  SET INHERIT ... | DROP INHERIT |
+  ADD SET <field> = <expr> | DROP SET <field> |
+  ADD INVOKE <call> | DROP INVOKE <n> |
+  SET WHERE <expr> | DROP WHERE |
   SET COLLECT FOR <duration> [MAX BATCH SIZE <bytes>] | DROP COLLECT |
   SET ATTACHED | SET DETACHED |
   SET BATCH MAX MESSAGES <n> MAX SIZE <bytes> | DROP BATCH |
   SET FLUSH EACH <duration> MAX BATCH SIZE <bytes> | SET FLUSH IMMEDIATE |
-  SET COMMIT EACH <duration> MAX SIZE <bytes>
+  SET GENERAL ERROR IGNORE|LOG
   [, ...];
 
 ALTER <CONNECTOR> <ENTITY> INGESTOR <name>
   SET FROM <body> |
-  SET QUIESCE <quiesce body> |
+  SET CLIENT <client> |
+  SET <locator> | SET <option> | DROP <option> |
+  SET MODE <declared delivery mode> |
+  SET START AT EARLIEST|LATEST |
+  SET QUIESCE <declared quiesce body> |
   SET DECODE USING <codec> |
   SET TIMESTAMP NOW | SET TIMESTAMP AT <field> | DROP TIMESTAMP |
   SET FILTER WHERE <expr> | DROP FILTER WHERE |
   ADD|DROP|REPLACE ROUTE ... |
+  ALTER ROUTE TO <relay> <construction change> |
   SET GENERAL ERROR IGNORE|LOG
   [, ...];
 

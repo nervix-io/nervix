@@ -509,6 +509,13 @@ impl IcebergClientTlsError {
     }
 }
 
+/// A table that declares the master key its files are encrypted under, whatever its format
+/// version. The emitter writes its data files and manifests unencrypted, so it publishes nothing
+/// into a table whose readers decrypt what it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the Iceberg table declares an encryption key, and the emitter writes no encrypted files")]
+struct IcebergEncryptedTable;
+
 /// What an emitter opens its REST catalog with: the properties the pairing of its two clients
 /// yields, the catalog client's TLS configuration, and the storage factory its tables' file I/O
 /// uses.
@@ -1529,7 +1536,27 @@ impl IcebergTableEmitterClient {
                     format!("failed to load Iceberg table {table_ident} for commit: {error}"),
                 )
             })?;
-        self.install_table(table)
+        self.install_table(table)?;
+        self.refuse_encrypted_table()
+    }
+
+    /// Refuses the installed table when it declares an encryption key. Every commit reloads the
+    /// table before it writes a data file and again before it appends, so a table that declares
+    /// one receives neither.
+    fn refuse_encrypted_table(&self) -> EmitterWriteResult<()> {
+        let declared = self
+            .table
+            .metadata()
+            .properties()
+            .contains_key(TableProperties::PROPERTY_ENCRYPTION_KEY_ID);
+        if !declared {
+            return Ok(());
+        }
+        let refusal = IcebergEncryptedTable;
+        let description = refusal.to_string();
+        Err(Report::new(refusal)
+            .change_context(EmitterWriteError::Commit { connector: ICEBERG })
+            .attach_printable(description))
     }
 
     /// Writes `batches`, which carry the columns of `staged`, into new Parquet data files of the
@@ -1765,7 +1792,7 @@ mod tests {
             ADLS_ACCOUNT_KEY, ADLS_ACCOUNT_NAME, ADLS_AUTHORITY_HOST, ADLS_CLIENT_ID,
             ADLS_CLIENT_SECRET, ADLS_SAS_TOKEN, ADLS_TENANT_ID, CLIENT_REGION, FileIO,
             GCS_ALLOW_ANONYMOUS, GCS_CREDENTIALS_JSON, GCS_DISABLE_CONFIG_LOAD,
-            GCS_DISABLE_VM_METADATA, GCS_NO_AUTH, GCS_SERVICE_PATH, GCS_TOKEN, S3_ACCESS_KEY_ID,
+            GCS_DISABLE_VM_METADATA, GCS_NO_AUTH, GCS_SERVICE_HOST, GCS_TOKEN, S3_ACCESS_KEY_ID,
             S3_ALLOW_ANONYMOUS, S3_DISABLE_CONFIG_LOAD, S3_DISABLE_EC2_METADATA, S3_ENDPOINT,
             S3_PATH_STYLE_ACCESS, S3_REGION, S3_SECRET_ACCESS_KEY, S3_SESSION_TOKEN,
         },
@@ -1840,7 +1867,7 @@ mod tests {
                 GCS_DISABLE_VM_METADATA,
             ),
             (IcebergStorageBackend::Gcs, "no_auth", GCS_NO_AUTH),
-            (IcebergStorageBackend::Gcs, "service_path", GCS_SERVICE_PATH),
+            (IcebergStorageBackend::Gcs, "service_path", GCS_SERVICE_HOST),
             (IcebergStorageBackend::Gcs, "token", GCS_TOKEN),
             (
                 IcebergStorageBackend::AzureBlob,
@@ -2014,35 +2041,60 @@ mod tests {
             .local_addr()
             .assured("the catalog endpoint has an address")
             .port();
+        /// One request the catalog fixture answers: the request line it expects and the response
+        /// it writes.
+        struct CatalogExchange {
+            request_line: &'static str,
+            status: &'static str,
+            body: &'static str,
+        }
+        // The catalog loads its configuration before the first operation, and the table load
+        // carries the token the configuration request already used.
+        let exchanges = [
+            CatalogExchange {
+                request_line: "get /v1/config http/1.1",
+                status: "200 OK",
+                body: r#"{"overrides":{},"defaults":{}}"#,
+            },
+            CatalogExchange {
+                request_line: "get /v1/namespaces/events/tables/orders http/1.1",
+                status: "404 Not Found",
+                body: "",
+            },
+        ];
         let catalog_server = nervix_primitives::task::spawn(async move {
-            let (mut stream, _) = catalog_listener
-                .accept()
-                .await
-                .assured("the catalog request connects");
-            let mut bytes = [0_u8; 4096];
-            let length = stream
-                .read(&mut bytes)
-                .await
-                .assured("the catalog request is readable");
-            let request = String::from_utf8_lossy(&bytes[..length]).to_ascii_lowercase();
-            assert!(request.starts_with("get /v1/config http/1.1"), "{request}");
-            assert!(
-                request.contains(&format!("host: {CATALOG}:{catalog_port}")),
-                "{request}"
-            );
-            assert!(
-                request.contains("authorization: bearer fixture-token"),
-                "{request}"
-            );
-            let body = r#"{"overrides":{},"defaults":{}}"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream
-                .write_all(response.as_bytes())
-                .await
-                .assured("the catalog response can be written");
+            for exchange in exchanges {
+                nervix_primitives::task::consume_budget().await;
+                let (mut stream, _) = catalog_listener
+                    .accept()
+                    .await
+                    .assured("the catalog request connects");
+                let mut bytes = [0_u8; 4096];
+                let length = stream
+                    .read(&mut bytes)
+                    .await
+                    .assured("the catalog request is readable");
+                let request = String::from_utf8_lossy(&bytes[..length]).to_ascii_lowercase();
+                assert!(request.starts_with(exchange.request_line), "{request}");
+                assert!(
+                    request.contains(&format!("host: {CATALOG}:{catalog_port}")),
+                    "{request}"
+                );
+                assert!(
+                    request.contains("authorization: bearer fixture-token"),
+                    "{request}"
+                );
+                let response = format!(
+                    "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    exchange.status,
+                    exchange.body.len(),
+                    exchange.body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .assured("the catalog response can be written");
+            }
         });
 
         let catalog_config = [
@@ -2081,10 +2133,14 @@ mod tests {
         .open(&dns)
         .await
         .assured("the REST catalog can be configured");
-        nervix_primitives::time::timeout(Duration::from_secs(10), catalog.invalidate_token())
-            .await
-            .assured("the catalog initialization completes")
-            .assured("the catalog accepts its runtime configuration");
+        let table =
+            TableIdent::from_strs(["events", "orders"]).assured("the fixture names a table");
+        let error =
+            nervix_primitives::time::timeout(Duration::from_secs(10), catalog.load_table(&table))
+                .await
+                .assured("the catalog answers the table load")
+                .expect_err("the fixture catalog holds no table");
+        assert_eq!(error.kind(), IcebergErrorKind::TableNotFound, "{error}");
         assert!(authority.questions_for(CATALOG) > 0);
         assert!(authority.questions_for(AUTH) > 0);
         auth_server.await.assured("the OAuth server task completes");
@@ -2164,16 +2220,16 @@ mod tests {
             single_attempt
                 .metadata()
                 .table_properties()
-                .expect("valid transient table properties")
-                .commit_num_retries,
+                .commit_num_retries()
+                .expect("valid transient commit retries"),
             0
         );
         assert_eq!(
             table
                 .metadata()
                 .table_properties()
-                .expect("valid source table properties")
-                .commit_num_retries,
+                .commit_num_retries()
+                .expect("valid source commit retries"),
             7,
             "the catalog table metadata must not be mutated"
         );

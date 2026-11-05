@@ -43,6 +43,7 @@ opendal = { workspace = true, features = [
   "services-gcs",
   "services-s3",
 ] }
+opendal-http-transport-reqwest = { workspace = true }
 parquet = { workspace = true }
 reqwest = { workspace = true }
 reqwest_iceberg = { workspace = true }

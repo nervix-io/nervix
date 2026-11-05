@@ -464,7 +464,12 @@ attached transaction stay as they were. See
 [Plexus Overview](plexus-overview.md) for its forms and output.
 
 Every persistent command keeps one execution reference while the browser waits, reconnects, or
-follows leadership. The transaction id and status are replicated. If the WebSocket closes
+follows leadership. When its outcome is not known yet, the console repeats it on the open session
+after a wait that starts at 250 milliseconds and doubles to at most five seconds. The command keeps
+its position ahead of later held commands, while session messages continue to arrive. The selected
+domain, clock and relay tabs keep their existing attachments. A redirect or an ended connection
+triggers recovery; an uncertain reply alone leaves the connection open. The transaction id and
+status are replicated. If the WebSocket closes
 unexpectedly or leadership changes, the console reconnects and attaches that id before resuming a
 pending command. Each append is matched by its reference and expected position, and an outstanding
 commit remains pending through `COMMITTING` until its exact terminal result. A

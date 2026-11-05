@@ -1586,6 +1586,81 @@ Feature: Iceberg emission
       | 1            |
       | 3            |
 
+  Scenario Outline: An Iceberg emitter refuses a table that declares an encryption key and commits the row it kept once the key is gone
+    Given Iceberg dependencies are running
+    And a <cluster_size> node nervix cluster is started
+    And Iceberg table "encrypted_notifications_{{test_id}}" exists at "s3://nervix-iceberg/tables/encrypted_notifications_{{test_id}}" with columns
+      """
+      user_id I64
+      action STRING
+      """
+    And Iceberg table "encrypted_notifications_{{test_id}}" declares table property "encryption.key-id" as "nervix-master-key"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA notification (user_id I64, action STRING);
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer, action string);
+      CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE VHOST edge iceberg-encrypted-{{test_id}}.example.com;
+      CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM notifications_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TO notifications INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE S3 CLIENT s3_main
+        CONFIG {
+          'endpoint' = '{{rustfs_addr}}',
+          'region' = 'us-east-1',
+          'access_key_id' = 'rustfsadmin',
+          'secret_access_key' = 'rustfsadmin',
+          'path_style_access' = true
+        };
+      CREATE ICEBERG_REST CLIENT iceberg_catalog
+        CONFIG {
+          'uri' = '{{iceberg_rest_addr}}',
+          'warehouse' = 's3://nervix-iceberg/warehouse'
+        };
+      CREATE ICEBERG TABLE EMITTER iceberg_encrypted FROM notifications TO s3_main TABLE 'encrypted_notifications_{{test_id}}' NAMESPACE '{{domain}}' LOCATION 's3://nervix-iceberg/tables/encrypted_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES { 'user_id' = input.user_id, 'action' = input.action } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "iceberg-encrypted-{{test_id}}.example.com" path "/notifications"
+      """
+      {"user_id":71,"action":"held"}
+      """
+    # The emitter writes no encrypted files, so every commit refuses the table before it writes a
+    # data file, and keeps the staged row for its retry.
+    Then within "30s" DESCRIBE EMITTER "iceberg_encrypted" on the leader node contains
+      """
+      transient error: the Iceberg table declares an encryption key, and the emitter writes no encrypted files
+      """
+    And the Iceberg table "encrypted_notifications_{{test_id}}" does not contain a row within "1s"
+      """
+      {"user_id":71,"action":"held"}
+      """
+    When the operator removes table property "encryption.key-id" from Iceberg table "encrypted_notifications_{{test_id}}"
+    Then the Iceberg table "encrypted_notifications_{{test_id}}" eventually contains a row
+      """
+      {"user_id":71,"action":"held"}
+      """
+    And within "30s" DESCRIBE EMITTER "iceberg_encrypted" on the leader node contains
+      """
+      transient error: -
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @iceberg_refused_append
   Scenario Outline: An Iceberg commit its catalog refused retries what it began with, and rows staged during its backoff are acknowledged only once a catalog commit of their own holds them
     Given Iceberg dependencies are running

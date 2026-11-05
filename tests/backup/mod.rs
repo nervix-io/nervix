@@ -202,6 +202,14 @@ async fn when_cli_backs_up(world: &mut ScenarioWorld, scope: String, node: Strin
     run_cli(world, &node, arguments).await;
 }
 
+#[then(expr = "the path of backup archive {string} is saved as placeholder {string}")]
+fn then_backup_archive_path_is_saved(world: &mut ScenarioWorld, file: String, placeholder: String) {
+    let path = archive_path(world, &file);
+    world
+        .placeholders
+        .insert(placeholder, path.display().to_string());
+}
+
 /// Every cut of the domain that reaches its capture waits there, a cut of a backup that runs again
 /// under its execution reference included, until the scenario releases the gate or times its
 /// holds.

@@ -18,8 +18,8 @@ use nervix_models::{
     DescribeTransaction, DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig,
     DomainPace, DomainTimeRate, DrainNode, DropModel, DropNode, EmitterBatchLegality,
     EmitterBodyForm, EmitterEntityKind, EmitterEnvelopeAlteration, EmitterReferenceKind,
-    EnvelopeClauseKind, EnvelopeProperty, ExistingUserPolicy, FieldName, HttpIngestorEntity,
-    IngestorAlteration, IngestorEntityKind, InspectionFormat, KafkaIngestorEntity, LookupQuery,
+    ExistingUserPolicy, FieldName, HttpIngestorEntity, IngestorAlteration, IngestorEntityKind,
+    IngestorEntityModel, IngestorReferenceKind, InspectionFormat, KafkaIngestorEntity, LookupQuery,
     ModelKind, ModelName, MqttIngestorEntity, NatsIngestorEntity, NodeRef, PlacementPolicy,
     PrometheusIngestorEntity, PulsarIngestorEntity, RabbitMqIngestorEntity, RebindResource,
     RebindResourceMembers, RebindResourceSelection, RedisIngestorEntity, RelayBranching, RelayName,
@@ -233,6 +233,11 @@ impl StatementVariant {
     }
 }
 
+/// Why an offered envelope operation finds a clause or property to write.
+const OFFERED_ENVELOPE_IS_DECLARED: &str =
+    "emitter_operation_forms offers an envelope operation in Plexus only where the entity \
+     declares a clause or property, and the vocabulary draws from every clause and any property";
+
 #[derive(Clone, Copy)]
 enum EmitterOperationForm {
     AddFrom,
@@ -240,26 +245,26 @@ enum EmitterOperationForm {
     SetWhere,
     DropWhere,
     SetTo,
+    Change,
     SetClient,
     SetEncode,
     DropEncode,
+    Construction,
     SetCollect,
     DropCollect,
     SetAttachment,
-    SetMode,
     SetBatch,
     DropBatch,
     SetFlush,
-    SetCommit,
+    SetGeneralError,
     Envelope,
 }
 
+/// One targeted change an emitter's envelope takes.
 #[derive(Clone, Copy)]
 enum EnvelopeOperationForm {
-    SetPersistent,
-    DropPersistent,
-    SetTimestamp,
-    DropTimestamp,
+    SetClause,
+    DropClause,
     SetProperties,
     DropProperties,
 }
@@ -1125,49 +1130,63 @@ impl Arbitrary<'_> {
             .assured("a route list holds at least one route")
     }
 
-    fn alter_emitter_operation(&mut self, kind: EmitterEntityKind) -> AlterEmitterOperation {
-        let mut choices = vec![
+    /// The operations an `ALTER` of an emitter of `kind` may write: every shared one, and those its
+    /// entity's reference, body, batching and envelope admit.
+    fn emitter_operation_forms(&self, kind: EmitterEntityKind) -> Vec<EmitterOperationForm> {
+        let mut forms = vec![
             EmitterOperationForm::AddFrom,
             EmitterOperationForm::DropFrom,
             EmitterOperationForm::SetWhere,
             EmitterOperationForm::DropWhere,
             EmitterOperationForm::SetTo,
+            EmitterOperationForm::Change,
+            EmitterOperationForm::Construction,
             EmitterOperationForm::SetCollect,
             EmitterOperationForm::DropCollect,
             EmitterOperationForm::SetAttachment,
-            EmitterOperationForm::SetMode,
             EmitterOperationForm::SetFlush,
+            EmitterOperationForm::SetGeneralError,
         ];
         let capabilities = kind.capabilities();
-        if capabilities.declares_envelope_clause(EnvelopeClauseKind::Persistent)
-            || capabilities.declares_envelope_clause(EnvelopeClauseKind::Timestamp)
-            || !capabilities.properties.is_empty()
-        {
-            choices.push(EmitterOperationForm::Envelope);
-        }
         if let EmitterReferenceKind::Client(_) | EmitterReferenceKind::StorageClient(_) =
             capabilities.reference
         {
-            choices.push(EmitterOperationForm::SetClient);
+            forms.push(EmitterOperationForm::SetClient);
         }
         if let EmitterBodyForm::Codec | EmitterBodyForm::CodecOrWithoutBody = capabilities.body {
-            choices.extend([
+            forms.extend([
                 EmitterOperationForm::SetEncode,
                 EmitterOperationForm::DropEncode,
             ]);
         }
         if !matches!(capabilities.batch, EmitterBatchLegality::Unavailable { .. }) {
-            choices.extend([
+            forms.extend([
                 EmitterOperationForm::SetBatch,
                 EmitterOperationForm::DropBatch,
             ]);
         }
-        if capabilities.option("COMMIT EACH").is_some() {
-            choices.push(EmitterOperationForm::SetCommit);
+        let plexus = self.domain == Domain::Plexus;
+        if !plexus || !capabilities.envelope.is_empty() || !capabilities.properties.is_empty() {
+            forms.push(EmitterOperationForm::Envelope);
         }
-        let count = NonZeroUsize::new(choices.len())
+        forms
+    }
+
+    /// The construction an emitter of `kind` writes, as a statement can change it in place: a
+    /// filter alone where its entity writes direct values, and every part otherwise.
+    fn emitter_construction_shape(&self, kind: EmitterEntityKind) -> RouteShape {
+        if self.domain == Domain::Plexus && kind.capabilities().body == EmitterBodyForm::Values {
+            RouteShape::FilterOnly
+        } else {
+            RouteShape::Transforming
+        }
+    }
+
+    fn alter_emitter_operation(&mut self, kind: EmitterEntityKind) -> AlterEmitterOperation {
+        let forms = self.emitter_operation_forms(kind);
+        let count = NonZeroUsize::new(forms.len())
             .assured("every entity accepts the shared input and attachment operations");
-        match choices[self.entropy.index(count)] {
+        match forms[self.entropy.index(count)] {
             EmitterOperationForm::AddFrom => AlterEmitterOperation::AddFrom {
                 relay: self.name(),
                 where_clause: self.optional_expression(),
@@ -1182,21 +1201,10 @@ impl Arbitrary<'_> {
             EmitterOperationForm::DropWhere => {
                 AlterEmitterOperation::AlterFromDropWhere { relay: self.name() }
             }
-            EmitterOperationForm::SetTo => {
-                let emitter = self.create_emitter_to(kind);
-                let construction =
-                    if emitter.construction == nervix_models::RouteConstruction::default() {
-                        None
-                    } else {
-                        Some(emitter.construction)
-                    };
-                AlterEmitterOperation::SetTo {
-                    destination: emitter.connector,
-                    body: emitter.body,
-                    envelope: emitter.envelope,
-                    construction,
-                }
-            }
+            EmitterOperationForm::SetTo => self.set_to(kind),
+            EmitterOperationForm::Change => AlterEmitterOperation::Change {
+                change: self.emitter_change(kind),
+            },
             EmitterOperationForm::SetClient => AlterEmitterOperation::SetClient {
                 client: self.name(),
             },
@@ -1204,15 +1212,18 @@ impl Arbitrary<'_> {
                 AlterEmitterOperation::SetEncodeUsing { codec: self.name() }
             }
             EmitterOperationForm::DropEncode => AlterEmitterOperation::DropEncode,
+            EmitterOperationForm::Construction => {
+                let shape = self.emitter_construction_shape(kind);
+                AlterEmitterOperation::Construction {
+                    alteration: self.construction_alteration(shape),
+                }
+            }
             EmitterOperationForm::SetCollect => AlterEmitterOperation::SetCollect {
                 policy: self.collect_policy(),
             },
             EmitterOperationForm::DropCollect => AlterEmitterOperation::DropCollect,
             EmitterOperationForm::SetAttachment => AlterEmitterOperation::SetAttachment {
                 mode: self.ack_mode(),
-            },
-            EmitterOperationForm::SetMode => AlterEmitterOperation::SetPublishingMode {
-                mode: self.emitter_entity_of(kind).mode_change(),
             },
             EmitterOperationForm::SetBatch => AlterEmitterOperation::SetBatch {
                 policy: self.batch_policy(),
@@ -1221,65 +1232,73 @@ impl Arbitrary<'_> {
             EmitterOperationForm::SetFlush => AlterEmitterOperation::SetFlush {
                 flush_policy: self.flush_policy(),
             },
-            EmitterOperationForm::SetCommit => AlterEmitterOperation::SetCommit {
-                commit_each: self.duration(),
-                max_commit_size: self.payload_size_limit(),
+            EmitterOperationForm::SetGeneralError => AlterEmitterOperation::SetGeneralError {
+                policy: self.general_error_policy(),
             },
             EmitterOperationForm::Envelope => AlterEmitterOperation::AlterEnvelope {
-                alteration: Box::new(self.alter_emitter_envelope(kind)),
+                alteration: Box::new(self.envelope_alteration(kind)),
             },
         }
     }
 
-    fn alter_emitter_envelope(&mut self, kind: EmitterEntityKind) -> EmitterEnvelopeAlteration {
-        let declared = kind.capabilities();
-        let mut choices = Vec::new();
-        if declared.declares_envelope_clause(EnvelopeClauseKind::Persistent) {
-            choices.extend([
-                EnvelopeOperationForm::SetPersistent,
-                EnvelopeOperationForm::DropPersistent,
+    /// One targeted change to the envelope of an emitter of `kind`: a clause or the properties its
+    /// entity declares in Plexus, and any clause or property in the vocabulary.
+    fn envelope_alteration(&mut self, kind: EmitterEntityKind) -> EmitterEnvelopeAlteration {
+        let plexus = self.domain == Domain::Plexus;
+        let capabilities = kind.capabilities();
+        let mut forms = Vec::new();
+        if !plexus || !capabilities.envelope.is_empty() {
+            forms.extend([
+                EnvelopeOperationForm::SetClause,
+                EnvelopeOperationForm::DropClause,
             ]);
         }
-        if declared.declares_envelope_clause(EnvelopeClauseKind::Timestamp) {
-            choices.extend([
-                EnvelopeOperationForm::SetTimestamp,
-                EnvelopeOperationForm::DropTimestamp,
-            ]);
-        }
-        if !declared.properties.is_empty() {
-            choices.extend([
+        if !plexus || !capabilities.properties.is_empty() {
+            forms.extend([
                 EnvelopeOperationForm::SetProperties,
                 EnvelopeOperationForm::DropProperties,
             ]);
         }
-        let count = NonZeroUsize::new(choices.len())
-            .assured("the caller selected an entity with targeted envelope edits");
-        match choices[self.entropy.index(count)] {
-            EnvelopeOperationForm::SetPersistent => EmitterEnvelopeAlteration::SetPersistent,
-            EnvelopeOperationForm::DropPersistent => EmitterEnvelopeAlteration::DropPersistent,
-            EnvelopeOperationForm::SetTimestamp => EmitterEnvelopeAlteration::SetTimestamp {
-                expression: self.expression(),
+        let count = NonZeroUsize::new(forms.len()).verified(OFFERED_ENVELOPE_IS_DECLARED);
+        match forms[self.entropy.index(count)] {
+            EnvelopeOperationForm::SetClause => EmitterEnvelopeAlteration::SetClause {
+                clause: self
+                    .envelope_clause_value(kind)
+                    .verified(OFFERED_ENVELOPE_IS_DECLARED),
             },
-            EnvelopeOperationForm::DropTimestamp => EmitterEnvelopeAlteration::DropTimestamp,
+            EnvelopeOperationForm::DropClause => EmitterEnvelopeAlteration::DropClause {
+                clause: self
+                    .envelope_clause_kind(kind)
+                    .verified(OFFERED_ENVELOPE_IS_DECLARED),
+            },
+            EnvelopeOperationForm::SetProperties => EmitterEnvelopeAlteration::SetProperties {
+                properties: self
+                    .envelope_properties(kind)
+                    .verified(OFFERED_ENVELOPE_IS_DECLARED),
+            },
             EnvelopeOperationForm::DropProperties => EmitterEnvelopeAlteration::DropProperties,
-            EnvelopeOperationForm::SetProperties => {
-                let mut properties = self.emitter_envelope(&[], declared.properties).properties;
-                if properties.is_empty() {
-                    let count = NonZeroUsize::new(declared.properties.len())
-                        .assured("this edit requires declared properties");
-                    let property = declared.properties[self.entropy.index(count)];
-                    properties.push(EnvelopeProperty {
-                        name: property.name.to_owned(),
-                        expression: self.expression(),
-                    });
-                }
-                EmitterEnvelopeAlteration::SetProperties { properties }
-            }
+        }
+    }
+
+    /// `SET TO` with the complete body of an emitter of `kind`, its construction written where the
+    /// body has one.
+    fn set_to(&mut self, kind: EmitterEntityKind) -> AlterEmitterOperation {
+        let emitter = self.create_emitter_to(kind);
+        let construction = if emitter.construction == nervix_models::RouteConstruction::default() {
+            None
+        } else {
+            Some(emitter.construction)
+        };
+        AlterEmitterOperation::SetTo {
+            destination: emitter.connector,
+            body: emitter.body,
+            envelope: emitter.envelope,
+            construction,
         }
     }
 
     /// The operations of an `ALTER … INGESTOR` statement under the head of any connector and
-    /// entity, each `SET FROM` stating a source of that pair.
+    /// entity, each `SET FROM` stating a source of that pair and each change one of its own.
     ///
     /// The match is exhaustive, so a new pair does not compile until the generator is taught to
     /// alter it.
@@ -1287,137 +1306,143 @@ impl Arbitrary<'_> {
         match self.ingest_source_kind() {
             IngestorEntityKind::Client(ClientIngestorEntity::Producer) => self
                 .operations(|arbitrary| {
-                    arbitrary.alter_ingestor_operation(Self::client_producer_source)
+                    arbitrary.alter_ingestor_operation(
+                        Self::client_producer_source,
+                        Self::client_producer_change,
+                    )
                 })
                 .into(),
             IngestorEntityKind::Http(HttpIngestorEntity::Request) => {
-                self.transport_operations(Self::http_request_source)
+                self.transport_operations(Self::http_request_source, Self::http_request_change)
             }
             IngestorEntityKind::Http(HttpIngestorEntity::Endpoint) => {
-                self.transport_operations(Self::http_endpoint_source)
+                self.transport_operations(Self::http_endpoint_source, Self::http_endpoint_change)
             }
-            IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic) => self
-                .operations(|arbitrary| {
-                    if arbitrary.entropy.flag() {
-                        nervix_models::KafkaTopicIngestorOperation::SetStartAt {
-                            position: arbitrary.ingest_start_position(),
-                        }
-                    } else {
-                        nervix_models::KafkaTopicIngestorOperation::Transport(
-                            arbitrary.transport_operation(Self::kafka_topic_source),
-                        )
-                    }
-                })
-                .into(),
-            IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic) => self
-                .operations(|arbitrary| match arbitrary.entropy.byte() % 3 {
-                    0 => nervix_models::PulsarTopicIngestorOperation::SetStartAt {
-                        position: arbitrary.ingest_start_position(),
-                    },
-                    1 => nervix_models::PulsarTopicIngestorOperation::SetType {
-                        kind: arbitrary.pulsar_subscription_type(),
-                    },
-                    _ => nervix_models::PulsarTopicIngestorOperation::Transport(
-                        arbitrary.transport_operation(Self::pulsar_topic_source),
-                    ),
-                })
-                .into(),
+            IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic) => {
+                self.transport_operations(Self::kafka_topic_source, Self::kafka_topic_change)
+            }
+            IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic) => {
+                self.transport_operations(Self::pulsar_topic_source, Self::pulsar_topic_change)
+            }
             IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => {
-                self.transport_operations(Self::mqtt_topic_source)
+                self.transport_operations(Self::mqtt_topic_source, Self::mqtt_topic_change)
             }
             IngestorEntityKind::Nats(NatsIngestorEntity::Subject) => {
-                self.transport_operations(Self::nats_subject_source)
+                self.transport_operations(Self::nats_subject_source, Self::nats_subject_change)
             }
             IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => {
-                self.transport_operations(Self::rabbitmq_queue_source)
+                self.transport_operations(Self::rabbitmq_queue_source, Self::rabbitmq_queue_change)
             }
             IngestorEntityKind::Redis(RedisIngestorEntity::PubSub) => {
-                self.transport_operations(Self::redis_pubsub_source)
+                self.transport_operations(Self::redis_pubsub_source, Self::redis_pubsub_change)
             }
-            IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query) => {
-                self.transport_operations(Self::prometheus_query_source)
-            }
+            IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query) => self
+                .transport_operations(Self::prometheus_query_source, Self::prometheus_query_change),
             IngestorEntityKind::ZeroMq(ZeroMqIngestorEntity::Pull) => {
-                self.transport_operations(Self::zeromq_pull_source)
+                self.transport_operations(Self::zeromq_pull_source, Self::zeromq_pull_change)
             }
             IngestorEntityKind::Sqs(SqsIngestorEntity::Queue) => {
-                self.transport_operations(Self::sqs_queue_source)
+                self.transport_operations(Self::sqs_queue_source, Self::sqs_queue_change)
             }
-            IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Connection) => {
-                self.transport_operations(Self::websockets_connection_source)
-            }
-            IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint) => {
-                self.transport_operations(Self::websockets_endpoint_source)
-            }
-            IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener) => {
-                self.transport_operations(Self::syslog_listener_source)
-            }
+            IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Connection) => self
+                .transport_operations(
+                    Self::websockets_connection_source,
+                    Self::websockets_connection_change,
+                ),
+            IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint) => self
+                .transport_operations(
+                    Self::websockets_endpoint_source,
+                    Self::websockets_endpoint_change,
+                ),
+            IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener) => self
+                .transport_operations(Self::syslog_listener_source, Self::syslog_listener_change),
         }
     }
 
     /// The operations of an alteration of a transport's ingestor, whose `SET FROM` states a source
-    /// `source` builds.
-    fn transport_operations<Source>(
+    /// `source` builds and whose changes `change` builds.
+    fn transport_operations<Source: IngestorEntityModel>(
         &mut self,
         source: impl Fn(&mut Self) -> Source,
+        change: impl Fn(&mut Self) -> Source::Change,
     ) -> IngestorAlteration
     where
         Vec<AlterTransportIngestorOperation<Source>>: Into<IngestorAlteration>,
     {
-        self.operations(|arbitrary| arbitrary.transport_operation(&source))
+        self.operations(|arbitrary| arbitrary.transport_operation(&source, &change))
             .into()
     }
 
-    /// One shared transport operation, reused when an entity composes its own options with it.
-    fn transport_operation<Source>(
+    /// One shared transport operation, or one change of the transport's own entity.
+    fn transport_operation<Source: IngestorEntityModel>(
         &mut self,
         source: impl Fn(&mut Self) -> Source,
+        change: impl Fn(&mut Self) -> Source::Change,
     ) -> AlterTransportIngestorOperation<Source> {
-        if self.entropy.byte() % 12 == 11 {
+        if self.entropy.byte() % 14 == 13 {
             AlterTransportIngestorOperation::SetDecodeUsing { codec: self.name() }
         } else {
-            AlterTransportIngestorOperation::from(self.alter_ingestor_operation(source))
+            AlterTransportIngestorOperation::from(self.alter_ingestor_operation(source, change))
         }
     }
 
-    /// One operation every ingestor accepts, whose `SET FROM` states a source `source` builds.
-    fn alter_ingestor_operation<Source>(
+    /// One operation every ingestor accepts, whose `SET FROM` states a source `source` builds and
+    /// whose changes `change` builds. Plexus writes `SET CLIENT` only for an entity that reads
+    /// through a client.
+    fn alter_ingestor_operation<Source: IngestorEntityModel>(
         &mut self,
         source: impl Fn(&mut Self) -> Source,
+        change: impl Fn(&mut Self) -> Source::Change,
     ) -> AlterIngestorOperation<Source> {
-        match self.entropy.byte() % 10 {
+        let reads_through_client = matches!(
+            Source::KIND.capabilities().reference,
+            IngestorReferenceKind::Client(_)
+        );
+        match self.entropy.byte() % 13 {
             0 => AlterIngestorOperation::SetSource {
                 source: source(self),
             },
-            1 => AlterIngestorOperation::SetQuiesce {
-                quiesce: self.quiesce_mode(),
+            1 => AlterIngestorOperation::Change {
+                change: change(self),
             },
-            2 => AlterIngestorOperation::SetTimestamp {
+            2 if reads_through_client || self.domain != Domain::Plexus => {
+                AlterIngestorOperation::SetClient {
+                    client: self.name(),
+                }
+            }
+            3 => AlterIngestorOperation::SetQuiesce {
+                quiesce: self.declared_quiesce_mode(Source::KIND),
+            },
+            4 => AlterIngestorOperation::SetTimestamp {
                 source: match self.entropy.byte() % 3 {
                     0 => nervix_models::IngestTimestampSource::Now,
                     1 => nervix_models::IngestTimestampSource::At(self.name()),
                     _ => nervix_models::IngestTimestampSource::AtMetadata(self.name()),
                 },
             },
-            3 => AlterIngestorOperation::DropTimestamp,
-            4 => AlterIngestorOperation::SetFilterWhere {
+            5 => AlterIngestorOperation::DropTimestamp,
+            6 => AlterIngestorOperation::SetFilterWhere {
                 where_clause: self.expression(),
             },
-            5 => AlterIngestorOperation::DropFilterWhere,
-            6 => AlterIngestorOperation::AddRoute {
+            7 => AlterIngestorOperation::DropFilterWhere,
+            8 => AlterIngestorOperation::AddRoute {
                 route: self.single_route(
                     RouteShape::Transforming,
                     RouteFlush::Required,
                     RouteBranch::PerRoute,
                 ),
             },
-            7 => AlterIngestorOperation::DropRoute { relay: self.name() },
-            8 => AlterIngestorOperation::ReplaceRoute {
+            9 => AlterIngestorOperation::DropRoute { relay: self.name() },
+            10 => AlterIngestorOperation::ReplaceRoute {
                 route: self.single_route(
                     RouteShape::Transforming,
                     RouteFlush::Required,
                     RouteBranch::PerRoute,
                 ),
+            },
+            11 => AlterIngestorOperation::AlterRoute {
+                relay: self.name(),
+                alteration: self.construction_alteration(RouteShape::Transforming),
             },
             _ => AlterIngestorOperation::SetGeneralError {
                 policy: self.general_error_policy(),

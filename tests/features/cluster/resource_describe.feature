@@ -19,6 +19,28 @@ Feature: Resource lifecycle
       | 1            |
       | 3            |
 
+  Scenario Outline: A malformed resource archive whose upload start a lapsed lease refused is sent again and judged on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE DOMAIN {{domain}};
+      CREATE RESOURCE malformed;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given node "{{leader}}" refuses its next resource upload start as a leader that could not confirm its lease
+    When a malformed archive upload of resource "malformed" is sent to the leader node
+    Then node "{{leader}}" refused a resource upload start
+    And the last command error contains
+      """
+      failed to read entire block
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario: Describing a missing resource version reports a clear error
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -120,6 +142,22 @@ Feature: Resource lifecycle
     Then the last command output contains
       """
       versions: 1
+      """
+
+  Scenario: An incomplete upload sent to a follower is refused by the leader its redirect names
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE DOMAIN {{domain}};
+      CREATE RESOURCE proto;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    And a node other than placeholder "leader" is saved as placeholder "follower"
+    When an incomplete upload of resource "proto" with identity "partial-body" is sent to node "{{follower}}"
+    Then the last command error contains
+      """
+      upload size mismatch: expected 2, received 1
       """
 
   Scenario Outline: Uploaded resource is describable after replication

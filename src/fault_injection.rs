@@ -50,6 +50,7 @@ mod backup_cut;
 #[cfg(test)]
 mod backup_cut_tests;
 mod client_inspection;
+mod command_reply;
 mod consensus;
 mod domain_clock;
 mod domain_resume;
@@ -85,6 +86,7 @@ mod restore_staging;
 #[cfg(test)]
 mod restore_staging_tests;
 mod runtime_installation;
+mod session_backpressure;
 mod shutdown_handoff;
 mod standalone_transaction;
 #[cfg(test)]
@@ -94,6 +96,7 @@ mod wasm_reset_publication;
 
 pub use backup_cut::BackupCutBoundary;
 use backup_cut::{BackupCutGate, BackupCutGateKey};
+use command_reply::CommandReplyScript;
 use domain_clock::DomainClockProgressPausePoint;
 pub use domain_resume::DomainResumeBoundary;
 use entity_drain::ForcedEntityDrainTimeout;
@@ -116,6 +119,7 @@ use restore_publication::RestorePublicationFailure;
 pub use restore_staging::RestoreStagingKind;
 use restore_staging::{RestoreStagingFailure, RestoreStagingTarget};
 use runtime_installation::RuntimeInstallationRefusals;
+use session_backpressure::ArmedSessionBackpressure;
 pub use standalone_transaction::StandaloneTransactionBoundary;
 use wasm_reset_publication::{WasmResetPublicationAuthorityLoss, WasmResetPublicationFailure};
 
@@ -167,6 +171,8 @@ pub struct FaultInjection {
 
 #[derive(Debug)]
 struct FaultInjectionState {
+    /// One bounded command-reply script per scenario domain, absent from ordinary builds.
+    command_reply_scripts: DashMap<DomainName, CommandReplyScript, RandomState>,
     emitter_faults: DashMap<String, EmitterFaultMode, RandomState>,
     failed_ingestors: DashMap<String, (), RandomState>,
     unavailable_emitter_clients: DashMap<String, (), RandomState>,
@@ -353,6 +359,8 @@ struct FaultInjectionState {
     /// source consumed the fault before checking its established connections. The armed request
     /// remains available until acknowledged; another request cannot overwrite it before then.
     syslog_listener_faults: watch::Sender<Option<SyslogListenerFault>>,
+    /// One scoped observation, borrowed only when a native session starts.
+    session_backpressure: watch::Sender<Option<ArmedSessionBackpressure>>,
     branch_instance_expiration_scan_interval: RwLock<Option<Duration>>,
     domain_drain_timeout: RwLock<Option<Duration>>,
     entity_gate_deadline: RwLock<Option<Duration>>,
@@ -541,9 +549,11 @@ impl Default for FaultInjection {
     fn default() -> Self {
         let (leadership_transfers, _) = broadcast::channel(16);
         let (syslog_listener_faults, _) = watch::channel(None);
+        let (session_backpressure, _) = watch::channel(None);
         let (startup_observation_end, _) = watch::channel(StartupObservationEnd::Unarmed);
         Self {
             inner: Arc::new(FaultInjectionState {
+                command_reply_scripts: DashMap::default(),
                 emitter_faults: DashMap::default(),
                 failed_ingestors: DashMap::default(),
                 unavailable_emitter_clients: DashMap::default(),
@@ -615,6 +625,7 @@ impl Default for FaultInjection {
                 state_replica_installation_failing: AtomicBool::new(false),
                 syslog_ingestor_bind_ips: DashMap::default(),
                 syslog_listener_faults,
+                session_backpressure,
                 branch_instance_expiration_scan_interval: RwLock::new(None),
                 domain_drain_timeout: RwLock::new(None),
                 entity_gate_deadline: RwLock::new(None),
