@@ -2278,6 +2278,10 @@ test-turmoil-coverage-runner:
 test-deloxide-lane-runner:
     python3 -m unittest --quiet scripts.tests.test_deloxide_lane
 
+# Verify interruption, timeout and process-group cleanup through real child processes.
+test-deloxide-supervision:
+    python3 -m unittest scripts.tests.test_deloxide_lane.SupervisionTests
+
 # Line coverage of collection and canonical runner changes, with actual command/artifact fixtures,
 # including Turmoil's CI contract and the Deloxide lane's supervision of real processes.
 coverage-model-runner:
