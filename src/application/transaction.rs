@@ -1146,6 +1146,7 @@ impl SessionServiceImpl {
                     .into_iter()
                     .map(|moved| OwnershipMoveImpact {
                         node: ImpactNodeCoverage::all_executions(moved.entity),
+                        unit: moved.unit,
                         source: moved.former_owner,
                         destination: moved.destination,
                         attribution: attribution.clone(),
