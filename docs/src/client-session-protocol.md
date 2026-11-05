@@ -1939,6 +1939,14 @@ completed. The Rust client ends the session used for that attempt and reports `U
 under the restore's own reference, with the typed reference mismatch beneath it. Recovering the
 restore streams the same statement and archive again under that reference.
 
+A reply must decode, and its request identity, when present, must equal the start's. A verified
+frame that fails semantic decoding or names another request is a protocol violation, not evidence
+that the restore was refused: the node may already have applied it. The Rust client ends the exact
+session used by that attempt, interrupts its pending requests, and returns `UncertainCommand`
+under the restore's own execution reference with the typed validation cause beneath it. A session
+installed while the restore was in flight remains usable. Keep the statement, archive bytes and
+reference unchanged when repeating the restore to recover its outcome.
+
 A refusal of the stream is not recorded; sending the stream again stages the archive again. Every
 other answer is a `CommandOutcome` under the start's execution reference:
 

@@ -455,6 +455,7 @@ tags = [
   "@backup_wait",
   "@client_wire_backup_outage",
   "@client_foreign_execution",
+  "@client_restore_reply_validation",
   "@stopped_checkpoint_writes",
   "@backup_cut_diagnostics",
   "@backup_parked_wait",
@@ -3575,6 +3576,9 @@ workloads = [
 [[owner]]
 path = "crates/client-core/src/client.rs"
 workloads = [
+  "scenario.client-restore-reply-validation",
+  "stress.client-restore-reply-validation",
+  "stress.client-restore-reply-validation-restore",
   "scenario.client-foreign-execution",
   "stress.client-foreign-execution",
   "paced.reopen-generation",
@@ -3622,6 +3626,9 @@ workloads = [
 gap = "The listed workloads reach the pending-replies lock through every request's registration, the replies its reader routes and the close of an exchange. None cancels a command through the Rust client: its only caller, nervix-cli, has no diagnostic form, and the lane starts an ordinary CLI binary, so ExchangeRequests::cancel, which registers a CancelRequest under the same single unnested acquisition every request takes and closes the registry when the frame cannot be sent, is exercised only by the client-core unit tests and the CLI scenarios, outside the lane."
 path = "crates/client-core/src/exchange.rs"
 workloads = [
+  "scenario.client-restore-reply-validation",
+  "stress.client-restore-reply-validation",
+  "stress.client-restore-reply-validation-restore",
   "scenario.client-foreign-execution",
   "stress.client-foreign-execution",
   "scenario.client-alter-drain",
@@ -5189,3 +5196,33 @@ invariant = "A foreign command outcome ends its session and the client recovers 
 invocation = "stress-scenarios"
 scenario = "A native command recovers its own execution after a foreign command reply on <cluster_size> nodes"
 selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "The native client on one and three nodes consumes a real completed restore through an invalid-reply peer, ends the originating exchange through its tracked pending-reply lock, then recovers under the original reference. Async session locks, socket waits and the ordinary CLI subprocess used for backup are outside Deloxide."
+examples = 4
+feature = "tests/features/runtime/client_restore_reply_validation.feature"
+id = "scenario.client-restore-reply-validation"
+invariant = "A completed restore with an undecodable or differently correlated reply remains uncertain under its own reference, ends only its originating session and recovers its recorded outcome."
+invocation = "scenarios"
+scenario = "A <client> recovers a completed restore after <reply> on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: The native client on one and three nodes consumes a real completed restore through an invalid-reply peer, ends the originating exchange through its tracked pending-reply lock, then recovers under the original reference. Async session locks, socket waits and the ordinary CLI subprocess used for backup are outside Deloxide."
+examples = 4
+feature = "tests/features/runtime/client_restore_reply_validation.feature"
+id = "stress.client-restore-reply-validation"
+invariant = "A completed restore with an undecodable or differently correlated reply remains uncertain under its own reference, ends only its originating session and recovers its recorded outcome."
+invocation = "stress-scenarios"
+scenario = "A <client> recovers a completed restore after <reply> on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: The native client on one and three nodes consumes a real completed restore through an invalid-reply peer, ends the originating exchange through its tracked pending-reply lock, then recovers under the original reference. Async session locks, socket waits and the ordinary CLI subprocess used for backup are outside Deloxide."
+examples = 4
+feature = "tests/features/runtime/client_restore_reply_validation.feature"
+id = "stress.client-restore-reply-validation-restore"
+invariant = "A completed restore with an undecodable or differently correlated reply remains uncertain under its own reference, ends only its originating session and recovers its recorded outcome."
+invocation = "stress-restore-scenarios"
+scenario = "A <client> recovers a completed restore after <reply> on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
