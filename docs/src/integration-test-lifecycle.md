@@ -3391,7 +3391,12 @@ for one build at a time, so the recipe builds each helper beside the suite in a 
 below `target/llvm-cov-tools`, and then installs it into the target directory of `cargo llvm-cov`. `scripts/scenario_shards.py`
 names what the archive holds: every executable `cargo llvm-cov report` reads as an object, the
 Playwright driver whose path the scenario executable holds, the ONNX fixtures and runtime, and the
-WASM guests. Each `scenarios (I of N)` job checks out the same revision on the build's provider,
+WASM guests. The archive stores each object without its DWARF debug information, most of a test
+executable's bytes, from a copy `objcopy --strip-debug` makes beside the build, whose own
+objects keep theirs. The symbol table and the coverage mapping stay, so a shard's report is the one
+the build's objects give, a panic names its location and a backtrace its functions; a backtrace
+from a restored object names no source line, and a debugger finds no variable in it. Each
+`scenarios (I of N)` job checks out the same revision on the build's provider,
 at the path the build checked out, which the executables' absolute paths require. It then restores
 the archive there with `just test-scenarios-coverage-unpack`. The restore refuses an archive of
 another revision or checkout path, a file restored at another size, and an executable whose shared libraries the runner
@@ -3440,8 +3445,9 @@ suite, so the dependencies they share compile once. It keeps Cargo's messages, a
 `scripts/unit_test_archive.py` reads the test executables from them. The scenario pack takes every
 object in the target directory, so it runs before the unit tests join the suite there. After the
 cache is published, `just test-coverage-pack` writes the second archive: every other object
-`cargo llvm-cov report` reads, the list of test executables, and the generated inputs a test reads.
-The scenario executable stays out, because the shards run it.
+`cargo llvm-cov report` reads, stored without its debug information as the scenario archive stores
+its objects, the list of test executables, and the generated inputs a test reads. The scenario
+executable stays out, because the shards run it.
 
 The workspace's all-features build includes the JVM binding's embedded tests. Before compiling
 them, `test-coverage-binaries` prepares the Java 21 jar with its native library and the boundary
