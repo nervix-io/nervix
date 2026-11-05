@@ -1864,6 +1864,8 @@ impl Application {
         }));
         #[cfg(feature = "testing")]
         service.register_wasm_state_reset_test_coordinator(&fault_injection, shutdown.clone());
+        #[cfg(feature = "testing")]
+        service.register_application_progress_test_queries(&fault_injection, shutdown.clone());
         let domain_clock_progress_service = service.clone();
         interconnect
             .register_handler::<RemoteDomainClockProgressRequest, _, _>(move |context, request| {

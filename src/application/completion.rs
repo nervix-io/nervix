@@ -660,6 +660,67 @@ impl SessionServiceImpl {
     }
 }
 
+#[cfg(feature = "testing")]
+impl SessionServiceImpl {
+    /// Answers the scenario's application progress queries from this node. A query for another
+    /// node goes over the interconnect, as this node's revision barriers query it; a query for this
+    /// node answers what its revision-query handler answers.
+    pub(in crate::application) fn register_application_progress_test_queries(
+        &self,
+        fault_injection: &crate::fault_injection::FaultInjection,
+        shutdown: CancellationToken,
+    ) {
+        use nervix_recovery::NoReceiver as _;
+
+        let local_node = self.inner.consensus.local_node_id().clone();
+        let mut queries = fault_injection.register_application_progress_queries(local_node.clone());
+        let service = self.clone();
+        self.inner.service_tasks.spawn(async move {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let query = nervix_primitives::select! {
+                    _ = shutdown.cancelled() => break,
+                    query = queries.recv() => query,
+                };
+                let Some(query) = query else {
+                    break;
+                };
+                let answer = service
+                    .answer_application_progress_test_query(&local_node, query.target)
+                    .await;
+                query
+                    .response
+                    .send(answer)
+                    .means_peer_left("application progress test query");
+            }
+        });
+    }
+
+    async fn answer_application_progress_test_query(
+        &self,
+        local_node: &ClusterNodeName,
+        target: ClusterNodeName,
+    ) -> error_stack::Result<
+        ApplicationRevisionResponse,
+        crate::fault_injection::ApplicationProgressQueryError,
+    > {
+        use error_stack::ResultExt as _;
+
+        if &target == local_node {
+            return Ok(self.inner.cluster.local_application_revision().await);
+        }
+        let failed = crate::fault_injection::ApplicationProgressQueryError::Query {
+            querier: local_node.clone(),
+            target: target.clone(),
+        };
+        self.inner
+            .interconnect
+            .request(&target, ApplicationRevisionRequest)
+            .await
+            .change_context(failed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeSet, time::Duration};

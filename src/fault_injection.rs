@@ -95,6 +95,8 @@ mod syslog_tests;
 mod transaction_cleanup;
 mod wasm_reset_publication;
 
+pub(crate) use application_progress::ApplicationProgressQuery;
+pub use application_progress::ApplicationProgressQueryError;
 pub use backup_cut::BackupCutBoundary;
 use backup_cut::{BackupCutGate, BackupCutGateKey};
 use command_reply::CommandReplyScript;
@@ -367,6 +369,9 @@ struct FaultInjectionState {
     leadership_transfers: broadcast::Sender<LeadershipTransferRequest>,
     wasm_state_reset_coordinators:
         DashMap<ClusterNodeName, mpsc::Sender<WasmStateResetRequest>, RandomState>,
+    /// Each running node's responder to the scenario's application progress queries.
+    application_progress_queries:
+        DashMap<ClusterNodeName, mpsc::Sender<ApplicationProgressQuery>, RandomState>,
 }
 
 pub(crate) struct WasmStateResetRequest {
@@ -483,6 +488,7 @@ enum CommandPausePoint {
     ForcedRecoveryMissingSchedule(ClusterNodeName),
     RuntimePreparation(ClusterNodeName),
     ApplicationRevisionResponse(ClusterNodeName),
+    ApplicationProgressReport(ClusterNodeName),
     ReferenceLookup(ClusterNodeName),
     DurableAdmission(ClusterNodeName),
     Finalization(ClusterNodeName),
@@ -632,6 +638,7 @@ impl Default for FaultInjection {
                 scheduler_mode: RwLock::new(SchedulerMode::default()),
                 leadership_transfers,
                 wasm_state_reset_coordinators: DashMap::default(),
+                application_progress_queries: DashMap::default(),
             }),
         }
     }
