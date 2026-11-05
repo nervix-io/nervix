@@ -82,7 +82,8 @@ pub use pool::PoolClass;
 pub use request::RkyvMessage;
 pub use request::{
     ApplicationCompletionPeersRequest, ApplicationCompletionPeersResponse, ApplicationHealthProbe,
-    ApplicationRevisionRequest, ApplicationRevisionResponse, HandlerRegistrationError,
+    ApplicationProgress, ApplicationProgressPhase, ApplicationProgressReceipt,
+    ApplicationProgressReport, ApplicationRevisionRequest, HandlerRegistrationError,
     HttpsListenerInstallation, HttpsListenerInstallationRequest, HttpsListenerInstallationResponse,
     InterconnectDuplexRequest, InterconnectRequest, InterconnectStreamRequest,
     RemoteRequestFailure, RequestContext, RequestError, RequestSubquota, StreamHandlerError,

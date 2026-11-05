@@ -1535,9 +1535,10 @@ The harness keeps these boundaries explicit.
   grows with every node's wait for CPU, its control-class queue included, whether or not a peer is
   silent.
   Its completion regression also holds every application-revision reply from the two followers
-  after sampling the reply. Local revision publication and gossip continue, so the same prepared
-  client's user creation, relay creation and cluster-status query must finish in order while
-  those replies remain held. This batch has one twenty-second harness budget. On 25 October
+  after sampling the reply. The followers keep reporting their progress to the leader, so the same
+  prepared client's user creation, relay creation and cluster-status query must finish in order,
+  through those reports, while the replies remain held. This batch has one twenty-second harness
+  budget. On 25 October
   2026, with 16 runtime workers, 48 slots, six large materialized workloads and 192 distinct
   health cases, 88 original requests exceeded nine seconds but all succeeded before fault
   release in 9.016 to 11.998 seconds. Every pre-release status still reported node-3 connected.

@@ -205,6 +205,7 @@ class InventoryTests(unittest.TestCase):
             "backup-capture-wire-malformed",
             "backup-section-mapping",
             "stopping-node-drain-wire",
+            "application-progress-wire",
             "cluster-peer-clock-probes",
             "cluster-parameters",
             "restore-installation-storage",

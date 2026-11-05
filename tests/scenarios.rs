@@ -12460,10 +12460,7 @@ async fn when_application_revision_responses_are_released(
 }
 
 #[given(expr = "application progress reports from node {string} pause before sending")]
-async fn given_application_progress_reports_are_paused(
-    world: &mut ScenarioWorld,
-    node_id: String,
-) {
+async fn given_application_progress_reports_are_paused(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
     world
         .cluster()
@@ -12487,8 +12484,8 @@ async fn then_application_progress_report_pause_is_reached(
     .await
     .unwrap_or_else(|error| {
         panic!(
-            "no application progress report from '{node_id}' reached its pause within \
-             {duration}: {error}"
+            "no application progress report from '{node_id}' reached its pause within {duration}: \
+             {error}"
         )
     });
 }
@@ -12545,33 +12542,13 @@ async fn then_background_plexus_execution_succeeds_after_the_release(
     world.last_command_output = Some(output);
 }
 
-/// What one node answered about its application progress, as the scenario reads it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ObservedApplicationProgress {
-    identity: nervix_models::ClusterNodeIdentity,
-    authoritative: Option<u64>,
-    runtime_prepared: Option<u64>,
-    runtime_ready: Option<u64>,
-}
-
-impl From<nervix_interconnect::ApplicationRevisionResponse> for ObservedApplicationProgress {
-    fn from(response: nervix_interconnect::ApplicationRevisionResponse) -> Self {
-        Self {
-            identity: response.identity,
-            authoritative: Some(response.authoritative),
-            runtime_prepared: Some(response.runtime_prepared),
-            runtime_ready: Some(response.runtime_ready),
-        }
-    }
-}
-
 /// Asks `querier` for the application progress of `target`, as `querier`'s revision barriers
 /// read it.
 async fn query_application_progress(
     world: &ScenarioWorld,
     querier: &str,
     target: &str,
-) -> Result<ObservedApplicationProgress, String> {
+) -> Result<nervix_interconnect::ApplicationProgress, String> {
     let querier = crate::common::cluster::node_name(querier);
     let target = crate::common::cluster::node_name(target);
     match world
@@ -12579,14 +12556,17 @@ async fn query_application_progress(
         .query_application_progress(&querier, target)
         .await
     {
-        Ok(answer) => Ok(answer.into()),
+        Ok(answer) => Ok(answer),
         Err(error) => Err(format!("{error:#}")),
     }
 }
 
 /// Whether `answer` reports every phase at `revision`, the runtime revision its reference node
 /// made ready, with an authoritative revision at least that runtime revision.
-fn answers_ready_revision(answer: &ObservedApplicationProgress, revision: u64) -> bool {
+fn answers_ready_revision(
+    answer: &nervix_interconnect::ApplicationProgress,
+    revision: u64,
+) -> bool {
     let Some(authoritative) = answer.authoritative else {
         return false;
     };
@@ -12611,7 +12591,6 @@ async fn then_node_answers_the_revisions_another_node_made_ready(
     let reference = expand_placeholders(world, &reference);
     let deadline = Instant::now()
         + parse_duration_text(&duration).expect("step duration must be a valid duration");
-    let mut last_observation = String::from("no answer yet");
     loop {
         nervix_primitives::task::consume_budget().await;
         let reference_answer = query_application_progress(world, &reference, &reference).await;
@@ -12627,13 +12606,13 @@ async fn then_node_answers_the_revisions_another_node_made_ready(
             ));
             return;
         }
-        last_observation = format!("reference {reference_answer:?}, answer {target_answer:?}");
+        let observation = format!("reference {reference_answer:?}, answer {target_answer:?}");
         assert!(
             Instant::now() < deadline,
             "node '{target}' did not answer node '{querier}' the revisions node '{reference}' \
-             made ready within {duration}; last observation: {last_observation}"
+             made ready within {duration}; last observation: {observation}"
         );
-        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(LEADER_POLL_INTERVAL).await;
     }
 }
 
@@ -12673,7 +12652,6 @@ async fn then_node_answers_a_new_incarnation_without_runtime_progress(
         .unwrap_or_else(|| panic!("a preceding step saved the incarnation of node '{target}'"));
     let deadline = Instant::now()
         + parse_duration_text(&duration).expect("step duration must be a valid duration");
-    let mut last_observation = String::from("no answer yet");
     loop {
         nervix_primitives::task::consume_budget().await;
         let answer = query_application_progress(world, &querier, &target).await;
@@ -12692,13 +12670,12 @@ async fn then_node_answers_a_new_incarnation_without_runtime_progress(
             ));
             return;
         }
-        last_observation = format!("{answer:?}");
         assert!(
             Instant::now() < deadline,
             "node '{target}' did not answer node '{querier}' under a new incarnation within \
-             {duration}; last observation: {last_observation}"
+             {duration}; last observation: {answer:?}"
         );
-        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+        nervix_primitives::time::sleep(LEADER_POLL_INTERVAL).await;
     }
 }
 

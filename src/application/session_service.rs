@@ -24,7 +24,7 @@ use nervix_client_wire::{
     SuggestOutcome, SuggestRequest, Suggestion, SuggestionKind, SuggestionStatus, TextEdit,
 };
 use nervix_consensus::{Administrator, CommandExecutionTransactionTarget, Observer, Proposer};
-use nervix_interconnect::Transport;
+use nervix_interconnect::{ApplicationProgressPhase, Transport};
 use nervix_models::{
     BuiltinFunctionScope, CommandExecutionReference, DomainName, Model, ModelName, PlacementPolicy,
     RequestedResourceVersion, ResourceId, ResourceName, ResourceUploadKey, ResourceVersionStatus,
@@ -59,7 +59,8 @@ use super::{
         OutcomeUnknownCause,
     },
     completion::{
-        ApplicationRevisionParticipants, ApplicationRevisionPhase, wait_for_application_revision,
+        ApplicationProgressState, ApplicationRevisionParticipants, ApplicationRevisionPhase,
+        BarrierNode, wait_for_application_revision,
     },
     configured_choices::{ConfiguredChoices, ConfiguredQuery},
     describe_output::placement_runtime_node_ref_suggestions,
@@ -176,6 +177,9 @@ pub(in crate::application) struct SessionServiceInner {
     /// The draws every subscription on this node samples its rows with.
     pub(in crate::application) subscription_sampler: SubscriptionSampler,
     pub(in crate::application) interconnect: Transport,
+    /// This incarnation's application progress and the reports it holds while it leads. Also held
+    /// by the revision and report handlers, the reporter and the authoritative writer.
+    pub(in crate::application) application_progress: ApplicationProgressState,
     /// Attaches the producers of this node's sessions, locally or through the node that executes
     /// their ingestor.
     pub(in crate::application) client_producers: ClientProducerRouter,
@@ -233,6 +237,7 @@ pub(in crate::application) struct RuntimeStateApplication<'a> {
     pub(in crate::application) interconnect: &'a Transport,
     pub(in crate::application) registry: &'a Registry,
     pub(in crate::application) consensus: &'a Observer,
+    pub(in crate::application) progress: &'a ApplicationProgressState,
     pub(in crate::application) admission: &'a RuntimeAdmission,
     pub(in crate::application) shutdown: &'a CancellationToken,
 }
@@ -290,9 +295,16 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
         interconnect,
         registry,
         consensus,
+        progress,
         admission,
         shutdown,
     } = application;
+    let barrier_node = BarrierNode {
+        cluster,
+        consensus,
+        interconnect,
+        progress,
+    };
     Box::pin(async move {
         let local_node_id = consensus.local_node_id();
         loop {
@@ -383,9 +395,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                 .pause_runtime_preparation_if_armed(local_node_id)
                 .await;
             cluster.publish_cluster_parameters(parameters, true).await;
-            cluster
-                .set_local_runtime_revision_prepared(state.revision)
-                .await;
+            progress.advance(ApplicationProgressPhase::RuntimePrepared, state.revision);
             debug!(
                 %local_node_id,
                 revision = state.revision,
@@ -416,9 +426,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                 return Err(deadline_overflow());
             };
             let preparation = wait_for_application_revision(
-                cluster,
-                consensus,
-                interconnect,
+                barrier_node,
                 state.revision,
                 ApplicationRevisionPhase::RuntimePrepared,
                 ApplicationRevisionParticipants::EveryLiveNode,
@@ -504,9 +512,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                 revision = state.revision,
                 "started running-domain ingestors"
             );
-            cluster
-                .set_local_runtime_revision_ready(state.revision)
-                .await;
+            progress.advance(ApplicationProgressPhase::RuntimeReady, state.revision);
             drop(activation);
             let readiness = async {
                 // A test build can hold this wait while the revision pauses a domain, as a cluster
@@ -516,9 +522,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                     .pause_backup_cut_application_if_armed(&state.domains)
                     .await;
                 wait_for_application_revision(
-                    cluster,
-                    consensus,
-                    interconnect,
+                    barrier_node,
                     state.revision,
                     ApplicationRevisionPhase::RuntimeReady,
                     ApplicationRevisionParticipants::EveryLiveNode,
@@ -1437,6 +1441,7 @@ impl SessionServiceImpl {
             interconnect: &self.inner.interconnect,
             registry: &self.inner.registry,
             consensus: &self.inner.consensus,
+            progress: &self.inner.application_progress,
             admission: &self.inner.runtime_admission,
             shutdown: &self.inner.drain_support_shutdown,
         };

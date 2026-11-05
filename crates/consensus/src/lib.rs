@@ -2920,6 +2920,14 @@ impl Observer {
             None => 0,
         }
     }
+
+    /// The index of the newest log entry this node applied, absent until it applies one. The
+    /// first entry of a cluster is its initial membership at index 0, so 0 is an applied revision.
+    pub fn applied_revision(&self) -> Option<u64> {
+        let state = self.inner.store.inner.state();
+        let log_id = state.last_applied_log_id.as_ref()?;
+        Some(log_id.index)
+    }
     pub async fn current_domains(&self) -> BTreeMap<DomainName, DomainState> {
         (&self.inner.store.inner.state().domains).into()
     }

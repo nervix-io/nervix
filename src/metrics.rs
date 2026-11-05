@@ -164,6 +164,10 @@ const WALL_HISTOGRAM_15M_STEP: Duration = Duration::from_secs(60);
 const DOMAIN_HISTOGRAM_1M_STEP: Duration = Duration::from_secs(10);
 const DOMAIN_HISTOGRAM_15M_STEP: Duration = Duration::from_secs(60);
 const HISTOGRAM_VALUE_SCALE: f64 = 1_000.0;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "one SI second contains one billion nanoseconds")
+)]
 const NANOS_PER_SECOND: f64 = 1_000_000_000.0;
 const HISTOGRAM_DISPLAY_DECIMAL_SCALE: f64 = 10.0;
 const HDR_HISTOGRAM_SIGFIG: u8 = 2;

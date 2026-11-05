@@ -1001,6 +1001,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/interconnect/src/request/__fuzz__/request__progress_properties__bolero_application_progress_messages_round_trip/corpus"
+domain_version = 1
+features = []
+id = "application-progress-wire"
+invariant = "Every current application progress query answer, progress report with its addressed leader and term, report receipt and completion-peers answer with its held progress survives the production typed-request payload encoder and decoder."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-interconnect"
+random_iterations = 256
+source = "crates/interconnect/src/request/progress_properties.rs"
+test = "request::progress_properties::bolero_application_progress_messages_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/node_drain__wire_properties__bolero_stopping_node_drain_messages_round_trip/corpus"
 domain_version = 1
 features = []

@@ -10,7 +10,7 @@
 //! - **Must not know.** What a barrier waits for, its participants or its deadline.
 
 use error_stack::Report;
-use nervix_interconnect::ApplicationRevisionResponse;
+use nervix_interconnect::ApplicationProgress;
 use nervix_models::ClusterNodeName;
 use nervix_primitives::sync::{mpsc, oneshot};
 
@@ -21,9 +21,8 @@ use super::{CommandPausePoint, FaultInjection};
 /// answers what its revision-query handler answers.
 pub(crate) struct ApplicationProgressQuery {
     pub(crate) target: ClusterNodeName,
-    pub(crate) response: oneshot::Sender<
-        error_stack::Result<ApplicationRevisionResponse, ApplicationProgressQueryError>,
-    >,
+    pub(crate) response:
+        oneshot::Sender<error_stack::Result<ApplicationProgress, ApplicationProgressQueryError>>,
 }
 
 /// Why a scenario's application progress query has no answer.
@@ -47,8 +46,8 @@ pub enum ApplicationProgressQueryError {
 }
 
 impl FaultInjection {
-    /// Holds every revision-query reply from this node until the scenario releases it. Local
-    /// revision publication and gossip continue while the replies retain their sampled values.
+    /// Holds every revision-query reply from this node until the scenario releases it. The node
+    /// keeps recording and reporting its progress while the replies retain their sampled values.
     pub fn pause_application_revision_responses_from(&self, node_id: ClusterNodeName) {
         self.arm_command_pause(CommandPausePoint::ApplicationRevisionResponse(node_id));
     }
@@ -137,7 +136,7 @@ impl FaultInjection {
         &self,
         querier: &ClusterNodeName,
         target: ClusterNodeName,
-    ) -> error_stack::Result<ApplicationRevisionResponse, ApplicationProgressQueryError> {
+    ) -> error_stack::Result<ApplicationProgress, ApplicationProgressQueryError> {
         let sender = match self.inner.application_progress_queries.get(querier) {
             Some(sender) => sender.clone(),
             None => {
@@ -157,9 +156,11 @@ impl FaultInjection {
         }
         match receiver.await {
             Ok(answer) => answer,
-            Err(_) => Err(Report::new(ApplicationProgressQueryError::ResponseDropped {
-                node: querier.clone(),
-            })),
+            Err(_) => Err(Report::new(
+                ApplicationProgressQueryError::ResponseDropped {
+                    node: querier.clone(),
+                },
+            )),
         }
     }
 }
