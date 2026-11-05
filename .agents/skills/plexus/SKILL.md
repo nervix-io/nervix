@@ -48,6 +48,13 @@ For Pulsar receipt deadlines, event times and delayed delivery, read
 [Emitters → Pulsar](../../../docs/src/emitters.md#pulsar). Check the generated capability mirror
 before carrying an option from one direction to the other.
 
+For NATS publication, choose `NATS SUBJECT EMITTER` with `MODE NO ACK` for Core NATS, or
+`NATS STREAM EMITTER` with a provisioned `STREAM`, a literal `SUBJECT` captured by that stream,
+and `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX <n>` for a JetStream PubAck. The stream
+emitter may set `MESSAGE ID <expression>` for server deduplication across retries. Read
+[Emitters → NATS](../../../docs/src/emitters.md#nats) for the complete clause order, failure
+outcomes and retry boundary.
+
 For RabbitMQ consumption choose `MODE NO ACK`, `MODE ACK SEQUENTIAL`, or
 `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
 Parallel `MAX` is 1 through 65,535 and is the broker prefetch per instance. Each delivery settles
@@ -88,8 +95,10 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   LATEST creation position, the subscription's TYPE, endpoints, delivery/ACK expectations,
   emitter publishing mode, confirmation window and timeout where applicable, retry pacing,
   ordering, and offsets.
-- Isolation: unbranched or a concrete branch key, branch TTL, and optional instance limit. A branch
-  currently has one direct execution partition; do not write a `PARTITIONS` clause.
+- Isolation: unbranched or a concrete branch key, branch TTL, optional instance limit, and the
+  branch's partition count when one relay owner per branch would funnel too much traffic (see
+  [Relay Partitions](https://docs.nervix.io/relay.html#relay-partitions)); the count changes only
+  while the domain is stopped.
 - Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference,
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
   repartitioning.
@@ -235,6 +244,12 @@ staging only; `COMMIT` supplies the full usable-effect boundary. CLI, Rust-clien
 flows retain command execution references, upload identities, transaction append positions, and
 commit identity through redirects or reconnects. Do not manufacture a new identity for an
 uncertain admitted operation.
+
+If a session's COMMIT, REVERT, or attach reports that its transaction is unknown after the retained
+tombstone is removed, that session can begin another transaction. Keep the original execution
+reference for any earlier command whose outcome is uncertain; the new failure does not identify
+that earlier outcome. Follow [Exact Recovery](https://docs.nervix.io/client-session-protocol.html#exact-recovery)
+for its recovery window and expiry.
 
 For storage failures or uncertain administrative outcomes, consult `Control Plane` → `Durability
 and recovery` before suggesting a retry, and

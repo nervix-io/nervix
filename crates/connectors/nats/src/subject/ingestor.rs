@@ -39,6 +39,18 @@ use crate::client::{NatsClientOptions, NatsClientOptionsError};
 
 const NATS: &str = "nats";
 
+/// The lost connections a client holds for its instance until the instance hears of them: one,
+/// because an instance ends its subscription or its pull on the first.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "an instance ends its subscription or pull on the first lost-connection signal, \
+                  so a second pending signal would carry nothing"
+    )
+)]
+pub(crate) const PENDING_LOSS_SIGNALS: usize = 1;
+
 /// Why a NATS ingestor could not connect or subscribe.
 #[derive(Debug, Error)]
 pub enum NatsSubjectIngestorError {
@@ -124,8 +136,7 @@ impl NatsSubjectIngestorPlan {
     }
 
     async fn subscribe(&self) -> NatsSubjectIngestorResult<NatsSubscription> {
-        // One pending signal is enough: the instance ends its subscription on the first.
-        let (lost, connection_lost) = mpsc::channel(1);
+        let (lost, connection_lost) = mpsc::channel(PENDING_LOSS_SIGNALS);
         let client = Self::client_from_config(&self.executor, &self.config, lost).await?;
         let subscriber = client
             .queue_subscribe(
@@ -153,8 +164,9 @@ impl NatsSubjectIngestorPlan {
     /// The host reopens a lost connection on its own reconnect cadence, so the client reports the
     /// loss instead of reconnecting in the background. The client cannot be told to make no
     /// attempt of its own, so it makes one before its connection task ends; the instance has
-    /// ended its subscription by then, and that attempt only lets the task end.
-    async fn client_from_config(
+    /// ended its subscription by then, and that attempt only lets the task end. Every NATS
+    /// ingestor entity connects through it.
+    pub(crate) async fn client_from_config(
         executor: &Executor,
         config: &[ClientConfigEntry],
         lost: mpsc::Sender<()>,
@@ -204,6 +216,18 @@ impl NatsSubjectIngestorPlan {
 /// own name.
 pub struct NatsMessageHeaders {
     message: NatsMessage,
+}
+
+impl NatsMessageHeaders {
+    /// The headers of `message`, which every NATS ingestor entity reads as its ingest headers.
+    pub(crate) fn new(message: NatsMessage) -> Self {
+        Self { message }
+    }
+
+    /// The payload of the message these headers belong to.
+    pub(crate) fn payload(&self) -> &[u8] {
+        &self.message.payload
+    }
 }
 
 impl IngestMessageHeaders for NatsMessageHeaders {
@@ -524,7 +548,7 @@ mod tests {
     /// pending, or after the instance stopped listening, is dropped.
     #[test]
     fn a_lost_connection_is_signalled_once_and_not_after_the_instance_stopped_listening() {
-        let (lost, mut connection_lost) = mpsc::channel(1);
+        let (lost, mut connection_lost) = mpsc::channel(PENDING_LOSS_SIGNALS);
         NatsSubjectIngestorPlan::signal_connection_lost(&lost);
         NatsSubjectIngestorPlan::signal_connection_lost(&lost);
         assert!(
@@ -588,7 +612,7 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn client_configuration_failures_keep_typed_context() {
-        let (lost, _connection_lost) = mpsc::channel(1);
+        let (lost, _connection_lost) = mpsc::channel(PENDING_LOSS_SIGNALS);
         let error = NatsSubjectIngestorPlan::client_from_config(
             &nervix_execution::Executor::default(),
             &[],

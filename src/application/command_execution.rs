@@ -1069,6 +1069,12 @@ impl SessionServiceImpl {
             }
         };
         self.restore_transaction_binding_for_execution(&execution, &mut result, subscriptions);
+        if let Some(CommandExecutionTransactionTarget::Existing { id, .. }) =
+            execution.transaction_target()
+        {
+            self.release_missing_transaction_binding_on_failure(id, &result, subscriptions)
+                .await;
+        }
         result
     }
 

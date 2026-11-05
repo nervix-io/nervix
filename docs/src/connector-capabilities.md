@@ -134,7 +134,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | NATS SUBJECT | Compare `NATS SUBJECT`: locator, options, modes. Subject consumption can join a queue group; publication chooses Core flush or JetStream acknowledgement. Both directions use quoted, case-preserving subjects; publication subjects exclude subscription wildcards. |
+| Entity | NATS SUBJECT | Compare `NATS SUBJECT`, `NATS STREAM`: locator, options, modes. Subject consumption can join a queue group; Core publication completes after its flush. Both directions use quoted, case-preserving subjects; publication subjects exclude subscription wildcards. |
 | Reference | NATS client |  |
 | Locator and validation rule | SUBJECT 'orders.created' (nats_subject) |  |
 | Modes (complete bodies after MODE) | NO ACK |  |
@@ -148,6 +148,26 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Buffers | messages the subscription holds ahead of the host: driver default, 65,536 messages; when full, drops what does not fit without counting it |  |
 | Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>the subscription's flush: unbounded<br>a silent connection: driver default, a ping every 60 s; the connection ends after 2 go unanswered |  |
 | Driver limits | None declared. |  |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
+
+### NATS STREAM ingest
+
+| Capability | Declaration | Mirror and transport reason |
+| --- | --- | --- |
+| Entity | NATS STREAM | Compare `NATS SUBJECT`, `NATS STREAM`: locator, options, modes. A durable pull consumer an operator provisioned acknowledges or negatively acknowledges each delivery on its own subject. A stream emitter names a provisioned stream, sends its expected-stream header with each message and waits for PubAck. |
+| Reference | NATS client |  |
+| Locator and validation rule | STREAM 'orders' (nats_stream) |  |
+| Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
+| Options in statement order | `CONSUMER 'nervix'` (string literal checked by nats_consumer); required |  |
+| Headers | `read_header`, `read_headers`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |  |
+| Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
+| Metadata | Not offered: The current stream declaration exposes message headers but no typed stream, consumer, sequence, timestamp or delivery-count metadata namespace. |  |
+| Every live node | no; scheduled owner |  |
+| Position class | broker_redelivered |  |
+| Acknowledgement confirmation | answered |  |
+| Buffers | deliveries a pull request brought ahead of the host: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it |  |
+| Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>the consumer lookup: driver default, 5 s request timeout<br>the answer to an acknowledgement or a negative acknowledgement: driver default, 10 s request timeout<br>a pull request, and a silent connection: driver default, a ping every 60 s; the connection ends after 2 go unanswered |  |
+| Driver limits | A pull request asks for at most the consumer's MaxRequestBatch and waits at most its MaxRequestExpires, where its operator set them. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### RABBITMQ QUEUE ingest
@@ -484,10 +504,10 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | NATS SUBJECT | Compare `NATS SUBJECT`: locator, options, modes. Subject consumption can join a queue group; publication chooses Core flush or JetStream acknowledgement. Both directions use quoted, case-preserving subjects; publication subjects exclude subscription wildcards. |
+| Entity | NATS SUBJECT | Compare `NATS SUBJECT`, `NATS STREAM`: locator, options, modes. Subject consumption can join a queue group; Core publication completes after its flush. Both directions use quoted, case-preserving subjects; publication subjects exclude subscription wildcards. |
 | Reference | NATS client |  |
 | Locator and validation rule | SUBJECT 'orders.Created' (nats_publish_subject) |  |
-| Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
+| Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | `write_header`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
@@ -497,9 +517,30 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | commands queued for the connection: driver default, 2048 commands; when full, holds back what fills it |  |
-| Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>a core publish and its flush to the client's socket, not a server round trip: `timeout_ms`; unbounded when omitted<br>a JetStream acknowledgement: `ACK TIMEOUT` |  |
+| Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>a core publish and its flush to the client's socket, not a server round trip: `timeout_ms`; unbounded when omitted |  |
 | Driver limits | Messages above the server's max_payload are rejected. |  |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |  |
+
+### NATS STREAM emit
+
+| Capability | Declaration | Mirror and transport reason |
+| --- | --- | --- |
+| Entity | NATS STREAM | Compare `NATS SUBJECT`, `NATS STREAM`: locator, options, modes, emit envelope/properties. A durable pull consumer an operator provisioned acknowledges or negatively acknowledges each delivery on its own subject. A stream emitter names a provisioned stream, sends its expected-stream header with each message and waits for PubAck. |
+| Reference | NATS client |  |
+| Locator and validation rule | STREAM 'orders' (nats_stream) |  |
+| Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
+| Options in statement order | `SUBJECT 'orders.created'` (string literal checked by nats_publish_subject); required |  |
+| Headers | `write_header`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |  |
+| Body | ENCODE USING &lt;codec&gt; |  |
+| BATCH | optional |  |
+| Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |  |
+| Batch transformation required | no |  |
+| Envelope | MESSAGE ID id |  |
+| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; its MESSAGE ID envelope and written headers travel with the payload. |  |
+| Buffers | commands queued for the connection: driver default, 2048 commands; when full, holds back what fills it<br>PubAck answers awaiting settlement: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it |  |
+| Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>the stream lookup: `ACK TIMEOUT`<br>a JetStream acknowledgement: `ACK TIMEOUT` |  |
+| Driver limits | Messages above the server's max_payload are rejected. |  |
+| Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### ZEROMQ PUSH emit
 

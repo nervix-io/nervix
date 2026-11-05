@@ -78,7 +78,11 @@ pub(in crate::registry) fn unplaced_schedule(models: Vec<Model>) -> ScheduledNod
                     let schema = index
                         .configured::<CreateSchema>(&branch.schema)
                         .expect("the fixture declares every branch schema");
-                    ResolvedBranching::branched(branch_name.clone(), schema.clone())
+                    ResolvedBranching::branched(
+                        branch_name.clone(),
+                        schema.clone(),
+                        nervix_models::BranchPartitions::ONE,
+                    )
                 }
             };
             Some(resolved)
