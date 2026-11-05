@@ -692,6 +692,11 @@ beside the suite as an object for LLVM's report. Each driver process inherits th
 binary's profile location, so both the Rust driver and Python extension contribute their counters
 to the same ordinary report when they exit.
 
+The scenario archive carries the exact Playwright driver and Node executable selected by the
+compiled Rust binding. The shard restores them at their embedded paths; it does not install a
+global npm Playwright package. Browser fixtures select the runner's installed Chrome or Chromium.
+The shard's Node.js setup serves native client probes independently of that bundled driver.
+
 The CI `scenarios-build` job uses the shared native
 [CI linker](./developing-nervix.md#validation-and-tests) for the server, CLI, unit tests and scenario harness,
 including their instrumented builds. Coverage flags do not replace Wild linker selection.
