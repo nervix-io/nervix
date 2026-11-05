@@ -293,10 +293,11 @@ impl Runtime {
         scope: WasmStateResetScope,
     ) -> error_stack::Result<(), WasmStateResetRuntimeError> {
         let entity = NodeRef::new(ModelKind::WasmProcessor, processor.clone());
-        if self.entity_gate_operation_owns_entity(
+        if self.entity_gate_operation_owns_unit(
             coordination,
             domain,
             &entity,
+            Unit::Single,
             EntityGatePurpose::WasmStateReset(scope),
         ) {
             return Ok(());

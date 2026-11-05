@@ -365,7 +365,7 @@ impl BranchRuntime {
             "a domain whose routing is not resolved has no materialized relays to reconcile, \
              which reading the routing below reports",
         );
-        let (desired_relays, relay_schema) = match self.domain_routing() {
+        let (desired_relays, relay_schema, relay_unit) = match self.domain_routing() {
             Ok(routing) => {
                 let desired_relays = routing
                     .materialized_stream_specs
@@ -374,7 +374,7 @@ impl BranchRuntime {
                         !routing
                             .materialized_stream_owner_nodes
                             .get(*relay)
-                            .is_some_and(Option::is_some)
+                            .is_some_and(RelayOwnerRoutes::is_placed)
                     })
                     .cloned()
                     .collect::<HashSet<_>>();
@@ -382,9 +382,10 @@ impl BranchRuntime {
                     .materialized_stream_specs
                     .get(relay)
                     .map(|spec| spec.schema.clone());
-                (desired_relays, relay_schema)
+                let relay_unit = routing.relay_partitioning(relay).unit_of(&self.key);
+                (desired_relays, relay_schema, Some(relay_unit))
             }
-            Err(_) => (HashSet::default(), None),
+            Err(_) => (HashSet::default(), None, None),
         };
         self.materialized_states
             .retain(|identifier, _| desired_relays.contains(identifier));
@@ -397,11 +398,26 @@ impl BranchRuntime {
                 );
                 return;
             };
-            let placement = match self.runtime.state_placement(
+            // The state of this branch belongs to the unit of the relay that owns its key.
+            let unit = match relay_unit {
+                Some(Ok(unit)) => unit,
+                Some(Err(error)) => {
+                    warn!(
+                        domain = self.domain.as_str(),
+                        relay = relay.as_str(),
+                        error = %format_args!("{error:#}"),
+                        "failed to place the branch-local materialized relay state"
+                    );
+                    return;
+                }
+                None => return,
+            };
+            let placement = match self.runtime.state_placement_for_unit(
                 &self.domain,
                 RuntimeStateKind::MaterializedRelay,
                 ModelKind::Relay,
                 relay,
+                unit,
                 self.key.clone(),
             ) {
                 Ok(placement) => placement,
@@ -466,7 +482,7 @@ impl BranchRuntime {
             .domain_routing()
             .ok()
             .and_then(|routing| routing.materialized_stream_owner_nodes.get(relay))
-            .is_some_and(Option::is_some)
+            .is_some_and(RelayOwnerRoutes::is_placed)
         {
             return;
         }

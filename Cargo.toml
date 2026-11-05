@@ -352,6 +352,7 @@ members = [
   "crates/models",
   "crates/primitives",
   "crates/primitives/macros",
+  "crates/rate-limit",
   "crates/recovery",
   "crates/simd-kernels",
   "crates/test-environment",
@@ -587,6 +588,7 @@ nervix-plexus = { package = "nervix-plexus", path = "crates/plexus", features = 
 ] }
 nervix-primitives = { package = "nervix-primitives", path = "crates/primitives" }
 nervix-primitives-macros = { package = "nervix-primitives-macros", path = "crates/primitives/macros" }
+nervix-rate-limit = { path = "crates/rate-limit" }
 nervix-recovery = { package = "nervix-recovery", path = "crates/recovery" }
 nervix-roto = { package = "nervix-roto", path = "crates/nervix-roto" }
 nervix-server = { package = "nervix-server", path = "." }

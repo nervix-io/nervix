@@ -21,6 +21,8 @@ use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, Buf
 
 /// The prefix of the subjects a client receives the replies to its requests on.
 const INBOX_PREFIX: &str = "_INBOX.";
+/// The suffix of the one wildcard subscription a client receives every reply to its requests on.
+const REQUEST_MUXER_SUFFIX: &str = ".*";
 
 /// A server on a loopback port that answers only what its check tells it to.
 pub(crate) struct ScriptedServer {
@@ -48,9 +50,10 @@ pub(crate) struct Subscription {
     sid: String,
 }
 
-/// A message the client published: the subject it asked the reply on, if any, and the bytes it
-/// carries, its header block first when it has one.
+/// A message the client published: the subject it published to, the subject it asked the reply
+/// on, if any, and the bytes it carries, its header block first when it has one.
 pub(crate) struct Publish {
+    pub(crate) subject: String,
     reply: Option<String>,
     pub(crate) message: Vec<u8>,
 }
@@ -205,6 +208,47 @@ impl ScriptedConnection {
         }
     }
 
+    /// Reads what the client sends until it unsubscribes `subscription`, answering no PING on the
+    /// way, so a check can deliver what a server sends before it processes the unsubscription.
+    pub(crate) async fn expect_unsubscribe(&mut self, subscription: &Subscription) {
+        loop {
+            let line = self.read_line().await;
+            let tokens = line.split_whitespace().collect::<Vec<_>>();
+            let Some(operation) = tokens.first() else {
+                continue;
+            };
+            if operation.eq_ignore_ascii_case("UNSUB") {
+                assert_eq!(
+                    tokens.get(1).copied(),
+                    Some(subscription.sid.as_str()),
+                    "the client unsubscribed another subscription: {line:?}"
+                );
+                return;
+            }
+            assert!(
+                !operation.eq_ignore_ascii_case("PING"),
+                "the client pinged before it unsubscribed: {line:?}"
+            );
+        }
+    }
+
+    /// Pings the client and reads what it sends until it answers. The client answers only once it
+    /// has read everything sent before the ping, so a check knows it holds those messages.
+    pub(crate) async fn ping_client(&mut self) {
+        self.send(b"PING\r\n").await;
+        loop {
+            let line = self.read_line().await;
+            if line.trim_end().eq_ignore_ascii_case("PONG") {
+                return;
+            }
+            assert!(
+                !line.to_ascii_uppercase().starts_with("PUB")
+                    && !line.to_ascii_uppercase().starts_with("HPUB"),
+                "the client published while the check waited for its answer: {line:?}"
+            );
+        }
+    }
+
     /// Reads what the client sends until a PING, and answers it.
     pub(crate) async fn answer_ping(&mut self) {
         loop {
@@ -231,6 +275,47 @@ impl ScriptedConnection {
         )
         .into_bytes();
         message.extend_from_slice(payload);
+        message.extend_from_slice(b"\r\n");
+        self.send(&message).await;
+    }
+
+    /// Delivers `payload` on `subscription` with `reply` as the subject the client answers it on.
+    pub(crate) async fn deliver_for_reply(
+        &mut self,
+        subscription: &Subscription,
+        reply: &str,
+        payload: &[u8],
+    ) {
+        let mut message = format!(
+            "MSG {} {} {reply} {}\r\n",
+            subscription.subject,
+            subscription.sid,
+            payload.len()
+        )
+        .into_bytes();
+        message.extend_from_slice(payload);
+        message.extend_from_slice(b"\r\n");
+        self.send(&message).await;
+    }
+
+    /// Delivers a status message with `code` and `description` and no payload on `subscription`,
+    /// as a server answers a pull request it ends or refuses.
+    pub(crate) async fn deliver_status(
+        &mut self,
+        subscription: &Subscription,
+        code: u16,
+        description: &str,
+    ) {
+        let header = format!("NATS/1.0 {code} {description}\r\n\r\n");
+        let mut message = format!(
+            "HMSG {} {} {} {}\r\n",
+            subscription.subject,
+            subscription.sid,
+            header.len(),
+            header.len()
+        )
+        .into_bytes();
+        message.extend_from_slice(header.as_bytes());
         message.extend_from_slice(b"\r\n");
         self.send(&message).await;
     }
@@ -280,7 +365,11 @@ impl ScriptedConnection {
                         subject: (*subject).to_string(),
                         sid: (*sid).to_string(),
                     };
-                    if subject.starts_with(INBOX_PREFIX) {
+                    // The client receives the replies to its requests on one wildcard subscription;
+                    // any other subscription, an inbox it reads deliveries on included, is the
+                    // check's to see.
+                    if subject.starts_with(INBOX_PREFIX) && subject.ends_with(REQUEST_MUXER_SUFFIX)
+                    {
                         self.inbox = Some(subscription);
                         continue;
                     }
@@ -295,6 +384,10 @@ impl ScriptedConnection {
     /// Reads the message a `PUB <subject> [reply] <size>` or `HPUB <subject> [reply] <header size>
     /// <size>` line announces.
     async fn read_publish(&mut self, tokens: &[&str]) -> Publish {
+        let subject = tokens
+            .get(1)
+            .expect("a publish names its subject")
+            .to_string();
         let is_headers = tokens
             .first()
             .is_some_and(|operation| operation.eq_ignore_ascii_case("HPUB"));
@@ -318,7 +411,11 @@ impl ScriptedConnection {
             .await
             .expect("the client sends the message its publish announced");
         message.truncate(size);
-        Publish { reply, message }
+        Publish {
+            subject,
+            reply,
+            message,
+        }
     }
 
     async fn read_line(&mut self) -> String {
