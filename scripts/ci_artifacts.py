@@ -86,9 +86,14 @@ from xml.etree import ElementTree
 
 PART_BYTES = 128 * 1024 * 1024
 CONCURRENT_TRANSFERS = 8
-# A body moves a block at a time: an upload reads its part file this much at once, and a download
-# takes at most this much from one read of its connection. A body's pace is checked block by block.
+# An upload reads its part file this much at a time, and a download buffers this much of its part
+# file before writing it.
 BLOCK_BYTES = 256 * 1024
+# A download takes at most this much from one read of its connection. A TLS record carries at most
+# 16 KiB, and each read allocates what it asks for, so a larger read only allocates more.
+RECEIVE_BYTES = 32 * 1024
+# How many times over each SLOW_SECONDS a download counts what arrived, when a block takes longer.
+PACE_CHECKS = 30
 # How long opening a connection may take, its TLS handshake included.
 CONNECT_SECONDS = 20
 # How long a connection may move no byte at all, waiting for an answer or inside a body.
@@ -540,11 +545,27 @@ class ReceivedPart:
             self.restart()
             raise Transient(f"{response.length} bytes on offer where {wanted} were asked for")
 
-    def write(self, block: bytes) -> None:
-        self.output.write(block)
-        self.digest.update(block)
-        self.received += len(block)
-        self.progress.add(len(block))
+    def receive(self, response: http.client.HTTPResponse, meter: Meter) -> None:
+        """Write a response's body into the part as it arrives. A read returns at most one TLS
+        record, and counting progress and pace costs more than writing a record, so they count what
+        arrived once a block has, or once PACE_CHECKS of the pace's period have passed."""
+        every = meter.limits.slow_seconds / PACE_CHECKS
+        due = meter.clock() + every
+        uncounted = 0
+        try:
+            while block := response.read1(RECEIVE_BYTES):
+                self.output.write(block)
+                self.digest.update(block)
+                self.received += len(block)
+                uncounted += len(block)
+                if uncounted >= BLOCK_BYTES or meter.clock() >= due:
+                    counted = uncounted
+                    uncounted = 0
+                    self.progress.add(counted)
+                    meter.count(counted)
+                    due = meter.clock() + every
+        finally:
+            self.progress.add(uncounted)
 
     def finish(self) -> None:
         """Check the whole part against its manifest entry."""
@@ -675,11 +696,8 @@ class Bucket:
                 if not received.complete():
                     with self.exchange("GET", key, headers={"range": received.wanted()}) as response:
                         received.accept(response)
-                        meter = Meter(self.limits, progress.stopping)
                         try:
-                            while block := response.read1(BLOCK_BYTES):
-                                received.write(block)
-                                meter.count(len(block))
+                            received.receive(response, Meter(self.limits, progress.stopping))
                         except TimeoutError as error:
                             raise Transient(f"nothing arrived for {self.limits.idle_seconds:g} s") from error
                 received.finish()

@@ -5,20 +5,24 @@
 from __future__ import annotations
 
 import contextlib
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 import os
 from pathlib import Path
 import re
+import signal
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 from urllib.parse import parse_qs, unquote, urlsplit
 from xml.sax.saxutils import escape
 
 from scripts import ci_artifacts as artifacts
+from scripts.ci_artifacts import Phase
 
 ROOT = Path(__file__).resolve().parents[2]
 ACTIONS = ("./.github/actions/ci-artifact-upload", "./.github/actions/ci-artifact-download")
@@ -151,14 +155,176 @@ class SelectionTests(unittest.TestCase):
             artifacts.Selection.of(["!logs"], str(self.root))
 
 
+class PaceTests(unittest.TestCase):
+    """The pace a body has to keep, which a clock the test moves decides."""
+
+    def test_a_body_that_falls_behind_its_pace_is_cut_off(self) -> None:
+        now = [0.0]
+        limits = artifacts.Limits(slowest_bytes_per_second=100, slow_seconds=10)
+        meter = artifacts.Meter(limits, threading.Event(), clock=lambda: now[0])
+        now[0] = 9.0
+        meter.count(600)
+        now[0] = 9.5
+        # A thousand bytes meet the pace of the ten seconds, and the next ten seconds start here.
+        meter.count(400)
+        now[0] = 19.0
+        meter.count(998)
+        now[0] = 19.6
+        with self.assertRaisesRegex(artifacts.Transient, r"^too slow: 999 B in 10 s, below 100 B/s$"):
+            meter.count(1)
+
+    def test_a_body_stops_when_its_transfer_does(self) -> None:
+        stopping = threading.Event()
+        meter = artifacts.Meter(artifacts.Limits(), stopping)
+        meter.count(1)
+        stopping.set()
+        with self.assertRaises(artifacts.Stopped):
+            meter.count(1)
+
+    def test_an_upload_counts_a_block_once_the_next_one_is_asked_for(self) -> None:
+        now = [0.0]
+        limits = artifacts.Limits(slowest_bytes_per_second=100, slow_seconds=10)
+        progress = artifacts.Progress("suite", "sent", [2500], limits, clock=lambda: now[0])
+        body = artifacts.MeteredBody(io.BytesIO(bytes(2500)), progress.part(0), limits, clock=lambda: now[0])
+        counted = []
+        for _ in range(4):
+            block = body.read(1024)
+            counted.append((len(block), progress.moved[0]))
+        self.assertEqual(counted, [(1024, 0), (1024, 1024), (452, 2048), (0, 2500)])
+
+    def test_an_upload_that_falls_behind_its_pace_is_cut_off(self) -> None:
+        now = [0.0]
+        limits = artifacts.Limits(slowest_bytes_per_second=100, slow_seconds=10)
+        progress = artifacts.Progress("suite", "sent", [3000], limits, clock=lambda: now[0])
+        body = artifacts.MeteredBody(io.BytesIO(bytes(3000)), progress.part(0), limits, clock=lambda: now[0])
+        body.read(500)
+        now[0] = 11.0
+        with self.assertRaisesRegex(artifacts.Transient, r"^too slow: 500 B in 11 s, below 100 B/s$"):
+            body.read(500)
+
+    def test_each_backoff_waits_longer_and_at_random_up_to_half_again(self) -> None:
+        limits = artifacts.Limits()
+        for failures, doubled in enumerate([2, 4, 8, 16, 30, 30], start=1):
+            with mock.patch.object(artifacts.random, "uniform", return_value=1.25) as uniform:
+                self.assertEqual(limits.backoff(failures), doubled * 1.25)
+            uniform.assert_called_once_with(1, 1.5)
+
+
+class ReportTests(unittest.TestCase):
+    """What a transfer says about itself, at a time the test sets."""
+
+    def test_a_report_counts_the_parts_and_names_the_slowest_one_moving(self) -> None:
+        now = [100.0]
+        progress = artifacts.Progress(
+            "suite", "received", [1024, 2048, 4096, 1024], artifacts.Limits(), clock=lambda: now[0]
+        )
+        finished, second, third, _ = (progress.part(index) for index in range(4))
+        finished.enter(Phase.MOVING)
+        finished.add(1024)
+        finished.enter(Phase.DONE)
+        second.enter(Phase.MOVING)
+        second.add(1024)
+        third.enter(Phase.MOVING)
+        third.add(512)
+        now[0] = 110.0
+        self.assertEqual(
+            progress.report(),
+            "suite: received 2.5 KiB of 8.0 KiB (31%) in 0:10, 256 B/s; parts: 1 done, 2 moving, "
+            "0 waiting to retry, 1 queued; slowest part-2: 512 B of 4.0 KiB at 51 B/s",
+        )
+        second.add(1024)
+        second.enter(Phase.DONE)
+        # A part that starts again moved all it holds since the previous report.
+        third.reset()
+        third.add(300)
+        third.enter(Phase.WAITING)
+        now[0] = 115.0
+        self.assertEqual(
+            progress.report(),
+            "suite: received 3.3 KiB of 8.0 KiB (41%) in 0:15, 265 B/s; parts: 2 done, 0 moving, "
+            "1 waiting to retry, 1 queued",
+        )
+
+    def test_a_long_transfer_counts_its_hours(self) -> None:
+        now = [0.0]
+        progress = artifacts.Progress("suite", "sent", [5 * 1024**3], artifacts.Limits(), clock=lambda: now[0])
+        progress.part(0).enter(Phase.MOVING)
+        now[0] = 3725.0
+        self.assertEqual(
+            progress.report(),
+            "suite: sent 0 B of 5.0 GiB (0%) in 1:02:05, 0 B/s; parts: 0 done, 1 moving, "
+            "0 waiting to retry, 0 queued; slowest part-0: 0 B of 5.0 GiB at 0 B/s",
+        )
+
+    def test_a_finished_transfer_ends_with_its_size_time_and_rate(self) -> None:
+        now = [0.0]
+        progress = artifacts.Progress("suite", "sent", [3 * 1024 * 1024], artifacts.Limits(), clock=lambda: now[0])
+        progress.part(0).enter(Phase.DONE)
+        now[0] = 75.0
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            progress.finish()
+        self.assertEqual(output.getvalue(), "suite: sent 3.0 MiB in 1 parts in 1:15, 41.0 KiB/s\n")
+
+    def test_a_transfer_with_failed_attempts_ends_with_a_warning(self) -> None:
+        now = [0.0]
+        progress = artifacts.Progress("suite", "sent", [3 * 1024 * 1024], artifacts.Limits(), clock=lambda: now[0])
+        progress.part(0).enter(Phase.WAITING)
+        progress.part(0).enter(Phase.WAITING)
+        progress.part(0).enter(Phase.DONE)
+        now[0] = 75.0
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            progress.finish()
+        self.assertEqual(
+            output.getvalue(),
+            "::warning title=CI artifact::suite: sent 3.0 MiB in 1 parts in 1:15, 41.0 KiB/s, after 2 failed attempts\n",
+        )
+
+
+@dataclass(frozen=True)
+class Cut:
+    """Send this many bytes of the body, then close the connection."""
+
+    after: int
+
+
+@dataclass(frozen=True)
+class Stall:
+    """Send this many bytes of the body, then nothing for a while, then the rest."""
+
+    after: int
+    seconds: float
+
+
+@dataclass(frozen=True)
+class Trickle:
+    """Send this many bytes of the body, then the rest one byte every 20 milliseconds."""
+
+    after: int
+
+
+@dataclass(frozen=True)
+class Silence:
+    """Take the request, and close the connection after a while without answering it."""
+
+    seconds: float
+
+
 class FakeBucket:
-    """An S3 path-style bucket on a local port, whose failures a test schedules."""
+    """An S3 path-style bucket on a local port, whose failures a test schedules: statuses, and
+    answers that end early, stall, crawl or never come."""
 
     def __init__(self) -> None:
         self.objects: dict[str, bytes] = {}
         self.requests: list[tuple[str, str]] = []
+        # The Range header of every GET of an object, by key.
+        self.ranges: list[tuple[str, str | None]] = []
         self.failures: list[tuple[str, int]] = []
+        self.faults: list[tuple[str, Cut | Stall | Trickle | Silence]] = []
         self.corrupted: list[str] = []
+        self.ranges_ignored = False
+        self.answer_delay = 0.0
         self.lock = threading.Lock()
         bucket = self
 
@@ -178,6 +344,14 @@ class FakeBucket:
                             return status
                 return None
 
+            def fault(self) -> Cut | Stall | Trickle | Silence | None:
+                with bucket.lock:
+                    for index, (fragment, fault) in enumerate(bucket.faults):
+                        if fragment in self.key():
+                            del bucket.faults[index]
+                            return fault
+                return None
+
             def answer(self, status: int, body: bytes = b"") -> None:
                 if status == 403:
                     body = b"<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>"
@@ -186,12 +360,42 @@ class FakeBucket:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def deliver(self, body: bytes, fault: Cut | Stall | Trickle | None) -> None:
+                """Write a body as a fault says, and stop quietly once the client hangs up."""
+                try:
+                    if fault is None:
+                        self.wfile.write(body)
+                        return
+                    self.wfile.write(body[: fault.after])
+                    self.wfile.flush()
+                    if isinstance(fault, Stall):
+                        time.sleep(fault.seconds)
+                        self.wfile.write(body[fault.after :])
+                    elif isinstance(fault, Trickle):
+                        for index in range(fault.after, len(body)):
+                            time.sleep(0.02)
+                            self.wfile.write(body[index : index + 1])
+                except OSError:
+                    return
+
             def do_PUT(self) -> None:
-                body = self.rfile.read(int(self.headers["Content-Length"]))
                 status = self.scheduled()
+                length = int(self.headers["Content-Length"])
+                try:
+                    body = self.rfile.read(length)
+                except OSError:
+                    return
+                # A client that gave up on a body stored nothing.
+                if len(body) < length:
+                    return
                 if status is not None:
                     self.answer(status)
                     return
+                fault = self.fault()
+                if isinstance(fault, Silence):
+                    time.sleep(fault.seconds)
+                    return
+                time.sleep(bucket.answer_delay)
                 with bucket.lock:
                     bucket.objects[self.key()] = body
                 self.answer(200)
@@ -206,6 +410,12 @@ class FakeBucket:
                     self.answer(200, bucket.listing(query["prefix"][0], query.get("continuation-token")))
                     return
                 with bucket.lock:
+                    bucket.ranges.append((self.key(), self.headers.get("Range")))
+                fault = self.fault()
+                if isinstance(fault, Silence):
+                    time.sleep(fault.seconds)
+                    return
+                with bucket.lock:
                     body = bucket.objects.get(self.key())
                     corrupted = any(item in self.key() for item in bucket.corrupted)
                     if corrupted:
@@ -213,11 +423,35 @@ class FakeBucket:
                 if body is None:
                     self.answer(404)
                     return
-                self.answer(200, b"damaged" + body[7:] if corrupted else body)
+                if corrupted:
+                    body = b"damaged" + body[7:]
+                start = bucket.range_start(self.headers.get("Range"))
+                if start is None:
+                    self.send_response(200)
+                elif start >= len(body):
+                    self.answer(416)
+                    return
+                else:
+                    self.send_response(206)
+                    self.send_header("Content-Range", f"bytes {start}-{len(body) - 1}/{len(body)}")
+                    body = body[start:]
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.deliver(body, fault)
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
+
+    def range_start(self, header: str | None) -> int | None:
+        """Where a `bytes=N-` range starts, or None for the whole object, which a request without a
+        range and a store that ignores ranges both receive."""
+        if header is None or self.ranges_ignored:
+            return None
+        match = re.fullmatch(r"bytes=(\d+)-", header)
+        if match is None:
+            raise AssertionError(f"a range the client never asks for: {header}")
+        return int(match.group(1))
 
     def listing(self, prefix: str, token: list[str] | None) -> bytes:
         """One name a page, so a listing has to follow its continuation tokens."""
@@ -229,12 +463,14 @@ class FakeBucket:
         namespace = 'xmlns="http://s3.amazonaws.com/doc/2006-03-01/"'
         return f"<ListBucketResult {namespace}><Prefix>{prefix}</Prefix>{page}{following}</ListBucketResult>".encode()
 
-    def client(self) -> artifacts.Bucket:
+    def client(self, limits: artifacts.Limits | None = None) -> artifacts.Bucket:
+        """A client of this bucket, whose backoffs are not random unless the test's limits say so."""
         return artifacts.Bucket(
             name="artifacts",
             endpoint=f"http://127.0.0.1:{self.server.server_address[1]}",
             access_key="key",
             secret_key="secret",
+            limits=artifacts.Limits(backoff_jitter=0) if limits is None else limits,
         )
 
     def close(self) -> None:
@@ -250,9 +486,9 @@ class TransferTests(unittest.TestCase):
         self.fake = FakeBucket()
         self.addCleanup(self.fake.close)
         self.bucket = self.fake.client()
-        sleeping = mock.patch.object(artifacts.time, "sleep")
-        self.sleeps = sleeping.start()
-        self.addCleanup(sleeping.stop)
+        pausing = mock.patch.object(artifacts, "pause")
+        self.pauses = pausing.start()
+        self.addCleanup(pausing.stop)
         temporary = mock.patch.dict(os.environ, {"RUNNER_TEMP": str(self.work)})
         temporary.start()
         self.addCleanup(temporary.stop)
@@ -272,6 +508,17 @@ class TransferTests(unittest.TestCase):
     def quiet(self) -> contextlib.AbstractContextManager[object]:
         return contextlib.redirect_stdout(io.StringIO())
 
+    def delays(self) -> list[float]:
+        return [call.args[1] for call in self.pauses.call_args_list]
+
+    def ranges_of(self, part: str) -> list[str | None]:
+        return [header for key, header in self.fake.ranges if key.endswith(f"/{part}")]
+
+    def stored(self, name: str, files: dict[str, bytes]) -> None:
+        """Upload an artifact of three parts: 4096, 4096 and 2048 bytes of a padded tar stream."""
+        with self.quiet():
+            artifacts.upload(self.bucket, "7", name, self.tree(files), 0, part_bytes=4096)
+
     def test_an_artifact_round_trips_across_parts(self) -> None:
         for level in (0, 1):
             with self.subTest(level=level):
@@ -286,6 +533,37 @@ class TransferTests(unittest.TestCase):
                 self.assertTrue(all(part["length"] <= 1024 for part in manifest["parts"]))
                 self.assertEqual(self.extracted(self.work / f"out-{level}"), files)
 
+    def test_a_transfer_says_what_it_moves_and_how_fast(self) -> None:
+        files = {"a.bin": os.urandom(5000)}
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            artifacts.upload(self.bucket, "7", "told", self.tree(files), 0, part_bytes=4096)
+            artifacts.download(self.bucket, "7", "told", "", self.work / "out")
+        lines = output.getvalue().splitlines()
+        self.assertEqual(lines[0], "told: 1 files, 10240 bytes in 3 parts")
+        self.assertRegex(lines[1], r"^told: sent 10\.0 KiB in 3 parts in 0:00, .+/s$")
+        self.assertEqual(lines[2], "told: 10240 bytes in 3 parts")
+        self.assertRegex(lines[3], r"^told: received 10\.0 KiB in 3 parts in 0:00, .+/s$")
+        self.assertEqual(lines[4], f"told: extracted into {self.work / 'out'}")
+
+    def test_moving_parts_report_how_far_they_got(self) -> None:
+        files = {"a.bin": os.urandom(5000)}
+        self.stored("watched", files)
+        self.fake.faults = [("part-0", Stall(after=1000, seconds=0.5))]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            bucket = self.fake.client(artifacts.Limits(report_seconds=0.05, backoff_jitter=0))
+            artifacts.download(bucket, "7", "watched", "", self.work / "out")
+        self.assertEqual(self.extracted(self.work / "out"), files)
+        # A download counts what arrived a block or a moment at a time, so a stalled part's bytes
+        # are those it held when it last counted them.
+        stalled = re.compile(
+            r"^watched: received .+ of 10\.0 KiB \(\d+%\) in 0:00, 0 B/s; parts: 2 done, 1 moving, "
+            r"0 waiting to retry, 0 queued; slowest part-0: \d+ B of 4\.0 KiB at 0 B/s$"
+        )
+        reports = [line for line in output.getvalue().splitlines() if stalled.match(line)]
+        self.assertTrue(reports, output.getvalue())
+
     def test_a_part_that_fails_is_sent_again_on_its_own(self) -> None:
         files = {"a.bin": os.urandom(5000)}
         self.fake.failures = [("part-1", 503), ("part-1", 500), ("part-2", 429)]
@@ -295,28 +573,156 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(self.extracted(self.work / "out"), files)
         sent = [key for method, key in self.fake.requests if method == "PUT" and key.endswith("part-0")]
         self.assertEqual(len(sent), 1, "a part that succeeded is not sent again")
-        self.assertEqual([call.args[0] for call in self.sleeps.call_args_list].count(2), 2)
+        self.assertEqual(sorted(self.delays()), [2, 2, 4])
 
     def test_a_refused_request_is_not_retried(self) -> None:
         self.fake.failures = [("part-0", 403)]
         with self.quiet(), self.assertRaisesRegex(artifacts.ArtifactError, "answered 403 AccessDenied"):
             artifacts.upload(self.bucket, "7", "refused", self.tree({"a": b"1"}), 0)
         self.assertEqual(sum(1 for method, _ in self.fake.requests if method == "PUT"), 1)
-        self.assertEqual(self.sleeps.call_count, 0)
+        self.assertEqual(self.pauses.call_count, 0)
 
     def test_a_store_that_stays_away_fails_after_its_attempts(self) -> None:
         self.fake.failures = [("part-0", 500)] * artifacts.TRANSFER_ATTEMPTS
-        with self.quiet(), self.assertRaisesRegex(artifacts.ArtifactError, "failed 6 times"):
+        with self.quiet(), self.assertRaisesRegex(artifacts.ArtifactError, "failed 6 times in a row, last with status 500"):
             artifacts.upload(self.bucket, "7", "gone", self.tree({"a": b"1"}), 0)
-        self.assertEqual([call.args[0] for call in self.sleeps.call_args_list], [2, 4, 8, 16, 30])
+        self.assertEqual(self.delays(), [2, 4, 8, 16, 30])
 
-    def test_a_damaged_part_is_fetched_again(self) -> None:
+    def test_a_part_that_fails_stops_the_others(self) -> None:
+        self.fake.failures = [("part-0", 403)]
+        self.fake.answer_delay = 0.5
+        files = {"a.bin": os.urandom(12000)}
+        with self.quiet(), self.assertRaisesRegex(artifacts.ArtifactError, "answered 403"):
+            artifacts.upload(self.bucket, "7", "stopped", self.tree(files), 0, part_bytes=1024)
+        sent = {int(key.rsplit("-", 1)[1]) for method, key in self.fake.requests if method == "PUT"}
+        self.assertIn(0, sent)
+        self.assertLessEqual(max(sent), artifacts.CONCURRENT_TRANSFERS - 1, "no part starts after one failed")
+        self.assertNotIn("runs/7/stopped/manifest.json", self.fake.objects)
+
+    def test_a_part_that_is_cut_off_resumes_where_it_stopped(self) -> None:
+        files = {"a.bin": os.urandom(5000)}
+        self.stored("resumed", files)
+        self.fake.faults = [("part-0", Cut(after=1500))]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            artifacts.download(self.bucket, "7", "resumed", "", self.work / "out")
+        self.assertEqual(self.extracted(self.work / "out"), files)
+        self.assertEqual(self.ranges_of("part-0"), ["bytes=0-", "bytes=1500-"])
+        self.assertIn(
+            "part-0: attempt 1 failed with the body ended at 1500 of 4096 bytes; resuming at 1.5 KiB in 2.0 s",
+            output.getvalue(),
+        )
+
+    def test_attempts_that_keep_bytes_do_not_use_up_the_retries(self) -> None:
+        files = {"a.bin": os.urandom(5000)}
+        self.stored("patient", files)
+        cuts = artifacts.TRANSFER_ATTEMPTS + 2
+        self.fake.faults = [("part-0", Cut(after=100))] * cuts
+        with self.quiet():
+            artifacts.download(self.bucket, "7", "patient", "", self.work / "out")
+        self.assertEqual(self.extracted(self.work / "out"), files)
+        self.assertEqual(self.ranges_of("part-0"), [f"bytes={100 * index}-" for index in range(cuts + 1)])
+        self.assertEqual(self.delays(), [2] * cuts)
+
+    def test_a_store_that_ignores_ranges_sends_the_part_from_its_start(self) -> None:
+        files = {"a.bin": os.urandom(5000)}
+        self.stored("whole", files)
+        self.fake.ranges_ignored = True
+        self.fake.faults = [("part-0", Cut(after=1500))]
+        with self.quiet():
+            artifacts.download(self.bucket, "7", "whole", "", self.work / "out")
+        self.assertEqual(self.extracted(self.work / "out"), files)
+        self.assertEqual(self.ranges_of("part-0"), ["bytes=0-", "bytes=1500-"])
+
+    def test_a_part_that_crawls_is_cut_off_and_resumed(self) -> None:
+        files = {"a.bin": os.urandom(5000)}
+        self.stored("crawled", files)
+        self.fake.faults = [("part-0", Trickle(after=1000))]
+        limits = artifacts.Limits(slowest_bytes_per_second=64 * 1024, slow_seconds=0.2, backoff_jitter=0)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            artifacts.download(self.fake.client(limits), "7", "crawled", "", self.work / "out")
+        self.assertEqual(self.extracted(self.work / "out"), files)
+        self.assertRegex(output.getvalue(), r"part-0: attempt 1 failed with too slow: \d+ B in 0 s, below 64\.0 KiB/s")
+        resumed = self.ranges_of("part-0")[1]
+        self.assertGreaterEqual(int(resumed.removeprefix("bytes=").removesuffix("-")), 1000)
+
+    def test_a_download_that_crawls_to_its_end_still_arrives(self) -> None:
+        # Every block falls behind an impossible pace, so every attempt is cut off after the block
+        # it received. Each keeps that block, so every attempt starts a new count of failures and
+        # the parts still arrive, the last attempt of each with nothing left to ask for.
+        files = {"a.bin": os.urandom(5000)}
+        self.stored("dogged", files)
+        limits = artifacts.Limits(slowest_bytes_per_second=10**30, slow_seconds=1e-9, backoff_jitter=0)
+        with self.quiet():
+            artifacts.download(self.fake.client(limits), "7", "dogged", "", self.work / "out")
+        self.assertEqual(self.extracted(self.work / "out"), files)
+        self.assertGreaterEqual(len(self.delays()), 3, "every part is cut off at least once")
+        self.assertEqual(set(self.delays()), {2})
+        for part, length in (("part-0", 4096), ("part-1", 4096), ("part-2", 2048)):
+            starts = [int(header.removeprefix("bytes=").removesuffix("-")) for header in self.ranges_of(part)]
+            self.assertEqual(starts, sorted(set(starts)), "every attempt asks for bytes it does not hold")
+            self.assertLess(max(starts), length, "a whole part is not asked for again")
+
+    def test_an_upload_that_crawls_fails_after_its_attempts(self) -> None:
+        # Every block falls behind an impossible pace, and an upload keeps nothing of an attempt that
+        # was cut off, so its attempts run out.
+        limits = artifacts.Limits(slowest_bytes_per_second=10**30, slow_seconds=1e-9, backoff_jitter=0)
+        files = {"a.bin": os.urandom(600 * 1024)}
+        with self.quiet(), self.assertRaisesRegex(artifacts.ArtifactError, "failed 6 times in a row, last with too slow"):
+            artifacts.upload(self.fake.client(limits), "7", "crawled", self.tree(files), 0)
+        # The bucket may not have read every request a client gave up on, so the client's own
+        # backoffs count its attempts.
+        self.assertEqual(self.delays(), [2, 4, 8, 16, 30])
+        self.assertEqual(self.fake.objects, {})
+
+    def test_a_body_that_stalls_is_cut_off_after_the_idle_limit(self) -> None:
+        files = {"a.bin": os.urandom(5000)}
+        self.stored("stalled", files)
+        self.fake.faults = [("part-0", Stall(after=1000, seconds=2))]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            bucket = self.fake.client(artifacts.Limits(idle_seconds=0.5, backoff_jitter=0))
+            artifacts.download(bucket, "7", "stalled", "", self.work / "out")
+        self.assertEqual(self.extracted(self.work / "out"), files)
+        self.assertEqual(self.ranges_of("part-0"), ["bytes=0-", "bytes=1000-"])
+        self.assertIn(
+            "part-0: attempt 1 failed with nothing arrived for 0.5 s; resuming at 1000 B in 2.0 s",
+            output.getvalue(),
+        )
+
+    def test_an_answer_that_never_comes_is_asked_for_again(self) -> None:
+        files = {"a.bin": os.urandom(5000)}
+        bucket = self.fake.client(artifacts.Limits(idle_seconds=0.5, backoff_jitter=0))
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.fake.faults = [("part-1", Silence(seconds=2))]
+            artifacts.upload(bucket, "7", "unanswered", self.tree(files), 0, part_bytes=4096)
+            self.fake.faults = [("part-0", Silence(seconds=2))]
+            artifacts.download(bucket, "7", "unanswered", "", self.work / "out")
+        self.assertEqual(self.extracted(self.work / "out"), files)
+        retried = re.findall(r"(storing|reading) \S+/part-(\d): attempt 1 failed with nothing moved for 0\.5 s; retrying", output.getvalue())
+        self.assertEqual(retried, [("storing", "1"), ("reading", "0")])
+
+    def test_an_interrupted_transfer_reports_how_far_it_got(self) -> None:
+        output = io.StringIO()
+        with mock.patch.object(artifacts, "wait", side_effect=KeyboardInterrupt), contextlib.redirect_stdout(output):
+            with self.assertRaises(KeyboardInterrupt):
+                artifacts.upload(self.bucket, "7", "cancelled", self.tree({"a": b"1"}), 0)
+        self.assertRegex(
+            output.getvalue(),
+            r"::error title=CI artifact::interrupted: cancelled: sent .+ of 10\.0 KiB \(\d+%\) in 0:00, .+; parts: ",
+        )
+        self.assertNotIn("runs/7/cancelled/manifest.json", self.fake.objects)
+
+    def test_a_damaged_part_is_fetched_again_from_its_start(self) -> None:
         files = {"a.bin": os.urandom(4000)}
         with self.quiet():
             artifacts.upload(self.bucket, "7", "checked", self.tree(files), 0, part_bytes=1024)
             self.fake.corrupted = ["part-1"]
             artifacts.download(self.bucket, "7", "checked", "", self.work / "out")
         self.assertEqual(self.extracted(self.work / "out"), files)
+        self.assertEqual(self.ranges_of("part-1"), ["bytes=0-", "bytes=0-"])
 
     def test_an_upload_without_its_manifest_cannot_be_read(self) -> None:
         self.fake.failures = [("manifest.json", 403)]
@@ -421,6 +827,20 @@ class CommandTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     artifacts.parse_arguments(["download", "--run", "7", *arguments])
 
+    def test_a_terminating_signal_interrupts_a_command_as_a_cancellation_does(self) -> None:
+        before = signal.getsignal(signal.SIGTERM)
+        handlers = []
+        with mock.patch.object(artifacts, "run_upload", side_effect=lambda _: handlers.append(signal.getsignal(signal.SIGTERM))):
+            status, _ = self.run_command("upload", "--run", "7", "--name", "n", "--path", "unused")
+        self.assertEqual(status, 0)
+        self.assertEqual(handlers, [signal.default_int_handler])
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)
+
+    def test_an_interrupted_command_exits_as_interrupted(self) -> None:
+        with mock.patch.object(artifacts, "run_upload", side_effect=KeyboardInterrupt):
+            status, _ = self.run_command("upload", "--run", "7", "--name", "n", "--path", "unused")
+        self.assertEqual(status, 130)
+
 
 def jobs_of(text: str) -> dict[str, str]:
     """The text of each job of a workflow, by name."""
@@ -499,6 +919,14 @@ class WorkflowTests(unittest.TestCase):
                 for action, inputs in declared.items():
                     if f"uses: {action}" in step:
                         self.assertLessEqual(given_inputs(step), inputs, f"{path.name}: {step}")
+
+    def test_the_actions_make_the_script_their_steps_process(self) -> None:
+        # The signals that stop a cancelled or timed out step reach its own process, which has to
+        # be the script for an interrupted transfer to report how far it got.
+        for action in ACTIONS:
+            text = (ROOT / action / "action.yml").read_text(encoding="utf-8")
+            run = text.split("run: >-\n", 1)[1]
+            self.assertTrue(run.lstrip().startswith('exec python3 "${GITHUB_WORKSPACE}/scripts/ci_artifacts.py" '), action)
 
 
 if __name__ == "__main__":
