@@ -1895,9 +1895,18 @@ option: an emitter without acknowledgement needs no session, and an acknowledged
 it.
 
 Every statement writes its quality of service as `QOS 0`, `QOS 1` or `QOS 2` before `MODE`. Neither
-has a default, and the two pair by what can complete a publish: nothing answers QoS 0, so `QOS 0`
-takes `NO ACK`, and a broker answers QoS 1 and 2, so `QOS 1` and `QOS 2` take `ACK SEQUENTIAL` or
-`ACK PARALLEL MAX <n>`.
+has a default. The legal pairings and their completion points are:
+
+| QoS | Mode families | Record completes when | Session requested |
+| --- | --- | --- | --- |
+| `0` | `NO ACK` | The client accepts the publish | Clean |
+| `1` | `ACK SEQUENTIAL`, `ACK PARALLEL` | The broker answers `PUBACK` | Persistent |
+| `2` | `ACK SEQUENTIAL`, `ACK PARALLEL` | The broker answers `PUBCOMP` | Persistent |
+
+Use the complete mode bodies from the declaration below: every mode has a retry policy, and
+acknowledged modes also require `ACK TIMEOUT`.
+`SESSION` is written only on an ingestor; the emitter derives it from QoS. The ingest-side
+combination of `NO ACK` with QoS 1 or 2 is not an emitter pairing.
 
 <!-- connector-matrix:emit-mqtt-topic:start -->
 ```plexus,ignore
@@ -1939,6 +1948,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-emit).
 <!-- connector-matrix:emit-mqtt-topic:end -->
 
+#### MQTT topics, properties and user properties
+
 `TOPIC` names one literal topic, published to exactly as written, letter case included. It follows
 the [ingestion topic filter rule](ingestors.md#external-names) without the `+` and `#` wildcards,
 so `TOPIC 'devices/+'` is refused when the emitter is created. The client's `addr` names the broker
@@ -1973,6 +1984,8 @@ CREATE refuses an unsupported QoS number with its value and accepted levels, suc
 offers only the modes the written quality of service pairs with, and a statement that writes
 another is refused with the mode underlined and what it writes named, such as
 `MQTT TOPIC emitters name MODE NO ACK only with QOS 0; the statement writes QOS 1`.
+
+#### MQTT alterations and delivery recovery
 
 `ALTER` holds every result to the same pairing, once every operation of the statement has applied.
 `SET MODE` changes the mode within a quality of service, so `SET MODE ACK PARALLEL MAX 8 ...` is
