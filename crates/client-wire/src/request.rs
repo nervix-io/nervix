@@ -148,6 +148,14 @@ pub struct SubscribeRequest {
 
 /// The depth of a subscribe request's expected schema table in its frame: the client message, the
 /// subscribe request, and the schema.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "session.fbs nests a subscribe request's expected schema in the client message \
+                  and the subscribe request, so the schema table sits at this depth"
+    )
+)]
 const EXPECTED_SCHEMA_DEPTH: usize = 3;
 
 /// Closes a subscription of the session.
