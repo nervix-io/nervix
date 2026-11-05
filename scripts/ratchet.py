@@ -347,11 +347,13 @@ def measure_sources(root: Path) -> dict[str, list[Site]]:
 
 
 def check_synchronization(root: Path) -> None:
-    from scripts import typed_ratchet
-
     target = Path(os.environ.get("CARGO_TARGET_DIR", root / "target"))
     destination = target / "typed-ratchet/gate.json"
-    if typed_ratchet.main(["--root", str(root), "--target-dir", str(target), "--output", str(destination)]):
+    executable = target / "typed-ratchet/source/debug/nervix-ratchet"
+    arguments = [str(executable), "analyze", "--root", str(root), "--target-dir", str(target), "--output", str(destination)]
+    if os.environ.get("NERVIX_NATIVE_COVERAGE_ATTEMPT"):
+        arguments = [sys.executable, str(root / "scripts/native_coverage.py"), "exec", *arguments]
+    if subprocess.run(arguments, cwd=root).returncode:
         raise SystemExit("error: compiler synchronization diagnostics failed")
 
 

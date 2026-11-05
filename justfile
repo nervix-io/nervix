@@ -2875,6 +2875,9 @@ ratchet *args: typed-ratchet-build typed-ratchet-source-build install-cargo-crap
 test-ratchet-units: typed-ratchet-source-build install-cargo-crap
     python3 -m unittest scripts.tests.test_ratchet scripts.tests.test_cargo_crap scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_lint_audit
 
+test-ratchet-audit-caller:
+    python3 -m unittest scripts.tests.test_lint_audit
+
 # Structural Rust properties use a stable source parser, without the compiler driver.
 typed-ratchet-source-build:
     #!/usr/bin/env bash
@@ -2885,14 +2888,27 @@ typed-ratchet-source-build:
     fi
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/source cargo +"$source_toolchain" build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report
 
-typed-ratchet-build:
+typed-ratchet-build: build-ratchet-runner
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report
 
 typed-ratchet *args: typed-ratchet-build
-    python3 -m scripts.typed_ratchet {{ args }}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    runner={{ quote(cargo_target_dir / "typed-ratchet/source/debug/nervix-ratchet") }}
+    if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
+        exec python3 scripts/native_coverage.py exec "$runner" analyze {{ args }}
+    fi
+    exec "$runner" analyze {{ args }}
 
 typed-ratchet-turmoil *args:
-    RUSTFLAGS="--cfg tokio_unstable {{ rustflags }}" python3 -m scripts.typed_ratchet {{ args }}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export RUSTFLAGS="--cfg tokio_unstable {{ rustflags }}"
+    runner={{ quote(cargo_target_dir / "typed-ratchet/source/debug/nervix-ratchet") }}
+    if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
+        exec python3 scripts/native_coverage.py exec "$runner" analyze {{ args }}
+    fi
+    exec "$runner" analyze {{ args }}
 
 # Report review candidates for code shaped around inaccurate lints: repeated keyed lookups, key
 # allocations, borrowed copies, duplicated branches, forwarding wrappers, discarded errors,
@@ -2904,10 +2920,12 @@ lint-audit *args: typed-ratchet-build
 
 test-typed-ratchet-compiler:
     just typed-ratchet --fixture-mode ordinary --recompile --inventory --output {{ quote(cargo_target_dir) }}/typed-ratchet/fixture-ordinary.json
-    python3 -m unittest scripts.tests.test_typed_ratchet scripts.tests.test_analysis_admission scripts.tests.compiler_fixture_checks.CompilerFixtureTests
+    just test-ratchet-runner
+    just ratchet-tests fixtures
 
-test-typed-ratchet-contracts +tests="scripts.tests.compiler_contract_checks scripts.tests.compiler_audit_checks": typed-ratchet-build
-    python3 -m unittest {{ tests }}
+test-typed-ratchet-contracts *args: typed-ratchet-build
+    just prepare-ratchet-contracts
+    just ratchet-tests contracts {{ args }}
 
 # Error propagation uses the actual node startup and DNS hooks, plus both simulation drivers.
 test-typed-error-runtime: build-web-console download-onnxruntime
@@ -2942,7 +2960,11 @@ test-typed-ratchet-modeled:
     just typed-ratchet --fixture-mode loom --inventory --output {{ quote(cargo_target_dir) }}/typed-ratchet/fixture-loom.json
     just typed-ratchet --fixture-mode turmoil --inventory --output {{ quote(cargo_target_dir) }}/typed-ratchet/fixture-turmoil.json
     just typed-ratchet --fixture-mode deloxide --inventory --output {{ quote(cargo_target_dir) }}/typed-ratchet/fixture-deloxide.json
-    python3 -m unittest scripts.tests.compiler_fixture_checks.ModeledFixtureTests
+    just prepare-ratchet-contracts shuttle
+    just prepare-ratchet-contracts loom
+    just prepare-ratchet-contracts turmoil
+    just prepare-ratchet-contracts deloxide
+    just ratchet-tests modeled
 
 test-typed-ratchet-docs:
     #!/usr/bin/env bash
@@ -2964,18 +2986,76 @@ test-typed-ratchet-product-docs:
     RUSTUP_TOOLCHAIN=1.99 just test-runtime-state-capabilities
 
 qualify-typed-ratchet-cache: typed-ratchet-build
-    python3 -m scripts.tests.qualify_typed_ratchet_cache
+    #!/usr/bin/env bash
+    set -euo pipefail
+    qualification_command=({{ quote(cargo_target_dir / "typed-ratchet/source/debug/nervix-ratchet") }} qualify-cache --root {{ quote(justfile_directory()) }} --target-dir {{ quote(cargo_target_dir) }})
+    if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
+        exec python3 scripts/native_coverage.py exec "${qualification_command[@]}"
+    fi
+    exec "${qualification_command[@]}"
 
 test-typed-ratchet-reports:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib
 
+# Focused deterministic tests of the analysis runner and host memory admission.
+test-ratchet-runner *args:
+    just ratchet-tests lib {{ args }}
+    just ratchet-tests wrapper {{ args }}
+
+# Focused local tooling counters for patch review; the existing native producer collects CI.
+coverage-ratchet-runner *args:
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/coverage cargo +1.99 llvm-cov test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-ratchet --lib --test wrapper --no-report -- {{ args }}
+    just coverage-ratchet-report-owner
+
+[private]
+coverage-ratchet-report-owner:
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/coverage cargo +1.99 llvm-cov test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib --no-clean --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
+    # Cached objects name the isolated tooling workspace by its compiler source root.
+    sed -i {{ quote("s|^SF:/src/|SF:" + justfile_directory() + "/tools/nervix-lint/|") }} lcov-workspace.info
+    pwd -P > coverage-source-root.txt
+
+[private]
+ratchet-tests selection *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    runner_toolchain="1.99"
+    if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
+        runner_toolchain="nightly-2026-09-17"
+    fi
+    if [[ {{ quote(selection) }} == lib ]]; then
+        targets=(--lib)
+    else
+        targets=(--test {{ quote(selection) }})
+    fi
+    NERVIX_RATCHET_TARGET_DIR={{ quote(cargo_target_dir) }} \
+        CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/tests \
+        cargo +"$runner_toolchain" test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-ratchet "${targets[@]}" -- {{ args }}
+
+prepare-ratchet-contracts mode="ordinary": typed-ratchet-build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    contract_command=({{ quote(cargo_target_dir / "typed-ratchet/source/debug/nervix-ratchet") }} prepare-contracts --root {{ quote(justfile_directory()) }} --target-dir {{ quote(cargo_target_dir) }} --mode {{ quote(mode) }})
+    if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
+        exec python3 scripts/native_coverage.py exec "${contract_command[@]}"
+    fi
+    exec "${contract_command[@]}"
+
+build-ratchet-runner:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    runner_toolchain="1.99"
+    if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
+        runner_toolchain="nightly-2026-09-17"
+    fi
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/source cargo +"$runner_toolchain" build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-ratchet
+
 fmt-typed-ratchet:
-    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report
+    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report --package nervix-ratchet
     cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --package nervix-lint-fixtures
     cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixture-macros/Cargo.toml
 
 fmt-check-typed-ratchet:
-    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report --check
+    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report --package nervix-ratchet --check
     cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --package nervix-lint-fixtures --check
     cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixture-macros/Cargo.toml --check
 
@@ -2987,14 +3067,14 @@ typed-ratchet-clippy-targets: typed-ratchet-clippy-packages
 
 # The compiler tooling is a workspace of its own on the analysis nightly, so it is a lane of its own.
 [private]
-typed-ratchet-clippy-packages: *(clippy-target "typed-ratchet" *["nervix-lint-driver", "nervix-lint-report"] ["--manifest-path", "tools/nervix-lint/Cargo.toml", "--all-targets"] "nightly-2026-09-17")
+typed-ratchet-clippy-packages: *(clippy-target "typed-ratchet" *["nervix-lint-driver", "nervix-lint-report", "nervix-ratchet"] ["--manifest-path", "tools/nervix-lint/Cargo.toml", "--all-targets"] "nightly-2026-09-17")
 
 coverage-typed-ratchet-python: typed-ratchet-source-build install-cargo-crap test-typed-ratchet-compiler test-typed-ratchet-modeled
     #!/usr/bin/env bash
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     export COVERAGE_FILE="{{ cargo_target_dir }}/typed-ratchet/python.coverage"
-    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.analysis_admission,scripts.ratchet,scripts.cargo_crap,scripts.rust_source,scripts.check_typed_errors,scripts.check_layer_provenance,scripts.check_clock_boundaries,scripts.native_coverage,scripts.bolero,scripts.bolero_rustc,scripts.bolero_coverage,scripts.build_web_console,scripts.lint_audit,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_typed_ratchet scripts.tests.test_analysis_admission scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_cargo_crap scripts.tests.test_lint_audit scripts.tests.test_check_typed_errors scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
+    "${coverage[@]}" run --branch --source=scripts.ratchet,scripts.cargo_crap,scripts.rust_source,scripts.check_typed_errors,scripts.check_layer_provenance,scripts.check_clock_boundaries,scripts.native_coverage,scripts.bolero,scripts.bolero_rustc,scripts.bolero_coverage,scripts.build_web_console,scripts.lint_audit,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_ratchet scripts.tests.test_cargo_crap scripts.tests.test_lint_audit scripts.tests.test_check_typed_errors scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
     "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/typed-ratchet/python.lcov"
     "${coverage[@]}" report
 
