@@ -123,6 +123,46 @@ class ArchiveTests(unittest.TestCase):
             archive.TestProgram(UNIT_EXECUTABLE.as_posix(), "crates/cli"),
         ])
 
+    def test_a_restored_jvm_test_reads_its_packaged_java_inputs(self) -> None:
+        build = Recorded(self.directory / "checkout")
+        package = build.root / "crates/client-jvm"
+        package.mkdir(parents=True)
+        java = Path("target/client-conformance/java")
+        inputs = {
+            java / "nervix-client.jar": b"packaged JNI library",
+            java / "tests/io/nervix/client/Properties.class": b"property fixture",
+            java / "tests/io/nervix/client/BoundaryTests.class": b"boundary fixture",
+            java / "tests/io/nervix/client/Properties$Input.class": b"nested fixture",
+        }
+        for path, content in inputs.items():
+            write(build.root / path, content)
+        program = archive.TestProgram(UNIT_EXECUTABLE.as_posix(), "crates/client-jvm")
+        write(build.root / archive.PROGRAMS, json.dumps([program.to_json()]).encode())
+        build.pack_tests(self.directory / "unit-tests.tar.zst")
+        (build.root / "target").rename(self.directory / "saved")
+        tools = fake_ldd(self.directory / "tools", "nothing")
+        with (
+            mock.patch.dict(os.environ, {"PATH": f"{tools}:{os.environ['PATH']}"}),
+            mock.patch.object(archive, "library_path", return_value="/toolchain"),
+            redirect_stdout(io.StringIO()),
+        ):
+            archive.unpack(build.root.resolve(), self.directory / "unit-tests.tar.zst")
+        for path, content in inputs.items():
+            self.assertEqual((build.root / path).read_bytes(), content)
+
+    def test_packing_jvm_tests_requires_their_jar_and_fixture_entry_classes(self) -> None:
+        build = Recorded(self.directory / "checkout")
+        program = archive.TestProgram(UNIT_EXECUTABLE.as_posix(), "crates/client-jvm")
+        write(build.root / archive.PROGRAMS, json.dumps([program.to_json()]).encode())
+        java = Path("target/client-conformance/java")
+        for path in (java / "nervix-client.jar", java / "tests/io/nervix/client/Properties.class",
+                     java / "tests/io/nervix/client/BoundaryTests.class"):
+            with self.assertRaisesRegex(shards.ShardError, "just build-client-jvm-tests") as failure:
+                build.pack_tests(self.directory / "unit-tests.tar.zst")
+            self.assertIn(path.as_posix(), str(failure.exception))
+            write(build.root / path, b"prepared input")
+
+
 
     def test_a_restore_resolves_libraries_where_a_run_finds_them(self) -> None:
         build = Recorded(self.directory / "checkout")
@@ -276,6 +316,13 @@ class WorkflowTests(unittest.TestCase):
                       "test-coverage-build", "toolchains-install"):
             self.assertNotIn(setup, tests)
 
+    def test_both_unit_test_jobs_provision_java_at_the_binding_floor(self) -> None:
+        for name in ("scenarios-build", "tests"):
+            job = self.job(name)
+            self.assertIn("name: Setup Java for embedded JVM tests", job)
+            self.assertIn("uses: actions/setup-java@v4", job)
+            self.assertIn('java-version: "21"', job)
+
 
 class RecipeTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -295,6 +342,10 @@ class RecipeTests(unittest.TestCase):
 
     def test_the_messages_lie_where_the_plan_reads_them(self) -> None:
         self.assertIn(archive.MESSAGES.as_posix(), self.recipe("test-coverage-binaries:"))
+
+    def test_workspace_tests_prepare_the_embedded_jvm_inputs_before_running(self) -> None:
+        for name in ("test:", "test-coverage-binaries:"):
+            self.assertIn("build-client-jvm-tests", self.recipe(name).splitlines()[0])
 
 
 if __name__ == "__main__":

@@ -1286,6 +1286,15 @@ message is sent. Targeted emitter alterations represent setting and dropping per
 timestamps and the whole property set as separate semantic operations, and preserve the envelope
 fields each operation does not address.
 
+The JVM binding's package-private JNI edge encodes owned native allocations in Java `long` values
+and an omitted native handle as zero only at that boundary. Public Java classes expose optional
+objects as `null` and typed enum variants and exceptions. A handle's private State serializes its
+short borrows and unique release. Its open/closing/closed state ends admission on close and
+defers native release until an admitted short call returns; it refuses nested access so a mutable
+borrow cannot overlap itself. Blocking calls own independent leases. A `Fields` lease is a
+complete validated description snapshot, while a mutable builder has no shared lease. Direct
+read-only buffers retain the native allocation through their root rather than a raw unowned address.
+
 ## Intake Unit And Gate Identity
 
 An instancing declaration is `Count(NonZeroU64)` or `PerPartition`; entity capabilities admit the

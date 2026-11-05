@@ -278,7 +278,15 @@ binaries after building beside the suite in directories of their own, and `test-
 the `scenarios-build` job, in one target directory, publishes its cache and packs one archive for
 each. The `tests` job restores
 [its archive](./integration-test-lifecycle.md#unit-test-archive) and runs `test-coverage-run`, which
-starts each test executable directly. The scenario suite runs in
+starts each test executable directly.
+The all-features workspace build includes the embedded JVM tests. Its preparation builds the
+Java 21 jar with its native library and the Java boundary fixtures. The unit-test archive carries
+that jar and every fixture class, including nested classes; packing refuses missing entry classes.
+The build and restored-test jobs provision Java 21. The restored runner loads those inputs and
+registers the instrumented executable's JNI methods, so their counters belong to the ordinary
+workspace report; the runner does not rebuild the jar, fixtures or Rust code.
+
+The scenario suite runs in
 [shards](./integration-test-lifecycle.md#scenario-shards): each shard restores its archive and runs
 `test-scenarios-coverage-shard`, which runs its share of the suite and exports the pair from that
 share's profiles, compiling nothing. `just coverage-report-workspace` writes the same pair from the

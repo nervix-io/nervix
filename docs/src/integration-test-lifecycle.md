@@ -84,12 +84,20 @@ repeat a scenario or change product delivery deadlines. A repeated input can hav
 effects under this endpoint's existing acknowledgement contract.
 
 The controlled three-node case pins the relay to node-3 and paces that node's inbound opaque bytes
-at 262,144 bytes per second. It positively observes the first input's forwarding error, releases
-the cadence, requires acknowledged input completion, then requires the exact subscription row
-within the same 30-second receive bound and an active subscription. The production scheduler is
-selected only to establish this fault's target; the ordinary outline retains randomized placement.
-The receive step records the subscription name and encoded frame length without logging row
-contents.
+at 262,144 bytes per second. One owned observation task runs the acknowledged publication beside
+the exact forwarding-error reader and releases the cadence as soon as that reader observes the
+failure. Both start before the step waits for their result. Delayed scenario polling can therefore
+delay result collection without leaving the byte fault active until the publication deadline.
+The failure reader shares the publication's 30-second bound; neither a missing witness nor a failed
+publication can establish recovery. Dropping the observation cancels both futures and releases the
+session they own. Elapsed-time events retain the release and acknowledgement boundaries without
+logging the row.
+
+After requiring the forwarding witness and acknowledged input completion, the case requires the
+exact subscription row within the separate 30-second receive bound and an active subscription.
+The production scheduler is selected only to establish this fault's target; the ordinary outline
+retains randomized placement. The receive step records the subscription name and encoded frame
+length without logging row contents.
 
 The Cucumber scenario suite runs Nervix the way an operator does. It starts clusters, drives them
 through the session API, brokers, and HTTP endpoints, and asserts on what they do. Many scenarios
@@ -1342,7 +1350,8 @@ The harness keeps these boundaries explicit.
   to learn the backup from the successor and recover it to another destination.
 
   Background command probes record the command pauses, domain-resume proposal or failure pauses,
-  and exact-reference lease refusal a scenario arms. An unresolved admission before the intended
+  standalone transaction lookup, preflight or failed-commit pauses, and exact-reference lease
+  refusal a scenario arms. An unresolved admission before the intended
   boundary repeats the prepared request; the witness belongs to the current attempt, so a later
   reconciliation arrival cannot turn
   an earlier admission reply into an after-boundary reply. A reached pause remains observed after
@@ -3417,6 +3426,13 @@ object in the target directory, so it runs before the unit tests join the suite 
 cache is published, `just test-coverage-pack` writes the second archive: every other object
 `cargo llvm-cov report` reads, the list of test executables, and the generated inputs a test reads.
 The scenario executable stays out, because the shards run it.
+
+The workspace's all-features build includes the JVM binding's embedded tests. Before compiling
+them, `test-coverage-binaries` prepares the Java 21 jar with its native library and the boundary
+fixtures. The unit archive includes the jar and every compiled fixture class, including nested
+classes; packing refuses a missing jar or fixture entry class. Both the build and unit-test jobs
+install Java 21, and the restored runner uses those packaged inputs without compiling. The
+scenario archive has no JVM fixture dependency.
 
 The `tests` job needs that build, and restores the archive with `just test-coverage-unpack`, under
 the checks a shard's restore makes. `just test-coverage-run` then compiles nothing. Cargo would

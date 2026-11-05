@@ -3952,3 +3952,33 @@ random_iterations = 256
 source = "crates/connectors/nats/src/client/authentication/tests.rs"
 test = "client::authentication::tests::bolero_nkey_authentication_preserves_identity_and_nonce"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 30
+corpus = "crates/client-jvm/src/__fuzz__/tests__bolero_columns_round_trip_through_jni/corpus"
+domain_version = 1
+features = ["jvm-tests"]
+id = "client-jvm-columns"
+invariant = "All scalar bits, UTF-8 and NUL bytes, null states, list and fixed-list values, every field flag and order, row count and canonical IPC survive Java builder and reader calls through the current instrumented JNI implementations; derived direct buffers retain their native batch after close."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-client-jvm"
+random_iterations = 256
+source = "crates/client-jvm/src/tests.rs"
+test = "tests::bolero_columns_round_trip_through_jni"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 30
+corpus = "crates/client-jvm/src/__fuzz__/tests__bolero_field_descriptions_round_trip_through_jni/corpus"
+domain_version = 1
+features = ["jvm-tests"]
+id = "client-jvm-fields"
+invariant = "Every generated field name, type level, fixed-list length, nullability, sensitivity and field order survives Java Fields, Schema and the complete native snapshot leased by endpoint opens."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-client-jvm"
+random_iterations = 256
+source = "crates/client-jvm/src/tests.rs"
+test = "tests::bolero_field_descriptions_round_trip_through_jni"
+test_target = "lib"

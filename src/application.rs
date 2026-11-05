@@ -44,6 +44,7 @@ use ahash::{HashMap, HashMapExt, HashSet, RandomState};
 use authentication::user_credentials;
 use background_task::{
     await_background_task_shutdown, join_public_listeners, request_shutdown_on_completion,
+    request_shutdown_on_return,
 };
 use clap::Parser;
 use clap_complete::Shell;
@@ -117,6 +118,7 @@ use nervix_primitives::{
 };
 use observability_http::serve_observability_http;
 use ownership_handoff::{FORCED_OWNERSHIP_RECOVERY_BUDGET, ForcedOwnershipRecoveryCoordinator};
+use public_listener::{PublicListener, PublicListenerKind};
 #[cfg(feature = "testing")]
 use scheduling::VOTER_OBSERVATION_GRACE;
 use scheduling::{
@@ -156,6 +158,7 @@ mod cli_values;
 mod client_consumers;
 mod client_description;
 mod client_producers;
+mod client_traffic;
 mod cluster_description;
 mod cluster_parameters;
 mod cluster_status;
@@ -181,6 +184,7 @@ mod observability_http;
 mod observation;
 mod ownership_handoff;
 mod preflight;
+mod public_listener;
 mod relocation;
 mod resource;
 mod restore;
@@ -1011,6 +1015,7 @@ impl Application {
                 service_tasks: ServiceTasks::default(),
                 auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
                 failed_auth_rate_limit_keys: DashMap::with_hasher(RandomState::new()),
+                traffic: client_traffic::ClientTraffic::new(runtime.metrics().client_traffic()),
                 transaction_bindings: DashMap::with_hasher(RandomState::new()),
                 command_executions: Default::default(),
                 transaction_executions: DashMap::with_hasher(RandomState::new()),
@@ -1034,6 +1039,25 @@ impl Application {
         }
 
         let listener_shutdown = shutdown_coordinator.admission_token();
+        let grpc_listener =
+            PublicListener::new(grpc_listener, PublicListenerKind::Grpc, &fault_injection);
+        let http_listener =
+            PublicListener::new(http_listener, PublicListenerKind::Http, &fault_injection);
+        let https_listener =
+            PublicListener::new(https_listener, PublicListenerKind::Https, &fault_injection);
+        let observability_listener = PublicListener::new(
+            observability_listener,
+            PublicListenerKind::Observability,
+            &fault_injection,
+        );
+        let web_console_listener = PublicListener::new(
+            web_console_listener,
+            PublicListenerKind::Console,
+            &fault_injection,
+        );
+        let web_console_https_listener = web_console_https_listener.map(|listener| {
+            PublicListener::new(listener, PublicListenerKind::ConsoleTls, &fault_injection)
+        });
 
         let grpc_service = service.clone();
         let grpc_shutdown = listener_shutdown.clone();
@@ -1096,45 +1120,27 @@ impl Application {
                     listener,
                     web_console_https_shutdown.clone(),
                 )
-                .await
+                .await;
             } else {
                 web_console_https_shutdown.cancelled().await;
-                Ok(())
             }
         };
 
         let public_listeners_shutdown = shutdown_coordinator.clone();
         let public_listeners = nervix_primitives::task::spawn(async move {
-            let (
-                api_result,
-                http_result,
-                https_result,
-                observability_result,
-                web_console_result,
-                web_console_https_result,
-            ) = tokio::join!(
+            // Only the gRPC server can fail; the other listeners return once admission closes.
+            let (api_result, (), (), (), (), ()) = tokio::join!(
                 request_shutdown_on_completion(api_server, public_listeners_shutdown.clone()),
-                request_shutdown_on_completion(http_server, public_listeners_shutdown.clone()),
-                request_shutdown_on_completion(https_server, public_listeners_shutdown.clone()),
-                request_shutdown_on_completion(
-                    observability_server,
-                    public_listeners_shutdown.clone()
-                ),
-                request_shutdown_on_completion(
-                    web_console_server,
-                    public_listeners_shutdown.clone()
-                ),
-                request_shutdown_on_completion(
+                request_shutdown_on_return(http_server, public_listeners_shutdown.clone()),
+                request_shutdown_on_return(https_server, public_listeners_shutdown.clone()),
+                request_shutdown_on_return(observability_server, public_listeners_shutdown.clone()),
+                request_shutdown_on_return(web_console_server, public_listeners_shutdown.clone()),
+                request_shutdown_on_return(
                     web_console_https_server,
                     public_listeners_shutdown.clone()
                 ),
             );
             api_result
-                .and(http_result)
-                .and(https_result)
-                .and(observability_result)
-                .and(web_console_result)
-                .and(web_console_https_result)
         });
 
         // Public observation stays available while live policy discovery fences execution.

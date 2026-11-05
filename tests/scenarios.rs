@@ -211,6 +211,7 @@ mod cli_outcomes;
 mod clickhouse_connections;
 mod client_consumers;
 mod client_producers;
+mod client_traffic;
 mod common;
 mod database_batches;
 #[cfg(feature = "deloxide")]
@@ -256,6 +257,7 @@ mod web_console_command_retry;
 mod web_console_connections;
 mod web_console_request_window;
 mod websocket_lifecycle;
+mod wide_row_intake;
 
 const SCENARIOS_PATH: &str = "tests/features";
 const TEST_LOG_DIR: &str = "tests/logs";
@@ -716,6 +718,9 @@ struct ScenarioWorld {
     consumers: client_consumers::ScenarioConsumers,
     /// The distinct-tenant payloads the last generating step posted and no assertion has received.
     generated_payloads: generated_http_payloads::GeneratedPayloads,
+    /// The authentication counts one node exported before a scenario's attempts, which its
+    /// assertions compare the node's later counts with.
+    client_authentication_baseline: client_traffic::AuthenticationBaseline,
 }
 
 impl fmt::Debug for ScenarioWorld {
@@ -29954,48 +29959,6 @@ async fn when_http_payload_is_acknowledged(
     .await
     .unwrap_or_else(|error| panic!("HTTP payload was not acknowledged: {error}"));
     append_cucumber_log_line("http publish completed: acknowledged");
-}
-
-#[when(
-    expr = "http payload begins acknowledged posting within {string} to node {string} with host \
-            {string} path {string}"
-)]
-async fn when_http_payload_begins_acknowledged_posting(
-    world: &mut ScenarioWorld,
-    wait: String,
-    node_id: String,
-    host: String,
-    path: String,
-    #[step] step: &Step,
-) {
-    assert!(
-        world.background_http_publish.is_none(),
-        "a background http publish is already active"
-    );
-    let wait = parse_duration_text(&wait)
-        .assured("the scenario declares a valid HTTP acknowledgement bound");
-    let node_id = expand_placeholders(world, &node_id);
-    let host = expand_placeholders(world, &host);
-    let path = expand_placeholders(world, &path);
-    let payload = expand_placeholders(world, docstring(step));
-    let publisher = world
-        .cluster()
-        .acknowledged_http_publisher(&node_id, &host, &path, wait);
-    let task =
-        nervix_primitives::task::spawn(async move { publisher.publish_bounded(&payload).await });
-    world.background_http_publish = Some(AbortOnDropHandle::new(task));
-}
-
-#[then("the background acknowledged http publish succeeds")]
-async fn then_the_background_acknowledged_http_publish_succeeds(world: &mut ScenarioWorld) {
-    let task = world
-        .background_http_publish
-        .take()
-        .assured("the preceding step started this scenario's acknowledged HTTP publish");
-    task.await
-        .unwrap_or_else(|error| panic!("acknowledged HTTP publish task failed: {error}"))
-        .unwrap_or_else(|error| panic!("HTTP payload was not acknowledged: {error}"));
-    append_cucumber_log_line("background http publish completed: acknowledged");
 }
 
 #[when(

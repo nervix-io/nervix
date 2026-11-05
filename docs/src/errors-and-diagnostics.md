@@ -2527,10 +2527,13 @@ An ordinary command whose internal transaction is still committing when its comm
 any other report, such as `TransactionCommitError::RecoverQuiescence` above a drain timeout or a
 consensus write refused by a saturated log, answers `OutcomeUnknown` with the `StillApplying` cause
 rather than `Failed`. That report describes one attempt, and the committing transaction keeps the
-command's domain mutation lease until recovery under the same reference records the outcome. A
-model step that adopts its transaction's own pause validates its frozen planning inputs against
-the domain as that pause left it, so `PlanningInputsChanged` names only inputs that another owner
-changed.
+command's domain mutation lease until recovery under the same reference records the outcome. If
+another coordinator has already finished that transaction, the ordinary command recovers its
+recorded outcome instead: an obsolete commit-attempt report cannot replace a committed success or
+the transaction's recorded terminal failure. Typed leadership loss still selects the leader
+response. A model step that adopts its transaction's own pause validates its frozen planning inputs
+against the domain as that pause left it, so `PlanningInputsChanged` names only inputs that another
+owner changed.
 
 An ordinary command's preflight, queue, and commit-planning refusals are reports decided against
 its coordinator's observation of the command's internal transaction. Before the session maps such a
@@ -2606,7 +2609,11 @@ name's report beneath `InvalidResourceName`, a local archive's I/O error beneath
 `InvalidCursor` or `InvalidCompletionPageSize`, the event queue's overflow beneath `EventOverflow`,
 and the `BackupDownloadError` beneath `BackupDownload`. A failure that may hide an admitted command
 or an installed upload is `UncertainCommand` or `UncertainUpload` above the failure that left the
-outcome unknown. A call its caller cancels through `execute_prepared_with_cancellation` ends with
+outcome unknown. If the server answered a command with a disposition that required another attempt,
+`LastUnresolvedAnswer` holds the last such typed disposition and its public message between
+`UncertainCommand` and the retry deadline that ended retrying. It does not replace the outer
+uncertainty or turn the intermediate answer into a terminal outcome. A call its caller cancels
+through `execute_prepared_with_cancellation` ends with
 the server's `RequestCancelled` at `BeforeAdmission` for a command that never ran,
 `UncertainCommand` above `RequestCancelled` at `AfterAdmission` for one that keeps running, or
 `CallCancelled` when no request of the call waited for a reply, beneath `UncertainCommand` or
@@ -2624,6 +2631,13 @@ restoration failure the client reports as a subscription or domain clock event c
 chain as its message. The shared C binding classifies a failure from the current context, a failed
 backup download from the `BackupDownloadError` beneath it, and returns the whole chain as the
 error's message.
+
+The Java 21 JNI library consumes that same classified host failure. It throws one
+`Nervix.ClientException` subclass per `FailureKind`, preserving the complete message, optional
+execution reference and typed open refusal. It never reclassifies by message text or treats a
+command disposition as a thrown operation error. A JNI library error stays at JNI's foreign
+boundary; an already pending Java exception is preserved. Checked native exports contain Rust
+unwinds at that boundary. Restoration events expose the shared client's message and retry wait.
 
 Resource archive construction returns its first I/O failure beneath `BuildUploadArchive`.
 Failure and cancellation abandon the partial temporary archive; they perform no destructor
@@ -2840,7 +2854,11 @@ failure names an archive file the browser could not read or that is empty, a tra
 stall, a missing reply, a reply that does not decode or answers another request or reference, or a
 restore whose outcome stayed unknown through its repetitions, which the dialog reports naming the
 execution reference. A refusal of the stream is shown as `restore refused (<failure>): <message>`,
-and the restore's own outcome as the dispatcher renders any command's. The console WebSocket
+and the restore's own outcome as the dispatcher renders any command's. A session reply whose
+command outcome names another execution reference than its command's is a protocol violation: the
+dispatcher reports `protocol violation: the reply to command execution '<own>' names execution
+'<other>'` in the terminal, shows nothing of that outcome as the command's, stops reading the
+connection, and recovers the command under its own reference on the next one. The console WebSocket
 transport closes a call whose client broke its framing with the codec's close code, a second
 download request with `1008`, an answer that does not fit a frame with `1011`, and every call when
 the node stops with `1001`.

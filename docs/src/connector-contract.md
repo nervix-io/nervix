@@ -209,8 +209,10 @@ retain their per-record checks. Client declarations can restrict an optional key
 scheme. OTEL's TLS file keys require an HTTPS endpoint independently of the selected protocol,
 before file inspection. Its declared header-pair decoder validates configuration and supplies
 the decoded values to both OTLP transports; each export uses the same once-decoded values.
-An invalid alteration leaves the accepted graph intact. Driver configuration checks and external
-availability retain their own boundaries; these declaration checks perform no transport I/O.
+An invalid alteration leaves the accepted graph intact, including when earlier operations in the
+same ordered `ALTER` change its client or locator before a later delivery or envelope check fails.
+Driver configuration checks and external availability retain their own boundaries; these
+declaration checks perform no transport I/O.
 
 ### Connector hygiene standard
 

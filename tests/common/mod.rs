@@ -28,6 +28,7 @@ pub(crate) mod node_liveness;
 pub(crate) mod node_startup;
 pub(crate) mod node_stop;
 pub(crate) mod node_trace_export;
+pub(crate) mod paced_publication;
 pub(crate) mod peer_addressing;
 pub(crate) mod phase_deadline;
 pub(crate) mod port_pool;

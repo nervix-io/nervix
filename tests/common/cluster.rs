@@ -9,6 +9,7 @@ use std::{
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
+    str::FromStr,
     time::{Duration, SystemTime},
 };
 
@@ -234,6 +235,40 @@ pub(crate) fn test_basic_authorization_for_password(password: &str) -> String {
 
 pub(crate) fn test_basic_authorization() -> String {
     test_basic_authorization_for_password(TEST_AUTH_PASSWORD)
+}
+
+/// The `Basic` authorization a call presents as `user` with `password`, whether or not the cluster
+/// has such a user.
+pub(crate) fn basic_authorization_as(user: &str, password: &str) -> String {
+    format!(
+        "Basic {}",
+        BASE64_STANDARD.encode(format!("{user}:{password}"))
+    )
+}
+
+/// A public listener every node binds, as a scenario names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NodeListener {
+    Grpc,
+    Http,
+    Observability,
+    Console,
+}
+
+impl FromStr for NodeListener {
+    type Err = io::Error;
+
+    fn from_str(name: &str) -> io::Result<Self> {
+        match name {
+            "grpc" => Ok(Self::Grpc),
+            "http" => Ok(Self::Http),
+            "observability" => Ok(Self::Observability),
+            "console" => Ok(Self::Console),
+            other => Err(io::Error::other(format!(
+                "a node has no '{other}' public listener"
+            ))),
+        }
+    }
 }
 
 fn truncate_test_log_once() -> io::Result<()> {
@@ -2498,6 +2533,28 @@ impl Cluster {
             }
             node = routes.after(&node, redirect.leader.as_ref()).to_string();
         }
+    }
+
+    /// The address one node's public `listener` is bound to.
+    pub(crate) fn public_listener_addr(
+        &self,
+        node_id: &str,
+        listener: NodeListener,
+    ) -> io::Result<SocketAddr> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .ok_or_else(|| io::Error::other(format!("unknown node '{node_id}'")))?;
+        let addr = match listener {
+            NodeListener::Grpc => match handle.config.grpc_mode {
+                InternalTransportMode::Http => handle.spec.grpc_addr(),
+                InternalTransportMode::Https => handle.spec.grpc_https_addr(),
+            },
+            NodeListener::Http => handle.spec.http_addr(),
+            NodeListener::Observability => handle.spec.observability_addr(),
+            NodeListener::Console => handle.spec.web_console_addr(),
+        };
+        addr.parse().map_err(io::Error::other)
     }
 
     pub(crate) fn web_console_url(&self, node_id: &str) -> io::Result<String> {

@@ -63,12 +63,14 @@ use tikv_jemalloc_ctl::{epoch, epoch_mib, stats};
 mod command_execution;
 mod interconnection;
 mod restore_staging;
+mod session;
 
 use command_execution::CommandExecutionMetrics;
 pub use interconnection::NodeObservations;
 use interconnection::{InterconnectionCollector, InterconnectionCollectorHandle};
 use restore_staging::RestoreStagingMetrics;
 pub(crate) use restore_staging::RestoreStagingObservation;
+pub(crate) use session::ClientTrafficMetrics;
 
 /// Why withdrawing a label set discards its outcome. See [`PrometheusMetrics::remove`].
 const WITHDRAWN_SERIES_MAY_NOT_EXIST: &str =
@@ -1620,6 +1622,7 @@ struct PrometheusMetrics {
     registry: Registry,
     command_execution: CommandExecutionMetrics,
     restore_staging: RestoreStagingMetrics,
+    client_traffic: ClientTrafficMetrics,
     /// Registered empty and filled in once the node's transport, executor and consensus observer
     /// exist. See [`RuntimeMetrics::install_node_observations`].
     interconnection: Arc<InterconnectionCollector>,
@@ -2265,10 +2268,12 @@ impl PrometheusMetrics {
 
         let command_execution = CommandExecutionMetrics::register(&registry);
         let restore_staging = RestoreStagingMetrics::register(&registry);
+        let client_traffic = ClientTrafficMetrics::register(&registry);
         Self {
             registry,
             command_execution,
             restore_staging,
+            client_traffic,
             interconnection,
             messages_total,
             batches_total,
@@ -4160,6 +4165,11 @@ impl RuntimeMetrics {
 
     pub(crate) fn record_restore_staging(&self, observation: RestoreStagingObservation) {
         self.series.prometheus.restore_staging.record(observation);
+    }
+
+    /// The families the traffic of this node's client listeners is recorded into.
+    pub(crate) fn client_traffic(&self) -> &ClientTrafficMetrics {
+        &self.series.prometheus.client_traffic
     }
 
     pub(crate) fn record_command_execution_refusal(
