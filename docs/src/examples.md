@@ -11,7 +11,7 @@ Runnable end-to-end graphs live under `examples/`:
 - `examples/wasm-processors/wasm-dual.plexus` wires Rust and Go guests into set-only multi-route WASM
   processors.
 - `examples/paced-simulation/paced_simulation.plexus` is the graph of two runnable applications, a
-  Rust driver and a Python driver over the shared C binding, that pace a sensor simulation by the
+  Rust driver and a Python driver over the native Python package, that pace a sensor simulation by the
   domain clock through client ingestors and attached client emitters. [Paced Simulation
   Drivers](paced-simulation-drivers.md) describes the graph and how to run both programs.
 

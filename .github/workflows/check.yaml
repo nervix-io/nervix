@@ -636,10 +636,9 @@ jobs:
   tests:
     name: tests
     needs: [scenarios-build]
-    # GitHub's hosted runner: 4 CPUs, 16 GB and a 150 GB disk with about 84 GiB free, room for the
-    # archive and its 32 GiB restored. On Boat the archive's download and restore alone outlasted
-    # this limit.
-    runs-on: ubuntu-24.04
+    # Blacksmith's 4-vCPU runner has 16 GB RAM and 80 GB advertised storage. Record the actual
+    # filesystem capacity and available bytes before the archive and restored tests share it.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     permissions:
       contents: read
@@ -684,10 +683,9 @@ jobs:
       # The tests sync their storage below /tmp and the checkout. A single-use runner needs no crash
       # consistency, so those volumes drop their write barriers, as the build job's kache start step
       # drops them for its store.
-      # The archive restores only at the checkout path it was built in, and GitHub's hosted runner
-      # checks out at another path than Blacksmith's, so this checkout also appears at the build's
-      # path. A bind mount, unlike a symbolic link, keeps that path through `pwd -P` and the path of
-      # a running executable.
+      # The archive restores only at the checkout path it was built in. Publish this checkout at
+      # that physical path as well; a bind mount keeps it through `pwd -P` and the path of a
+      # running executable.
       - name: Mount the checkout at the build's path
         env:
           BUILD_CHECKOUT: ${{ needs.scenarios-build.outputs.checkout }}
@@ -709,6 +707,9 @@ jobs:
         uses: ./.github/actions/runner-diagnostics
         with:
           label: tests-coverage
+
+      - name: Record unit-test disk capacity
+        run: df -B1 --output=source,size,used,avail,target "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
 
       - name: Download the unit tests
         uses: ./.github/actions/ci-artifact-download
@@ -793,7 +794,7 @@ jobs:
       contents: read
     outputs:
       shards: ${{ steps.shards.outputs.shards }}
-      # The tests job restores its archive on GitHub's hosted runner, at this path.
+      # The tests job restores its archive at this physical checkout path.
       checkout: ${{ github.workspace }}
     env:
       NO_COLOR: "1"
@@ -862,6 +863,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "24"
+
+      - name: Setup uv for the Python driver wheel
+        uses: astral-sh/setup-uv@v6
 
       # The Python package's unit tests embed CPython, so the unit tests link its library.
       - name: Install apt deps
