@@ -88,11 +88,32 @@ CREATE IF NOT EXISTS WIRE AVRO SCHEMA notification_wire MODE STRICT (
 ```
 
 JSON, CBOR, and AVRO wire schemas must declare at least one field.
-JSON and CBOR also accept exact numeric and datetime wire types (`U8` through `I64`, `F32`,
-`F64`, and `DATETIME`) alongside the generic JSON types. The exact variants retain their type in
-the canonical definition and in completion suggestions. A codec binds an exact wire type only to
-the internal type of the same name: a `U8` wire field to a `U8` field, and a `DATETIME` wire field,
-whose value is RFC 3339 text, to a `DATETIME` field without an `ENCODE ... AS RFC3339` rule.
+
+JSON fields declare `string`, `number`, `integer`, `boolean`, or `array`. AVRO fields declare
+`boolean`, `int`, `long`, `float`, `double`, `string`, `bytes`, or `array`. Keywords are
+case-insensitive; canonical definitions print the types in uppercase.
+
+| Wire type | Internal type |
+| --- | --- |
+| JSON `integer` | `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `U64`, `I64` |
+| JSON `number` | `F32`, `F64` |
+| JSON or AVRO `boolean` | `BOOL` |
+| JSON or AVRO `string` | `STRING`; `DATETIME` with `ENCODE field AS RFC3339`; `BYTES` with `ENCODE field AS BASE64` |
+| AVRO `int` | `I32` |
+| AVRO `long` | `I64` |
+| AVRO `float` | `F32` |
+| AVRO `double` | `F64` |
+| AVRO `bytes` | `BYTES`, without an encoding rule |
+| JSON or AVRO `array` | `ARRAY` or `VEC`, with item types derived from the internal schema |
+
+Integer decoding checks the internal type's range. AVRO scalar bindings are exact: for example,
+an `int` field binds an `I32` field. Encoding rules declare a text representation explicitly;
+they do not choose between runtime encoding modes.
+
+CBOR accepts `string`, `number`, `integer`, `object`, `array`, `boolean`, `null`, `U8` through
+`I64`, `F32`, `F64`, `DATETIME`, and `BYTES`. Its exact numeric types bind the internal type of
+the same name, and its `DATETIME` type carries RFC 3339 text without an encoding rule. A CBOR
+`string` binds `DATETIME` only with `ENCODE field AS RFC3339`.
 
 The web console's **Create** menu provides structured editors for internal schemas and each of
 these three declared wire formats. Internal collection controls build nested `ARRAY` and `VEC`
@@ -220,10 +241,19 @@ CREATE IF NOT EXISTS CODEC notification_codec
 `created_at` is the internal schema field name. The matching wire field must be a
 string, and the internal field must be `DATETIME`.
 
-For an internal `BYTES` field, declare `BYTES` in the JSON or CBOR wire schema. Its wire value is
-a canonical RFC 4648 standard base64 string with padding; malformed or unpadded text is a decode
-error. AVRO `BYTES` fields use Avro's native byte sequence. A wire `STRING` field cannot bind an
-internal `BYTES` field. Nested `ARRAY` and `VEC` byte elements use the same representation.
+For an internal `BYTES` field carried as a JSON or AVRO `string`, declare its text representation:
+
+```plexus
+CREATE SCHEMA binary_event (payload BYTES);
+CREATE WIRE JSON SCHEMA binary_wire MODE STRICT (payload string);
+CREATE CODEC binary_codec FROM WIRE JSON SCHEMA binary_wire TO SCHEMA binary_event
+  ENCODE payload AS BASE64;
+```
+
+`BASE64` uses the RFC 4648 standard alphabet with padding and requires canonical text on decode.
+Malformed, unpadded, or noncanonical text is a decode error. An AVRO `bytes` field uses Avro's
+native byte sequence and accepts no encoding rule. CBOR `BYTES` fields carry the same padded
+base64 text. Nested `ARRAY` and `VEC` byte elements use their format's byte representation.
 
 Live `WIRE JSON` ingestion copies each connector-owned payload into mutable scratch retained by
 the open ingest group, then parses it with simd-json using parser buffers retained beside that

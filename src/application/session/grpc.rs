@@ -34,6 +34,7 @@ use std::{
     task::{Context, Poll},
 };
 
+use error_stack::Report;
 use futures_util::{Stream, StreamExt as _, stream};
 use nervix_client_wire::{
     BackupDownloadFrame, BackupDownloadRequestFrame, ClientFrame, EncodedFrame, RestoreFrame,
@@ -44,6 +45,7 @@ use nervix_client_wire::{
         UPLOAD_RESOURCE_PATH,
     },
 };
+use nervix_models::UserName;
 use nervix_primitives::sync::{CancellationToken, oneshot};
 use nervix_recovery::Discarded as _;
 use tonic::{
@@ -57,8 +59,40 @@ use tonic::{
 
 use super::{InboundFrame, SessionTransport, download::DownloadFrameStream, outbound};
 use crate::application::{
-    authentication::GrpcAuthenticationError, session_service::SessionServiceImpl,
+    authentication::{BasicAuthCredentials, GrpcAuthenticationError, credentials_from_metadata},
+    client_traffic::ClientCall,
+    session_service::SessionServiceImpl,
 };
+
+/// What a gRPC call presents to be authenticated: where it came from and the credentials its
+/// metadata carries.
+struct PresentedCall {
+    call: ClientCall,
+    credentials: Option<BasicAuthCredentials>,
+}
+
+impl PresentedCall {
+    fn of<T>(request: &Request<T>) -> Self {
+        Self {
+            call: ClientCall {
+                transport: SessionTransport::Grpc,
+                peer: request.remote_addr(),
+            },
+            credentials: credentials_from_metadata(request.metadata()),
+        }
+    }
+
+    /// Authenticates the presented credentials, or reports why they do not authenticate the call.
+    async fn authenticate(
+        self,
+        service: &SessionServiceImpl,
+    ) -> Result<UserName, Report<GrpcAuthenticationError>> {
+        service
+            .authenticate_client(self.call, self.credentials.as_ref())
+            .await
+            .map_err(|refusal| Report::new(refusal.into()))
+    }
+}
 
 /// The status of a call the node ended because it closed admission.
 fn shutting_down() -> Status {
@@ -171,8 +205,8 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for Exchange {
         let service = self.service.clone();
         let limits = self.limits;
         Box::pin(async move {
-            let user = service
-                .authenticate_grpc_metadata(request.metadata())
+            let user = PresentedCall::of(&request)
+                .authenticate(&service)
                 .await
                 .map_err(GrpcAuthenticationError::status)?;
             let (failure_sender, failure) = oneshot::channel();
@@ -249,8 +283,8 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for Upload {
         let limits = self.limits;
         let admission = service.inner.admission_shutdown.clone();
         until_admission_closes(admission, async move {
-            let user = service
-                .authenticate_grpc_metadata(request.metadata())
+            let user = PresentedCall::of(&request)
+                .authenticate(&service)
                 .await
                 .map_err(GrpcAuthenticationError::status)?;
             let reply = service.serve_upload(user, request.into_inner()).await?;
@@ -285,8 +319,8 @@ impl ClientStreamingService<VerifiedFrame<RestoreFrame>> for Restore {
         let limits = self.limits;
         let admission = service.inner.admission_shutdown.clone();
         until_admission_closes(admission, async move {
-            let user = service
-                .authenticate_grpc_metadata(request.metadata())
+            let user = PresentedCall::of(&request)
+                .authenticate(&service)
                 .await
                 .map_err(GrpcAuthenticationError::status)?;
             let reply = service.serve_restore(user, request.into_inner()).await?;
@@ -322,8 +356,8 @@ impl ServerStreamingService<VerifiedFrame<BackupDownloadRequestFrame>> for Downl
         let limits = self.limits;
         let admission = service.inner.admission_shutdown.clone();
         until_admission_closes(admission.clone(), async move {
-            let user = service
-                .authenticate_grpc_metadata(request.metadata())
+            let user = PresentedCall::of(&request)
+                .authenticate(&service)
                 .await
                 .map_err(GrpcAuthenticationError::status)?;
             let frames = service

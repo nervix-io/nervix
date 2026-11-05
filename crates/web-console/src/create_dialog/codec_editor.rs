@@ -12,6 +12,8 @@
 )]
 
 use leptos::prelude::*;
+use nervix_models::CodecEncoding;
+use strum::IntoEnumIterator as _;
 
 use super::{
     ChoiceControl, ChoiceGroup, CreateSignals, RequestSender,
@@ -226,7 +228,21 @@ pub(super) fn CodecEditor(
                                         signals.edit();
                                     } />
                             </label>
-                            <span>"AS RFC3339"</span>
+                            <div class="create-codec-encoding-format create-mode-options" aria-label="Encoding">
+                                <For each=|| { CodecEncoding::iter().collect::<Vec<_>>() }
+                                    key=|encoding| encoding.as_ref().to_string()
+                                    children=move |encoding| view! {
+                                        <button type="button" data-value=encoding.as_ref().to_string()
+                                            class:active=move || signals.codec.get().encoding_rules.get(index).is_some_and(|rule| rule.encoding == encoding)
+                                            disabled=pending
+                                            on:click=move |_| {
+                                                signals.codec.update(|draft| {
+                                                    if let Some(rule) = draft.encoding_rules.get_mut(index) { rule.encoding = encoding; }
+                                                });
+                                                signals.edit();
+                                            }>{encoding.as_ref().to_string()}</button>
+                                    } />
+                            </div>
                             <button type="button" class="create-codec-encoding-remove" disabled=pending
                                 on:click=move |_| {
                                     signals.codec.update(|draft| {
@@ -240,7 +256,7 @@ pub(super) fn CodecEditor(
                     on:click=move |_| {
                         signals.codec.update(|draft| draft.encoding_rules.push(EncodingRuleDraft::default()));
                         signals.edit();
-                    }>"Add RFC3339 field"</button>
+                    }>"Add encoding rule"</button>
             </div>
         </Show>
     }

@@ -305,14 +305,16 @@ platform string; connector preparation uses it only when the codec's event omits
 A polled HTTP request's header holds a literal or names a client secret as two states of one enum,
 so a value cannot be both or neither, and the Model that names a secret holds its key and never its
 value.
-The registry's `NERVIX SUB TYPES` archive signature identifies the current Model layout, including a
-Pulsar subscription's required type, an owned Pulsar subscription's required start position, a Kafka
+The registry's `NERVIX WIRE TYPE` archive signature identifies the current Model layout, including
+the separate JSON and CBOR wire type enums, the AVRO representation types, explicit `BASE64`
+codec encoding, a Pulsar subscription's required type, an owned Pulsar subscription's required
+start position, a Kafka
 consumer group's required start position, the required branch partition count, Sentry platform, an
 ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the
 receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of
 service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC
 emitter writes beside its publishing mode, a `REDIS PUBSUB` ingestor's subscription, which is either
-a `CHANNEL` or a `PATTERN`, and that header state. Consensus's `raft_alter_parity_` keyspaces and
+a `CHANNEL` or a `PATTERN`, and that header state. Consensus's `raft_wire_alter_` keyspaces and
 current state metadata encoding identify its stored shapes, the statements a transaction keeps
 included. An unrecognized signature, namespace or encoding fails with the owning storage error and
 requires the stored data to be recreated.
@@ -1228,6 +1230,11 @@ owns established connection tasks and queued frames; source close ends that reta
 The testing capability shares one named listener-fault request between the connector and host:
 the selected bound address and its acknowledgement belong to that same armed request.
 
+The consensus append-submission test control is idle, armed for one follower, or delivered with
+that nonempty request's previous and last log identities and entry count. The delivered variant
+owns its observation, so it cannot also remain armed. A scoped stream control retains its target;
+the ordinary build's inert control is zero-sized and retains no target or shared state.
+
 A Syslog frame's peer is a UDP address, a TCP address or a shared TLS connection identity. Only the
 TLS variant can hold a verified client-certificate subject, whose absence represents a connection
 without client authentication. Subject decoding happens after successful TLS verification; a
@@ -1270,3 +1277,12 @@ String properties retain their exact declared type and cross the AMQP short-stri
 message is sent. Targeted emitter alterations represent setting and dropping persistence,
 timestamps and the whole property set as separate semantic operations, and preserve the envelope
 fields each operation does not address.
+
+The JVM binding's package-private JNI edge encodes owned native allocations in Java `long` values
+and an omitted native handle as zero only at that boundary. Public Java classes expose optional
+objects as `null` and typed enum variants and exceptions. A handle's private State serializes its
+short borrows and unique release. Its open/closing/closed state ends admission on close and
+defers native release until an admitted short call returns; it refuses nested access so a mutable
+borrow cannot overlap itself. Blocking calls own independent leases. A `Fields` lease is a
+complete validated description snapshot, while a mutable builder has no shared lease. Direct
+read-only buffers retain the native allocation through their root rather than a raw unowned address.

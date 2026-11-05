@@ -513,6 +513,12 @@ Through `nx_session_domain_clock` a host reads the latest followed clock itself 
 the attach reply carried before it uses the first tick, and projects logical time, waits and
 admission with the Rust client's arithmetic instead of reimplementing it.
 
+The native Python package exposes that same Rust client through `Session.domain_clock` and
+`Session.next_clock_event`. Its `DomainClock.logical_time_at`, `wall_duration_until`,
+`admission_window` and `admits` use the client's clock arithmetic. The published Python paced
+driver reads the attached snapshot before submitting and pauses on `ClockEventKind.INTERRUPTED`
+until a subsequent `ClockEventKind.STATE`; it never advances pacing from a tick alone.
+
 ## Execution-Time Snapshots
 
 The clock is sampled once when a unit of domain work is accepted. The resulting execution snapshot

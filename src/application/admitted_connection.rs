@@ -2,11 +2,11 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** Accepting connections for a public listener and failing every read and write on
-//!   them once the node cuts the connections it accepted, so the protocol served on a connection
-//!   ends together with the requests it carries.
-//! - **Depends on.** Tokio's listener and I/O traits, the cancellation token that cuts accepted
-//!   connections, and tonic's connection information.
+//! - **Owns.** Handing the connections a public listener accepts to the server that serves them,
+//!   and failing every read and write on them once the node cuts the connections it accepted, so
+//!   the protocol served on a connection ends together with the requests it carries.
+//! - **Depends on.** The public listener's accepts, Tokio's I/O traits, the cancellation token that
+//!   cuts accepted connections, and tonic's connection information.
 //! - **Must not know.** The protocol carried on a connection or what its requests do.
 //!
 //! Closing admission does not end a connection: the server serving the listener stops accepting
@@ -30,43 +30,38 @@ use std::{
 
 use futures_util::{Stream, stream};
 use nervix_primitives::{
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     sync::{CancellationToken, WaitForCancellationFutureOwned},
 };
-use nervix_recovery::Reported as _;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tonic::transport::server::Connected;
 
+use super::public_listener::PublicListener;
+
 /// A public listener whose accepted connections end when the node cuts them.
 pub(in crate::application) struct AdmittingListener {
-    listener: TcpListener,
+    listener: PublicListener,
     cut: CancellationToken,
 }
 
 impl AdmittingListener {
-    pub(in crate::application) fn new(listener: TcpListener, cut: CancellationToken) -> Self {
+    pub(in crate::application) fn new(listener: PublicListener, cut: CancellationToken) -> Self {
         Self { listener, cut }
     }
 
-    /// Every connection the listener accepts, in the form a gRPC server serves.
+    /// Every connection the listener accepts, in the form a gRPC server serves. The public
+    /// listener reports an accept that failed and accepts again, so the server is never handed a
+    /// failure.
     pub(in crate::application) fn into_connections(
         self,
     ) -> impl Stream<Item = io::Result<AdmittedConnection<TcpStream>>> {
         stream::unfold(self, Self::accept_next)
     }
 
-    async fn accept_next(self) -> Option<(io::Result<AdmittedConnection<TcpStream>>, Self)> {
-        let accepted = self.listener.accept().await;
-        let connection = match accepted {
-            Ok((stream, _)) => {
-                stream
-                    .set_nodelay(true)
-                    .reported("disabling Nagle on an accepted gRPC connection");
-                Ok(AdmittedConnection::new(stream, &self.cut))
-            }
-            Err(error) => Err(error),
-        };
-        Some((connection, self))
+    async fn accept_next(mut self) -> Option<(io::Result<AdmittedConnection<TcpStream>>, Self)> {
+        let (stream, _) = self.listener.accept().await;
+        let connection = AdmittedConnection::new(stream, &self.cut);
+        Some((Ok(connection), self))
     }
 }
 

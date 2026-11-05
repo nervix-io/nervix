@@ -91,7 +91,10 @@ pub fn create_codec_parser<'src>() -> impl Parser<
 
     let encoding_rule = field_ref()
         .then_ignore(kw(Identifier::As))
-        .then(kw(Identifier::Rfc3339).to(CodecEncoding::Rfc3339))
+        .then(choice((
+            kw(Identifier::Rfc3339).to(CodecEncoding::Rfc3339),
+            kw(Identifier::Base64).to(CodecEncoding::Base64),
+        )))
         .map(|(field, encoding)| CodecEncodingRule { field, encoding })
         .boxed();
     let encoding_rules = kw(Identifier::Encode)
@@ -273,7 +276,8 @@ pub fn suggest_create_codec(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{ClientConfigEntry, WireSchemaName};
+    use meticulous::ResultExt as _;
+    use nervix_models::{ClientConfigEntry, FieldName, WireSchemaName};
     use rstest::rstest;
 
     use super::*;
@@ -511,6 +515,31 @@ mod tests {
     )]
     fn rejects_invalid_codec_forms(#[case] input: &str) {
         assert!(parse_create_codec(input).is_err());
+    }
+
+    #[test]
+    fn parses_base64_field_encoding() {
+        for format in ["JSON", "AVRO"] {
+            for spelling in ["BASE64", "base64", "BaSe64"] {
+                let input = format!(
+                    "CREATE CODEC binary_codec FROM WIRE {format} SCHEMA binary_wire TO SCHEMA \
+                     binary_schema ENCODE payload AS {spelling};"
+                );
+                let parsed = parse_create_codec(&input).assured("BASE64 is a field encoding");
+                assert_eq!(
+                    parsed.encoding_rules,
+                    vec![CodecEncodingRule {
+                        field: FieldName::parse("payload").assured("valid field name"),
+                        encoding: CodecEncoding::Base64,
+                    }]
+                );
+            }
+        }
+        let prefix = "CREATE CODEC binary_codec FROM WIRE JSON SCHEMA binary_wire TO SCHEMA \
+                      binary_schema ENCODE payload AS ";
+        let suggestions = suggest_create_codec(prefix, prefix.len());
+        assert!(suggestions.contains(&"BASE64".to_string()));
+        assert!(suggestions.contains(&"RFC3339".to_string()));
     }
 
     #[test]

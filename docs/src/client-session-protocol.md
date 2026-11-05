@@ -66,6 +66,8 @@ over the interconnect, and that node encodes Row frames for its own sessions.
 | Vocabulary | `nervix-models` | Execution references, domain, relay, subscription and user names, timestamps, the transaction status, preview identity and impact report, the resource description, and the observed domain clock. |
 | Edges | The wire crate, `nervix-client-wire` | The FlatBuffers schema, frame verification and ownership, the session limits, the typed requests, replies, events, transfers and rows the schema describes, the display text of a row, and how frames travel in gRPC and WebSocket messages. It knows no registry, runtime, consensus, parser, Arrow, or client dispatch. |
 | Edges | The session service in `nervix-server` | Authenticating a call, one session per transport connection, correlation, the ordered and concurrent lanes, cancellation against admission, typed rejections, reply encoding and transfer, the control and subscription lanes a session's frames wait in, unsolicited events, domain clock attachments, the upload stream, the backup download stream, the restore stream, and carrying a download or a restore over a console WebSocket of its own. |
+| Edges | The client traffic record in `nervix-server` | The traffic series of each client listener, resolved once when the service starts, and the operator's record of a call whose credentials did not authenticate it. |
+| Edges | The public listeners in `nervix-server` | Taking each connection a public listener accepts, and reporting an accept that failed while the listener keeps accepting. |
 | Edges | The Row encoder in `nervix-server` | Binding one subscription generation to the row schema it announces and writing selected Arrow rows into bounded frames. |
 | Edges | The session command and transaction adapters in `nervix-server` | Command admission and retained outcomes, and a session's transaction lifecycle, its binding, statement preflight and the replicated commit with the quiescence it recovers from. |
 | Edges | Session subscriptions | Creation and deletion, the per-session subscription set, the generation each subscription opens with, its lifecycle, and its filter and sampling. |
@@ -75,7 +77,8 @@ over the interconnect, and that node encodes Row frames for its own sessions.
 | Data plane | Relay subscription fan-out | The subscribers of one relay, the definition they were attached under, and ending every subscriber before a batch of another definition can reach it. |
 | Edges | The Rust client, `nervix-client-core` | Connecting, TLS selection, the dispatcher that pairs replies with requests, execution identity across retries, redirect and reconnect, transaction binding and previews, desired subscriptions and their restoration, followed domain clocks, uploads, and backup downloads verified against their summary. |
 | Edges | The host session runtime, `nervix-client-host` | What every binding shares: the session runtime a host's thread blocks on, cancellation and deadlines, the classification of every client failure by its report's context, subscription events with bulk column access to their verified frames, domain clock events and the clock of each followed domain with its projections, field descriptions, and the Rust client's producers and consumers with their typed outcomes, settlements and Arrow batches built and read one column level at a time. |
-| Edges | The C ABI, `nervix-client-ffi` | The C ABI through which C, C++, JVM and Ruby hosts drive the host session runtime: the handles a host holds, retains and releases, borrowed frame access, and bulk column copies into memory the host passes. |
+| Edges | The C ABI, `nervix-client-ffi` | The C ABI through which C, C++ and Ruby hosts drive the host session runtime: the handles a host holds, retains and releases, borrowed frame access, and bulk column copies into memory the host passes. |
+| Edges | The JVM library, `nervix-client-jvm` | Java 21 classes on JNI: Cleaner-owned handles, independent blocking leases, typed exceptions, owner-retaining read-only direct buffers, bulk column arrays and Arrow IPC. |
 | Edges | The Python package, `nervix-client-python` | `nervix_client`, through which CPython hosts drive the host session runtime on pyo3: objects whose lifetimes are Python's, waits that release the GIL, typed exceptions, connection options, columns read as Python values, and Arrow batches exchanged through the Arrow PyCapsule interface. |
 | Edges | The web console and the CLI | Consumers of the same protocol with bounded buffers of their own. The console speaks it over its WebSockets: the session, and one per backup download or restore stream, whose archive it verifies or measures itself; the CLI uses the Rust client. |
 
@@ -221,7 +224,9 @@ sanitizer-backed fuzzing run the same assertions through the
 ## Transports, Endpoints, And Authentication
 
 Every live node runs both client listeners. Neither depends on leadership or placement, and both
-close only when the node begins to stop.
+close only when the node begins to stop. An accept that fails closes neither: the listener reports
+the failure and accepts the next connection, as
+[Stop Requests](./shutdown.md#stop-requests) describes for every public listener.
 
 Configured `HTTP ENDPOINT` and `WEBSOCKETS ENDPOINT` ingestors use the server's VHOST listeners on
 every live node. Their codec payloads and configured WebSocket signaling follow the
@@ -330,6 +335,20 @@ for it in turn. A node whose credentials class cannot take the verification now 
 credentials were not judged, so the attempt neither counts as a failure nor paces the user, and the
 same credentials may be presented again. After a failed attempt for a user, that user's later
 attempts are paced to ten per second until one succeeds.
+
+Every name costs the node the same work. Credentials whose name names no user, or cannot name one,
+have their password hashed on the credentials worker exactly as creating a user hashes one, under
+the same charge, before they are refused. Neither the answer nor when it arrives tells an unknown
+user from a wrong password, and a node whose credentials class cannot take that hash now answers
+`UNAVAILABLE` or `503` for an unknown user as it does for a known one.
+
+Credentials a listener judged and refused are logged at `warn` as `client authentication failed`,
+with the listener as `transport` and the address the call came from as `peer`. The record never
+carries the user name or the password the call presented, because a name an operator did not
+create can be a password typed into the wrong field. A call that presented no readable credentials
+is logged at `debug`. Every attempt is counted on the node that judged it, in
+`nervix_client_authentications_total` by outcome; see
+[Client Traffic](./metrics-and-observability.md#client-traffic).
 
 Authentication establishes who owns what a session does: its transaction binding, its execution
 references, its subscriptions, and its uploads. It is the only access control. Every authenticated
@@ -2024,10 +2043,10 @@ it restores them.
 ## Bindings For Other Hosts
 
 A host language reaches the protocol in one of two ways. It uses the shared Rust binding, or it
-implements the protocol itself from the schema. The binding is the supported path: C, C++, JVM and
+implements the protocol itself from the schema. The binding is the supported path: C, C++ and
 Ruby hosts load its C ABI, `nervix-client-ffi`, whose contract is
 `crates/client-ffi/include/nervix_client.h`, and CPython hosts import its Python package,
-`nervix_client`. Both drive the host session runtime every binding of the Rust client shares,
+`nervix_client`, while JVM hosts use the Java 21 JNI library in `crates/client-jvm`. All drive the host session runtime every binding of the Rust client shares,
 `nervix-client-host`, and through it the Rust client's own state machine, so request correlation,
 leader redirects, reconnection, execution identity across retries, and desired-subscription
 restoration are decided once, in the library, and a host never retries, reroutes, or reinterprets
@@ -2142,6 +2161,23 @@ host differs from a C one:
   event, in native byte order. A batch exports itself and a submission is imported through the
   Arrow PyCapsule interface, so pyarrow and polars read and build batches without a copy, and a
   rows event's rows export as one Arrow batch whose sensitive fields are nullable.
+
+A JVM host uses `io.nervix.client.Nervix` from the jar built by `just build-client-jvm`.
+The jar bundles its target's JNI library and extracts it to a private temporary directory when
+loaded; `-Dio.nervix.client.library=/absolute/path/to/library` selects an explicit library instead.
+A jar without a bundled library uses `System.loadLibrary`. Build an artifact for the host's native
+target; no Java preview feature or native-access flag is required on Java 21. Every handle is
+`AutoCloseable` with Cleaner fallback. A short call borrows under its handle's private monitor;
+reentrant close stops new admission and defers release until the short call returns, and nested
+access to that handle is refused;
+a blocking call first takes an independent native lease and releases that monitor. Closing the
+original handle cannot invalidate that call, and another thread may trigger its `Cancel`.
+The library calls no Java from its own threads. A frame or IPC `ByteBuffer` is direct and read-only;
+its root retains the native event, batch or delivery through every slice and duplicate. Bulk
+column arrays and builder inputs are copied. Strings preserve UTF-8 bytes and embedded NUL;
+unsigned 64-bit values preserve their bits in `long`. Prepared executions, typed failure causes,
+completion edits, clocks, endpoint admission, recovery and settlement all remain the shared host's.
+`end(Cancel)` waits for endpoint closure; `close()` releases ownership without acknowledging data.
 
 Independent implementations exist as qualification clients rather than supported SDKs. The Go client
 speaks native gRPC with `flatc --go` output and `google.golang.org/grpc`, and the TypeScript client
@@ -2292,16 +2328,23 @@ The protocol makes a client's view of its own work explicit rather than inferred
   execution reference, and every other end of a download at `debug`.
 
 The server keeps its own records at the levels the logging contract assigns. Listener startup is
-logged at `info`. A reply replaced by a rejection, a reply the session ended before it could queue,
+logged at `info`, and so is a listener that accepts connections again after its accepts failed; the
+first of those failures is logged at `warn` and the ones repeating it at `debug`. A reply replaced
+by a rejection, a reply the session ended before it could queue,
 a subscription notice or loss report that does not fit a frame, domain clock attach, detach, and
 end, and producer opens, refusals, closes, and ends are logged at `debug`. A session that falls behind the notice bus, an event or snapshot that
-does not fit a frame, a failed revert at a clean close, and a failed remote subscription dispatch
-are logged at `warn`. A failed revert at a clean close names its transaction and renders the
+does not fit a frame, a failed revert at a clean close, a failed remote subscription dispatch, and
+credentials a listener judged and refused are logged at `warn`. A failed revert at a clean close names its transaction and renders the
 revert's whole cause chain, so a lease the leader could not confirm, a lost leadership and a
 storage failure read differently. Session opening and closing, individual requests, and rows are
-not logged, and no log line carries a payload value. The server exports no metric for sessions, requests,
-rejections, or authentication attempts; a client that needs them measures them itself. Producer
-counts are exported by the node that executes the client ingestor, not per session.
+not logged, and no log line carries a payload value. Each node exports the traffic its client
+listeners carry: the sessions it serves and has served, the requests they decode by kind, the
+rejections and cancellations that end requests, the transfer parts of large replies, and the
+authentication attempts it judged by outcome, each by transport; see
+[Client Traffic](./metrics-and-observability.md#client-traffic). They count traffic and carry no
+session, request, execution or user identity, so a client that pairs its own replies with its
+requests still logs their identities itself. Producer counts are exported by the node that
+executes the client ingestor, not per session.
 
 ## Retained Subscription And Producer Dependencies
 

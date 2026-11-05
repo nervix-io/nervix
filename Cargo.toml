@@ -307,6 +307,7 @@ members = [
   "crates/client-core",
   "crates/client-ffi",
   "crates/client-host",
+  "crates/client-jvm",
   "crates/client-python",
   "crates/client-wire",
   "crates/columnar-json",
@@ -506,6 +507,7 @@ jaq-core = "3"
 jaq-fmts = "0.1"
 jaq-json = "2"
 jaq-std = "3"
+jni = "0.22.4"
 # The VM resolves time zone names only against the IANA database `jiff-tzdb` bundles, never against
 # the host, so every node running one build computes the same local times.
 jiff = { version = "0.2.35", default-features = false, features = ["std"] }
@@ -547,7 +549,6 @@ nervix-checkpoint-replication = { package = "nervix-checkpoint-replication", pat
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
 nervix-client-ffi = { package = "nervix-client-ffi", path = "crates/client-ffi" }
 nervix-client-host = { package = "nervix-client-host", path = "crates/client-host" }
-nervix-client-python = { package = "nervix-client-python", path = "crates/client-python" }
 nervix-client-wire = { package = "nervix-client-wire", path = "crates/client-wire" }
 nervix-columnar-json = { package = "nervix-columnar-json", path = "crates/columnar-json" }
 nervix-connector = { package = "nervix-connector", path = "crates/connector" }

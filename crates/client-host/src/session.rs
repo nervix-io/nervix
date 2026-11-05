@@ -36,6 +36,7 @@ use crate::{
 const RUNTIME_THREADS: usize = 2;
 
 /// An open session, as the host holds it.
+#[derive(Clone)]
 pub struct Session {
     shared: Arc<SessionRuntime>,
 }

@@ -60,6 +60,7 @@ mod entity_drain_tests;
 mod execution;
 mod handoff_gate_link;
 mod interest_visibility;
+mod listener_accept;
 mod live_view_gap;
 #[cfg(test)]
 mod live_view_gap_tests;
@@ -104,6 +105,8 @@ pub(crate) use entity_drain::ObservedEntityDrain;
 use execution::NodeExecution;
 use handoff_gate_link::HandoffGateLink;
 use interest_visibility::InterestVisibilityRefusal;
+use listener_accept::ListenerAcceptFailures;
+pub(crate) use listener_accept::ListenerAcceptFaults;
 use live_view_gap::{LiveViewGap, LiveViewGapState};
 use materialized_reads::DelayedMaterializedReads;
 use model_publication::ModelPublicationRefusal;
@@ -352,6 +355,9 @@ struct FaultInjectionState {
     /// source consumed the fault before checking its established connections. The armed request
     /// remains available until acknowledged; another request cannot overwrite it before then.
     syslog_listener_faults: watch::Sender<Option<SyslogListenerFault>>,
+    /// The public listeners, by bound address, whose next accept fails, and those whose armed
+    /// failure happened.
+    listener_accept_failures: watch::Sender<ListenerAcceptFailures>,
     /// One scoped observation, borrowed only when a native session starts.
     session_backpressure: watch::Sender<Option<ArmedSessionBackpressure>>,
     branch_instance_expiration_scan_interval: RwLock<Option<Duration>>,
@@ -543,6 +549,7 @@ impl Default for FaultInjection {
     fn default() -> Self {
         let (leadership_transfers, _) = broadcast::channel(16);
         let (syslog_listener_faults, _) = watch::channel(None);
+        let (listener_accept_failures, _) = watch::channel(ListenerAcceptFailures::default());
         let (session_backpressure, _) = watch::channel(None);
         let (startup_observation_end, _) = watch::channel(StartupObservationEnd::Unarmed);
         Self {
@@ -618,6 +625,7 @@ impl Default for FaultInjection {
                 state_replica_installation_failing: AtomicBool::new(false),
                 syslog_ingestor_bind_ips: DashMap::default(),
                 syslog_listener_faults,
+                listener_accept_failures,
                 session_backpressure,
                 branch_instance_expiration_scan_interval: RwLock::new(None),
                 domain_drain_timeout: RwLock::new(None),

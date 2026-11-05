@@ -353,7 +353,7 @@ during the detach waits for it to end and attaches the clock only if the client 
 
 ### Through The Shared C Binding
 
-The shared C binding reads the same events and attached clocks for C, C++, JVM and Ruby hosts; its
+The shared C binding reads the same events and attached clocks for C, C++ and Ruby hosts; its
 header is `crates/client-ffi/include/nervix_client.h`. `ATTACH DOMAIN CLOCK;` and
 `DETACH DOMAIN CLOCK;` run through `nx_session_prepare` and `nx_session_execute` like any statement,
 for the session's selected domain, and fail with `NX_ERROR_INVALID_ARGUMENT` when none is selected.
@@ -413,6 +413,16 @@ session already follows it. An attach whose session was lost is sent again on th
 client opens. An attach cancelled or expired after its request was sent can still attach the
 session: executing the same prepared execution again is answered after the earlier attempt, and
 `nx_session_domain_clock` then tells whether the session follows the clock.
+
+### Through The JVM Library
+
+Java 21 and later use `io.nervix.client.Nervix` from `crates/client-jvm`. Its `Session`, prepared
+`Execution`, `Outcome`, `ClockEvent` and immutable `DomainClock` expose the shared Rust client's
+state and projection arithmetic. `RestorationFailure` carries the message and physical wait.
+`Cancel` supports deadlines and cancellation from another Java thread while a native call waits.
+Close handles with try-with-resources; Cleaner supplies fallback cleanup. Build the jar and its
+native library with `just build-client-jvm`. The [implementation manual](./client-implementation-manual.md#using-the-jvm-library)
+owns the Java lifetime, unsigned-width, error and threading rules.
 
 ### Through The Python Package
 
@@ -590,7 +600,7 @@ submissions with their original handle rather than resending them.
 
 ### Endpoints Through The Shared C Binding
 
-The shared C binding exposes the same producers and consumers to C, C++, JVM and Ruby hosts,
+The shared C binding exposes the same producers and consumers to C, C++ and Ruby hosts,
 through `crates/client-ffi/include/nervix_client.h`. Every call forwards to the Rust handles
 above, so credit, retries of temporary refusals, restoration, outcomes and settlements behave
 exactly as described; the binding keeps no acknowledgement or reconnect state of its own.
@@ -637,6 +647,16 @@ exactly as described; the binding keeps no acknowledgement or reconnect state of
   from one thread at a time. A producer, a consumer and a delivery keep their session running until
   they are released, and a borrowed stream or value stays valid until the reference it was read from
   is released.
+
+### Endpoints Through The JVM Library
+
+The JNI library exposes `Session.openProducer` and `openConsumer`, `Fields`, `Schema`,
+`BatchBuilder`, `Batch`, `Delivery` and `Submission`. Builders copy one column level per call;
+readers copy states, offsets and scalar bytes in bulk. `Batch.fromIpc` and `ipc` exchange canonical
+Arrow IPC with Arrow Java. Direct `ipcBuffer` views retain their data through every derived buffer.
+Endpoint `description`, `pending`, `state`, `admission` and `reopen` read the shared client's typed
+results. `submit`, `rejoin`, `next`, `ack`, `retry`, `reject` and `end` take optional cancellation
+and deadline tokens; none owns a Java retry policy. `close` releases ownership and settles nothing.
 
 ### Endpoints Through The Python Package
 

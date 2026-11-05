@@ -687,7 +687,7 @@ mod tests {
         AlterDeduplicator, AlterDeduplicatorError, AlterDeduplicatorOperation, AlterPlacement,
         AlterPlacementError, AlterPlacementOperation, AlterProcessorError, AlterProcessorOperation,
         AlterRelay, AlterRelayError, AlterRelayOperation, AlterWireSchema, AlterWireSchemaError,
-        AlterWireSchemaOperation, AvroType, CreatePlacement, CreateWireSchema, JsonType, Model,
+        AlterWireSchemaOperation, AvroType, CreatePlacement, CreateWireSchema, Model,
         PlacementPolicy, WireSchemaField,
     };
 
@@ -729,7 +729,7 @@ mod tests {
             strictness: Default::default(),
             fields: vec![WireSchemaField {
                 name: named("value"),
-                ty: JsonType::String,
+                ty: nervix_models::CborType::String,
                 optional: false,
             }],
         }));
