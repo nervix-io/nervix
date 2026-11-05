@@ -27,6 +27,23 @@ handler remains recurring debt. Source hosts retain an exact instance readiness 
 the readiness registry. Relay channels, transport selection and domain publications use the
 immutable tables and retained lifetimes described below.
 
+## Unit allowance keyed stores
+
+`crates/rate-limit/src/keyed.rs::KeyedStore` owns a configured number of blocking-mutex shards,
+each holding `ExpiryMap<KeyFingerprint, Entry>`. One `Limiter` execution unit owns its clause's
+store, with exclusive admission spanning all clauses. Fingerprints are 128 bits; no original key
+value is retained or rendered. A lease on an established key holds one shard. First installation,
+global LRU eviction, statistics and snapshots lock shards in ascending order. An established-key
+lease takes no further lock. Keys are bounded globally by `MAX KEYS` and released at `TTL` from
+last accepted use. A refused payload restores cell debt and publishes no new key or eviction.
+Each synchronous operation is bounded by the declared shards and retained entries and awaits
+nothing. These accesses implement allowance accounting itself, rather than configuration or
+ownership discovery; they are the bounded protocol described in
+[Unit Allowance Transactions](../docs/src/data-plane-concurrency.md#unit-allowance-transactions).
+The store is dropped with its unit. Observer statistics expires keys before counting occupancy.
+The Shuttle check drives actual leases; the all-selection Deloxide owner record reaches actual
+tracked shard locks, including restoration. Neither claims coverage of governor internals.
+
 ## Diagnostic acquisition history
 
 `nervix-primitives::deadlock::OrderHistory::edges` is a diagnostic-only
