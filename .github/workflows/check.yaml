@@ -1111,7 +1111,7 @@ jobs:
         with:
           tool: just@latest,cargo-llvm-cov
 
-      # JavaScript clients use this Node.js; the scenario archive supplies its Playwright driver.
+      # Native client probes use Node.js; browser probes use the archived Playwright driver.
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
