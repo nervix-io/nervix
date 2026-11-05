@@ -590,6 +590,14 @@ applied separately to incoming and outgoing work across all peers and connection
 These reservations mean that ordinary management traffic cannot consume the capacity required to
 resolve already-started relay work or determine whether a peer is healthy.
 
+Consensus heartbeats use the management pool independently of log replication. The worker waits
+for one answer from each follower up to the leader lease (the configured maximum election timeout),
+and its interconnect request uses the same full bound. An answer after one heartbeat interval
+but before that lease expires can therefore reach Raft; timeout or transport failure still ends the
+request and releases its management stream. Initial empty replication probes continue to use their
+shorter soft deadline and the same typed management response. This changes neither the wire shape
+nor pool and admission quotas.
+
 Leasing an established stream allocates nothing and acquires no shared discovery map. An immutable
 persistent target table selects the peer's fixed pool arrays. Each slot retains its cancellation
 lifetime, one atomic worker claim and an `ArcSwapOption` containing the current authenticated

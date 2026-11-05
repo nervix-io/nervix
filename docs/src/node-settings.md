@@ -77,6 +77,11 @@ election timeout. Gossip derives its failure detector the same way: it assumes t
 intervals between a peer's heartbeats until it has observed some, and takes no gap longer than
 twenty gossip intervals as a sample, 5 and 10 seconds by default.
 
+The maximum Raft election timeout also bounds the leader lease and a heartbeat's response wait.
+The interval still schedules heartbeats; an answer later than one interval but inside the lease
+can renew it using that request's sending time. This adds no node setting or separate timing
+prerequisite.
+
 A proposed new prerequisite first has to establish why a committed cluster parameter applied by
 rebuilding its owner cannot express it.
 
