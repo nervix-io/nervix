@@ -312,7 +312,7 @@ platform string; connector preparation uses it only when the codec's event omits
 A polled HTTP request's header holds a literal or names a client secret as two states of one enum,
 so a value cannot be both or neither, and the Model that names a secret holds its key and never its
 value.
-The registry's `NERVIX UNIT WIRE` archive signature identifies the current Model layout, including
+The registry's `NERVIX UNIT RANK` archive signature identifies the current Model layout, including
 the separate JSON and CBOR wire type enums, AVRO representation types, explicit `BASE64` codec
 encoding, a Pulsar subscription's required type and an owned subscription's required start position,
 a Kafka consumer group's required start position, the required 16-bit branch partition count,
@@ -322,19 +322,18 @@ the receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the sessi
 service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC
 emitter writes beside its publishing mode, its retained-publication flag and MQTT 5 property
 mappings, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`,
-and that header state. Consensus's `raft_instance_wire_` keyspaces and current `ClusterState`
-metadata encoding, 12, identify its stored shapes, including the partition count of every resolved branch
+and that header state. Consensus's `raft_unit_rank_` keyspaces and current `ClusterState`
+metadata encoding, 13, identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations. The runtime state store's
-`wide-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the
+`ranked-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the
 unsigned 64-bit instance identity and the unit every branch-aggregated metric series carries.
 Fixed intake counts remain `NonZeroU64`; branch partition counts remain `NonZeroU16`. The
 registry's instancing boundary checks native count conversion and the layout of the scheduled
 unit entries before materialization. An unaddressable declaration is a typed validation failure;
 its full-width Model remains representable independently of the target's execution capacity. The
 client placement union carries an instance index as an unsigned 64-bit value. Backup format
-major `4` and its unit-bearing record versions own a primitive unit encoding with a 32-bit
-partition ordinal and a 64-bit instance ordinal. The native `NervixKafkaState` checkpoint contains
+major `5` and its unit-bearing record versions own an eight-byte primitive unit rank. The native `NervixKafkaState` checkpoint contains
 positions and an optional applied explicit-start generation. Pending canonical starts and
 subsequent unit-owned progress use that current shape. An unrecognized signature, namespace or
 encoding fails with the owning storage error and requires the stored data to be recreated.
@@ -1314,6 +1313,14 @@ forms before placement. A resolved source unit uses the shared `NodeUnitRef` and
 `DomainNodeUnitRef` identities throughout plans, runtime registrations and durable state placement.
 There is no node-local index conversion. A source's readiness is one scalar whose retirement ends
 that exact lifetime.
+The shared `Unit` identity occupies eight bytes with four-byte archive alignment. Its private rank
+orders `Single`, all 32-bit partitions, and then instance indices. `UnitKind` is its semantic view;
+JSON uses that tagged view and validates an instance index through `Unit::try_instance`.
+Every rank is valid. The maximum instance index is `u64::MAX - (2^32 + 1)`, above every vector
+position on supported targets; this representation therefore admits every materializable source
+unit while preserving the full-width count declaration. Archive and transport records retain the
+same footprint for single, partition and instance units. Stored tagged key segments and the client
+placement union validate their 64-bit instance value before constructing the identity.
 Singleton placement inspection selects by cardinality: one `Instance(0)` has one owner just as one
 `Single` does. Several instances have separate placements and no entity-wide execution node.
 

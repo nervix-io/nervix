@@ -623,7 +623,7 @@ mod tests {
     fn planned_ingestor(fixture: &EntrypointTestDomain<'_>) -> Arc<IngestorStartPlan> {
         fixture
             .plan(&domain("default"), filtering_ingestor())
-            .ingestor(&named("source"), Unit::Single)
+            .ingestor(&named("source"), Unit::SINGLE)
             .cloned()
             .assured("the fixture schedules the ingestor")
     }

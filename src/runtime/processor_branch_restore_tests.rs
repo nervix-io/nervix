@@ -113,7 +113,7 @@ impl OpenWindowFixture {
             revision: ProcessorPlanRevision::new(),
             owner: NodeUnitRef::new(
                 NodeRef::new(ModelKind::WindowProcessor, RelayName::from(&processor)),
-                Unit::Single,
+                Unit::SINGLE,
             ),
             root_relay: input_relay.clone(),
             branch: Some(named::<BranchName>("by_tenant")),

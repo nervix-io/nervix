@@ -632,7 +632,7 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
         revision: ProcessorPlanRevision::new(),
         owner: NodeUnitRef::new(
             NodeRef::new(spec.kind, RelayName::from(&spec.processor)),
-            Unit::Single,
+            Unit::SINGLE,
         ),
         root_relay,
         branch: node.branch.clone(),

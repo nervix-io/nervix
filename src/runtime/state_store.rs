@@ -92,16 +92,16 @@ const STATE_UNIT_KEY_MARKER: u8 = b'U';
 fn append_unit_key(key: &mut Vec<u8>, unit: Unit) {
     key.push(0);
     key.push(STATE_UNIT_KEY_MARKER);
-    match unit {
-        Unit::Single => {
+    match unit.kind() {
+        nervix_models::UnitKind::Single => {
             key.push(0);
             key.extend_from_slice(&0_u32.to_be_bytes());
         }
-        Unit::Partition(partition) => {
+        nervix_models::UnitKind::Partition(partition) => {
             key.push(1);
             key.extend_from_slice(&partition.to_be_bytes());
         }
-        Unit::Instance(instance) => {
+        nervix_models::UnitKind::Instance(instance) => {
             key.push(2);
             key.extend_from_slice(&instance.to_be_bytes());
         }
@@ -139,7 +139,7 @@ impl fmt::Display for RuntimeStatePlacement {
             self.kind.as_str(),
             self.identifier.as_str()
         )?;
-        if self.unit != Unit::Single {
+        if self.unit != Unit::SINGLE {
             write!(formatter, " unit {:?}", self.unit)?;
         }
         write!(formatter, " in domain '{}'", self.domain.as_str())
@@ -2358,17 +2358,22 @@ fn stored_placement(key: &[u8]) -> Result<StoredPlacement, Report<RuntimePersist
     }
     let ordinal = &unit_segment[2..2 + ordinal_bytes];
     let unit = match tag {
-        Some(0) if ordinal == [0; 4] => Unit::Single,
-        Some(1) => Unit::Partition(u32::from_be_bytes(
+        Some(0) if ordinal == [0; 4] => Unit::SINGLE,
+        Some(1) => Unit::partition(u32::from_be_bytes(
             ordinal
                 .try_into()
                 .verified("a partition ordinal has four bytes"),
         )),
-        Some(2) => Unit::Instance(u64::from_be_bytes(
+        Some(2) => Unit::try_instance(u64::from_be_bytes(
             ordinal
                 .try_into()
                 .verified("an instance ordinal has eight bytes"),
-        )),
+        ))
+        .map_err(|cause| {
+            Report::new(cause)
+                .change_context(StoredStateIssue::KeyUnitInvalid)
+                .change_context(RuntimePersistenceError::DecodeState)
+        })?,
         _ => return Err(StoredStateIssue::KeyUnitInvalid.decode_failure()),
     };
     let lifetime_start = unit_end;

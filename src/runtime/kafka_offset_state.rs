@@ -145,7 +145,7 @@ pub(super) fn project_offset_snapshot(
     selection: nervix_interconnect::IngestorUnitSelection,
     cancellation: &nervix_execution::Cancellation,
 ) -> error_stack::Result<Vec<u8>, RuntimePersistenceError> {
-    let nervix_models::Unit::Instance(index) = selection.unit else {
+    let nervix_models::UnitKind::Instance(index) = selection.unit.kind() else {
         return Err(Report::new(KafkaOffsetCheckpointError::InstanceSelection)
             .change_context(RuntimePersistenceError::DecodeState));
     };
@@ -218,7 +218,7 @@ pub(super) fn merge_offset_snapshots(
     }
     let mut selected = BTreeMap::new();
     for checkpoint in payloads {
-        let nervix_models::Unit::Instance(source_index) = checkpoint.unit else {
+        let nervix_models::UnitKind::Instance(source_index) = checkpoint.unit.kind() else {
             return Err(Report::new(KafkaOffsetCheckpointError::InstanceSelection)
                 .change_context(RuntimePersistenceError::DecodeState));
         };
@@ -604,7 +604,7 @@ impl KafkaOffsetStateOriginator {
         state
             .assignment
             .authorize_exclusive(self.assignment, StateCapability::Originate, || {
-                let nervix_models::Unit::Instance(index) = selection.unit else {
+                let nervix_models::UnitKind::Instance(index) = selection.unit.kind() else {
                     return;
                 };
                 if index == 0 || index >= selection.count.get() {
@@ -1193,7 +1193,7 @@ impl CapturedKafkaOffsets {
         selection: nervix_interconnect::IngestorUnitSelection,
         mut check: impl FnMut() -> error_stack::Result<(), RuntimePersistenceError>,
     ) -> error_stack::Result<PersistedRuntimeStateEntry, RuntimePersistenceError> {
-        let nervix_models::Unit::Instance(index) = selection.unit else {
+        let nervix_models::UnitKind::Instance(index) = selection.unit.kind() else {
             return Err(Report::new(KafkaOffsetCheckpointError::InstanceSelection)
                 .change_context(RuntimePersistenceError::DecodeState));
         };
@@ -2089,7 +2089,7 @@ mod tests {
             kind: ModelKind::Ingestor,
             identifier: ModelName::parse("source")
                 .assured("the test model name satisfies the model-name grammar"),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         }
     }
@@ -2127,7 +2127,8 @@ mod tests {
                     let mut states = Vec::new();
                     for index in 0..count.get() {
                         let mut placement = offset_placement();
-                        placement.unit = nervix_models::Unit::Instance(index);
+                        placement.unit = nervix_models::Unit::try_instance(index)
+                            .assured("the fixture index fits the execution-unit range");
                         let state = Arc::new(
                             ReplicatedKafkaOffsetState::new(placement, None)
                                 .assured("an empty instance initializes"),
@@ -2154,7 +2155,8 @@ mod tests {
                         let unit =
                             usize::try_from(index).assured("the generated index is at most four");
                         let selection = nervix_interconnect::IngestorUnitSelection {
-                            unit: nervix_models::Unit::Instance(index),
+                            unit: nervix_models::Unit::try_instance(index)
+                                .assured("the fixture index fits the execution-unit range"),
                             count,
                         };
                         let initialized = index == 0 || arbitrary.entropy().flag();
@@ -2239,7 +2241,8 @@ mod tests {
                         let mut prepared = Vec::new();
                         let mut complete = BTreeMap::new();
                         for index in 0..target_count.get() {
-                            let unit = nervix_models::Unit::Instance(index);
+                            let unit = nervix_models::Unit::try_instance(index)
+                                .assured("the fixture index fits the execution-unit range");
                             let selection = nervix_interconnect::IngestorUnitSelection {
                                 unit,
                                 count: target_count,
@@ -2458,7 +2461,7 @@ mod tests {
         fn shuttle_pending_start_seeds_survive_commits_acknowledgements_and_late_candidates() {
             check_interleavings(|| {
                 let mut placement = offset_placement();
-                placement.unit = nervix_models::Unit::Instance(0);
+                placement.unit = nervix_models::Unit::FIRST_INSTANCE;
                 let state = Arc::new(
                     ReplicatedKafkaOffsetState::new(placement, None)
                         .assured("an empty coordinator initializes"),
@@ -2496,7 +2499,8 @@ mod tests {
                     let root = root.clone();
                     move || {
                         let selection = nervix_interconnect::IngestorUnitSelection {
-                            unit: nervix_models::Unit::Instance(1),
+                            unit: nervix_models::Unit::try_instance(1)
+                                .assured("the fixture index fits the execution-unit range"),
                             count,
                         };
                         let seed = root
@@ -2531,7 +2535,8 @@ mod tests {
                     }
                 });
                 let selection = nervix_interconnect::IngestorUnitSelection {
-                    unit: nervix_models::Unit::Instance(2),
+                    unit: nervix_models::Unit::try_instance(2)
+                        .assured("the fixture index fits the execution-unit range"),
                     count,
                 };
                 let before = root

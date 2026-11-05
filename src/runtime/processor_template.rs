@@ -837,7 +837,7 @@ impl BranchInstanceTemplate {
                     .map(|output| {
                         let metrics = runtime.inner.metrics.resolve_node_batch_metrics(
                             NodeBatchMetricsSpec {
-                                unit: Unit::Single,
+                                unit: Unit::SINGLE,
                                 domain,
                                 kind: processor.kind,
                                 node: &processor.processor,

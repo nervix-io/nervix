@@ -1939,7 +1939,7 @@ impl Runtime {
                     *unit,
                     Some(local_node_id),
                 );
-            } else if *unit == Unit::Single {
+            } else if *unit == Unit::SINGLE {
                 self.inner.metrics.register_global_node(
                     domain,
                     node.kind(),

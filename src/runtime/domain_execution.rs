@@ -248,7 +248,12 @@ impl RelayUnitRef {
 
     /// Every unit of `relay`, as one contiguous range of an ordered map keyed by relay unit.
     fn units_of(relay: &RelayName) -> std::ops::RangeInclusive<Self> {
-        Self::new(relay.clone(), Unit::Single)..=Self::new(relay.clone(), Unit::Instance(u64::MAX))
+        Self::new(relay.clone(), Unit::SINGLE)
+            ..=Self::new(
+                relay.clone(),
+                Unit::try_instance(Unit::MAX_INSTANCE_INDEX)
+                    .assured("the maximum execution-unit index is representable"),
+            )
     }
 }
 
@@ -1032,7 +1037,7 @@ mod tests {
             passive_only: false,
             materialized_stream_owner_nodes: [(
                 relay.clone(),
-                RelayOwnerRoutes::new(BTreeMap::from([(Unit::Single, first_owner.clone())])),
+                RelayOwnerRoutes::new(BTreeMap::from([(Unit::SINGLE, first_owner.clone())])),
             )]
             .into_iter()
             .collect(),
@@ -1044,7 +1049,7 @@ mod tests {
         routing.passive_only = true;
         routing.materialized_stream_owner_nodes.insert(
             relay.clone(),
-            RelayOwnerRoutes::new(BTreeMap::from([(Unit::Single, second_owner.clone())])),
+            RelayOwnerRoutes::new(BTreeMap::from([(Unit::SINGLE, second_owner.clone())])),
         );
 
         let staged_revision = cache.load().clone();
@@ -1054,7 +1059,7 @@ mod tests {
             staged_revision
                 .materialized_stream_owner_nodes
                 .get(&relay)
-                .and_then(|owners| owners.owner_of(Unit::Single)),
+                .and_then(|owners| owners.owner_of(Unit::SINGLE)),
             Some(&first_owner)
         );
 
@@ -1067,7 +1072,7 @@ mod tests {
             second_revision
                 .materialized_stream_owner_nodes
                 .get(&relay)
-                .and_then(|owners| owners.owner_of(Unit::Single)),
+                .and_then(|owners| owners.owner_of(Unit::SINGLE)),
             Some(&second_owner)
         );
     }

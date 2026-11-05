@@ -104,9 +104,12 @@ selection, adoption and seed release. Restore retains the pending cut, so a dela
 resume it after the lifecycle advances. Count redistribution prepares the newest canonical
 generation and each actual owner's progress on every target primary and replica.
 
-The current archive uses format major `4`. Each unit-bearing record owns its primitive encoding:
-`Single`, a 32-bit partition ordinal, or a 64-bit instance ordinal. Its record version fences the
-shape before decoding.
+The current archive uses format major `5`. Each unit-bearing record owns an eight-byte primitive
+rank with four-byte alignment. Rank zero is `Single`, ranks one through `2^32` select the full
+32-bit partition range, and subsequent ranks select instance indices from zero. Every rank is a
+valid unit, and the instance range includes every source index an allocation can materialize.
+The record version fences this shape before decoding; restore then validates that the unit belongs
+to the restored schedule.
 
 ### Layout And Verification
 

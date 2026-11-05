@@ -400,7 +400,11 @@ mod tests {
                 .collect(),
             );
             let plan = plans
-                .ingestor(&named("source"), Unit::Instance(index))
+                .ingestor(
+                    &named("source"),
+                    Unit::try_instance(index)
+                        .assured("the fixture index fits the execution-unit range"),
+                )
                 .expect("each global unit has its plan");
             let start = connector::BrokerIngestorStart {
                 connector,
@@ -479,7 +483,8 @@ mod tests {
                 Report::new(IngestorStartError::AlreadyRunning {
                     domain: domain.clone(),
                     ingestor: ingestor.clone(),
-                    unit: Unit::Instance(2),
+                    unit: Unit::try_instance(2)
+                        .assured("the fixture index fits the execution-unit range"),
                 }),
                 "ingestor 'source' in domain 'sales' instance 2 is already running",
             ),

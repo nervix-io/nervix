@@ -537,7 +537,7 @@ pub(super) mod tests {
             .await
             .expect("the refused body is reported to the node's observers");
         let described = runtime
-            .describe_local_ingestor(&domain, &ingestor, nervix_models::Unit::Single)
+            .describe_local_ingestor(&domain, &ingestor, nervix_models::Unit::SINGLE)
             .expect("the fixture's ingestor describes itself");
         let rejection = described
             .last_decode_rejection
@@ -575,7 +575,7 @@ pub(super) mod tests {
         let dropped = runtime.inner.metrics.ingestor_header_values_dropped(
             &domain,
             &ingestor,
-            Unit::Single,
+            Unit::SINGLE,
             dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
         );
 
@@ -600,7 +600,7 @@ pub(super) mod tests {
             .expect("the running domain has an execution")
             .revision
             .entrypoints
-            .ingestor(&ingestor, Unit::Single)
+            .ingestor(&ingestor, Unit::SINGLE)
             .cloned()
             .expect("the execution plans the endpoint ingestor");
 
@@ -641,7 +641,7 @@ pub(super) mod tests {
             .collect::<Vec<_>>();
         assert_eq!(bound, vec![runtime_key]);
         let describe = runtime
-            .describe_local_ingestor(&domain, &ingestor, nervix_models::Unit::Single)
+            .describe_local_ingestor(&domain, &ingestor, nervix_models::Unit::SINGLE)
             .expect("describe should represent the running ingestor");
         assert!(describe.running);
         assert!(describe.ready);
@@ -756,7 +756,7 @@ pub(super) mod tests {
         let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
         let mut errors = runtime.events().subscribe();
         let quiesce = runtime
-            .ingestor_quiesce_control(&domain, &ingestor, nervix_models::Unit::Single)
+            .ingestor_quiesce_control(&domain, &ingestor, nervix_models::Unit::SINGLE)
             .assured("a running ingestor holds its quiesce control");
         let route = runtime
             .resolve_endpoint("edge.example.com", "/events")
@@ -842,7 +842,7 @@ pub(super) mod tests {
             .expect("the fixture's relay accepts a subscriber that describes its rows");
         let mut errors = runtime.events().subscribe();
         let quiesce = runtime
-            .ingestor_quiesce_control(&domain, &ingestor, nervix_models::Unit::Single)
+            .ingestor_quiesce_control(&domain, &ingestor, nervix_models::Unit::SINGLE)
             .assured("a running ingestor holds its quiesce control");
         let route = runtime
             .resolve_endpoint("edge.example.com", "/events")

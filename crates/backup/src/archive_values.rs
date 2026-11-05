@@ -158,9 +158,14 @@ impl<'a> Values<'a> {
             .entropy()
             .index(NonZeroUsize::new(3).assured("three unit kinds"))
         {
-            0 => Unit::Single,
-            1 => Unit::Partition(ordinal),
-            _ => Unit::Instance(self.0.entropy().boundary_biased(0..=u64::MAX)),
+            0 => Unit::SINGLE,
+            1 => Unit::partition(ordinal),
+            _ => Unit::try_instance(
+                self.0
+                    .entropy()
+                    .boundary_biased(0..=Unit::MAX_INSTANCE_INDEX),
+            )
+            .assured("the fixture index fits the execution-unit range"),
         }
     }
 

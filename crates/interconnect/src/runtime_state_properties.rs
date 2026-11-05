@@ -95,8 +95,8 @@ impl<'a> Messages<'a> {
 
     fn unit(&mut self) -> nervix_models::Unit {
         match self.arbitrary.entropy().byte() % 3 {
-            0 => nervix_models::Unit::Single,
-            1 => nervix_models::Unit::Partition(
+            0 => nervix_models::Unit::SINGLE,
+            1 => nervix_models::Unit::partition(
                 u32::try_from(
                     self.arbitrary
                         .entropy()
@@ -104,20 +104,24 @@ impl<'a> Messages<'a> {
                 )
                 .assured("partition indices fit u32"),
             ),
-            _ => nervix_models::Unit::Instance(
-                self.arbitrary.entropy().boundary_biased(0..=u64::MAX),
-            ),
+            _ => nervix_models::Unit::try_instance(
+                self.arbitrary
+                    .entropy()
+                    .boundary_biased(0..=nervix_models::Unit::MAX_INSTANCE_INDEX),
+            )
+            .assured("the fixture index fits the execution-unit range"),
         }
     }
 
     fn ingestor_selection(&mut self) -> crate::IngestorUnitSelection {
         let count = self.arbitrary.positive_u64();
         crate::IngestorUnitSelection {
-            unit: nervix_models::Unit::Instance(
+            unit: nervix_models::Unit::try_instance(
                 self.arbitrary
                     .entropy()
                     .boundary_biased(0..=count.get() - 1),
-            ),
+            )
+            .assured("the fixture index fits the execution-unit range"),
             count,
         }
     }
@@ -797,7 +801,7 @@ fn runtime_state_wire_variant_boundaries() {
                         kind,
                         identifier: ModelName::parse("checkpoint")
                             .assured("a fixed valid model name"),
-                        unit: nervix_models::Unit::Single,
+                        unit: nervix_models::Unit::SINGLE,
                         branch_key,
                     };
                     Message::SyncRequest(StateSyncRequest {
@@ -924,9 +928,12 @@ fn bolero_intake_unit_requests_preserve_their_selection() {
                 domain,
                 name: messages.arbitrary.rule_name(),
                 unit: if messages.arbitrary.entropy().flag() {
-                    nervix_models::Unit::Single
+                    nervix_models::Unit::SINGLE
                 } else {
-                    nervix_models::Unit::Instance(u64::from(messages.arbitrary.entropy().byte()))
+                    nervix_models::Unit::try_instance(u64::from(
+                        messages.arbitrary.entropy().byte(),
+                    ))
+                    .assured("the fixture index fits the execution-unit range")
                 },
             };
             let executor = Executor::default();

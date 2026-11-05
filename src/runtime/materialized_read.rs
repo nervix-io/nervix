@@ -1500,7 +1500,7 @@ mod tests {
             },
             kind: ModelKind::Relay,
             identifier: named("state"),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         };
         runtime
@@ -1563,7 +1563,7 @@ mod tests {
             },
             kind: ModelKind::Relay,
             identifier: ModelName::from(&relay),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         };
 

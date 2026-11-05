@@ -1065,7 +1065,7 @@ impl Runtime {
             state,
             kind,
             identifier,
-            nervix_models::Unit::Single,
+            nervix_models::Unit::SINGLE,
             branch_key,
         )
     }

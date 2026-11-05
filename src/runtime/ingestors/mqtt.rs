@@ -51,7 +51,7 @@ impl PreparedMqttIngestorClient {
         name: &IngestorName,
         revision: &ExecutionRevision,
     ) -> bool {
-        revision.entrypoints.ingestor(name, Unit::Instance(0)).is_some_and(|plan|
+        revision.entrypoints.ingestor(name, Unit::FIRST_INSTANCE).is_some_and(|plan|
             matches!(&plan.input, IngestorInputPlan::Transport(input)
                 if matches!(&input.source, IngestorConnectorPlan::Mqtt(MqttIngestorStartPlan::Topic(source)) if source == &self.declaration)))
     }
@@ -207,8 +207,8 @@ impl MqttTopicIngestorStartPlan {
     ) -> error_stack::Result<(), RuntimeError> {
         let ending = units
             .iter()
-            .map(|unit| match unit {
-                Unit::Instance(index) => *index,
+            .map(|unit| match unit.kind() {
+                nervix_models::UnitKind::Instance(index) => index,
                 _ => unreachable!("MQTT plans declare instance units"),
             })
             .collect::<std::collections::BTreeSet<_>>();

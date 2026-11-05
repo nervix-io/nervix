@@ -265,7 +265,7 @@ impl Runtime {
     ) -> BranchMetricsMark {
         self.unit_branch_metrics_mark(
             domain,
-            &NodeUnitRef::new(NodeRef::new(kind, identifier), Unit::Single),
+            &NodeUnitRef::new(NodeRef::new(kind, identifier), Unit::SINGLE),
         )
     }
 
@@ -971,7 +971,7 @@ mod tests {
             state: RuntimeState::BranchAggregated,
             kind: ModelKind::Ingestor,
             identifier: ModelName::from(&ingestor.clone()),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         };
         {
@@ -987,7 +987,7 @@ mod tests {
             let metrics = RuntimeMetrics::default();
             metrics
                 .resolve_node_batch_metrics(NodeBatchMetricsSpec {
-                    unit: Unit::Single,
+                    unit: Unit::SINGLE,
                     domain: &domain,
                     kind: ModelKind::Ingestor,
                     node: &ModelName::from(&ingestor),
@@ -1002,7 +1002,7 @@ mod tests {
                     &domain,
                     ModelKind::Ingestor,
                     &ModelName::from(&ingestor),
-                    Unit::Single,
+                    Unit::SINGLE,
                 ),
             };
             let payload = encode_branch_aggregated_snapshot(&snapshot)
@@ -1043,7 +1043,7 @@ mod tests {
             state: RuntimeState::BranchAggregated,
             kind: ModelKind::Ingestor,
             identifier: ModelName::from(&ingestor.clone()),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         };
         let db = Database::builder(dir.path())
@@ -1058,7 +1058,7 @@ mod tests {
         let persisted_metrics = RuntimeMetrics::default();
         persisted_metrics
             .resolve_node_batch_metrics(NodeBatchMetricsSpec {
-                unit: Unit::Single,
+                unit: Unit::SINGLE,
                 domain: &domain,
                 kind: ModelKind::Ingestor,
                 node: &ModelName::from(&ingestor),
@@ -1073,7 +1073,7 @@ mod tests {
                 &domain,
                 ModelKind::Ingestor,
                 &ModelName::from(&ingestor),
-                Unit::Single,
+                Unit::SINGLE,
             ),
         };
         let payload = encode_branch_aggregated_snapshot(&snapshot)
@@ -1127,7 +1127,7 @@ mod tests {
             state: RuntimeState::BranchAggregated,
             kind: ModelKind::Ingestor,
             identifier: ModelName::from(&ingestor.clone()),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         };
         let db = Database::builder(dir.path())
@@ -1142,7 +1142,7 @@ mod tests {
         let persisted_metrics = RuntimeMetrics::default();
         persisted_metrics
             .resolve_node_batch_metrics(NodeBatchMetricsSpec {
-                unit: Unit::Single,
+                unit: Unit::SINGLE,
                 domain: &domain,
                 kind: ModelKind::Ingestor,
                 node: &ModelName::from(&ingestor),
@@ -1157,7 +1157,7 @@ mod tests {
                 &domain,
                 ModelKind::Ingestor,
                 &ModelName::from(&ingestor),
-                Unit::Single,
+                Unit::SINGLE,
             ),
         };
         let payload = encode_branch_aggregated_snapshot(&snapshot)
@@ -1187,7 +1187,7 @@ mod tests {
             .inner
             .metrics
             .resolve_node_batch_metrics(NodeBatchMetricsSpec {
-                unit: Unit::Single,
+                unit: Unit::SINGLE,
                 domain: &domain,
                 kind: ModelKind::Ingestor,
                 node: &ModelName::from(&ingestor),
@@ -1363,7 +1363,7 @@ mod tests {
         );
 
         let describe = runtime
-            .describe_local_ingestor(&domain, &ingestor, nervix_models::Unit::Single)
+            .describe_local_ingestor(&domain, &ingestor, nervix_models::Unit::SINGLE)
             .expect("describe should succeed");
 
         assert!(!describe.running);

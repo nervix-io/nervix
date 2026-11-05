@@ -207,7 +207,7 @@ impl ExecutionNode {
     /// The one unit of a node revised as a single unit, and `None` for a relay revised as several
     /// partitions, whose units each have their own placement.
     pub(crate) fn sole_unit(&self) -> Option<&ExecutionUnit> {
-        self.units.get(&Unit::Single)
+        self.units.get(&Unit::SINGLE)
     }
 
     /// The one node a single-unit node is assigned to, when it is assigned to exactly one. `None`
@@ -697,7 +697,7 @@ mod tests {
             .for_each(|bytes: &[u8]| {
                 let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
                 let relay = NodeRef::new(ModelKind::Relay, named::<ModelName>("events"));
-                let unit = Unit::Partition(u32::from(arbitrary.entropy().byte()));
+                let unit = Unit::partition(u32::from(arbitrary.entropy().byte()));
                 let owner = named::<ClusterNodeName>("node-1");
                 let destination = named::<ClusterNodeName>("node-2");
                 let mut before = schedule(nonzero!(2usize));
@@ -716,7 +716,7 @@ mod tests {
                     .assured("the unit-keyed schedule plans");
                 let planned = &revision.nodes[&relay];
                 assert_eq!(
-                    planned.units[&Unit::Single].primary_node.as_ref(),
+                    planned.units[&Unit::SINGLE].primary_node.as_ref(),
                     Some(&owner)
                 );
                 assert_eq!(
@@ -821,7 +821,7 @@ mod tests {
 
         assert!(
             matches!(ExecutionDelta::between(Some(&before), Some(&after)),
-            ExecutionDelta::EntitySwap(change) if change.reassignments == vec![NodeUnitRef::new(relay, Unit::Single)])
+            ExecutionDelta::EntitySwap(change) if change.reassignments == vec![NodeUnitRef::new(relay, Unit::SINGLE)])
         );
     }
 
@@ -873,7 +873,7 @@ mod tests {
         assert_eq!(change.forced_recovery_relays, expected);
         assert_eq!(
             change.reassignments,
-            vec![NodeUnitRef::new(relay, Unit::Single)]
+            vec![NodeUnitRef::new(relay, Unit::SINGLE)]
         );
         assert!(matches!(
             ExecutionDelta::between(Some(&after), Some(&after)),
@@ -937,7 +937,7 @@ mod tests {
         );
         assert_eq!(
             change.reassignments,
-            vec![NodeUnitRef::new(relay, Unit::Single)]
+            vec![NodeUnitRef::new(relay, Unit::SINGLE)]
         );
     }
 }

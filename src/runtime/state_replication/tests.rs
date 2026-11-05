@@ -173,7 +173,7 @@ impl EmptyRelayHandoffFixture {
                 source_incarnation,
                 destination_incarnation,
                 domain: self.domain.clone(),
-                unit: nervix_models::Unit::Single,
+                unit: nervix_models::Unit::SINGLE,
                 entity: self.entity.clone(),
                 base_schedule_fingerprint: self.base_schedule_fingerprint,
                 target_schedule_fingerprint: self.target_schedule_fingerprint,
@@ -343,7 +343,7 @@ async fn surviving_authority_reconciles_a_dead_coordinators_preparation() {
             &fixture.operation_id,
             &fixture.domain,
             &fixture.entity,
-            nervix_models::Unit::Single,
+            nervix_models::Unit::SINGLE,
         )
         .expect("a reordered stale discard should remain idempotent");
     let prepared = runtime
@@ -442,7 +442,7 @@ async fn committed_preparation_survives_coordinator_failure_and_destination_rest
                 source_incarnation,
                 destination_incarnation: prepared_destination_incarnation,
                 domain: fixture.domain.clone(),
-                unit: nervix_models::Unit::Single,
+                unit: nervix_models::Unit::SINGLE,
                 entity: fixture.entity.clone(),
                 base_schedule_fingerprint: fixture.base_schedule_fingerprint,
                 target_schedule_fingerprint: fixture.target_schedule_fingerprint,
@@ -483,7 +483,7 @@ async fn committed_preparation_survives_coordinator_failure_and_destination_rest
             &fixture.domain,
             fixture.entity.kind,
             &fixture.entity.identifier,
-            nervix_models::Unit::Single,
+            nervix_models::Unit::SINGLE,
         )
         .expect("activation should remain readable")
         .expect("activation should be durable");
@@ -596,7 +596,7 @@ async fn stopped_wasm_ownership_recovery_preserves_the_complete_checkpoint_inven
                 destination,
                 destination_incarnation,
                 domain: domain.clone(),
-                unit: nervix_models::Unit::Single,
+                unit: nervix_models::Unit::SINGLE,
                 entity: entity.clone(),
                 base_schedule_fingerprint: fingerprint,
                 target_schedule_fingerprint: fingerprint,
@@ -654,7 +654,7 @@ async fn forced_recovery_completion_survives_runtime_restart_and_schedule_rebuil
         },
         kind: ModelKind::Relay,
         identifier: identifier.clone(),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: None,
     };
     let payload = empty_sealed_container().expect("empty materialized state should seal");
@@ -719,7 +719,7 @@ async fn forced_recovery_completion_survives_runtime_restart_and_schedule_rebuil
             destination: &destination,
             destination_incarnation,
             entity: &entity,
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             target_schedule_fingerprint: initial_fingerprint,
         };
         let store = runtime
@@ -820,7 +820,7 @@ async fn forced_recovery_recreates_state_only_for_a_complete_reset_decision() {
         },
         kind: ModelKind::Relay,
         identifier: identifier.clone(),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: None,
     };
     let payload = empty_sealed_container().expect("empty materialized state should seal");
@@ -913,7 +913,7 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         state: RuntimeState::KafkaOffset,
         kind: ModelKind::Ingestor,
         identifier: named("orders_source"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: None,
     };
     let kafka_state = Arc::new(
@@ -943,11 +943,11 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         },
         kind: ModelKind::Deduplicator,
         identifier: named("deduplicate_orders"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: string_branch_key("tenant", "acme"),
     };
     let sibling_branch_placement = RuntimeStatePlacement {
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: string_branch_key("tenant", "globex"),
         ..deduplicator_placement.clone()
     };
@@ -970,7 +970,7 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         .payload;
     let other_entity_placement = RuntimeStatePlacement {
         identifier: named("other_deduplicator"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: string_branch_key("tenant", "acme"),
         ..deduplicator_placement.clone()
     };
@@ -990,7 +990,7 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         destination: &destination,
         destination_incarnation: ClusterNodeIncarnation::new(42),
         entity: &kafka_entity,
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         target_schedule_fingerprint: [9; 32],
     };
     let deduplicator_recovery = ForcedRuntimeStateRecoveryTransition {
@@ -999,7 +999,7 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         destination: &destination,
         destination_incarnation: ClusterNodeIncarnation::new(42),
         entity: &deduplicator_entity,
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         target_schedule_fingerprint: [9; 32],
     };
     let kafka_prepared = PersistedRuntimeStateEntry {
@@ -1198,11 +1198,11 @@ fn forced_recovery_refuses_missing_or_stale_preparation_without_changing_state()
         },
         kind: ModelKind::Deduplicator,
         identifier: named("deduplicate_orders"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: string_branch_key("tenant", "acme"),
     };
     let sibling_branch = RuntimeStatePlacement {
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: string_branch_key("tenant", "globex"),
         ..placement.clone()
     };
@@ -1235,7 +1235,7 @@ fn forced_recovery_refuses_missing_or_stale_preparation_without_changing_state()
         destination: &destination,
         destination_incarnation: ClusterNodeIncarnation::new(42),
         entity: &entity,
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         target_schedule_fingerprint: [9; 32],
     };
 
@@ -1335,7 +1335,7 @@ fn runtime_state_store_persists_latest_snapshot_with_monotonic_lsm() {
         },
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: string_branch_key("tenant", "acme"),
     };
 
@@ -1375,7 +1375,7 @@ async fn deduplicator_snapshot_task_persists_published_keys_on_interval() {
         },
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: string_branch_key("tenant", "acme"),
     };
     let state = runtime
@@ -1437,7 +1437,7 @@ async fn deduplicator_snapshot_task_persists_published_keys_after_the_branch_tas
         },
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: string_branch_key("tenant", "acme"),
     };
     let state = runtime
@@ -1496,7 +1496,7 @@ async fn materialized_relay_snapshot_task_owns_persistence() {
         },
         kind: ModelKind::Relay,
         identifier: named("latest_orders"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: None,
     };
     let schema = test_schema(&[("status", ParseAsType::String)]);
@@ -1573,7 +1573,7 @@ async fn kafka_offset_snapshot_task_owns_persistence() {
         state: RuntimeState::KafkaOffset,
         kind: ModelKind::Ingestor,
         identifier: named("orders_source"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: None,
     };
     let mut assignment = runtime
@@ -1652,7 +1652,7 @@ async fn window_processor_snapshot_task_persists_published_state_on_interval() {
         },
         kind: ModelKind::WindowProcessor,
         identifier: named("latency_window"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: string_branch_key("tenant", "acme"),
     };
     let state = runtime
@@ -1719,7 +1719,7 @@ fn a_window_state_publication_proceeds_while_a_snapshot_reads_the_previous_one()
         },
         kind: ModelKind::WindowProcessor,
         identifier: named("latency_window"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: string_branch_key("tenant", "acme"),
     };
     let state = ReplicatedWindowProcessorState::new(placement, None);
@@ -1759,7 +1759,7 @@ async fn a_recreated_window_branch_refuses_the_previous_lifetime_checkpoint() {
         },
         kind: ModelKind::WindowProcessor,
         identifier: named("latency_window"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: string_branch_key("tenant", "acme"),
     };
     let plan = window_plan(
@@ -1808,7 +1808,7 @@ fn runtime_state_store_purges_only_stale_schema_fingerprints() {
         },
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: None,
     };
     let current_schema = SchemaFingerprint::from_digest([2; 32]);
@@ -1834,7 +1834,7 @@ fn runtime_state_store_purges_only_stale_schema_fingerprints() {
                         kind: base.kind,
                         identifier: base.identifier.clone(),
                     },
-                    nervix_models::Unit::Single,
+                    nervix_models::Unit::SINGLE,
                 ),
                 ScheduledStateIdentity {
                     schema_fingerprint: current_schema,
@@ -1879,7 +1879,7 @@ fn runtime_state_store_purges_only_the_requested_entity() {
         },
         kind: ModelKind::Relay,
         identifier: named("events"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: None,
     };
     let retained = RuntimeStatePlacement {
@@ -1935,7 +1935,7 @@ fn kafka_offset_state_roundtrips_partition_schedule_through_fjall() {
         state: RuntimeState::KafkaOffset,
         kind: ModelKind::Ingestor,
         identifier: named("kafka_notifications"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: None,
     };
     let state = Arc::new(
@@ -1991,7 +1991,7 @@ fn branch_aggregated_state_snapshot_roundtrips_metrics() {
         state: RuntimeState::BranchAggregated,
         kind: ModelKind::Ingestor,
         identifier: named("redis_notifications"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: None,
     };
     let relay = named("notifications");
@@ -2004,7 +2004,7 @@ fn branch_aggregated_state_snapshot_roundtrips_metrics() {
     .expect("branch-aggregated state should initialize");
     metrics
         .resolve_node_batch_metrics(NodeBatchMetricsSpec {
-            unit: Unit::Single,
+            unit: Unit::SINGLE,
             domain: &placement.domain,
             kind: placement.kind,
             node: &placement.identifier,
@@ -2054,7 +2054,7 @@ fn a_metrics_update_after_a_flush_took_its_snapshot_is_persisted_by_the_next_flu
         state: RuntimeState::BranchAggregated,
         kind: ModelKind::Ingestor,
         identifier: named("redis_notifications"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: None,
     };
     let relay = named("notifications");
@@ -2062,7 +2062,7 @@ fn a_metrics_update_after_a_flush_took_its_snapshot_is_persisted_by_the_next_flu
         ReplicatedBranchAggregatedState::new(placement.clone(), Some(node.clone()), &metrics, None)
             .assured("a state without a persisted snapshot initializes");
     let batch_metrics = metrics.resolve_node_batch_metrics(NodeBatchMetricsSpec {
-        unit: Unit::Single,
+        unit: Unit::SINGLE,
         domain: &placement.domain,
         kind: placement.kind,
         node: &placement.identifier,
@@ -2101,7 +2101,7 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
         },
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: string_branch_key("tenant", "acme"),
     };
     let state = runtime
@@ -2161,7 +2161,7 @@ fn owned_placement(
         state,
         kind,
         identifier: named(identifier),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: branch,
     }
 }
@@ -2331,7 +2331,7 @@ fn deduplicator_key_reservation_reports_new_and_duplicate_keys() {
         },
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: string_branch_key("tenant", "acme"),
     };
     let state = Arc::new(
@@ -2362,7 +2362,7 @@ fn runtime_state_placement_storage_key_includes_branch_key() {
         },
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: string_branch_key("tenant", "beta"),
     };
     let tenant = RuntimeStatePlacement {
@@ -2372,7 +2372,7 @@ fn runtime_state_placement_storage_key_includes_branch_key() {
         },
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: string_branch_key("tenant", "acme"),
     };
 
@@ -2382,7 +2382,7 @@ fn runtime_state_placement_storage_key_includes_branch_key() {
         state: RuntimeState::BranchAggregated,
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: None,
     };
     assert_ne!(
@@ -2396,7 +2396,7 @@ fn runtime_state_placement_storage_key_includes_branch_key() {
         },
         kind: ModelKind::Deduplicator,
         identifier: named("dedup_orders"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: None,
     };
     assert_ne!(

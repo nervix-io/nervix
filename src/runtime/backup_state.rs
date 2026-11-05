@@ -1230,7 +1230,7 @@ mod tests {
         primaries.extend(
             entities
                 .into_iter()
-                .map(|node| NodeUnitRef::new(node, nervix_models::Unit::Single)),
+                .map(|node| NodeUnitRef::new(node, nervix_models::Unit::SINGLE)),
         );
         primaries
     }
@@ -1287,7 +1287,7 @@ mod tests {
             state: RuntimeState::BranchLru {
                 schema: SchemaFingerprint::from_digest([4; 32]),
             },
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         }
     }
@@ -1298,7 +1298,7 @@ mod tests {
                 schema: SchemaFingerprint::from_digest([4; 32]),
                 generation: WasmStateGeneration::FIRST,
             },
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: super::super::string_branch_key("tenant", tenant),
             ..lifecycle.clone()
         }
@@ -1354,7 +1354,7 @@ mod tests {
                 .assured("lifecycle persists");
             let placement = RuntimeStatePlacement {
                 state: checkpoint.state,
-                unit: nervix_models::Unit::Single,
+                unit: nervix_models::Unit::SINGLE,
                 branch_key: super::super::string_branch_key("tenant", "alpha"),
                 ..lifecycle
             };
@@ -1453,7 +1453,7 @@ mod tests {
                 .assured("lifecycle persists");
             let placement = RuntimeStatePlacement {
                 state: RuntimeState::Deduplicator { schema },
-                unit: nervix_models::Unit::Single,
+                unit: nervix_models::Unit::SINGLE,
                 branch_key: super::super::string_branch_key("tenant", "alpha"),
                 ..lifecycle
             };
@@ -1535,7 +1535,7 @@ mod tests {
             state: RuntimeState::WindowProcessor {
                 schema: SchemaFingerprint::from_digest([4; 32]),
             },
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: super::super::string_branch_key("tenant", "alpha"),
             ..lifecycle.clone()
         };
@@ -1918,7 +1918,7 @@ mod tests {
             state: RuntimeState::Deduplicator {
                 schema: SchemaFingerprint::from_digest([4; 32]),
             },
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: super::super::string_branch_key("tenant", "alpha"),
         }
     }
@@ -1932,7 +1932,7 @@ mod tests {
             state: RuntimeState::WindowProcessor {
                 schema: SchemaFingerprint::from_digest([4; 32]),
             },
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: super::super::string_branch_key("tenant", "alpha"),
         }
     }

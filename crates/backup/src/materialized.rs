@@ -84,7 +84,7 @@ struct IdentitiesWire {
 
 impl ArchiveRecord for MaterializedRelayDescriptor {
     const KIND: RecordKind = RecordKind::MaterializedRelayDescriptor;
-    const VERSION: u16 = 3;
+    const VERSION: u16 = 4;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         encode_record(
@@ -137,7 +137,7 @@ impl ArchiveRecord for MaterializedRelayDescriptor {
 
 impl ArchiveRecord for MaterializedIdentitiesRecord {
     const KIND: RecordKind = RecordKind::MaterializedIdentities;
-    const VERSION: u16 = 3;
+    const VERSION: u16 = 4;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         let bytes = encode_record(
@@ -221,7 +221,7 @@ mod tests {
                 let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
                 let groups = arbitrary.entropy().count(4);
                 let mut descriptor = MaterializedRelayDescriptor {
-                    unit: nervix_models::Unit::Single,
+                    unit: nervix_models::Unit::SINGLE,
                     domain: arbitrary.name(),
                     entity: arbitrary.name(),
                     schema: SchemaFingerprint::from_digest(std::array::from_fn(|_| {
@@ -274,7 +274,7 @@ mod tests {
                         .checked_add(rows)
                         .verified("at most four groups of eight rows are generated");
                     records.push(MaterializedIdentitiesRecord {
-                        unit: nervix_models::Unit::Single,
+                        unit: nervix_models::Unit::SINGLE,
                         domain: descriptor.domain.clone(),
                         entity: descriptor.entity.clone(),
                         group: u32::try_from(group).assured("at most four groups fit in u32"),
@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn materialized_record_counts_and_branch_keys_are_validated() {
         let descriptor = DescriptorWire {
-            unit: crate::wire::UnitWire::Single,
+            unit: nervix_models::Unit::SINGLE.into(),
             domain: "tenant".into(),
             entity: "state".into(),
             schema: [1; 32],
@@ -369,7 +369,7 @@ mod tests {
             }]),
         ] {
             let record = IdentitiesWire {
-                unit: crate::wire::UnitWire::Single,
+                unit: nervix_models::Unit::SINGLE.into(),
                 domain: "tenant".into(),
                 entity: "state".into(),
                 group: 0,

@@ -1301,7 +1301,7 @@ impl Runtime {
         }
         for entry in self.inner.emitter_buffers.iter() {
             if entry.key().domain == *domain && entities.contains(&entry.key().node) {
-                units.insert(NodeUnitRef::new(entry.key().node.clone(), Unit::Single));
+                units.insert(NodeUnitRef::new(entry.key().node.clone(), Unit::SINGLE));
             }
         }
         units.into_iter().collect()
@@ -1603,7 +1603,7 @@ impl Runtime {
         domain: &DomainName,
         node: NodeRef,
     ) -> Arc<NodeQuiesceCounters> {
-        self.unit_quiesce_counters(domain, NodeUnitRef::new(node, Unit::Single))
+        self.unit_quiesce_counters(domain, NodeUnitRef::new(node, Unit::SINGLE))
     }
 
     pub(super) fn unit_quiesce_counters(
@@ -1808,10 +1808,12 @@ mod tests {
                     .register_ingestor_quiesce(&domain, &ingestor, unit, None),
             ))
         };
-        let ending = control(Unit::Instance(0));
+        let ending = control(Unit::FIRST_INSTANCE);
         ending.engage(IngestorQuiesceCause::OwnershipHandoff);
-        let replacement = control(Unit::Instance(0));
-        let sibling = control(Unit::Instance(2));
+        let replacement = control(Unit::FIRST_INSTANCE);
+        let sibling = control(
+            Unit::try_instance(2).assured("the fixture index fits the execution-unit range"),
+        );
         replacement.engage(IngestorQuiesceCause::EntityHold);
         let key = |unit| {
             DomainNodeUnitRef::new(
@@ -1822,11 +1824,11 @@ mod tests {
         runtime
             .inner
             .ingestor_quiescence
-            .insert(key(Unit::Instance(0)), replacement.clone());
-        runtime
-            .inner
-            .ingestor_quiescence
-            .insert(key(Unit::Instance(2)), sibling.clone());
+            .insert(key(Unit::FIRST_INSTANCE), replacement.clone());
+        runtime.inner.ingestor_quiescence.insert(
+            key(Unit::try_instance(2).assured("the fixture index fits the execution-unit range")),
+            sibling.clone(),
+        );
         Runtime::release_entity_alter_hold(
             &runtime.inner.ingestors,
             &runtime.inner.ingestor_quiescence,
@@ -1840,11 +1842,11 @@ mod tests {
                 },
                 targets: EntityGateTargets::Units(vec![NodeUnitRef::new(
                     NodeRef::new(ModelKind::Ingestor, &ingestor),
-                    Unit::Instance(0),
+                    Unit::FIRST_INSTANCE,
                 )]),
                 purpose: EntityGatePurpose::OwnershipHandoff,
                 quiesced_ingestors: vec![QuiescedIngestorHold {
-                    unit: Unit::Instance(0),
+                    unit: Unit::FIRST_INSTANCE,
                     ingestor: ingestor.clone(),
                     cause: IngestorQuiesceCause::OwnershipHandoff,
                     control: ending.clone(),
@@ -1855,8 +1857,11 @@ mod tests {
         assert!(!ending.is_quiesced());
         assert!(replacement.is_quiesced());
         for (unit, expected) in [
-            (Unit::Instance(0), &replacement),
-            (Unit::Instance(2), &sibling),
+            (Unit::FIRST_INSTANCE, &replacement),
+            (
+                Unit::try_instance(2).assured("the fixture index fits the execution-unit range"),
+                &sibling,
+            ),
         ] {
             let current = runtime
                 .ingestor_quiesce_control(&domain, &ingestor, unit)
@@ -2015,7 +2020,7 @@ mod tests {
 
         let key = DomainNodeUnitRef::new(
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
-            Unit::Single,
+            Unit::SINGLE,
         );
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let stopped = StdArc::new(AtomicBool::new(false));
@@ -2154,7 +2159,7 @@ mod tests {
         );
         let key = DomainNodeUnitRef::new(
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
-            Unit::Single,
+            Unit::SINGLE,
         );
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task = nervix_primitives::task::spawn(async move {
@@ -2607,7 +2612,7 @@ mod tests {
             identifier: named("deduplicate_events"),
         };
         let entity = affected.clone().in_domain(&domain);
-        let targets = EntityGateTargets::Units(vec![NodeUnitRef::new(affected, Unit::Single)]);
+        let targets = EntityGateTargets::Units(vec![NodeUnitRef::new(affected, Unit::SINGLE)]);
         let first = coordination("leader-a", 10, 1);
         let second = coordination("leader-b", 20, 1);
         let lease = || EntityGateLease {
@@ -2951,7 +2956,7 @@ mod tests {
         assert!(!runtime.entity_gate_operation_owns_unit(
             &coordination,
             &domain,
-            &NodeUnitRef::new(entity.clone(), Unit::Single),
+            &NodeUnitRef::new(entity.clone(), Unit::SINGLE),
             EntityGatePurpose::OwnershipHandoff,
         ));
         let freeze = OwnershipHandoffFreezeWatch::new(&runtime, entity.in_domain(&domain));

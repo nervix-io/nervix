@@ -157,7 +157,7 @@ struct DelayedRemovalWire {
 
 impl ArchiveRecord for DeduplicatorStateDescriptor {
     const KIND: RecordKind = RecordKind::DeduplicatorStateDescriptor;
-    const VERSION: u16 = 3;
+    const VERSION: u16 = 4;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         encode_record(
@@ -204,7 +204,7 @@ impl ArchiveRecord for DeduplicatorStateDescriptor {
 
 impl ArchiveRecord for WindowStateDescriptor {
     const KIND: RecordKind = RecordKind::WindowStateDescriptor;
-    const VERSION: u16 = 3;
+    const VERSION: u16 = 4;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         let mut rows = Vec::with_capacity(self.rows.len());
@@ -435,7 +435,7 @@ mod tests {
         let domain = DomainName::parse("prod").assured("the test domain is valid");
         let entity = ModelName::parse("latency_window").assured("the test entity is valid");
         let empty = WindowStateDescriptor {
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             domain,
             entity,
             schema: SchemaFingerprint::from_digest([1; 32]),

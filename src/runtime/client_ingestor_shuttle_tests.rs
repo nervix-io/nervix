@@ -161,7 +161,7 @@ fn a_batch_racing_a_quiesce_is_counted_or_refused() {
         let metric_labels = metrics.register_ingestor_quiesce(
             &domain,
             &ingestor,
-            nervix_models::Unit::Single,
+            nervix_models::Unit::SINGLE,
             None,
         );
         let control = Arc::new(IngestorQuiesceControl::new(

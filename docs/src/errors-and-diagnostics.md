@@ -3575,3 +3575,9 @@ Start planning separately validates the complete resolved unit declaration.
 `AlreadyRunning` and `IngestorNotRunning` name the exact source unit, allowing a sibling instance
 to start or stop independently.
 Per-unit DESCRIBE requests and status records preserve the unit selected by their caller.
+`UnitIndexError` is the vocabulary's pure refusal for an instance ordinal outside its compact
+identity range. Semantic JSON validates that bound during deserialization. The client wire decoder
+preserves the cause under `WireDecodeError::InvalidValue`, and a stored tagged key preserves it
+under `StoredStateIssue::KeyUnitInvalid` and `RuntimePersistenceError::DecodeState`.
+Allocation-layout validation rejects unaddressable count declarations before materializing units;
+every addressable index fits the identity range.

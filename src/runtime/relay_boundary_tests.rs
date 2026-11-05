@@ -38,7 +38,7 @@ use crate::{
 fn single_presence(services: &RelayBoundaryServices) -> RelayBranchPresence {
     services
         .branch_presences
-        .of(Unit::Single)
+        .of(Unit::SINGLE)
         .cloned()
         .expect("a whole relay has its single unit's presence")
 }
@@ -47,7 +47,7 @@ fn single_presence(services: &RelayBoundaryServices) -> RelayBranchPresence {
 /// into partitions, is cancelled from the start.
 fn single_ingress_cancelled(services: &RelayBoundaryServices, branch: &Option<BranchKey>) -> bool {
     services
-        .ingress_slot(branch, Unit::Single)
+        .ingress_slot(branch, Unit::SINGLE)
         .cancellation()
         .is_cancelled()
 }
@@ -56,7 +56,7 @@ fn relay_metrics(runtime: &Runtime, domain: &DomainName, relay: &RelayName) -> R
     runtime.inner.metrics.resolve_relay_metrics(
         domain,
         relay,
-        Unit::Single,
+        Unit::SINGLE,
         None,
         RELAY_BUFFER_DIRECTION_CONCRETE,
         None,
@@ -83,7 +83,7 @@ fn forced_routing_fence_ends_changed_channels_until_publication(#[case] move_own
         Arc::new(crate::runtime_ack::AckRootTracker::default()),
     );
     services.replace_owner_routes(RelayOwnerRoutes::single(owner.clone()));
-    let retained = services.ingress_slot(&None, Unit::Single);
+    let retained = services.ingress_slot(&None, Unit::SINGLE);
     services.fence_routing_change(&RelayOwnerRoutes::single(owner.clone()), &consumers);
     assert!(!retained.cancellation().is_cancelled());
 
@@ -141,7 +141,7 @@ async fn runtime_report_chain_detached_relay_delivery_log() {
     let mut logs = ReportLogObserver::new();
     logs.observe(services.dispatch_remote_runtime_consumers(
         &domain("default"),
-        Unit::Single,
+        Unit::SINGLE,
         &batch,
     ))
     .await
@@ -349,13 +349,13 @@ fn branch_eviction_cancels_and_reopens_relay_channel_generations() {
     let node = ClusterNodeName::parse("node-2").expect("valid node name");
     let relay = RelayName::parse("notifications").expect("valid relay name");
     let branch = string_branch_key("tenant", "acme");
-    let ingress = services.ingress_slot(&branch, Unit::Single);
+    let ingress = services.ingress_slot(&branch, Unit::SINGLE);
     let outbound = services.outbound_slot(
         &node,
         &relay,
         RelayPayloadKind::Routed,
         &branch,
-        Unit::Single,
+        Unit::SINGLE,
     );
     let first_delivery = outbound.next_delivery();
 
@@ -368,7 +368,7 @@ fn branch_eviction_cancels_and_reopens_relay_channel_generations() {
         &relay,
         RelayPayloadKind::Routed,
         &branch,
-        Unit::Single,
+        Unit::SINGLE,
     );
     let reopened_delivery = reopened.next_delivery();
     assert!(!reopened.cancellation().is_cancelled());
@@ -386,13 +386,13 @@ async fn relay_owner_buffer_remains_visible_in_entity_drain_status() {
     let relay = named::<RelayName>("orders");
     let services = test_relay_boundary_services();
     let _owner_receiver =
-        services.activate_owner_buffer(Unit::Single, relay_metrics(&runtime, &domain, &relay));
+        services.activate_owner_buffer(Unit::SINGLE, relay_metrics(&runtime, &domain, &relay));
     runtime.inner.relay_boundary_fanouts.insert(
         DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
         services.fanout.clone(),
     );
     services
-        .enqueue_owner_batch(&quiesce_test_batch(), Unit::Single)
+        .enqueue_owner_batch(&quiesce_test_batch(), Unit::SINGLE)
         .await
         .expect("the relay owner buffer should admit the batch");
 
@@ -412,14 +412,14 @@ fn replacing_relay_owner_retires_the_retained_ingress_channel() {
     let services = test_relay_boundary_services();
     services.replace_owner_routes(RelayOwnerRoutes::single(named("node-2")));
     let branch = string_branch_key("tenant", "acme");
-    let retained = services.ingress_slot(&branch, Unit::Single);
-    let sibling = services.ingress_slot(&string_branch_key("tenant", "beta"), Unit::Single);
+    let retained = services.ingress_slot(&branch, Unit::SINGLE);
+    let sibling = services.ingress_slot(&string_branch_key("tenant", "beta"), Unit::SINGLE);
 
     services.replace_owner_routes(RelayOwnerRoutes::single(named("node-3")));
 
     assert!(retained.cancellation().is_cancelled());
     assert!(sibling.cancellation().is_cancelled());
-    let replacement = services.ingress_slot(&branch, Unit::Single);
+    let replacement = services.ingress_slot(&branch, Unit::SINGLE);
     assert!(!replacement.cancellation().is_cancelled());
     assert!(!StdArc::ptr_eq(&retained, &replacement));
 }
@@ -431,7 +431,7 @@ async fn relay_owner_buffer_retains_the_upstream_ack_until_fanout() {
     let relay = named::<RelayName>("orders");
     let services = test_relay_boundary_services();
     let (mut owner_receiver, _owner_buffer) =
-        services.activate_owner_buffer(Unit::Single, relay_metrics(&runtime, &domain, &relay));
+        services.activate_owner_buffer(Unit::SINGLE, relay_metrics(&runtime, &domain, &relay));
     let (acks, completion) = AckSet::root();
     let batch = RelayRecordBatch::single(
         test_schema(&[("value", ParseAsType::I64)]),
@@ -442,7 +442,7 @@ async fn relay_owner_buffer_retains_the_upstream_ack_until_fanout() {
     .expect("relay owner ACK test batch should build");
 
     services
-        .enqueue_owner_batch(&batch, Unit::Single)
+        .enqueue_owner_batch(&batch, Unit::SINGLE)
         .await
         .expect("the relay owner buffer should admit the batch");
     let completion = completion.wait();
@@ -480,7 +480,7 @@ async fn relay_dispatch_detaches_subscription_delivery_from_ack_chain() {
         .spawn_relay_owner_task(
             &domain,
             &relay,
-            Unit::Single,
+            Unit::SINGLE,
             services.clone(),
             RelayRetention::default(),
         )
@@ -548,7 +548,7 @@ async fn relay_dispatch_detaches_detached_runtime_consumers_from_ack_chain() {
         .spawn_relay_owner_task(
             &domain,
             &relay,
-            Unit::Single,
+            Unit::SINGLE,
             services.clone(),
             RelayRetention::default(),
         )
@@ -601,7 +601,7 @@ async fn relay_runtime_consumer_broadcast_fans_out_to_multiple_attached_receiver
         .spawn_relay_owner_task(
             &domain,
             &relay,
-            Unit::Single,
+            Unit::SINGLE,
             services.clone(),
             RelayRetention::default(),
         )
@@ -681,7 +681,7 @@ async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
         .spawn_relay_owner_task(
             &domain,
             &relay,
-            Unit::Single,
+            Unit::SINGLE,
             services.clone(),
             RelayRetention::default(),
         )
@@ -907,7 +907,7 @@ async fn inbound_subscription_wait_does_not_hold_domain_execution() {
                 kind: RelayPayloadKind::SubscriptionFanout,
                 domain: inbound_domain,
                 relay,
-                unit: Unit::Single,
+                unit: Unit::SINGLE,
                 key: None,
                 batch_ipc,
                 metadata: vec![metadata],
@@ -1043,7 +1043,7 @@ async fn owner_ingress_publishes_branch_presence_to_the_relay_state_placement() 
     let relay_id = RelayName::parse("notifications").expect("valid identifier");
     publish_state_identity(&runtime, &domain, ModelKind::Relay, &relay_id);
     let placement_presence = runtime
-        .relay_branch_presence(&domain, &relay_id, Unit::Single)
+        .relay_branch_presence(&domain, &relay_id, Unit::SINGLE)
         .expect("the relay's state identity is published");
     let services = Arc::new(RelayBoundaryServices::new(
         RelayBoundaryFanout::direct_with_capacity(STUPID_CHANNEL_CAPACITY_REMOVE_ME),
@@ -1101,7 +1101,7 @@ async fn owner_ingress_publishes_branch_presence_to_the_relay_state_placement() 
         .spawn_relay_owner_task(
             &domain,
             &relay_id,
-            Unit::Single,
+            Unit::SINGLE,
             services,
             RelayRetention::default(),
         )
@@ -1116,7 +1116,7 @@ async fn owner_ingress_publishes_branch_presence_to_the_relay_state_placement() 
                 kind: RelayPayloadKind::Ingress,
                 domain: domain.clone(),
                 relay: relay_id.clone(),
-                unit: Unit::Single,
+                unit: Unit::SINGLE,
                 key: BranchKey::to_remote_key(&key),
                 batch_ipc,
                 metadata: vec![
@@ -1220,7 +1220,7 @@ impl JoinedRelayOwner {
             kind: RelayPayloadKind::Ingress,
             domain: self.domain.clone(),
             relay: self.relay.clone(),
-            unit: Unit::Single,
+            unit: Unit::SINGLE,
             key: BranchKey::to_remote_key(key),
             batch_ipc,
             metadata: vec![
@@ -1253,7 +1253,7 @@ async fn a_delivery_held_for_its_acknowledgement_watches_reaches_its_relay_once_
         .spawn_relay_owner_task(
             &owner.domain,
             &owner.relay,
-            Unit::Single,
+            Unit::SINGLE,
             owner.services.clone(),
             RelayRetention::default(),
         )
@@ -1410,7 +1410,7 @@ async fn a_routed_attached_delivery_fails_on_a_node_that_no_longer_runs_its_cons
                 kind: RelayPayloadKind::Routed,
                 domain: domain.clone(),
                 relay: relay.clone(),
-                unit: Unit::Single,
+                unit: Unit::SINGLE,
                 key: BranchKey::to_remote_key(&None),
                 batch_ipc,
                 metadata: vec![test_runtime_row([]).metadata().to_remote()],
@@ -1504,7 +1504,7 @@ async fn a_remote_payload_that_does_not_decode_names_its_defect() {
                     kind: RelayPayloadKind::Routed,
                     domain: domain.clone(),
                     relay: relay.clone(),
-                    unit: Unit::Single,
+                    unit: Unit::SINGLE,
                     key,
                     batch_ipc: batch_ipc.clone(),
                     metadata,
@@ -1592,7 +1592,7 @@ async fn a_subscription_fanout_that_does_not_decode_is_refused() {
                 kind: RelayPayloadKind::SubscriptionFanout,
                 domain: domain.clone(),
                 relay: relay.clone(),
-                unit: Unit::Single,
+                unit: Unit::SINGLE,
                 key: None,
                 batch_ipc: batch_ipc.clone(),
                 metadata,
@@ -1692,7 +1692,7 @@ async fn relay_owner_enforces_branch_capacity_across_batches() {
         .spawn_relay_owner_task(
             &domain,
             &relay,
-            Unit::Single,
+            Unit::SINGLE,
             services.clone(),
             RelayRetention {
                 branch_ttl: None,
@@ -1716,7 +1716,7 @@ async fn relay_owner_enforces_branch_capacity_across_batches() {
         )
         .expect("relay batch should build");
         services
-            .enqueue_owner_batch(&batch, Unit::Single)
+            .enqueue_owner_batch(&batch, Unit::SINGLE)
             .await
             .expect("owner should admit the batch");
     }
@@ -1762,7 +1762,7 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
         .spawn_relay_owner_task(
             &domain,
             &relay,
-            Unit::Single,
+            Unit::SINGLE,
             services.clone(),
             RelayRetention {
                 branch_ttl: Some(Duration::from_millis(20)),
@@ -1778,7 +1778,7 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
     )
     .expect("relay batch should build");
     services
-        .enqueue_owner_batch(&batch, Unit::Single)
+        .enqueue_owner_batch(&batch, Unit::SINGLE)
         .await
         .expect("owner should admit the batch");
 
@@ -1842,7 +1842,7 @@ impl BranchKeySiblingRelays {
             &self.ending,
             RelayPayloadKind::Routed,
             key,
-            Unit::Single,
+            Unit::SINGLE,
         )
     }
 
@@ -1855,7 +1855,7 @@ impl BranchKeySiblingRelays {
         )
         .expect("relay batch should build");
         self.ending_services
-            .enqueue_owner_batch(&batch, Unit::Single)
+            .enqueue_owner_batch(&batch, Unit::SINGLE)
             .await
             .expect("owner should admit the batch");
     }
@@ -1881,12 +1881,12 @@ async fn relay_owner_expiry_retires_only_its_own_channels_for_the_branch_key() {
     let relays = BranchKeySiblingRelays::publish(&runtime, &domain);
     let key = string_branch_key("tenant", "acme");
     let ending_route = relays.ending_route(&key);
-    let sibling_ingress = relays.sibling_services.ingress_slot(&key, Unit::Single);
+    let sibling_ingress = relays.sibling_services.ingress_slot(&key, Unit::SINGLE);
     let owner_task = runtime
         .spawn_relay_owner_task(
             &domain,
             &relays.ending,
-            Unit::Single,
+            Unit::SINGLE,
             relays.ending_services.clone(),
             RelayRetention {
                 branch_ttl: Some(Duration::from_millis(20)),
@@ -1924,12 +1924,12 @@ async fn relay_owner_lru_eviction_retires_only_its_own_channels_for_the_branch_k
     let evicted = string_branch_key("tenant", "acme");
     let admitted = string_branch_key("tenant", "globex");
     let ending_route = relays.ending_route(&evicted);
-    let sibling_ingress = relays.sibling_services.ingress_slot(&evicted, Unit::Single);
+    let sibling_ingress = relays.sibling_services.ingress_slot(&evicted, Unit::SINGLE);
     let owner_task = runtime
         .spawn_relay_owner_task(
             &domain,
             &relays.ending,
-            Unit::Single,
+            Unit::SINGLE,
             relays.ending_services.clone(),
             RelayRetention {
                 branch_ttl: None,
@@ -1965,7 +1965,7 @@ async fn stop_domain_execution_leaves_relay_branch_presence_to_its_owner() {
     let branch = string_branch_key("tenant", "acme");
     publish_state_identity(&runtime, &domain, ModelKind::Relay, &relay);
     let presence = runtime
-        .relay_branch_presence(&domain, &relay, Unit::Single)
+        .relay_branch_presence(&domain, &relay, Unit::SINGLE)
         .expect("the relay's state identity is published");
     let mut owner = OwnedBranches::<BranchKey, ()>::claim(presence.clone());
     owner
@@ -2029,7 +2029,7 @@ async fn an_ended_producer_cannot_attach_to_a_recreated_relay_branch() {
     });
     producer.retire();
     services.channels.retire(&None);
-    assert!(!services.channels.bind(&None, Unit::Single).is_retired());
+    assert!(!services.channels.bind(&None, Unit::SINGLE).is_retired());
     let (batch, completion) = presence_test_batch(None);
     assert!(producer.dispatch_boundary(&batch).await.is_err());
     assert!(matches!(completion.wait().await, AckOutcome::NoAck(_)));
@@ -2039,7 +2039,7 @@ async fn an_ended_producer_cannot_attach_to_a_recreated_relay_branch() {
 async fn fan_out_through_owner(services: &RelayBoundaryServices, key: &Option<BranchKey>) {
     let (batch, completion) = presence_test_batch(key.clone());
     services
-        .enqueue_owner_batch(&batch, Unit::Single)
+        .enqueue_owner_batch(&batch, Unit::SINGLE)
         .await
         .expect("owner should admit the batch");
     // The owner holds a share attached to this one, so the root completes once the owner has
@@ -2076,7 +2076,7 @@ async fn an_established_relay_branch_publishes_its_presence_once_across_successi
         .spawn_relay_owner_task(
             &domain,
             &relay,
-            Unit::Single,
+            Unit::SINGLE,
             services.clone(),
             RelayRetention {
                 branch_ttl: Some(Duration::from_secs(300)),
@@ -2119,7 +2119,7 @@ async fn a_successor_owner_starts_from_an_empty_presence_after_its_predecessor_w
         .spawn_relay_owner_task(
             &domain,
             &relay,
-            Unit::Single,
+            Unit::SINGLE,
             predecessor_services.clone(),
             RelayRetention::default(),
         )
@@ -2138,7 +2138,7 @@ async fn a_successor_owner_starts_from_an_empty_presence_after_its_predecessor_w
         .spawn_relay_owner_task(
             &domain,
             &relay,
-            Unit::Single,
+            Unit::SINGLE,
             successor_services.clone(),
             RelayRetention::default(),
         )
@@ -2171,7 +2171,7 @@ async fn an_ending_predecessor_owner_cannot_clear_its_successors_presence() {
         .spawn_relay_owner_task(
             &domain,
             &relay,
-            Unit::Single,
+            Unit::SINGLE,
             predecessor_services.clone(),
             RelayRetention::default(),
         )
@@ -2183,7 +2183,7 @@ async fn an_ending_predecessor_owner_cannot_clear_its_successors_presence() {
         .spawn_relay_owner_task(
             &domain,
             &relay,
-            Unit::Single,
+            Unit::SINGLE,
             successor_services.clone(),
             RelayRetention::default(),
         )
@@ -2221,7 +2221,7 @@ async fn relay_state_shutdown_drains_every_ready_batch() {
             },
             kind: ModelKind::Relay,
             identifier: ModelName::from(&relay.clone()),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         },
         schema.arrow_schema(),
@@ -2240,7 +2240,7 @@ async fn relay_state_shutdown_drains_every_ready_batch() {
         &domain,
         RelayStateTaskSpec {
             relay: relay.clone(),
-            unit: Unit::Single,
+            unit: Unit::SINGLE,
             partitioning: RelayPartitioning::Whole,
             state,
             retention: RelayRetention::default(),
@@ -2295,9 +2295,9 @@ async fn direct_fanout_owner_buffer_uses_configured_capacity() {
         )
         .await;
     let (mut receiver, _owner_buffer) =
-        fanout.activate_owner_buffer(Unit::Single, relay_metrics(&runtime, &domain, &relay));
+        fanout.activate_owner_buffer(Unit::SINGLE, relay_metrics(&runtime, &domain, &relay));
     let owner_buffer = fanout
-        .owner_buffer(Unit::Single)
+        .owner_buffer(Unit::SINGLE)
         .expect("owner buffer must be active");
 
     owner_buffer
@@ -2371,7 +2371,7 @@ async fn relay_boundary_fanout_resize_preserves_existing_owner_receiver() {
         )
         .await;
     let (mut receiver, _owner_buffer) =
-        fanout.activate_owner_buffer(Unit::Single, relay_metrics(&runtime, &domain, &relay));
+        fanout.activate_owner_buffer(Unit::SINGLE, relay_metrics(&runtime, &domain, &relay));
     let resized = runtime
         .relay_boundary_fanout_with_capacity(
             &domain,
@@ -2384,12 +2384,12 @@ async fn relay_boundary_fanout_resize_preserves_existing_owner_receiver() {
     let broadcast = match (&fanout, &resized) {
         (RelayBoundaryFanout::Direct(original), RelayBoundaryFanout::Direct(resized_fanout)) => {
             assert!(Arc::ptr_eq(original, resized_fanout));
-            assert_eq!(resized_fanout.owner_buffer_len(Unit::Single), Some((0, 5)));
+            assert_eq!(resized_fanout.owner_buffer_len(Unit::SINGLE), Some((0, 5)));
             assert_eq!(resized_fanout.subscriptions.receivers().capacity(), 1);
             assert_eq!(resized_fanout.attached_runtime_consumers.capacity(), 1);
             assert_eq!(resized_fanout.detached_runtime_consumers.capacity(), 1);
             resized_fanout
-                .owner_buffer(Unit::Single)
+                .owner_buffer(Unit::SINGLE)
                 .expect("owner buffer must remain active")
         }
         _ => panic!("unbranched relay must use direct fanout"),
@@ -2613,7 +2613,7 @@ async fn a_three_destination_fanout_shares_one_encoded_body() {
                     sequence: index.arch_into(),
                 },
                 domain: &domain,
-                unit: Unit::Single,
+                unit: Unit::SINGLE,
                 consumer,
                 batch: &batch,
                 batch_ipc: body.clone(),
@@ -2805,7 +2805,7 @@ async fn the_console_lists_the_concrete_branches_the_relay_owner_holds() {
         .spawn_relay_owner_task(
             &domain,
             &relay,
-            Unit::Single,
+            Unit::SINGLE,
             services.clone(),
             RelayRetention::default(),
         )
@@ -2864,7 +2864,7 @@ async fn an_unscheduled_materialized_record_is_visible_only_while_its_owner_hold
     publish_state_identity(&runtime, &domain, ModelKind::Relay, &relay);
     publish_state_identity(&runtime, &domain, ModelKind::Relay, &untracked);
     let presence = runtime
-        .relay_branch_presence(&domain, &relay, Unit::Single)
+        .relay_branch_presence(&domain, &relay, Unit::SINGLE)
         .expect("the relay's state identity is published");
     let routing = DomainRoutingSnapshot {
         relay_services: [(relay.clone(), services_reporting_to(presence.clone()))]
@@ -2930,7 +2930,7 @@ async fn a_payload_for_a_relay_this_node_has_not_instantiated_names_its_domain_a
         kind,
         domain: target.clone(),
         relay: relay.clone(),
-        unit: Unit::Single,
+        unit: Unit::SINGLE,
         key: None,
         batch_ipc: batch_ipc.clone(),
         metadata: Vec::new(),

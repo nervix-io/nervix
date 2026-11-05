@@ -255,7 +255,7 @@ impl Runtime {
                 let templates = relays.route_templates(
                     ModelKind::Reingestor,
                     &ModelName::from(&plan.name),
-                    Unit::Single,
+                    Unit::SINGLE,
                     &plan.routes,
                 )?;
                 templates_by_reingestor.insert(plan.name.clone(), templates);
@@ -1262,7 +1262,7 @@ mod tests {
             .spawn_relay_owner_task(
                 &domain,
                 &root_relay,
-                Unit::Single,
+                Unit::SINGLE,
                 services.clone(),
                 RelayRetention::default(),
             )
@@ -1275,7 +1275,7 @@ mod tests {
                     ModelKind::Reingestor,
                     named::<ModelName>("tenant_partition"),
                 ),
-                Unit::Single,
+                Unit::SINGLE,
             ),
             root_relay: root_relay.clone(),
             branch: None,
@@ -1428,7 +1428,7 @@ mod tests {
             .spawn_relay_owner_task(
                 &domain,
                 &root_relay,
-                Unit::Single,
+                Unit::SINGLE,
                 services.clone(),
                 RelayRetention::default(),
             )
@@ -1441,7 +1441,7 @@ mod tests {
                     ModelKind::Reingestor,
                     named::<ModelName>("tenant_partition"),
                 ),
-                Unit::Single,
+                Unit::SINGLE,
             ),
             root_relay: root_relay.clone(),
             branch: None,
@@ -1557,7 +1557,7 @@ mod tests {
             .spawn_relay_owner_task(
                 &domain,
                 &relay,
-                Unit::Single,
+                Unit::SINGLE,
                 output_services.clone(),
                 RelayRetention::default(),
             )
@@ -1620,7 +1620,7 @@ mod tests {
                             ModelKind::Reingestor,
                             named::<ModelName>("tenant_partition"),
                         ),
-                        Unit::Single,
+                        Unit::SINGLE,
                     ),
                     root_relay: relay.clone(),
                     branch: None,

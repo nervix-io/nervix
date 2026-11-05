@@ -15,6 +15,7 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
+use meticulous::ResultExt as _;
 use nervix_connector::{IngestMetadataRow, IngestorReadCancellation};
 use nervix_connector_fake::{FakeIngestor as ChannelIngestor, FakeMessage as ChannelMessage};
 use nervix_model_harness::shuttle::{check_pct, check_random};
@@ -266,7 +267,7 @@ fn engagement_during_dispatch(family: IngestorFamily, cause: IngestorQuiesceCaus
             .assured("the check's domain is an identifier-shaped name");
         let ingestor = IngestorName::try_from("source")
             .assured("the check's ingestor is an identifier-shaped name");
-        let labels = metrics.register_ingestor_quiesce(&domain, &ingestor, Unit::Single, None);
+        let labels = metrics.register_ingestor_quiesce(&domain, &ingestor, Unit::SINGLE, None);
         let quiesce = Arc::new(IngestorQuiesceControl::new(
             IngestQuiesceMode::Drop,
             metrics,
@@ -1064,7 +1065,13 @@ fn instance_unit_handoff() {
             Arc::new(IngestorQuiesceControl::new(
                 IngestQuiesceMode::Suspend,
                 metrics.clone(),
-                metrics.register_ingestor_quiesce(&domain, &source, Unit::Instance(index), None),
+                metrics.register_ingestor_quiesce(
+                    &domain,
+                    &source,
+                    Unit::try_instance(index)
+                        .assured("the fixture index fits the execution-unit range"),
+                    None,
+                ),
             ))
         };
         let start = |control: Arc<IngestorQuiesceControl>| {

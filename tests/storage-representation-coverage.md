@@ -38,7 +38,7 @@ ingestor operations. The Model, registry and consensus properties preserve those
 Wire-schema generators carry each format's declared types, and codec generators carry explicit
 `BASE64` byte-text rules alongside `RFC3339` datetime-text rules. JSON, CBOR and AVRO retain their
 own wire type enums. The Model/archive, registry and consensus properties preserve those complete
-values. The `NERVIX UNIT WIRE` registry signature and `raft_instance_wire_` consensus namespace
+values. The `NERVIX UNIT RANK` registry signature and `raft_unit_rank_` consensus namespace
 identify the current Model layout before decoding.
 
 `ALTER INGESTOR` and `ALTER EMITTER` statement generators draw, for every entity, each change its
@@ -47,14 +47,17 @@ Kafka's and Pulsar's `SET START AT`, a declared quiesce mode and `SET CLIENT` wh
 or writes through a client. They mix them with the shared operations, the in-place construction
 changes of a route or an emitter, and an emitter's envelope clauses and properties. The
 Model/archive, consensus and canonical Plexus properties preserve the complete operations in order,
-and the `raft_instance_wire_` consensus namespace identifies the statement layout the
+and the `raft_unit_rank_` consensus namespace identifies the statement layout the
 transactions it keeps are stored in before decoding.
 
-Ingestor count declarations and instance ordinals retain their full positive 64-bit range.
+Ingestor count declarations retain their full positive 64-bit range. Compact execution-unit ranks
+retain every instance ordinal a supported target can materialize, including ordinals above `u32::MAX`.
 `models-ingestor-instancing` covers the declaration through JSON and archive encoding; the
 scheduled-unit, physical-key, handoff-record, client-reply and backup-record generators carry
-full-width instance identities. The backup crate owns its primitive `UnitWire` representation;
-its current unit-bearing record versions convert the complete identity both ways.
+boundary instance identities. Native and archived units occupy eight bytes with four-byte archive
+alignment. Semantic JSON and tagged physical keys validate the current ordinal bound. The backup
+crate owns its eight-byte primitive `UnitWire` representation; its current unit-bearing record
+versions convert the complete identity both ways.
 
 MQTT TOPIC ingestor generators draw either session at QoS 0, 1 or 2 beside `NO ACK`, and the
 persistent session at QoS 1 or 2 beside an acknowledged mode, so every pairing the declaration

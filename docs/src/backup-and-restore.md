@@ -831,15 +831,15 @@ its format version, each a little-endian 16-bit integer. The rest is an
 | Users | 2 | 1 | Every user's name and password hash as a PHC string |
 | Domain | 3 | 1 | Pace, default placement policy, lifecycle status, start count, the point the latest start began from, the committed clock mapping, the logical instant the clock had reached, and each declared resource with its next version number |
 | Resource version | 4 | 1 | The version's domain, resource and number, its upload state, and for a published version its checksums, file count, sizes, creation time and creating node |
-| WASM guest state descriptor | 5 | 3 | The scheduled unit, saved branch key, schema fingerprint, guest state generation and checkpoint revision |
-| Kafka domain offsets | 6 | 4 | The scheduled unit, ingestor schema fingerprint, optional applied explicit-start generation, and ordered topic and partition positions, expressed as the next offset to consume |
-| Branch lifecycle | 7 | 3 | The scheduled unit, owner kind, schema fingerprint, branch keys, last ingestion times and incarnations in LRU order |
-| Materialized relay descriptor | 8 | 3 | Domain and relay names, scheduled unit, schema fingerprint, revision, ownership fence, branch generation, row count and group count |
-| Materialized record identities | 9 | 3 | The scheduled unit and ordered row identities: an unbranched identity or typed branch fields, and low/high ingestion watermarks |
-| Deduplicator keyspace descriptor | 10 | 3 | Domain and deduplicator names, scheduled unit, schema fingerprint, branch fingerprint and typed branch fields, revision, key count and group count |
-| Window state descriptor | 11 | 3 | Domain and window processor names, scheduled unit, schema fingerprint, window model digest, branch fingerprint and typed branch fields, revision, branch incarnation, first and next admission sequence, each retained row's low/high ingestion watermarks, group count, and each aggregate's structure: rebuilt from the retained rows, or a linear histogram with its delayed removals as expiry time and bucket |
+| WASM guest state descriptor | 5 | 4 | The scheduled unit, saved branch key, schema fingerprint, guest state generation and checkpoint revision |
+| Kafka domain offsets | 6 | 5 | The scheduled unit, ingestor schema fingerprint, optional applied explicit-start generation, and ordered topic and partition positions, expressed as the next offset to consume |
+| Branch lifecycle | 7 | 4 | The scheduled unit, owner kind, schema fingerprint, branch keys, last ingestion times and incarnations in LRU order |
+| Materialized relay descriptor | 8 | 4 | Domain and relay names, scheduled unit, schema fingerprint, revision, ownership fence, branch generation, row count and group count |
+| Materialized record identities | 9 | 4 | The scheduled unit and ordered row identities: an unbranched identity or typed branch fields, and low/high ingestion watermarks |
+| Deduplicator keyspace descriptor | 10 | 4 | Domain and deduplicator names, scheduled unit, schema fingerprint, branch fingerprint and typed branch fields, revision, key count and group count |
+| Window state descriptor | 11 | 4 | Domain and window processor names, scheduled unit, schema fingerprint, window model digest, branch fingerprint and typed branch fields, revision, branch incarnation, first and next admission sequence, each retained row's low/high ingestion watermarks, group count, and each aggregate's structure: rebuilt from the retained rows, or a linear histogram with its delayed removals as expiry time and bucket |
 
-The archive format major version is `4`. An archive with another major version fails before any
+The archive format major version is `5`. An archive with another major version fails before any
 state section can be skipped or installed; capture a new archive in the current instance-unit format. A reader refuses invalid record magic, an unsupported
 manifest or required configuration record, an unknown record kind in the manifest, a first entry
 other than the manifest, and any section whose place, length or digest differs from what the

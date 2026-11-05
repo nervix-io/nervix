@@ -45,7 +45,7 @@ apply anything. The revision holds:
   schedule; and
 - the ownership-handoff fingerprint computed from the committed schedule's unit placements.
 
-Each scheduled node owns a map of `Unit::Single`, `Unit::Partition(p)`, or `Unit::Instance(i)`
+Each scheduled node owns a map of `Unit` identities with `Single`, `Partition(p)`, or `Instance(i)`
 placements. The unit carries its primary, assigned nodes, ownership transition, and WASM guest
 generations. The revision and planned resource assignments preserve those unit keys, and schedule
 reassignments name the node and unit together. A relay branched by a branch of several partitions

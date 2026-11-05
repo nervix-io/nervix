@@ -417,7 +417,7 @@ impl Runtime {
         self.clear_ingestor_readiness(domain, ingestor, unit);
         // A client ingestor's producers outlive this execution until the endpoint learns whether a
         // restart keeps their contract.
-        if unit == Unit::Single {
+        if unit == Unit::SINGLE {
             self.uninstall_client_execution(domain, ingestor);
         }
         if self
@@ -812,7 +812,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let describe = runtime
-                .describe_local_ingestor(&domain, &ingestor, Unit::Instance(0))
+                .describe_local_ingestor(&domain, &ingestor, Unit::FIRST_INSTANCE)
                 .expect("describe should succeed for scheduled ingestor");
             assert!(describe.running);
             let reported = describe.transient_error.as_deref().is_some_and(|error| {
@@ -957,12 +957,12 @@ mod tests {
                 .ingestors
                 .contains_key(&DomainNodeUnitRef::new(
                     DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
-                    Unit::Instance(0)
+                    Unit::FIRST_INSTANCE
                 )),
             "failed scheduled ingestor start must not leave an ingestor runtime"
         );
         let describe = runtime
-            .describe_local_ingestor(&domain, &ingestor, Unit::Instance(0))
+            .describe_local_ingestor(&domain, &ingestor, Unit::FIRST_INSTANCE)
             .expect("describe should represent the stopped ingestor");
         assert!(!describe.running);
         assert!(!describe.ready);
@@ -990,7 +990,7 @@ mod tests {
             "unexpected rebuild error: {clock_error}"
         );
         let describe = runtime
-            .describe_local_ingestor(&domain, &ingestor, Unit::Instance(0))
+            .describe_local_ingestor(&domain, &ingestor, Unit::FIRST_INSTANCE)
             .expect("describe should represent the stopped ingestor");
         assert_eq!(
             describe.transient_error.as_deref(),
@@ -1008,7 +1008,7 @@ mod tests {
             .stop_ingestor_unit(
                 &domain("default"),
                 &named::<IngestorName>("mqtt_notifications"),
-                Unit::Instance(2),
+                Unit::try_instance(2).assured("the fixture index fits the execution-unit range"),
             )
             .await
             .expect_err("no ingestor runs before one starts");

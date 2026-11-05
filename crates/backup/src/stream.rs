@@ -638,7 +638,7 @@ mod tests {
             });
         }
         BranchLifecycleRecord {
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             domain: DomainName::parse("payments").assured("the domain is an accepted literal"),
             owner_kind: ModelKind::Ingestor,
             entity: ModelName::parse("source").assured("the entity is an accepted literal"),
@@ -797,7 +797,7 @@ mod tests {
     fn a_record_above_the_limit_reports_its_whole_length_and_forwards_no_more_than_the_limit() {
         let topic = "t".repeat(200);
         let stream = StreamedKafkaOffsets {
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             domain: DomainName::parse("payments").assured("the domain is an accepted literal"),
             entity: ModelName::parse("source").assured("the entity is an accepted literal"),
             schema: SchemaFingerprint::from_digest([5; 32]),

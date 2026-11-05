@@ -254,15 +254,15 @@ impl Runtime {
         {
             return Err(stale());
         }
-        let Some(Unit::Instance(index)) = node
+        let Some(nervix_models::UnitKind::Instance(index)) = node
             .units
             .get_key_value(&placement.unit)
-            .map(|(unit, _)| *unit)
+            .map(|(unit, _)| unit.kind())
         else {
             return Err(stale());
         };
         let source = node.units.get(&placement.unit).ok_or_else(stale)?;
-        let root = node.units.get(&Unit::Instance(0)).ok_or_else(stale)?;
+        let root = node.units.get(&Unit::FIRST_INSTANCE).ok_or_else(stale)?;
         if source.primary_node.as_ref() != Some(request.source.node_id())
             || root.primary_node.as_ref() != Some(dispatcher.local_node_id())
         {
@@ -289,7 +289,7 @@ impl Runtime {
             return Err(stale());
         }
         let mut root_placement = placement.clone();
-        root_placement.unit = Unit::Instance(0);
+        root_placement.unit = Unit::FIRST_INSTANCE;
         let state = self
             .inner
             .replicated_kafka_offset_states
@@ -439,7 +439,7 @@ impl Runtime {
             *durable = Some(expected);
         }
         self.kafka_start_still_admitted(&request, &admission)?;
-        if admission.selection.unit == Unit::Instance(0)
+        if admission.selection.unit == Unit::FIRST_INSTANCE
             || matches!(&request.action, KafkaStartAction::Acknowledge { .. })
         {
             return Ok(KafkaStartResponse::Current { generation });
@@ -560,7 +560,7 @@ impl Runtime {
             .nodes
             .get(&NodeRef::new(placement.kind, placement.identifier.clone()))
             .ok_or_else(stale)?;
-        let coordinator_unit = node.units.get(&Unit::Instance(0)).ok_or_else(stale)?;
+        let coordinator_unit = node.units.get(&Unit::FIRST_INSTANCE).ok_or_else(stale)?;
         let coordinator = coordinator_unit.primary_node.clone().ok_or_else(stale)?;
         let request = KafkaStartRequest {
             placement: placement.to_remote(),
@@ -635,7 +635,7 @@ impl Runtime {
             .verified("an originating ingestor has at least its own unit");
             drop(execution);
             let mut root = state.placement().clone();
-            root.unit = Unit::Instance(0);
+            root.unit = Unit::FIRST_INSTANCE;
             let selection = IngestorUnitSelection {
                 unit: state.placement().unit,
                 count,
@@ -796,7 +796,7 @@ impl Runtime {
                 placement: state.placement().clone(),
             })?;
         self.verify_kafka_start_recipient(state, generation)?;
-        if state.placement().unit != Unit::Instance(0) {
+        if state.placement().unit != Unit::FIRST_INSTANCE {
             return Err(Report::new(StateReplicationError::Superseded {
                 placement: state.placement().clone(),
             }));
@@ -889,7 +889,7 @@ impl Runtime {
         };
         if placement.state != RuntimeState::KafkaOffset
             || placement.kind != ModelKind::Ingestor
-            || placement.unit != Unit::Instance(0)
+            || placement.unit != Unit::FIRST_INSTANCE
             || placement.branch_key.is_some()
         {
             return Err(stale());
@@ -943,7 +943,7 @@ mod shuttle_checks {
                 state: RuntimeState::KafkaOffset,
                 kind: ModelKind::Ingestor,
                 identifier: ModelName::parse("source").assured("a fixed valid source"),
-                unit: Unit::Instance(0),
+                unit: Unit::FIRST_INSTANCE,
                 branch_key: None,
             };
             let state = Arc::new(

@@ -99,16 +99,20 @@ mod tests {
             unpaced_domain_state(domain.as_str()),
         )]));
         let first = runtime
-            .ingest_task_handles(&domain, &ingestor, Unit::Instance(0))
+            .ingest_task_handles(&domain, &ingestor, Unit::FIRST_INSTANCE)
             .expect("the first unit binds its domain");
         let sibling = runtime
-            .ingest_task_handles(&domain, &ingestor, Unit::Instance(2))
+            .ingest_task_handles(
+                &domain,
+                &ingestor,
+                Unit::try_instance(2).assured("the fixture index fits the execution-unit range"),
+            )
             .expect("the sibling binds its domain");
         let (first_ack, first_completion) = first.tracked_root();
         let (sibling_ack, sibling_completion) = sibling.tracked_root();
         let entity = NodeRef::new(ModelKind::Ingestor, &ingestor);
         let targets =
-            EntityGateTargets::Units(vec![NodeUnitRef::new(entity.clone(), Unit::Instance(0))]);
+            EntityGateTargets::Units(vec![NodeUnitRef::new(entity.clone(), Unit::FIRST_INSTANCE)]);
         let status = || {
             runtime.entity_drain_status(
                 &domain,
@@ -139,15 +143,24 @@ mod tests {
         let runtime = Runtime::new();
         let domain = domain("instances");
         let ingestor = named::<IngestorName>("source");
-        let ending = runtime.prepare_ingestor_readiness(&domain, &ingestor, Unit::Instance(0));
-        let sibling = runtime.prepare_ingestor_readiness(&domain, &ingestor, Unit::Instance(2));
+        let ending = runtime.prepare_ingestor_readiness(&domain, &ingestor, Unit::FIRST_INSTANCE);
+        let sibling = runtime.prepare_ingestor_readiness(
+            &domain,
+            &ingestor,
+            Unit::try_instance(2).assured("the fixture index fits the execution-unit range"),
+        );
         ending.mark_ready();
         sibling.mark_ready();
-        let replacement = runtime.prepare_ingestor_readiness(&domain, &ingestor, Unit::Instance(0));
+        let replacement =
+            runtime.prepare_ingestor_readiness(&domain, &ingestor, Unit::FIRST_INSTANCE);
         replacement.mark_ready();
         ending.mark_unready();
-        assert!(runtime.ingestor_ready(&domain, &ingestor, Unit::Instance(0)));
-        assert!(runtime.ingestor_ready(&domain, &ingestor, Unit::Instance(2)));
+        assert!(runtime.ingestor_ready(&domain, &ingestor, Unit::FIRST_INSTANCE));
+        assert!(runtime.ingestor_ready(
+            &domain,
+            &ingestor,
+            Unit::try_instance(2).assured("the fixture index fits the execution-unit range")
+        ));
         assert!(!ending.is_ready());
     }
 
@@ -159,10 +172,10 @@ mod tests {
         let mut state = unpaced_domain_state(domain.as_str());
         runtime.sync_domains(&BTreeMap::from([(domain.clone(), state.clone())]));
         let handles = runtime
-            .ingest_task_handles(&domain, &ingestor, nervix_models::Unit::Single)
+            .ingest_task_handles(&domain, &ingestor, nervix_models::Unit::SINGLE)
             .assured("the source binds an installed domain");
         let observer =
-            runtime.ingestor_ack_root_trackers(&domain, &ingestor, nervix_models::Unit::Single);
+            runtime.ingestor_ack_root_trackers(&domain, &ingestor, nervix_models::Unit::SINGLE);
         let (acks, completion) = handles.tracked_root();
         assert_eq!(runtime.domain_outstanding_work(&domain), 1);
         assert_eq!(observer.ingestor_outstanding(), 1);

@@ -543,7 +543,7 @@ mod tests {
                     members: vec![first.clone(), second.clone()]
                         .into_iter()
                         .map(|node| {
-                            nervix_models::NodeUnitRef::new(node, nervix_models::Unit::Single)
+                            nervix_models::NodeUnitRef::new(node, nervix_models::Unit::SINGLE)
                         })
                         .collect(),
                     primary_node: None,
@@ -552,7 +552,7 @@ mod tests {
                     members: vec![second.clone(), third.clone()]
                         .into_iter()
                         .map(|node| {
-                            nervix_models::NodeUnitRef::new(node, nervix_models::Unit::Single)
+                            nervix_models::NodeUnitRef::new(node, nervix_models::Unit::SINGLE)
                         })
                         .collect(),
                     primary_node: None,
@@ -563,7 +563,7 @@ mod tests {
         let plan = EntityGatePlan::for_ownership_handoff(
             Some(&schedule),
             Some(&schedule),
-            [NodeUnitRef::new(first.clone(), nervix_models::Unit::Single)],
+            [NodeUnitRef::new(first.clone(), nervix_models::Unit::SINGLE)],
         );
 
         assert_eq!(plan.affected_entities(), &[first, second, third]);

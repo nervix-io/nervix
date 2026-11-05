@@ -1,3 +1,4 @@
+use meticulous::ResultExt as _;
 use nervix_arbitrary::{Arbitrary, Domain};
 use nonzero_ext::nonzero;
 
@@ -12,6 +13,58 @@ use crate::{
     SyslogIngestMode, SyslogIngestor, SyslogListenerIngestor, Unit, WasmProcessorLimits,
     WasmStateResetReason, WasmStateResetScope,
 };
+
+#[test]
+fn execution_unit_has_bounded_native_and_archived_storage() {
+    assert_eq!(std::mem::size_of::<Unit>(), 8);
+    assert_eq!(std::mem::size_of::<rkyv::Archived<Unit>>(), 8);
+    assert_eq!(std::mem::align_of::<rkyv::Archived<Unit>>(), 4);
+}
+
+#[test]
+fn execution_units_preserve_order_and_round_trip_every_boundary() {
+    let mut units = vec![Unit::SINGLE, Unit::partition(0), Unit::partition(u32::MAX)];
+    for index in [
+        0,
+        1,
+        u64::from(u32::MAX),
+        u64::from(u32::MAX) + 1,
+        Unit::MAX_INSTANCE_INDEX,
+    ] {
+        let unit = Unit::try_instance(index).assured("the selected index is within the unit range");
+        assert_eq!(unit.kind(), crate::UnitKind::Instance(index));
+        units.push(unit);
+    }
+    assert!(units.windows(2).all(|pair| pair[0] < pair[1]));
+    for unit in units {
+        let json = serde_json::to_vec(&unit).assured("a unit has a JSON representation");
+        assert_eq!(
+            serde_json::from_slice::<Unit>(&json).assured("a unit decodes"),
+            unit
+        );
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&unit).assured("a unit archives");
+        assert_eq!(bytes.len(), 8);
+        assert_eq!(
+            rkyv::from_bytes::<Unit, rkyv::rancor::Error>(&bytes).assured("a unit decodes"),
+            unit
+        );
+    }
+}
+
+#[test]
+fn execution_unit_range_contains_every_addressable_vector_position() {
+    let largest_position =
+        u64::try_from(isize::MAX).assured("supported targets have at most 64-bit pointers");
+    assert!(largest_position <= Unit::MAX_INSTANCE_INDEX);
+    assert!(Unit::try_instance(largest_position).is_ok());
+    let outside = Unit::MAX_INSTANCE_INDEX
+        .checked_add(1)
+        .assured("the unit rank reserves kind values");
+    assert!(matches!(Unit::try_instance(outside), Err(cause) if cause.index == outside));
+    let json =
+        serde_json::to_vec(&crate::UnitKind::Instance(outside)).assured("a boundary input encodes");
+    assert!(serde_json::from_slice::<Unit>(&json).is_err());
+}
 
 #[test]
 fn bolero_scheduled_units_round_trip_through_current_storage_shape() {
@@ -68,8 +121,13 @@ fn bolero_scheduled_units_round_trip_through_current_storage_shape() {
             let base = node.single_unit().clone();
             let ordinal = u32::from(arbitrary.entropy().byte());
             for unit in [
-                Unit::Partition(ordinal),
-                Unit::Instance(arbitrary.entropy().boundary_biased(0..=u64::MAX)),
+                Unit::partition(ordinal),
+                Unit::try_instance(
+                    arbitrary
+                        .entropy()
+                        .boundary_biased(0..=Unit::MAX_INSTANCE_INDEX),
+                )
+                .assured("the fixture index fits the execution-unit range"),
             ] {
                 if arbitrary.entropy().flag() {
                     let mut placement = base.clone();
@@ -391,7 +449,7 @@ fn a_domain_schedule_names_the_units_a_node_is_the_primary_of_in_schedule_order(
         .collect::<Vec<_>>();
     assert_eq!(
         names,
-        vec![("orders", Unit::Single), ("refunds", Unit::Single)]
+        vec![("orders", Unit::SINGLE), ("refunds", Unit::SINGLE)]
     );
     assert!(schedule.primary_units_on(&named("node-c")).is_empty());
 }
@@ -427,10 +485,10 @@ fn a_relay_scheduled_as_partitions_takes_no_guest_state_lifetime_or_reset() {
     .placed_on(Some(owner.clone()), vec![owner.clone()]);
     let single = relay
         .units
-        .shift_remove(&Unit::Single)
+        .shift_remove(&Unit::SINGLE)
         .expect("the fixture starts with one unit");
-    relay.units.insert(Unit::Partition(0), single.clone());
-    relay.units.insert(Unit::Partition(1), single);
+    relay.units.insert(Unit::partition(0), single.clone());
+    relay.units.insert(Unit::partition(1), single);
     let before = relay.clone();
 
     // Failover and drain begin a new guest-state lifetime for every node they move, so these run

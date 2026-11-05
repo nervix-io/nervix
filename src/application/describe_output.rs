@@ -274,7 +274,7 @@ pub(in crate::application) fn format_ingestor_describe_output(
         format!("ingestor: {}", name.as_str()),
         "kind: INGESTOR".to_string(),
     ];
-    if let Unit::Instance(index) = unit {
+    if let nervix_models::UnitKind::Instance(index) = unit.kind() {
         let owner = match ingestor_node
             .unit(unit)
             .and_then(|placement| placement.execution_node())
@@ -660,7 +660,7 @@ fn format_schedule_placement_lines(scheduled_node: Option<&ScheduledNode>) -> Ve
 fn format_partition_placement_lines(scheduled_node: &ScheduledNode) -> Vec<String> {
     let mut lines = vec![format!("partitions: {}", scheduled_node.units.len())];
     for (unit, scheduled) in &scheduled_node.units {
-        let Unit::Partition(partition) = unit else {
+        let nervix_models::UnitKind::Partition(partition) = unit.kind() else {
             continue;
         };
         let owner = match scheduled_node.unit_execution_node(*unit) {
@@ -1847,7 +1847,7 @@ mod tests {
                 &ingestor.name,
                 ingestor,
                 &scheduled,
-                Unit::Single,
+                Unit::SINGLE,
                 &summary,
             )
             .assured("the current ingestor configuration renders");

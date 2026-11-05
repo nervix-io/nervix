@@ -40,7 +40,7 @@ mod tests {
             state: RuntimeState::BranchAggregated,
             kind: ModelKind::Ingestor,
             identifier: source.clone(),
-            unit: Unit::Instance(1),
+            unit: Unit::try_instance(1).assured("the fixture index fits the execution-unit range"),
             branch_key: None,
         };
         let record = |metrics: &RuntimeMetrics, unit, node: &ClusterNodeName, count| {
@@ -65,15 +65,25 @@ mod tests {
             None,
         )
         .expect("the first owner installs its instance state");
-        record(&previous_metrics, Unit::Instance(1), &first_node, 2);
+        record(
+            &previous_metrics,
+            Unit::try_instance(1).assured("the fixture index fits the execution-unit range"),
+            &first_node,
+            2,
+        );
         previous.mark_metrics_updated();
         let checkpoint = previous
             .latest_snapshot(&previous_metrics)
             .expect("the ending owner captures its final totals");
 
         let metrics = RuntimeMetrics::default();
-        record(&metrics, Unit::Instance(0), &next_node, 7);
-        record(&metrics, Unit::Instance(1), &next_node, 100);
+        record(&metrics, Unit::FIRST_INSTANCE, &next_node, 7);
+        record(
+            &metrics,
+            Unit::try_instance(1).assured("the fixture index fits the execution-unit range"),
+            &next_node,
+            100,
+        );
         let successor = ReplicatedBranchAggregatedState::new(
             placement.clone(),
             Some(next_node.clone()),
@@ -82,7 +92,7 @@ mod tests {
         )
         .expect("the successor installs exactly the transferred instance");
         let total = |metrics: &RuntimeMetrics, unit: Unit| {
-            let Unit::Instance(index) = unit else {
+            let nervix_models::UnitKind::Instance(index) = unit.kind() else {
                 unreachable!("the test names only instance units")
             };
             metrics
@@ -105,9 +115,20 @@ mod tests {
                 })
                 .sum::<u64>()
         };
-        assert_eq!(total(&metrics, Unit::Instance(0)), 7);
-        assert_eq!(total(&metrics, Unit::Instance(1)), 2);
-        record(&metrics, Unit::Instance(1), &next_node, 3);
+        assert_eq!(total(&metrics, Unit::FIRST_INSTANCE), 7);
+        assert_eq!(
+            total(
+                &metrics,
+                Unit::try_instance(1).assured("the fixture index fits the execution-unit range")
+            ),
+            2
+        );
+        record(
+            &metrics,
+            Unit::try_instance(1).assured("the fixture index fits the execution-unit range"),
+            &next_node,
+            3,
+        );
         successor.mark_metrics_updated();
         let checkpoint = successor
             .latest_snapshot(&metrics)
@@ -121,7 +142,7 @@ mod tests {
             }));
         }
         let restored_metrics = RuntimeMetrics::default();
-        record(&restored_metrics, Unit::Instance(0), &next_node, 9);
+        record(&restored_metrics, Unit::FIRST_INSTANCE, &next_node, 9);
         ReplicatedBranchAggregatedState::new(
             placement,
             Some(next_node),
@@ -129,8 +150,14 @@ mod tests {
             Some(checkpoint),
         )
         .expect("a restart restores the unit-qualified checkpoint");
-        assert_eq!(total(&restored_metrics, Unit::Instance(0)), 9);
-        assert_eq!(total(&restored_metrics, Unit::Instance(1)), 5);
+        assert_eq!(total(&restored_metrics, Unit::FIRST_INSTANCE), 9);
+        assert_eq!(
+            total(
+                &restored_metrics,
+                Unit::try_instance(1).assured("the fixture index fits the execution-unit range")
+            ),
+            5
+        );
     }
 
     #[test]
@@ -142,7 +169,7 @@ mod tests {
             state: RuntimeState::BranchAggregated,
             kind: ModelKind::Ingestor,
             identifier: named("source"),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         };
         let state = ReplicatedBranchAggregatedState::new(
@@ -154,7 +181,7 @@ mod tests {
         .expect("the metric placement initializes");
         let relay = named("events");
         let batch = metrics.resolve_node_batch_metrics(NodeBatchMetricsSpec {
-            unit: Unit::Single,
+            unit: Unit::SINGLE,
             domain: &placement.domain,
             kind: placement.kind,
             node: &placement.identifier,

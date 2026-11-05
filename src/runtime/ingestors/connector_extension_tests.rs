@@ -180,11 +180,11 @@ impl UnfoldingDomain {
             branched_senders: entrypoints.senders,
             quiesce,
             shutdown,
-            unit: Unit::Single,
+            unit: Unit::SINGLE,
             readiness: self.runtime.prepare_ingestor_readiness(
                 &self.domain,
                 &self.ingestor,
-                Unit::Single,
+                Unit::SINGLE,
             ),
             buffered_intake: intake.buffered,
             flush_each_intake: intake.flush_each_intake,
@@ -196,7 +196,7 @@ impl UnfoldingDomain {
     /// The quiesce control the fixture's running ingestor holds.
     pub(super) fn quiesce(&self) -> Arc<IngestorQuiesceControl> {
         self.runtime
-            .ingestor_quiesce_control(&self.domain, &self.ingestor, nervix_models::Unit::Single)
+            .ingestor_quiesce_control(&self.domain, &self.ingestor, nervix_models::Unit::SINGLE)
             .assured("a running ingestor holds its quiesce control")
     }
 
@@ -369,7 +369,7 @@ pub(super) fn quiesce_control(
 ) -> Arc<IngestorQuiesceControl> {
     let metrics = RuntimeMetrics::default();
     let labels =
-        metrics.register_ingestor_quiesce(&fixture.domain, &fixture.ingestor, Unit::Single, None);
+        metrics.register_ingestor_quiesce(&fixture.domain, &fixture.ingestor, Unit::SINGLE, None);
     Arc::new(IngestorQuiesceControl::new(mode, metrics, labels))
 }
 

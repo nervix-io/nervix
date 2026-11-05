@@ -38,6 +38,7 @@ mod duration_text;
 mod emitter;
 mod emitter_batch;
 mod emitter_envelope;
+mod execution_unit;
 mod expression;
 mod http_request;
 mod ingestor_input;
@@ -248,6 +249,7 @@ pub use emitter_envelope::{
     EmitterEnvelope, EmitterEnvelopeAlteration, EnvelopeClause, EnvelopeClauseValue,
     EnvelopeDeclarationError, EnvelopeProperty,
 };
+pub use execution_unit::{Unit, UnitIndexError, UnitKind};
 pub use expression::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, CaseBranch, Expression,
     ExternalValue, FieldReference, FieldScope, Float64Literal, Inheritance, InheritedField,
@@ -345,7 +347,7 @@ pub use schedule::{
     ClusterSchedule, DomainNodeUnitRef, DomainSchedule, EntityGateTargets, KafkaPartitionSchedule,
     NodeUnitRef, OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
     OwnershipStateResetCause, OwnershipTransition, PlacementGroupSchedule, ScheduledModel,
-    ScheduledNode, ScheduledNodes, ScheduledUnit, Unit,
+    ScheduledNode, ScheduledNodes, ScheduledUnit,
 };
 pub use schema::{
     AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaError,

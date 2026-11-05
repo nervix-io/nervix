@@ -229,7 +229,7 @@ impl MetricKey {
             peer_kind: "RELAY".to_string(),
             peer: relay.as_str().to_string(),
             direction: direction.to_string(),
-            unit: Unit::Single,
+            unit: Unit::SINGLE,
             metric,
         }
     }
@@ -251,7 +251,7 @@ impl MetricKey {
             peer_kind: String::new(),
             peer: String::new(),
             direction: direction.to_string(),
-            unit: Unit::Single,
+            unit: Unit::SINGLE,
             metric,
         }
     }
@@ -2597,8 +2597,7 @@ impl RuntimeMetricsSnapshot {
     /// Keep complete series, including their original instance and physical-node identities.
     /// A retired instance's history has one checkpoint owner until that instance is declared again.
     pub(crate) fn select_instances(mut self, index: u64, count: NonZeroU64) -> Self {
-        let selected =
-            |unit| matches!(unit, Unit::Instance(origin) if origin % count.get() == index);
+        let selected = |unit: Unit| matches!(unit.kind(), nervix_models::UnitKind::Instance(origin) if origin % count.get() == index);
         self.counters.retain(|series| selected(series.key.unit));
         self.histograms.retain(|series| selected(series.key.unit));
         self
@@ -4822,7 +4821,7 @@ impl RuntimeMetrics {
                 peer: String::new(),
                 direction: key.direction.clone(),
                 // A domain aggregate covers every unit of the targets it sums.
-                unit: Unit::Single,
+                unit: Unit::SINGLE,
                 metric: key.metric,
             };
             if let Some((_, summary)) = counters
@@ -4863,7 +4862,7 @@ impl RuntimeMetrics {
                 peer: String::new(),
                 direction: key.direction.clone(),
                 // A domain aggregate covers every unit of the targets it sums.
-                unit: Unit::Single,
+                unit: Unit::SINGLE,
                 metric: key.metric,
             };
             if let Some((_, summary)) = histograms
@@ -5511,26 +5510,30 @@ fn prometheus_label_values(key: &MetricKey) -> [Cow<'_, str>; 10] {
 /// partition, and the same `-` absent marker as the other optional labels for every series of a
 /// target that is not divided into partitions.
 fn partition_label(unit: Unit) -> Cow<'static, str> {
-    match unit {
-        Unit::Partition(partition) => Cow::Owned(partition.to_string()),
-        Unit::Single | Unit::Instance(_) => Cow::Borrowed("-"),
+    match unit.kind() {
+        nervix_models::UnitKind::Partition(partition) => Cow::Owned(partition.to_string()),
+        nervix_models::UnitKind::Single | nervix_models::UnitKind::Instance(_) => {
+            Cow::Borrowed("-")
+        }
     }
 }
 
 fn instance_label(unit: Unit) -> Cow<'static, str> {
-    match unit {
-        Unit::Instance(index) => Cow::Owned(index.to_string()),
-        Unit::Single | Unit::Partition(_) => Cow::Borrowed("-"),
+    match unit.kind() {
+        nervix_models::UnitKind::Instance(index) => Cow::Owned(index.to_string()),
+        nervix_models::UnitKind::Single | nervix_models::UnitKind::Partition(_) => {
+            Cow::Borrowed("-")
+        }
     }
 }
 
 /// The ` partition=p` field a `DESCRIBE` metric line carries for a series of one relay partition,
 /// and nothing for a series of a target that is not divided into partitions.
 fn partition_field(unit: Unit) -> String {
-    match unit {
-        Unit::Partition(partition) => format!(" partition={partition}"),
-        Unit::Instance(index) => format!(" instance={index}"),
-        Unit::Single => String::new(),
+    match unit.kind() {
+        nervix_models::UnitKind::Partition(partition) => format!(" partition={partition}"),
+        nervix_models::UnitKind::Instance(index) => format!(" instance={index}"),
+        nervix_models::UnitKind::Single => String::new(),
     }
 }
 
@@ -5861,13 +5864,21 @@ mod tests {
                 let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
                 let mut snapshot = RuntimeMetricsSnapshot::generated(&mut arbitrary);
                 for (index, series) in snapshot.counters.iter_mut().enumerate() {
-                    series.key.unit =
-                        Unit::Instance(arbitrary.entropy().boundary_biased(0..=u64::MAX));
+                    series.key.unit = Unit::try_instance(
+                        arbitrary
+                            .entropy()
+                            .boundary_biased(0..=Unit::MAX_INSTANCE_INDEX),
+                    )
+                    .assured("the fixture index fits the execution-unit range");
                     series.key.metric = format!("counter_{index}");
                 }
                 for (index, series) in snapshot.histograms.iter_mut().enumerate() {
-                    series.key.unit =
-                        Unit::Instance(arbitrary.entropy().boundary_biased(0..=u64::MAX));
+                    series.key.unit = Unit::try_instance(
+                        arbitrary
+                            .entropy()
+                            .boundary_biased(0..=Unit::MAX_INSTANCE_INDEX),
+                    )
+                    .assured("the fixture index fits the execution-unit range");
                     series.key.metric = format!("histogram_{index}");
                 }
                 snapshot
@@ -5966,7 +5977,7 @@ mod tests {
         let children = metrics.register_ingestor_quiesce(
             &domain,
             &ingestor,
-            nervix_models::Unit::Single,
+            nervix_models::Unit::SINGLE,
             None,
         );
         metrics.set_ingestor_quiesce_buffered(&children, 2, 13);
@@ -6028,7 +6039,7 @@ mod tests {
             MetricKey::relay(
                 domain,
                 relay,
-                Unit::Single,
+                Unit::SINGLE,
                 Some(physical_node_id),
                 "received",
                 MESSAGES_TOTAL,
@@ -6164,7 +6175,7 @@ mod tests {
                 &domain,
                 &NodeUnitRef::new(
                     nervix_models::NodeRef::new(ModelKind::Ingestor, &ingestor),
-                    Unit::Single,
+                    Unit::SINGLE,
                 ),
                 Some(&physical_node),
                 "received",
@@ -6273,7 +6284,7 @@ mod tests {
         let relay_metrics = metrics.resolve_relay_metrics(
             &domain,
             &relay,
-            Unit::Single,
+            Unit::SINGLE,
             Some(&physical_node),
             "concrete",
             None,
@@ -6523,7 +6534,7 @@ mod tests {
             .resolve_relay_metrics(
                 &domain,
                 &relay,
-                Unit::Single,
+                Unit::SINGLE,
                 Some(&ClusterNodeName::parse("node-1").expect("valid name")),
                 "concrete",
                 None,
@@ -6601,7 +6612,11 @@ mod tests {
         let target = ModelName::from(&source);
         let relay = RelayName::parse("events").expect("valid relay");
         let physical = ClusterNodeName::parse("node-1").expect("valid node");
-        let children = [Unit::Instance(0), Unit::Instance(1)].map(|unit| {
+        let children = [
+            Unit::FIRST_INSTANCE,
+            Unit::try_instance(1).assured("the fixture index fits the execution-unit range"),
+        ]
+        .map(|unit| {
             metrics.register_ingestor_quiesce(&domain, &source, unit, Some(&physical));
             metrics.resolve_node_batch_metrics(NodeBatchMetricsSpec {
                 domain: &domain,
@@ -6617,8 +6632,13 @@ mod tests {
         children[0].observe(2, 20, None);
         children[1].observe(3, 30, None);
         for (index, expected) in [(0, 2), (1, 3)] {
-            let lines =
-                metrics.describe_global_unit(&domain, "INGESTOR", &target, Unit::Instance(index));
+            let lines = metrics.describe_global_unit(
+                &domain,
+                "INGESTOR",
+                &target,
+                Unit::try_instance(index)
+                    .assured("the fixture index fits the execution-unit range"),
+            );
             let messages = lines
                 .iter()
                 .filter(|line| line.trim_start().starts_with("messages_total "))
@@ -6627,10 +6647,19 @@ mod tests {
             assert!(messages[0].contains(&format!("instance={index}")));
             assert!(messages[0].contains(&format!("total={expected}")));
         }
-        metrics.remove_ingestor_unit(&domain, &source, Unit::Instance(1), Some(&physical));
+        metrics.remove_ingestor_unit(
+            &domain,
+            &source,
+            Unit::try_instance(1).assured("the fixture index fits the execution-unit range"),
+            Some(&physical),
+        );
         children[0].observe(5, 50, None);
-        let retained =
-            metrics.snapshot_global_unit(&domain, ModelKind::Ingestor, &target, Unit::Instance(0));
+        let retained = metrics.snapshot_global_unit(
+            &domain,
+            ModelKind::Ingestor,
+            &target,
+            Unit::FIRST_INSTANCE,
+        );
         assert_eq!(
             retained
                 .counters
@@ -6657,7 +6686,7 @@ mod tests {
         let relay_metrics = metrics.resolve_relay_metrics(
             &domain,
             &relay,
-            Unit::Single,
+            Unit::SINGLE,
             Some(&ClusterNodeName::parse("node-1").expect("valid name")),
             "concrete",
             Some(tenant_branch("acme")),
@@ -6665,7 +6694,7 @@ mod tests {
         relay_metrics.observe_batch(2, 64, None);
         relay_metrics.observe_buffer(1, 2);
 
-        metrics.remove_relay_unit(&domain, &relay, Unit::Single);
+        metrics.remove_relay_unit(&domain, &relay, Unit::SINGLE);
 
         assert!(
             metrics
@@ -6704,7 +6733,7 @@ mod tests {
         let domain = DomainName::parse("main").expect("valid domain");
         let relay = RelayName::parse("events").expect("valid identifier");
         let node = ClusterNodeName::parse("node-1").expect("valid name");
-        for unit in [Unit::Partition(0), Unit::Partition(3)] {
+        for unit in [Unit::partition(0), Unit::partition(3)] {
             let partition =
                 metrics.resolve_relay_metrics(&domain, &relay, unit, Some(&node), "concrete", None);
             partition.observe_batch(2, 64, None);
@@ -6737,7 +6766,7 @@ mod tests {
             "a DESCRIBE line names its partition: {described:?}"
         );
 
-        metrics.remove_relay_unit(&domain, &relay, Unit::Partition(0));
+        metrics.remove_relay_unit(&domain, &relay, Unit::partition(0));
         let rendered = metrics.prometheus_text();
         assert!(!rendered.contains("partition=\"0\""), "{rendered}");
         assert!(
@@ -6755,7 +6784,7 @@ mod tests {
         let owner = metrics.resolve_relay_metrics(
             &domain,
             &relay,
-            Unit::Single,
+            Unit::SINGLE,
             Some(&node),
             "concrete",
             None,
@@ -6938,7 +6967,7 @@ mod tests {
         assert!(prometheus.contains("nervix_messages_per_batch_count"));
 
         let snapshot =
-            metrics.snapshot_global_unit(&domain, ModelKind::Deduplicator, &node, Unit::Single);
+            metrics.snapshot_global_unit(&domain, ModelKind::Deduplicator, &node, Unit::SINGLE);
         let histogram = snapshot
             .histograms
             .iter()
@@ -6954,7 +6983,7 @@ mod tests {
             &domain,
             ModelKind::Deduplicator,
             &node,
-            Unit::Single,
+            Unit::SINGLE,
             snapshot,
         );
         assert!(
@@ -7028,7 +7057,7 @@ mod tests {
             .resolve_relay_metrics(
                 &domain,
                 &relay,
-                Unit::Single,
+                Unit::SINGLE,
                 Some(&physical_node),
                 "concrete",
                 None,
@@ -7039,7 +7068,7 @@ mod tests {
             &domain,
             ModelKind::Relay,
             &ModelName::from(&relay),
-            Unit::Single,
+            Unit::SINGLE,
         );
         assert_eq!(snapshot.counters.len(), 3);
         assert!(
@@ -7069,7 +7098,7 @@ mod tests {
             .resolve_relay_metrics(
                 &domain,
                 &relay,
-                Unit::Single,
+                Unit::SINGLE,
                 Some(&physical_node),
                 "concrete",
                 None,
@@ -7238,7 +7267,7 @@ mod tests {
             &node_id,
         );
         let global =
-            metrics.snapshot_global_unit(&domain, ModelKind::Deduplicator, &node, Unit::Single);
+            metrics.snapshot_global_unit(&domain, ModelKind::Deduplicator, &node, Unit::SINGLE);
         for snapshot in [branch, global] {
             let latency = snapshot
                 .histograms
@@ -7301,7 +7330,7 @@ mod tests {
             &DomainName::parse("main").expect("valid domain"),
             ModelKind::Deduplicator,
             &ModelName::parse("dedupe").expect("valid identifier"),
-            Unit::Single,
+            Unit::SINGLE,
         );
         let latency = snapshot
             .histograms

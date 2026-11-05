@@ -62,7 +62,7 @@ fn assert_rejected(fixture: &UnfoldingDomain, report: &str, rejections: u64) {
         .describe_local_ingestor(
             &fixture.domain,
             &fixture.ingestor,
-            nervix_models::Unit::Single,
+            nervix_models::Unit::SINGLE,
         )
         .expect("the fixture's ingestor describes itself");
     assert_eq!(described.decode_rejections_total, rejections);

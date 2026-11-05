@@ -834,7 +834,7 @@ impl EmitterTask {
             Some(relay) => {
                 EmitterOutputMetrics::Relay(runtime.inner.metrics.resolve_node_batch_metrics(
                     NodeBatchMetricsSpec {
-                        unit: Unit::Single,
+                        unit: Unit::SINGLE,
                         domain,
                         kind: ModelKind::Emitter,
                         node: &ModelName::from(&emitter.name),

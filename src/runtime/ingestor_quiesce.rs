@@ -2177,7 +2177,7 @@ mod tests {
         let ingestor = named::<IngestorName>("source");
         let key = DomainNodeUnitRef::new(
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
-            Unit::Single,
+            Unit::SINGLE,
         );
         let control =
             test_ingestor_quiesce_control(&runtime, &domain, &ingestor, IngestQuiesceMode::Suspend);
@@ -2202,7 +2202,7 @@ mod tests {
         let ingestor = named::<IngestorName>("source");
         let key = DomainNodeUnitRef::new(
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
-            Unit::Single,
+            Unit::SINGLE,
         );
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let stopped = Arc::new(AtomicBool::new(false));
@@ -2311,7 +2311,7 @@ mod tests {
             let metric_labels = metrics.register_ingestor_quiesce(
                 &domain("default"),
                 &named("source"),
-                nervix_models::Unit::Single,
+                nervix_models::Unit::SINGLE,
                 None,
             );
             let control = Arc::new(IngestorQuiesceControl::new(
@@ -2496,7 +2496,7 @@ mod tests {
                 let metric_labels = metrics.register_ingestor_quiesce(
                     &domain("default"),
                     &named("source"),
-                    nervix_models::Unit::Single,
+                    nervix_models::Unit::SINGLE,
                     None,
                 );
                 let control = Arc::new(IngestorQuiesceControl::new(
@@ -2613,7 +2613,7 @@ mod tests {
                 let metric_labels = metrics.register_ingestor_quiesce(
                     &domain("default"),
                     &named("source"),
-                    nervix_models::Unit::Single,
+                    nervix_models::Unit::SINGLE,
                     None,
                 );
                 let control = Arc::new(IngestorQuiesceControl::new(

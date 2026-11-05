@@ -125,9 +125,13 @@ impl Arbitrary<'_> {
     /// whose index is near either end of its range.
     pub fn unit(&mut self) -> nervix_models::Unit {
         match self.entropy.byte() % 3 {
-            0 => nervix_models::Unit::Single,
-            1 => nervix_models::Unit::Partition(self.unit_index()),
-            _ => nervix_models::Unit::Instance(self.entropy.boundary_biased(0..=u64::MAX)),
+            0 => nervix_models::Unit::SINGLE,
+            1 => nervix_models::Unit::partition(self.unit_index()),
+            _ => nervix_models::Unit::try_instance(
+                self.entropy
+                    .boundary_biased(0..=nervix_models::Unit::MAX_INSTANCE_INDEX),
+            )
+            .assured("the fixture index fits the execution-unit range"),
         }
     }
 

@@ -915,10 +915,10 @@ mod tests {
         assert_eq!(
             units,
             vec![
-                Unit::Partition(0),
-                Unit::Partition(1),
-                Unit::Partition(2),
-                Unit::Partition(3)
+                Unit::partition(0),
+                Unit::partition(1),
+                Unit::partition(2),
+                Unit::partition(3)
             ]
         );
         let mut owners = std::collections::BTreeSet::new();

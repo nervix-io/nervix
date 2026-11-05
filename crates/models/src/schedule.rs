@@ -23,7 +23,7 @@ use std::{
 };
 
 use indexmap::IndexMap;
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::AsRefStr;
@@ -31,7 +31,7 @@ use strum::AsRefStr;
 use crate::{
     BranchKeyFingerprint, ClusterNodeName, CommandExecutionReference, CreateWasmProcessor,
     DomainName, DomainNodeRef, IngestorEntity, KafkaIngestor, KafkaOffsetMode, Model, ModelKind,
-    ModelName, NodeRef, ResolvedBranching, SchemaFingerprint, UniquelyKindedModel,
+    ModelName, NodeRef, ResolvedBranching, SchemaFingerprint, UniquelyKindedModel, Unit,
     WasmSavedStateRejection, WasmStateGeneration, WasmStateGenerations, WasmStateRecoveries,
     WasmStateRecoveryAdmission, WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetPhase,
     WasmStateResetReason, WasmStateResetScope,
@@ -62,52 +62,6 @@ impl FromIterator<DomainSchedule> for ClusterSchedule {
 /// A domain's scheduled nodes, in the order the registry emitted them and keyed by runtime node
 /// identity so callers resolve a node by kind and identifier without scanning the sequence.
 pub type ScheduledNodes = IndexMap<NodeRef, ScheduledNode>;
-
-/// One independently placed execution of a logical node. Partition and instance numbers are
-/// zero-based within that node. A graph without declared partitions or external instances has
-/// exactly one `Single` unit.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-)]
-pub enum Unit {
-    Single,
-    Partition(u32),
-    Instance(u64),
-}
-
-impl Unit {
-    /// The ` unit=partition:<p>` or ` unit=instance:<i>` field a status or plan line names a unit
-    /// by, and nothing for the `Single` unit of a node without partitions or instances.
-    pub fn status_field(self) -> String {
-        match self {
-            Self::Single => String::new(),
-            Self::Partition(partition) => format!(" unit=partition:{partition}"),
-            Self::Instance(instance) => format!(" unit=instance:{instance}"),
-        }
-    }
-
-    /// The ` partition <p>` or ` instance <i>` words an operator-facing label names a unit by,
-    /// after the node it belongs to, and nothing for the `Single` unit.
-    pub fn label_suffix(self) -> String {
-        match self {
-            Self::Single => String::new(),
-            Self::Partition(partition) => format!(" partition {partition}"),
-            Self::Instance(instance) => format!(" instance {instance}"),
-        }
-    }
-}
 
 /// The identity of one unit of a scheduled node, shared by planning and state ownership.
 #[derive(
@@ -206,7 +160,7 @@ impl DomainNodeUnitRef {
     }
 
     pub fn single(entity: DomainNodeRef) -> Self {
-        Self::new(entity, Unit::Single)
+        Self::new(entity, Unit::SINGLE)
     }
 }
 
@@ -568,12 +522,15 @@ impl ScheduledNode {
         match (config, branching) {
             (Model::Relay(_), Some(branching)) => branching.units(),
             (Model::Ingestor(ingestor), _) => match ingestor.input.instances() {
-                Some(crate::IngestorInstances::Count(count)) => {
-                    (0..count.get()).map(Unit::Instance).collect()
-                }
-                _ => vec![Unit::Single],
+                Some(crate::IngestorInstances::Count(count)) => (0..count.get())
+                    .map(|index| {
+                        Unit::try_instance(index)
+                            .assured("the validated allocation layout bounds the instance index")
+                    })
+                    .collect(),
+                _ => vec![Unit::SINGLE],
             },
-            _ => vec![Unit::Single],
+            _ => vec![Unit::SINGLE],
         }
     }
 
@@ -581,7 +538,7 @@ impl ScheduledNode {
     pub fn is_partitioned(&self) -> bool {
         self.units
             .keys()
-            .any(|unit| matches!(unit, Unit::Partition(_)))
+            .any(|unit| matches!(unit.kind(), crate::UnitKind::Partition(_)))
     }
 
     /// The placement of `unit`, when this node is scheduled as it.

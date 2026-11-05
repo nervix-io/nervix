@@ -20,7 +20,7 @@ use crate::{
     },
 };
 
-const STATE_RECORD_VERSION: u16 = 3;
+const STATE_RECORD_VERSION: u16 = 4;
 
 /// One branch's committed WASM guest save. The raw blob is a separate section at the descriptor's
 /// corresponding guest-blob path.
@@ -124,7 +124,7 @@ impl ArchiveRecord for WasmStateDescriptor {
 
 impl ArchiveRecord for KafkaOffsetsRecord {
     const KIND: RecordKind = RecordKind::KafkaOffsets;
-    const VERSION: u16 = 4;
+    const VERSION: u16 = 5;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         StreamedKafkaOffsets {
@@ -407,7 +407,7 @@ mod tests {
             value: StateValue::String("north".to_string()),
         }];
         let descriptor = WasmStateDescriptor {
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             domain: domain(),
             entity: entity(),
             schema: SchemaFingerprint::from_digest([3; 32]),
@@ -426,7 +426,7 @@ mod tests {
         );
 
         let offsets = KafkaOffsetsRecord {
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             domain: domain(),
             entity: entity(),
             schema: SchemaFingerprint::from_digest([3; 32]),
@@ -452,7 +452,7 @@ mod tests {
         );
 
         let lifecycle = BranchLifecycleRecord {
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             domain: domain(),
             owner_kind: ModelKind::WasmProcessor,
             entity: entity(),
@@ -475,7 +475,7 @@ mod tests {
     #[test]
     fn runtime_state_records_validate_order_and_incarnation() {
         let offsets = KafkaOffsetsRecord {
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             domain: domain(),
             entity: entity(),
             schema: SchemaFingerprint::from_digest([3; 32]),
@@ -498,7 +498,7 @@ mod tests {
         assert!(KafkaOffsetsRecord::decode("offsets.rkyv", &bytes).is_err());
 
         let lifecycle = BranchLifecycleRecord {
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             domain: domain(),
             owner_kind: ModelKind::WasmProcessor,
             entity: entity(),

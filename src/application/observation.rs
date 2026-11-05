@@ -48,7 +48,7 @@ use nervix_models::{
     InspectionFormat, LookupName, LookupQuery, Model, ModelKind, ModelName, NodeRef, ParseAsType,
     ResourceDescription, ResourceId, ResourceName, ResourceUsage, ResourceVersion,
     ResourceVersionDescription, ResourceVersionEntries, ScheduledNode, SchemaName,
-    UniquelyKindedModel, Unit, WasmStateInspection,
+    UniquelyKindedModel, WasmStateInspection,
 };
 use nervix_vm::window::{WindowAggregateProgram, lower_window_assignments};
 use tracing::{debug, warn};
@@ -320,7 +320,7 @@ impl SessionServiceImpl {
         } else {
             "not exists".to_string()
         }];
-        if let Unit::Partition(partition) = unit {
+        if let nervix_models::UnitKind::Partition(partition) = unit.kind() {
             lines.push(format!("partition: {partition}"));
             if let Some(owner) = &owner {
                 lines.push(format!("owner: {owner}"));

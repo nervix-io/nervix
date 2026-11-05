@@ -638,7 +638,7 @@ mod tests {
         runtime.inner.ingestor_quiescence.insert(
             DomainNodeUnitRef::new(
                 DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
-                Unit::Single,
+                Unit::SINGLE,
             ),
             control.clone(),
         );

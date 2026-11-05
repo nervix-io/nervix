@@ -1181,7 +1181,7 @@ async fn branched_root_without_children_acks_success() {
         .spawn_relay_owner_task(
             &root_domain,
             &root_relay,
-            Unit::Single,
+            Unit::SINGLE,
             root_services.clone(),
             RelayRetention::default(),
         )
@@ -1195,7 +1195,7 @@ async fn branched_root_without_children_acks_success() {
         .inner
         .metrics
         .resolve_node_batch_metrics(NodeBatchMetricsSpec {
-            unit: Unit::Single,
+            unit: Unit::SINGLE,
             domain: &root_domain,
             kind: ModelKind::Ingestor,
             node: &ModelName::from(&root_source),
@@ -1211,7 +1211,7 @@ async fn branched_root_without_children_acks_success() {
         routing: None,
         routing_snapshot: None,
         domain_clock: test_domain_clock(&root_domain),
-        owner: NodeUnitRef::new(NodeRef::new(ModelKind::Ingestor, root_source), Unit::Single),
+        owner: NodeUnitRef::new(NodeRef::new(ModelKind::Ingestor, root_source), Unit::SINGLE),
         root_relay: root_relay.clone(),
         error_policies: ErrorPolicies::handled_by_log(),
         relays: [(
@@ -1289,7 +1289,7 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
         .spawn_relay_owner_task(
             &domain,
             &root_relay,
-            Unit::Single,
+            Unit::SINGLE,
             services.clone(),
             RelayRetention::default(),
         )
@@ -1306,7 +1306,7 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
                     ModelKind::Ingestor,
                     named::<ModelName>("notifications_ingestor"),
                 ),
-                Unit::Single,
+                Unit::SINGLE,
             ),
             root_relay: root_relay.clone(),
             branch: None,
@@ -1390,7 +1390,7 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
             .spawn_relay_owner_task(
                 &domain,
                 &root_relay,
-                Unit::Single,
+                Unit::SINGLE,
                 services.clone(),
                 RelayRetention::default(),
             )
@@ -1425,7 +1425,7 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
                     revision: ProcessorPlanRevision::new(),
                     owner: NodeUnitRef::new(
                         NodeRef::new(entity_kind, named::<ModelName>(source)),
-                        Unit::Single,
+                        Unit::SINGLE,
                     ),
                     root_relay: root_relay.clone(),
                     branch: None,

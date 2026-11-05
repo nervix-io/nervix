@@ -77,10 +77,10 @@ impl IngestorSpec {
     }
 
     pub(in crate::runtime) fn instance_index(&self) -> u64 {
-        match self.unit {
-            Unit::Single => 0,
-            Unit::Instance(index) => index,
-            Unit::Partition(_) => {
+        match self.unit.kind() {
+            nervix_models::UnitKind::Single => 0,
+            nervix_models::UnitKind::Instance(index) => index,
+            nervix_models::UnitKind::Partition(_) => {
                 unreachable!("an ingestor plan declares Single or Instance units")
             }
         }
@@ -654,10 +654,12 @@ impl RuntimeIngestorHost {
             ack_root_trackers,
             shutdown: spec.shutdown,
             delivery_stop,
-            instance_index: match spec.unit {
-                Unit::Single => 0,
-                Unit::Instance(index) => index,
-                Unit::Partition(_) => unreachable!("source hosts run ingestor units"),
+            instance_index: match spec.unit.kind() {
+                nervix_models::UnitKind::Single => 0,
+                nervix_models::UnitKind::Instance(index) => index,
+                nervix_models::UnitKind::Partition(_) => {
+                    unreachable!("source hosts run ingestor units")
+                }
             },
             readiness: spec.readiness,
             collector,

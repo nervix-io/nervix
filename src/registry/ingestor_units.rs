@@ -139,25 +139,32 @@ impl IngestorUnits {
 
     pub(in crate::registry) fn units(&self) -> Vec<Unit> {
         let count = match self {
-            Self::Single => return vec![Unit::Single],
+            Self::Single => return vec![Unit::SINGLE],
             Self::Instances(count) => count.get(),
             Self::PerPartition { count, .. } => u64::from(count.get()),
         };
-        (0..count).map(Unit::Instance).collect()
+        (0..count)
+            .map(|index| {
+                Unit::try_instance(index)
+                    .assured("the validated allocation layout bounds the instance index")
+            })
+            .collect()
     }
 
     /// The exact relay units with which this source instance must move.
     pub(in crate::registry) fn colocated_relays(&self, unit: Unit) -> Vec<NodeUnitRef> {
-        let (Self::PerPartition { count, relays }, Unit::Instance(index)) = (self, unit) else {
+        let (Self::PerPartition { count, relays }, nervix_models::UnitKind::Instance(index)) =
+            (self, unit.kind())
+        else {
             return Vec::new();
         };
         if index >= u64::from(count.get()) {
             return Vec::new();
         }
         let relay_unit = if count.get() == 1 {
-            Unit::Single
+            Unit::SINGLE
         } else {
-            Unit::Partition(u32::try_from(index).assured("a constructed partition index fits u32"))
+            Unit::partition(u32::try_from(index).assured("a constructed partition index fits u32"))
         };
         relays
             .iter()

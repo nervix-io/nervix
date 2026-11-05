@@ -7,6 +7,7 @@
 
 use std::collections::BTreeSet;
 
+use meticulous::ResultExt as _;
 use nervix_models::{BranchPartitions, IngestorInput, Model, PlacementPolicy};
 use nonzero_ext::nonzero;
 
@@ -97,13 +98,13 @@ fn one_instance_exposes_its_single_execution_and_several_instances_keep_distinct
         .expect("the source is scheduled");
     assert_eq!(
         source.units.keys().copied().collect::<Vec<_>>(),
-        [Unit::Instance(0)]
+        [Unit::FIRST_INSTANCE]
     );
     assert_eq!(source.assigned_single_node(), Some(&owner));
     assert_eq!(source.primary_node(), Some(&owner));
     assert_eq!(
         source.single_unit(),
-        source.unit(Unit::Instance(0)).unwrap()
+        source.unit(Unit::FIRST_INSTANCE).unwrap()
     );
     source.single_unit_mut().primary_node = Some(named("node-2"));
     assert_eq!(
@@ -133,7 +134,10 @@ fn independent_instances_spread_primaries_and_keep_their_own_replicas() {
     let source = &schedule.nodes[&NodeRef::new(ModelKind::Ingestor, named::<ModelName>("source"))];
     assert_eq!(
         source.units.keys().copied().collect::<Vec<_>>(),
-        (0..3).map(Unit::Instance).collect::<Vec<_>>()
+        (0..3)
+            .map(|index| Unit::try_instance(index)
+                .assured("the validated allocation layout bounds the instance index"))
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         source
@@ -157,11 +161,11 @@ fn per_partition_groups_bind_only_the_corresponding_instance_and_relay_unit() {
     for index in 0..4 {
         let source = NodeUnitRef::new(
             NodeRef::new(ModelKind::Ingestor, named::<ModelName>("source")),
-            Unit::Instance(index),
+            Unit::try_instance(index).assured("the fixture index fits the execution-unit range"),
         );
         let relay = NodeUnitRef::new(
             NodeRef::new(ModelKind::Relay, named::<ModelName>("events")),
-            Unit::Partition(u32::try_from(index).expect("the four fixture partitions fit u32")),
+            Unit::partition(u32::try_from(index).expect("the four fixture partitions fit u32")),
         );
         assert_eq!(
             groups.groups[groups.by_member[&source]]

@@ -57,8 +57,8 @@ fn refuse(issue: IngestorUnitLayoutError) -> Report<OwnershipHandoffError> {
 }
 
 fn instance_index(selection: IngestorUnitSelection) -> OwnershipHandoffResult<u64> {
-    match selection.unit {
-        Unit::Instance(index) if index < selection.count.get() => Ok(index),
+    match selection.unit.kind() {
+        nervix_models::UnitKind::Instance(index) if index < selection.count.get() => Ok(index),
         _ => Err(refuse(IngestorUnitLayoutError::Selection)),
     }
 }
@@ -70,7 +70,7 @@ fn project_checkpoint(
     cancellation: &Cancellation,
 ) -> OwnershipHandoffResult<PersistedRuntimeStateEntry> {
     let index = instance_index(selection)?;
-    let Unit::Instance(source_index) = placement.unit else {
+    let nervix_models::UnitKind::Instance(source_index) = placement.unit.kind() else {
         return Err(refuse(IngestorUnitLayoutError::Selection));
     };
     snapshot.payload = match placement.state.kind() {
@@ -106,7 +106,9 @@ impl Runtime {
         checkpoints: Vec<OwnershipHandoffCheckpoint>,
     ) -> OwnershipHandoffResult<Vec<OwnershipHandoffCheckpoint>> {
         instance_index(selection)?;
-        if entity.kind != ModelKind::Ingestor || !matches!(unit, Unit::Instance(_)) {
+        if entity.kind != ModelKind::Ingestor
+            || !matches!(unit.kind(), nervix_models::UnitKind::Instance(_))
+        {
             return Err(refuse(IngestorUnitLayoutError::Scope));
         }
         let scheduled = self.ownership_handoff_scheduled_node(domain, entity)?;

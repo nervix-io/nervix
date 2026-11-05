@@ -2687,7 +2687,7 @@ mod tests {
         runtime.inner.in_flight_by_ingestor.insert(
             DomainNodeUnitRef::new(
                 DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
-                Unit::Single,
+                Unit::SINGLE,
             ),
             tracker.clone(),
         );
@@ -2741,7 +2741,7 @@ mod tests {
                     revision: ProcessorPlanRevision::new(),
                     owner: NodeUnitRef::new(
                         NodeRef::new(ModelKind::Ingestor, named::<ModelName>("orders_source")),
-                        Unit::Single,
+                        Unit::SINGLE,
                     ),
                     root_relay: relay.clone(),
                     branch: None,
@@ -2892,7 +2892,7 @@ mod tests {
                     revision: ProcessorPlanRevision::new(),
                     owner: NodeUnitRef::new(
                         NodeRef::new(ModelKind::Ingestor, named::<ModelName>("orders_source")),
-                        Unit::Single,
+                        Unit::SINGLE,
                     ),
                     root_relay: relay.clone(),
                     branch: None,

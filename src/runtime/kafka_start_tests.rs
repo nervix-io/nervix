@@ -10,6 +10,7 @@
     nervix::layer(harness, reason = "tests the production Kafka start boundary")
 )]
 
+use meticulous::ResultExt as _;
 use nervix_models::{DomainStartPoint, DomainStatus, DomainTimeRate, Statement};
 
 use super::*;
@@ -92,7 +93,8 @@ impl Fixture {
                 state: RuntimeState::KafkaOffset,
                 kind: ModelKind::Ingestor,
                 identifier: ModelName::parse("source").assured("the source name is valid"),
-                unit: Unit::Instance(index),
+                unit: Unit::try_instance(index)
+                    .assured("the fixture index fits the execution-unit range"),
                 branch_key: None,
             };
             states.push(

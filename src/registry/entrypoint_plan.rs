@@ -698,7 +698,7 @@ mod tests {
 
         assert_eq!(plans.routes().count(), 4);
         let unbranched = plans
-            .ingestor(&named("unbranched_source"), Unit::Instance(0))
+            .ingestor(&named("unbranched_source"), Unit::FIRST_INSTANCE)
             .assured("the unbranched ingestor is planned");
         let route = only_route(&unbranched.ingestor.routes);
         assert_eq!(route.relay, named("events"));
@@ -710,7 +710,7 @@ mod tests {
         );
 
         let branching = plans
-            .ingestor(&named("branching_source"), Unit::Instance(0))
+            .ingestor(&named("branching_source"), Unit::FIRST_INSTANCE)
             .assured("the branching ingestor is planned");
         let route = only_route(&branching.ingestor.routes);
         assert!(matches!(
@@ -769,7 +769,7 @@ mod tests {
         let plans = planned_entrypoints(models).assured("the fixture schedule plans");
         let route = only_route(
             &plans
-                .ingestor(&named("source"), Unit::Instance(0))
+                .ingestor(&named("source"), Unit::FIRST_INSTANCE)
                 .assured("the ingestor is planned")
                 .ingestor
                 .routes,
@@ -798,7 +798,7 @@ mod tests {
         let plans = planned_entrypoints(models).assured("the fixture schedule plans");
         let route = only_route(
             &plans
-                .ingestor(&named("source"), Unit::Instance(0))
+                .ingestor(&named("source"), Unit::FIRST_INSTANCE)
                 .assured("the ingestor is planned")
                 .ingestor
                 .routes,

@@ -505,7 +505,7 @@ pub(in crate::application) fn placement_group(
     PlacementGroupSchedule {
         members: members
             .into_iter()
-            .map(|node| nervix_models::NodeUnitRef::new(node, nervix_models::Unit::Single))
+            .map(|node| nervix_models::NodeUnitRef::new(node, nervix_models::Unit::SINGLE))
             .collect(),
         primary_node: Some(primary_node.clone()),
     }

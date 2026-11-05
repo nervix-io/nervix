@@ -296,7 +296,7 @@ impl Runtime {
         if self.entity_gate_operation_owns_unit(
             coordination,
             domain,
-            &NodeUnitRef::new(entity, Unit::Single),
+            &NodeUnitRef::new(entity, Unit::SINGLE),
             EntityGatePurpose::WasmStateReset(scope),
         ) {
             return Ok(());

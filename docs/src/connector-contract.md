@@ -1433,8 +1433,8 @@ ingestor binds its codec, node filter, routes and branched entrypoints against t
 surfaces and parses its declared acknowledgement before any connector instance opens, so a start
 that fails leaves nothing running.
 Instance-capable entities declare `Count(NonZeroU64)` or `PerPartition` in the vocabulary. The
-registry resolves that declaration into exact `Unit::Instance(i)` placements and per-unit start
-plans; `Single` entities retain `Unit::Single`. Each host opens only its plan's global index.
+registry resolves that declaration into exact `Instance(i)` unit placements and per-unit start
+plans; `Single` entities retain their single unit. Each host opens only its plan's global index.
 Connector configuration still carries the total count where the transport needs it. A handoff
 changes one unit's primary and state originator without restarting its siblings.
 

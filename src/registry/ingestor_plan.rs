@@ -566,19 +566,27 @@ impl IngestorStartPlan {
         routes: &EntrypointRouteContext<'_>,
     ) -> Result<Self, Report<EntrypointPlanError>> {
         let valid_units = match ingestor.input.instances() {
-            None => scheduled.units.len() == 1 && scheduled.units.contains_key(&Unit::Single),
+            None => scheduled.units.len() == 1 && scheduled.units.contains_key(&Unit::SINGLE),
             Some(nervix_models::IngestorInstances::Count(count)) => {
                 u64::try_from(scheduled.units.len()).ok() == Some(count.get())
-                    && (0..count.get())
-                        .all(|index| scheduled.units.contains_key(&Unit::Instance(index)))
+                    && (0..count.get()).all(|index| {
+                        scheduled.units.contains_key(
+                            &Unit::try_instance(index).assured(
+                                "the validated allocation layout bounds the instance index",
+                            ),
+                        )
+                    })
             }
             Some(nervix_models::IngestorInstances::PerPartition) => {
                 !scheduled.units.is_empty()
                     && scheduled.units.len() <= usize::from(u16::MAX)
                     && (0..scheduled.units.len()).all(|index| {
-                        scheduled.units.contains_key(&Unit::Instance(
-                            u64::try_from(index).assured("an allocated unit count fits u64"),
-                        ))
+                        scheduled.units.contains_key(
+                            &Unit::try_instance(
+                                u64::try_from(index).assured("an allocated unit count fits u64"),
+                            )
+                            .assured("the validated allocation layout bounds the instance index"),
+                        )
                     })
             }
         };
@@ -1848,7 +1856,7 @@ mod tests {
             ))
             .assured("the fixture schedules the ingestor")
             .units
-            .get_mut(&Unit::Instance(0))
+            .get_mut(&Unit::FIRST_INSTANCE)
             .assured("the first declared instance exists")
             .primary_node = Some(named("node-a"));
         let activation =
@@ -2009,7 +2017,7 @@ mod tests {
                 ingestor_model(case.source.clone()),
                 nervix_models::SchemaFingerprint::from_digest([1; 32]),
             ),
-            Unit::Single,
+            Unit::SINGLE,
         )
         .expect_err("a differently named source must not be planned");
 

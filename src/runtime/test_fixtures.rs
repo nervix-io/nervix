@@ -407,7 +407,7 @@ pub(super) fn test_ingestor_quiesce_control(
         runtime
             .inner
             .metrics
-            .register_ingestor_quiesce(domain, ingestor, Unit::Single, None);
+            .register_ingestor_quiesce(domain, ingestor, Unit::SINGLE, None);
     Arc::new(super::IngestorQuiesceControl::new(
         mode,
         runtime.inner.metrics.clone(),
@@ -1245,7 +1245,7 @@ pub(super) fn junction_branch_template(
         revision: super::ProcessorPlanRevision::new(),
         owner: NodeUnitRef::new(
             NodeRef::new(ModelKind::Junction, RelayName::from(&processor.clone())),
-            Unit::Single,
+            Unit::SINGLE,
         ),
         root_relay: input_relay.clone(),
         branch: None,

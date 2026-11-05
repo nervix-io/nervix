@@ -2145,7 +2145,7 @@ mod tests {
             revision: ProcessorPlanRevision::new(),
             owner: NodeUnitRef::new(
                 NodeRef::new(entity_kind, named::<ModelName>("counting_guest")),
-                Unit::Single,
+                Unit::SINGLE,
             ),
             root_relay: named("counted_input_events"),
             branch: branched.then(|| named("by_tenant")),
@@ -2310,7 +2310,7 @@ mod tests {
             revision: ProcessorPlanRevision::new(),
             owner: NodeUnitRef::new(
                 NodeRef::new(ModelKind::Deduplicator, named::<ModelName>("dedup_users")),
-                Unit::Single,
+                Unit::SINGLE,
             ),
             root_relay: named("orders"),
             branch: None,
@@ -2615,7 +2615,7 @@ mod tests {
             .spawn_relay_owner_task(
                 &domain,
                 &output,
-                Unit::Single,
+                Unit::SINGLE,
                 services.clone(),
                 RelayRetention::default(),
             )

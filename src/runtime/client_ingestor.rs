@@ -750,7 +750,7 @@ impl Runtime {
             &ModelName::from(&ingestor.name),
             branched_templates,
         );
-        let readiness = self.prepare_ingestor_readiness(domain, &ingestor.name, Unit::Single);
+        let readiness = self.prepare_ingestor_readiness(domain, &ingestor.name, Unit::SINGLE);
         let (shutdown_tx, _) = watch::channel(false);
         let (jobs, job_receiver) = mpsc::channel(1);
         let execution = Arc::new(ClientExecution {
@@ -774,7 +774,7 @@ impl Runtime {
             branched_senders: branched_runtime.senders.clone(),
             metrics,
             quiesce: quiesce.clone(),
-            trackers: self.ingestor_ack_root_trackers(domain, &ingestor.name, Unit::Single),
+            trackers: self.ingestor_ack_root_trackers(domain, &ingestor.name, Unit::SINGLE),
             ack_timeout: plan.policy.ack_timeout,
         };
         if commands.send(EndpointCommand::Install(execution)).is_err() {
@@ -977,7 +977,7 @@ impl Runtime {
         let Some(plan) = execution
             .revision
             .entrypoints
-            .ingestor(&ingestor, Unit::Single)
+            .ingestor(&ingestor, Unit::SINGLE)
         else {
             return Some(ClientProducerEndReason::EndpointRemoved);
         };

@@ -903,7 +903,7 @@ fn handoff_freeze_follows_admitted_route_flush() {
             ModelName::parse("source").assured("valid source"),
         );
         let targets =
-            EntityGateTargets::Units(vec![NodeUnitRef::new(entity.clone(), Unit::Single)]);
+            EntityGateTargets::Units(vec![NodeUnitRef::new(entity.clone(), Unit::SINGLE)]);
         let counters = runtime.node_quiesce_counters(&domain, entity.clone());
         let mut participant = runtime.force_flush_participant(&domain, counters.clone());
         counters.admit(1);

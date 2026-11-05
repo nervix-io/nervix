@@ -566,7 +566,7 @@ impl ActiveNode {
         {
             return partitions.units();
         }
-        vec![nervix_models::Unit::Single]
+        vec![nervix_models::Unit::SINGLE]
     }
 
     /// How this node is addressed: the kind it is and the name it carries, together.

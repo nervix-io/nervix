@@ -1116,9 +1116,9 @@ impl Arbitrary<'_> {
                             nervix_models::NodeUnitRef::new(
                                 node,
                                 if self.entropy.flag() {
-                                    nervix_models::Unit::Instance(0)
+                                    nervix_models::Unit::FIRST_INSTANCE
                                 } else {
-                                    nervix_models::Unit::Partition(1)
+                                    nervix_models::Unit::partition(1)
                                 },
                             )
                         })

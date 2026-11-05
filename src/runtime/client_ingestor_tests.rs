@@ -40,7 +40,7 @@ async fn runtime_report_chain_admitted_client_batch_log() {
     let ingestor = named::<IngestorName>("orders_in");
     install_unpaced_test_domain(&runtime, &domain);
     let handles = runtime
-        .ingest_task_handles(&domain, &ingestor, nervix_models::Unit::Single)
+        .ingest_task_handles(&domain, &ingestor, nervix_models::Unit::SINGLE)
         .assured("the fixture ingestor attaches before its domain ends");
     let schema = test_schema(&[("id", ParseAsType::U64)]);
     let route = bind_ingestor_route_for_test(
@@ -65,7 +65,7 @@ async fn runtime_report_chain_admitted_client_batch_log() {
     .assured("the fixture route binds its one field");
     let metrics = runtime.inner.metrics.clone();
     let labels =
-        metrics.register_ingestor_quiesce(&domain, &ingestor, nervix_models::Unit::Single, None);
+        metrics.register_ingestor_quiesce(&domain, &ingestor, nervix_models::Unit::SINGLE, None);
     let intake = ClientIntake {
         handles,
         runtime: runtime.clone(),
@@ -849,7 +849,7 @@ fn a_batch_validated_under_a_hold_is_refused_with_its_root_resolved() {
     let domain = DomainName::parse("tenant").assured("a literal domain name");
     let ingestor = IngestorName::parse("orders_in").assured("a literal ingestor name");
     let metric_labels =
-        metrics.register_ingestor_quiesce(&domain, &ingestor, nervix_models::Unit::Single, None);
+        metrics.register_ingestor_quiesce(&domain, &ingestor, nervix_models::Unit::SINGLE, None);
     let control = IngestorQuiesceControl::new(IngestQuiesceMode::Suspend, metrics, metric_labels);
     let trackers = IngestorAckRootTrackers::detached();
 

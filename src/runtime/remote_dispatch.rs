@@ -2583,7 +2583,7 @@ mod tests {
                     &domain("default"),
                     &named("orders"),
                     &quiesce_test_batch(),
-                    Unit::Single,
+                    Unit::SINGLE,
                 )
                 .await
         });
@@ -2624,7 +2624,7 @@ mod tests {
             .fanout_owner_batch(
                 &domain,
                 &relay,
-                Unit::Single,
+                Unit::SINGLE,
                 &batch,
                 &ConfiguredFaultInjection::default(),
             )

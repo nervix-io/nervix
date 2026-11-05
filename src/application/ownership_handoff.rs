@@ -651,11 +651,11 @@ pub(in crate::application) fn planned_ownership_moves(
             && current_node
                 .units
                 .keys()
-                .all(|unit| matches!(unit, Unit::Instance(_)))
+                .all(|unit| matches!(unit.kind(), nervix_models::UnitKind::Instance(_)))
             && planned_node
                 .units
                 .keys()
-                .all(|unit| matches!(unit, Unit::Instance(_)))
+                .all(|unit| matches!(unit.kind(), nervix_models::UnitKind::Instance(_)))
         {
             let sources = current_node
                 .units
@@ -1611,7 +1611,7 @@ impl SessionServiceImpl {
                     .collect::<BTreeSet<_>>();
                 if request.entity.kind != nervix_models::ModelKind::Ingestor
                     || selection.unit != request.unit
-                    || !matches!(selection.unit, Unit::Instance(index) if index < selection.count.get())
+                    || !matches!(selection.unit.kind(), nervix_models::UnitKind::Instance(index) if index < selection.count.get())
                     || units.len() != sources.len()
                     || units != scheduled.units.keys().copied().collect()
                     || !sources.iter().any(|source| source.node == request.source)
