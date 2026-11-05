@@ -124,7 +124,7 @@ A reader verifies an archive as a stream, without seeking:
 
 1. The first header must be the regular `manifest.rkyv` entry within the 64 MiB record limit;
    anything else is refused before the manifest is read.
-2. The manifest must hold archive format major version `4`, valid domain names, no duplicate path,
+2. The manifest must hold archive format major version `5`, valid domain names, no duplicate path,
    and a known record kind for every record section.
 3. Every following entry must be the next section the manifest names, with that exact length,
    within its content kind's bound, and with that digest once its bytes are drained. A missing,
