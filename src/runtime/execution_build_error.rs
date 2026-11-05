@@ -44,6 +44,8 @@ pub(crate) enum ExecutionBuildError {
     MissingRelaySchema { relay: RelayName },
     #[error("relay '{relay}' has no runtime boundary on this node")]
     MissingRelayBoundary { relay: RelayName },
+    #[error("relay '{relay}' is not scheduled as unit {unit:?}")]
+    RelayUnitNotScheduled { relay: RelayName, unit: Unit },
     #[error(
         "{} '{}' reads relay '{relay}', which the domain does not activate",
         .node.kind.as_str(),

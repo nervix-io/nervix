@@ -26,6 +26,12 @@ Ingestor generators draw every timestamp source, `TIMESTAMP AT metadata.<field>`
 Plexus properties preserve the metadata source distinctly from a payload field of the same name,
 and the same signature and namespace fence that shape.
 
+NATS ingestor generators draw both entities, `NATS SUBJECT` and `NATS STREAM`, the stream source
+with its stream and consumer names, both acknowledged modes and every quiesce mode it declares. The
+Model/archive, registry, consensus, canonical Plexus, presentation and console-draft properties
+preserve the complete stream source, and the advanced archive signature and keyspace namespace
+fence the archived union that holds it.
+
 Pulsar subscription generators draw both required owned creation positions, `EARLIEST` and
 `LATEST`, provisioned subscriptions without a position, and all four subscription types, with one
 instance for a type that reads through one consumer. The Model, registry and consensus properties
@@ -38,17 +44,17 @@ ingestor operations. The Model, registry and consensus properties preserve those
 Wire-schema generators carry each format's declared types, and codec generators carry explicit
 `BASE64` byte-text rules alongside `RFC3339` datetime-text rules. JSON, CBOR and AVRO retain their
 own wire type enums. The Model/archive, registry and consensus properties preserve those complete
-values. The `NERVIX WIRE TYPE` registry signature and `raft_wire_alter_` consensus namespace
-identify the current Model layout before decoding.
+values. The `NERVIX MODEL NJS` registry signature and `raft_jetstream_` consensus namespace identify
+the current Model layout before decoding.
 
 `ALTER INGESTOR` and `ALTER EMITTER` statement generators draw, for every entity, each change its
 own grammar writes: a locator, a declared option and the `DROP` of an optional one, `SET MODE`,
 Kafka's and Pulsar's `SET START AT`, a declared quiesce mode and `SET CLIENT` where the entity reads
 or writes through a client. They mix them with the shared operations, the in-place construction
-changes of a route or an emitter, and an emitter's envelope clauses and properties. The Model/archive,
-consensus and canonical Plexus properties preserve the complete operations in order, and the
-`raft_wire_alter_` consensus namespace identifies the statement layout the transactions it keeps
-are stored in before decoding.
+changes of a route or an emitter, and an emitter's envelope clauses and properties. The
+Model/archive, consensus and canonical Plexus properties preserve the complete operations in order,
+and the `raft_jetstream_` consensus namespace identifies the statement layout the transactions it
+keeps are stored in before decoding.
 
 MQTT TOPIC ingestor generators draw either session at QoS 0, 1 or 2 beside `NO ACK`, and the
 persistent session at QoS 1 or 2 beside an acknowledged mode, so every pairing the declaration

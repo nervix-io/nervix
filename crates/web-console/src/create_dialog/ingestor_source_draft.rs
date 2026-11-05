@@ -23,18 +23,18 @@ use nervix_models::{
     IngestorEntity, IngestorEntityKind, KafkaConsumerGroupName, KafkaIngestMode,
     KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicIngestor, KafkaTopicName, ModelName,
     MqttIngestMode, MqttIngestorEntity, MqttQos, MqttSession, MqttTopicFilter, MqttTopicIngestor,
-    NatsIngestMode, NatsIngestorEntity, NatsQueueGroupName, NatsSubjectIngestor, NatsSubjectName,
-    NodeRef, PayloadSizeLimit, PrometheusIngestMode, PrometheusIngestorEntity,
-    PrometheusQueryIngestor, PulsarIngestMode, PulsarIngestorEntity, PulsarSubscription,
-    PulsarSubscriptionName, PulsarSubscriptionOwnership, PulsarSubscriptionType,
-    PulsarTopicIngestor, PulsarTopicName, RabbitMqIngestMode, RabbitMqIngestorEntity,
-    RabbitMqQueueIngestor, RabbitMqQueueName, RedisChannelName, RedisChannelPattern,
-    RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor, RedisSubscriptionTarget,
-    RetryPolicy, SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor, SqsQueueName, SqsReceiveMax,
-    SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor, WebsocketsConnectionIngestor,
-    WebsocketsEndpointIngestor, WebsocketsIngestMode, WebsocketsIngestorEntity,
-    WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders, ZeroMqIngestMode, ZeroMqIngestorEntity,
-    ZeroMqPullIngestor,
+    NatsConsumerName, NatsIngestMode, NatsIngestorEntity, NatsQueueGroupName, NatsStreamIngestMode,
+    NatsStreamIngestor, NatsStreamName, NatsSubjectIngestor, NatsSubjectName, NodeRef,
+    PayloadSizeLimit, PrometheusIngestMode, PrometheusIngestorEntity, PrometheusQueryIngestor,
+    PulsarIngestMode, PulsarIngestorEntity, PulsarSubscription, PulsarSubscriptionName,
+    PulsarSubscriptionOwnership, PulsarSubscriptionType, PulsarTopicIngestor, PulsarTopicName,
+    RabbitMqIngestMode, RabbitMqIngestorEntity, RabbitMqQueueIngestor, RabbitMqQueueName,
+    RedisChannelName, RedisChannelPattern, RedisIngestorEntity, RedisPubSubIngestMode,
+    RedisPubSubIngestor, RedisSubscriptionTarget, RetryPolicy, SqsIngestMode, SqsIngestorEntity,
+    SqsQueueIngestor, SqsQueueName, SqsReceiveMax, SyslogIngestMode, SyslogIngestorEntity,
+    SyslogListenerIngestor, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
+    WebsocketsIngestMode, WebsocketsIngestorEntity, WebsocketsUpgradeHeader,
+    WebsocketsUpgradeHeaders, ZeroMqIngestMode, ZeroMqIngestorEntity, ZeroMqPullIngestor,
 };
 use strum::IntoEnumIterator as _;
 use thiserror::Error;
@@ -121,6 +121,8 @@ pub(super) struct IngestorEntityDraft {
     pub(super) pattern: String,
     pub(super) subject: String,
     pub(super) queue_group: String,
+    pub(super) stream: String,
+    pub(super) consumer: String,
     pub(super) subscription: String,
     pub(super) subscription_ownership: Option<PulsarSubscriptionOwnership>,
     pub(super) subscription_type: Option<PulsarSubscriptionType>,
@@ -404,6 +406,16 @@ impl IngestorEntityDraft {
                 quiesce,
             }
             .into(),
+            IngestorEntityKind::Nats(NatsIngestorEntity::Stream) => NatsStreamIngestor {
+                client: self.client()?,
+                stream: NatsStreamName::parse(&self.stream)
+                    .change_context(IngestorEntityDraftError::Stream)?,
+                consumer: NatsConsumerName::parse(&self.consumer)
+                    .change_context(IngestorEntityDraftError::Consumer)?,
+                mode: self.nats_stream_mode()?,
+                quiesce,
+            }
+            .into(),
             IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => RabbitMqQueueIngestor {
                 client: self.client()?,
                 queue: RabbitMqQueueName::parse(&self.queue)
@@ -677,6 +689,27 @@ impl IngestorEntityDraft {
         Ok(self.upgrade_headers.clone())
     }
 
+    fn nats_stream_mode(
+        &self,
+    ) -> error_stack::Result<NatsStreamIngestMode, IngestorEntityDraftError> {
+        match self.delivery {
+            Some(IngestDeliveryKind::AckSequential) => Ok(NatsStreamIngestMode::AckSequential {
+                timeout: self.ack_timeout()?,
+                retry_policy: self.retry_policy()?,
+            }),
+            Some(IngestDeliveryKind::AckParallel) => Ok(NatsStreamIngestMode::AckParallel {
+                max: self.ack_max()?,
+                batch_timeout: self
+                    .required(&self.batch_timeout, IngestorEntityDraftError::BatchTimeout)?,
+                timeout: self.ack_timeout()?,
+                retry_policy: self.retry_policy()?,
+            }),
+            Some(IngestDeliveryKind::NoAck | IngestDeliveryKind::AckRequest) | None => {
+                Err(Report::new(IngestorEntityDraftError::Mode))
+            }
+        }
+    }
+
     fn rabbitmq_mode(&self) -> error_stack::Result<RabbitMqIngestMode, IngestorEntityDraftError> {
         match self.delivery {
             Some(IngestDeliveryKind::NoAck) => Ok(RabbitMqIngestMode::NoAck),
@@ -817,6 +850,10 @@ pub(super) enum IngestorEntityDraftError {
     Subject,
     #[error("Enter a valid queue group")]
     QueueGroup,
+    #[error("Enter a valid stream")]
+    Stream,
+    #[error("Enter a valid consumer")]
+    Consumer,
     #[error("Enter a valid subscription")]
     Subscription,
     #[error("Choose whether the ingestor owns the subscription or an operator provisioned it")]
@@ -1031,6 +1068,10 @@ mod tests {
                 draft.queue_group = entity.queue_group.to_string();
                 draft.instances = entity.instances.to_string();
             }
+            IngestorEntity::Nats(NatsIngestor::Stream(entity)) => {
+                draft.stream = entity.stream.to_string();
+                draft.consumer = entity.consumer.to_string();
+            }
             IngestorEntity::RabbitMq(RabbitMqIngestor::Queue(entity)) => {
                 draft.queue = entity.queue.to_string();
                 draft.instances = entity.instances.to_string();
@@ -1147,6 +1188,8 @@ mod tests {
         draft.channel = "events".into();
         draft.subject = "events".into();
         draft.queue_group = "workers".into();
+        draft.stream = "events".into();
+        draft.consumer = "workers".into();
         draft.subscription = "workers".into();
         draft.subscription_ownership = Some(PulsarSubscriptionOwnership::Provisioned);
         draft.subscription_type = Some(nervix_models::PulsarSubscriptionType::Shared);

@@ -29,6 +29,7 @@ nervix-connector = { workspace = true }
 nervix-execution = { workspace = true }
 nervix-models = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
+nervix-recovery = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
 
