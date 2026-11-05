@@ -4,9 +4,10 @@
 //!
 //! - **Owns.** Sending a command again, under the execution reference its first attempt carried,
 //!   to the nodes of a scenario cluster until the leader answers it with a known outcome, and the
-//!   bound on how long that may take.
-//! - **Depends on.** The harness's raw session, the gRPC endpoints of the cluster's nodes, and the
-//!   harness's phase deadline.
+//!   bound on how long that may take. It also owns the node any other request goes to next when a
+//!   node answered it without deciding it.
+//! - **Depends on.** The harness's raw session, the gRPC endpoints of the cluster's nodes, the
+//!   leader a client wire redirect names, and the harness's phase deadline.
 //! - **Must not know.** Which step sent the command, what the command does, or which node a
 //!   scenario expects to lead.
 //!
@@ -22,10 +23,16 @@
 //! believes it leads answers with another unknown outcome, so the node that does lead answers with
 //! the outcome whichever node a scenario last saw leading. That also leaves recovery nothing to
 //! borrow from the scenario, so a step's background task recovers its commands the same way.
+//!
+//! A request that is not a command, such as a transaction attach, an upload or a restore stream,
+//! follows the client protocol's redirects instead: a node that names the leader sends the
+//! request there next, and any other answer that decides nothing sends it to the next node in
+//! node order, so a request that no node redirects still reaches every node in turn.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, ops::Bound, time::Duration};
 
-use nervix_client_wire::CommandOutcome;
+use meticulous::OptionExt as _;
+use nervix_client_wire::{CommandOutcome, NodeEndpoints};
 
 use super::{
     command_probe::{CommandProbe, ProbeReply},
@@ -33,9 +40,10 @@ use super::{
     raw_session::{PreparedCommand, TestSession, outcome_not_leader},
 };
 
-/// How long recovery may go on asking the nodes for one command's outcome. A test cluster elects a
-/// leader within its two-second election timeout; the rest is slack for a loaded machine.
-const UNKNOWN_OUTCOME_RECOVERY: Duration = Duration::from_secs(60);
+/// How long recovery may go on asking the nodes for one command's outcome, and a step for the
+/// answer to an attach or an upload that nodes keep answering without deciding it. A test cluster
+/// elects a leader within its two-second election timeout; the rest is slack for a loaded machine.
+pub(crate) const UNKNOWN_OUTCOME_RECOVERY: Duration = Duration::from_secs(60);
 
 /// How long recovery waits, after no node it reached knew the outcome, before it asks again. An
 /// election runs for at least this long, so asking sooner only adds sessions.
@@ -64,6 +72,39 @@ pub(crate) struct LearnedOutcome {
 impl LeaderRoutes {
     pub(crate) fn new(endpoints: BTreeMap<String, String>) -> Self {
         Self { endpoints }
+    }
+
+    /// The gRPC endpoint of `node`, when it is a node of this cluster.
+    pub(crate) fn endpoint(&self, node: &str) -> Option<&str> {
+        let endpoint = self.endpoints.get(node)?;
+        Some(endpoint.as_str())
+    }
+
+    /// The node a request goes to after `answered` answered it without deciding it.
+    ///
+    /// A redirect that names `leader` sends the request to that node when it is a node of this
+    /// cluster, as the client protocol requires. Any other answer that decides nothing, a redirect
+    /// that names no leader or one this cluster does not have, an unknown outcome or a call that
+    /// ended without an answer, sends it to the node after `answered` in node order, wrapping
+    /// around, so one node that knows no leader cannot hold the request.
+    pub(crate) fn after(&self, answered: &str, leader: Option<&NodeEndpoints>) -> &str {
+        if let Some(leader) = leader
+            && let Some((node, _)) = self.endpoints.get_key_value(leader.node.as_str())
+        {
+            return node;
+        }
+        let later = self
+            .endpoints
+            .range::<str, _>((Bound::Excluded(answered), Bound::Unbounded))
+            .next();
+        let (node, _) = match later {
+            Some(later) => later,
+            None => self
+                .endpoints
+                .first_key_value()
+                .assured("a scenario cluster's routes name at least the node that answered"),
+        };
+        node
     }
 
     /// Repeats the original request and transaction position until the outcome is known, or an

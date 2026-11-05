@@ -1084,6 +1084,8 @@ async fn serve_command(
     subscriptions: &mut SessionSubscriptions,
 ) {
     let execution_reference = command.execution_reference.clone();
+    #[cfg(feature = "testing")]
+    let reply_script_request = command.clone();
     let processing = shared
         .service
         .process_command(command, subscriptions, admission);
@@ -1096,6 +1098,17 @@ async fn serve_command(
         return;
     };
     let outcome = command_outcome(execution_reference, response);
+    #[cfg(feature = "testing")]
+    let outcome = {
+        let mut outcome = outcome;
+        shared
+            .service
+            .inner
+            .runtime
+            .fault_injection()
+            .substitute_uncertain_command_reply(&reply_script_request, &mut outcome);
+        outcome
+    };
     shared
         .finish_with(request_id, ReplyBody::Command(Box::new(outcome)))
         .await;

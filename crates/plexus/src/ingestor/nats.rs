@@ -13,7 +13,10 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{NatsIngestMode, NatsQueueGroupName, NatsSubjectIngestor, NatsSubjectName};
+use nervix_models::{
+    NatsIngestMode, NatsQueueGroupName, NatsSubjectIngestor, NatsSubjectIngestorChange,
+    NatsSubjectName,
+};
 
 use super::delivery::{instances, no_ack, push_quiesce_clause};
 use crate::{
@@ -47,6 +50,24 @@ pub(super) fn subject_body<'src>()
                 }
             },
         )
+        .boxed()
+}
+
+/// `SET SUBJECT`, `SET QUEUE GROUP` or `SET MODE`: one part of a `NATS SUBJECT` body.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], NatsSubjectIngestorChange, extra::Err<ParseError<'src>>> + Clone
+{
+    let subject = kw(Identifier::Subject)
+        .ignore_then(external_name::<NatsSubjectName>())
+        .map(NatsSubjectIngestorChange::Subject);
+    let group = kw_phrase2(Identifier::Queue, Identifier::Group)
+        .ignore_then(external_name::<NatsQueueGroupName>())
+        .map(NatsSubjectIngestorChange::QueueGroup);
+    let mode = kw(Identifier::Mode)
+        .ignore_then(no_ack().to(NatsIngestMode::NoAck))
+        .map(NatsSubjectIngestorChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((subject, group, mode)))
         .boxed()
 }
 

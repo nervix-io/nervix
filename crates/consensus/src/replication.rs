@@ -62,8 +62,8 @@ use thiserror::Error;
 use tracing::debug;
 
 use crate::{
-    AppendStreamOpenRecorder, LogIdOf, NetworkClient, ProtocolReceiver, TypeConfig,
-    unreachable_err, validate_protocol_origin, wire,
+    AppendStreamOpenRecorder, AppendSubmissionFault, LogIdOf, NetworkClient, ProtocolReceiver,
+    TypeConfig, unreachable_err, validate_protocol_origin, wire,
 };
 
 #[cfg(test)]
@@ -307,6 +307,8 @@ where
                 &self.executor,
                 &self.local_node_id,
                 &self.target,
+                self.append_stream_open_recorder
+                    .append_submission_fault(&self.target),
                 input,
             )
             .await?;
@@ -383,6 +385,7 @@ struct AppendSubmission {
     submitted_bytes: u64,
     batch_target_bytes: u64,
     acknowledged: mpsc::UnboundedReceiver<u64>,
+    _fault: AppendSubmissionFault,
 }
 
 impl AppendSubmission {
@@ -395,6 +398,14 @@ impl AppendSubmission {
             None => request.prev_log_id.clone(),
         };
         self.wait_for_follower_capacity().await?;
+        #[cfg(any(test, feature = "testing"))]
+        if self._fault.take(&request).await {
+            let failure = std::io::Error::other("injected append submission failure");
+            let failure = Report::new(failure).change_context(RequestError::Encode {
+                request: wire::OpenAppendStream::NAME,
+            });
+            return Err(SubmissionStopped::StreamFailed(failure));
+        }
         let record = wire::AppendEntriesRecord::from_request(request);
         let bytes = match self.sender.send(record).await {
             Ok(bytes) => bytes,
@@ -591,6 +602,7 @@ async fn open_append_stream<S>(
     executor: &Executor,
     local_node_id: &ClusterNodeName,
     target: &ClusterNodeName,
+    fault: AppendSubmissionFault,
     input: S,
 ) -> Result<
     BoxStream<'static, Result<StreamAppendResult<TypeConfig>, RPCError<TypeConfig>>>,
@@ -622,6 +634,7 @@ where
         submitted_bytes: 0,
         batch_target_bytes: append_batch_target_bytes(executor),
         acknowledged: acknowledge_rx,
+        _fault: fault,
     };
     let submission_target = target.clone();
     nervix_primitives::task::spawn(async move {

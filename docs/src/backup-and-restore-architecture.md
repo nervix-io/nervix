@@ -86,6 +86,11 @@ tree would duplicate the whole vocabulary, and the stored representation would c
 to it. A backup renders each domain's models, parses the rendered text back, and refuses the archive
 unless it yields exactly the committed models.
 
+Wire schemas in those records use each format's current Plexus vocabulary, and codec text carries
+its explicit `RFC3339` or `BASE64` rules. Restore parses and validates that text through the current
+language and registry boundaries. A vocabulary change needs no archive-owned Model encoding or
+format change; text that cannot form a current Model fails restore preparation.
+
 Every record section opens with a twelve-byte header: the magic `NVXBKREC`, then the record kind
 and its format version as little-endian 16-bit integers. A reader checks the magic, then the kind,
 then the version for exact equality, copies the payload into an aligned buffer and validates it with

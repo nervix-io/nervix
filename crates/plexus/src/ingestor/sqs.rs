@@ -13,7 +13,9 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{SqsIngestMode, SqsQueueIngestor, SqsQueueName, SqsReceiveMax};
+use nervix_models::{
+    SqsIngestMode, SqsQueueIngestor, SqsQueueIngestorChange, SqsQueueName, SqsReceiveMax,
+};
 
 use super::delivery::{
     ParallelAck, SequentialAck, ack_parallel_within, ack_sequential, optional_instances,
@@ -38,10 +40,10 @@ fn receive_window<'src>()
         .boxed()
 }
 
-/// `FROM <client> QUEUE '<queue>' [INSTANCES <n>] MODE ACK SEQUENTIAL … | ACK PARALLEL MAX <n> …
-/// ON QUIESCE SUSPEND`, where a parallel window takes at most the messages one receive returns.
-pub(super) fn queue_body<'src>()
--> impl Parser<'src, &'src [Token], SqsQueueIngestor, extra::Err<ParseError<'src>>> + Clone {
+/// The delivery mode of an SQS consumer: `ACK SEQUENTIAL …` or `ACK PARALLEL MAX <n> …`, where a
+/// parallel window takes at most the messages one receive returns.
+fn mode<'src>()
+-> impl Parser<'src, &'src [Token], SqsIngestMode, extra::Err<ParseError<'src>>> + Clone {
     let sequential = ack_sequential().map(
         |SequentialAck {
              timeout,
@@ -64,13 +66,19 @@ pub(super) fn queue_body<'src>()
             retry_policy,
         },
     );
-    let mode = choice((parallel, sequential));
+    choice((parallel, sequential)).boxed()
+}
+
+/// `FROM <client> QUEUE '<queue>' [INSTANCES <n>] MODE ACK SEQUENTIAL … | ACK PARALLEL MAX <n> …
+/// ON QUIESCE SUSPEND`.
+pub(super) fn queue_body<'src>()
+-> impl Parser<'src, &'src [Token], SqsQueueIngestor, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
         .then_ignore(kw(Identifier::Queue))
         .then(external_name::<SqsQueueName>())
         .then(optional_instances::<SqsQueueIngestor>())
         .then_ignore(kw(Identifier::Mode))
-        .then(mode)
+        .then(mode())
         .then(suspend_only_quiesce_clause())
         .map(
             |((((client, queue), instances), mode), quiesce)| SqsQueueIngestor {
@@ -81,6 +89,20 @@ pub(super) fn queue_body<'src>()
                 quiesce,
             },
         )
+        .boxed()
+}
+
+/// `SET QUEUE` or `SET MODE`: one part of an `SQS QUEUE` body.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], SqsQueueIngestorChange, extra::Err<ParseError<'src>>> + Clone {
+    let queue = kw(Identifier::Queue)
+        .ignore_then(external_name::<SqsQueueName>())
+        .map(SqsQueueIngestorChange::Queue);
+    let delivery = kw(Identifier::Mode)
+        .ignore_then(mode())
+        .map(SqsQueueIngestorChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((queue, delivery)))
         .boxed()
 }
 

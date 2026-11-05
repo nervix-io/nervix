@@ -85,10 +85,10 @@ Feature: Kafka emission
         secret string,
         note string OPTIONAL,
         occurred_at string,
-        blob BYTES
+        blob string
       );
       CREATE CODEC incoming_codec FROM WIRE JSON SCHEMA incoming_wire TO SCHEMA incoming_event
-        ENCODE occurred_at AS RFC3339;
+        ENCODE occurred_at AS RFC3339, blob AS BASE64;
       CREATE SCHEMA outgoing_event (
         clean STRING,
         escaped STRING,
@@ -101,10 +101,10 @@ Feature: Kafka emission
         escaped string,
         note string OPTIONAL,
         occurred_at string,
-        blob BYTES
+        blob string
       );
       CREATE CODEC outgoing_codec FROM WIRE JSON SCHEMA outgoing_wire TO SCHEMA outgoing_event
-        ENCODE occurred_at AS RFC3339;
+        ENCODE occurred_at AS RFC3339, blob AS BASE64;
       CREATE RELAY events SCHEMA incoming_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;

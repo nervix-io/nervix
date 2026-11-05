@@ -16,7 +16,7 @@
 use chumsky::prelude::*;
 use nervix_models::{
     KafkaConsumerGroupName, KafkaIngestMode, KafkaOffsetMode, KafkaTopicIngestor,
-    KafkaTopicIngestorOperation, KafkaTopicName,
+    KafkaTopicIngestorChange, KafkaTopicName,
 };
 
 use super::delivery::{
@@ -33,20 +33,10 @@ use crate::{
 /// [INSTANCES <n>] MODE … ON QUIESCE SUSPEND`.
 pub(super) fn topic_body<'src>()
 -> impl Parser<'src, &'src [Token], KafkaTopicIngestor, extra::Err<ParseError<'src>>> + Clone {
-    let consumer_group = kw_phrase2(Identifier::Consumer, Identifier::Group)
-        .ignore_then(external_name::<KafkaConsumerGroupName>())
-        .then(start_position())
-        .map(|(group, start_at)| KafkaOffsetMode::ConsumerGroup { group, start_at });
-    let offset_mode = kw(Identifier::Offset)
-        .ignore_then(kw(Identifier::By))
-        .ignore_then(choice((
-            consumer_group,
-            kw(Identifier::Domain).to(KafkaOffsetMode::Domain),
-        )));
     client_ref()
         .then_ignore(kw(Identifier::Topic))
         .then(external_name::<KafkaTopicName>())
-        .then(offset_mode)
+        .then(offset_mode())
         .then(optional_instances::<KafkaTopicIngestor>())
         .then_ignore(kw(Identifier::Mode))
         .then(mode())
@@ -62,6 +52,21 @@ pub(super) fn topic_body<'src>()
             },
         )
         .boxed()
+}
+
+/// `OFFSET BY DOMAIN | CONSUMER GROUP '<group>' START AT EARLIEST|LATEST`: who owns the offsets.
+fn offset_mode<'src>()
+-> impl Parser<'src, &'src [Token], KafkaOffsetMode, extra::Err<ParseError<'src>>> + Clone {
+    let consumer_group = kw_phrase2(Identifier::Consumer, Identifier::Group)
+        .ignore_then(external_name::<KafkaConsumerGroupName>())
+        .then(start_position())
+        .map(|(group, start_at)| KafkaOffsetMode::ConsumerGroup { group, start_at });
+    kw(Identifier::Offset)
+        .ignore_then(kw(Identifier::By))
+        .ignore_then(choice((
+            consumer_group,
+            kw(Identifier::Domain).to(KafkaOffsetMode::Domain),
+        )))
 }
 
 /// The delivery modes of a Kafka consumer: `NO ACK`, `ACK SEQUENTIAL …` or `ACK PARALLEL …`.
@@ -94,16 +99,21 @@ fn mode<'src>()
     ))
 }
 
-pub(super) fn alteration<'src>()
--> impl Parser<'src, &'src [Token], nervix_models::AlterIngestor, extra::Err<ParseError<'src>>> + Clone
+/// `SET TOPIC`, `SET OFFSET BY`, `SET START AT` or `SET MODE`: one part of a `KAFKA TOPIC` body.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], KafkaTopicIngestorChange, extra::Err<ParseError<'src>>> + Clone
 {
-    let operation = choice((
-        kw(Identifier::Set)
-            .ignore_then(start_position())
-            .map(|position| KafkaTopicIngestorOperation::SetStartAt { position }),
-        super::transport_operation(topic_body()).map(KafkaTopicIngestorOperation::Transport),
-    ));
-    super::alteration::<KafkaTopicIngestor, _, _>(operation)
+    let topic = kw(Identifier::Topic)
+        .ignore_then(external_name::<KafkaTopicName>())
+        .map(KafkaTopicIngestorChange::Topic);
+    let offsets = offset_mode().map(KafkaTopicIngestorChange::OffsetBy);
+    let start = start_position().map(KafkaTopicIngestorChange::StartAt);
+    let delivery = kw(Identifier::Mode)
+        .ignore_then(mode())
+        .map(KafkaTopicIngestorChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((topic, offsets, start, delivery)))
+        .boxed()
 }
 
 #[cfg(test)]

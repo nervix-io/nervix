@@ -247,7 +247,10 @@ impl DomainState {
                     graph.add_edge(branch_schema, source, EdgeKind::RequiredBy);
                     validate_branch_model(domain, identifier, models, branch)?;
                 }
-                Model::WireJsonSchema(schema) | Model::WireCborSchema(schema) => {
+                Model::WireJsonSchema(schema) => {
+                    ensure_wire_schema_has_fields(domain, identifier, schema)?;
+                }
+                Model::WireCborSchema(schema) => {
                     ensure_wire_schema_has_fields(domain, identifier, schema)?;
                 }
                 Model::WireAvroSchema(schema) => {

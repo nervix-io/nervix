@@ -68,7 +68,8 @@ For the CLI's `subscribe` and `domain-clock` shell streams and their line format
 [Command Line Client](https://docs.nervix.io/client-tools-cli.html) directly. Follow the same
 documentation version as the selected index; this client chapter is outside the curated Plexus index.
 
-For browser controls waiting behind commands, lookup replacement and reconnect behavior, read
+For browser controls waiting behind commands, lookup replacement, uncertain-command recovery on
+the open session and reconnect behavior, read
 [Web Console](https://docs.nervix.io/client-tools-web-console.html#bounded-buffers) and
 [Client Session Protocol](https://docs.nervix.io/client-session-protocol.html#restoration-and-bounded-consumers)
 directly. Follow the same documentation version as the selected index; these client chapters are
@@ -223,7 +224,9 @@ current connection, retry and deadline limits.
   coincide. They declare `MODE STRICT|LOOSE` after their names, and a mode-only change uses `ALTER
   WIRE <format> SCHEMA <wire_schema> MODE STRICT|LOOSE`. SYSLOG is a predefined singleton wire
   schema referenced directly with `FROM SYSLOG`; it has no name or model lifecycle.
-- Every codec explicitly handles any wire/internal datetime or shape difference. Every JAQ-backed
+- Every codec explicitly declares text interchange with `ENCODE field AS RFC3339` for datetimes
+  and `ENCODE field AS BASE64` for bytes in JSON or AVRO strings. Read `Schemas And Codecs` for
+  the exact binding matrix and native byte representations. Every JAQ-backed
   codec uses `WITH JAQ TRANSFORMATIONS` and declares `ON INGESTION`, `ON EMITTING`, or both in that
   order; `ON EMITTING BATCH` may follow `ON EMITTING` and yields exactly one value per batch. Every `ON INGESTION` output is an object that fits the internal schema, and a payload that
   unfolds into several messages is decoded, acknowledged, and redelivered as a whole.
@@ -365,8 +368,9 @@ current connection, retry and deadline limits.
   required `NAMESPACE` names the catalog namespace independently of the Nervix domain; provision
   each of its case-preserving dot-separated levels before starting the emitter. Until the catalog
   holds the namespace and the table, the emitter retries its open and `DESCRIBE EMITTER` names the
-  namespace or the table it lacks. Move an emitter to another namespace with `SET TO`, restating
-  its complete destination with the new `NAMESPACE` and that table's `LOCATION`. A
+  namespace or the table it lacks. Move an emitter to another namespace with
+  `SET NAMESPACE '...', SET LOCATION '...'` in one `ALTER`, naming that table's `LOCATION`, or with
+  `SET TO` restating its complete destination. A
   `DATETIME`, at the top level or inside a `VEC` or `ARRAY`, is written at the containing
   microsecond and needs a `timestamptz` column, not `timestamptz_ns`. A commit writes each mapped
   column into the table column of its name, in any `VALUES` order, and a null into each optional
@@ -376,9 +380,10 @@ current connection, retry and deadline limits.
   a null, such as an `OPTIONAL` field; wrap it in `coalesce(...)` with a never-null argument. A
   commit refuses a table changed after open in the same way, naming the column, and retries until
   the table can take the mapped columns again.
-- Point an Iceberg emitter at an unpartitioned table. Its data files carry no partition values, so
-  a table whose current partition spec has a field opens but fails every commit, and the emitter
-  retries it without end. The emitter only appends Parquet data files with the Parquet library's
+- Point an Iceberg emitter at an unpartitioned, unencrypted table. Its data files carry no partition
+  values, so a table whose current partition spec has a field opens but fails every commit, and the
+  emitter retries it without end; a table whose properties declare `encryption.key-id` does the
+  same, because the emitter writes no encrypted files. The emitter only appends Parquet data files with the Parquet library's
   default writer properties: it writes no deletes or upserts, never changes the table's schema and
   commits only through an `ICEBERG_REST` catalog client. Set `'path_style_access' = true` on an
   `S3` client whose S3-compatible store serves buckets as paths, or whose bucket name contains a
@@ -473,9 +478,10 @@ current connection, retry and deadline limits.
   `metadata.correlation_data` explicitly before using it as text.
 - An `MQTT TOPIC` emitter writes its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, `NO ACK` only at
   `QOS 0` and `ACK` only at `QOS 1` or `QOS 2`. `SET MODE` stays within the written quality of
-  service, and `SET TO` changes it. Read `Emitters` → `MQTT` for what each level completes on and
-  for the persistent session a new client cannot take over. Use that section for `RETAIN`, typed
-  publish `PROPERTIES` and ordered, repeated user properties written with `write_header`.
+  service; `SET QOS` changes it, beside `SET MODE` in the same `ALTER` when it crosses `QOS 0`, and
+  `SET TO` changes both. Read `Emitters` → `MQTT` for what each level completes on and for the
+  persistent session a new client cannot take over. Use that section for `RETAIN`, typed publish
+  `PROPERTIES` and ordered, repeated user properties written with `write_header`.
 - An `MQTT CLIENT`'s `addr` is `mqtt://` or `mqtts://`, a host and a port, with no credentials,
   path or query: write `username` and `password` (redacted on inspection), `keep_alive_ms` in
   whole seconds and the source admission bound `max_packet_size` as their own keys, checked against
@@ -749,8 +755,9 @@ Choose checks relevant to the configured graph:
   `nervix_restore_staging_reclaimed_bytes_total` at `/metrics`; the backup chapter distinguishes
   logical usage from SST allocation. Recover an uncertain applying restore by sending it again
   under its exact execution reference, as the Rust client's `restore_with_reference` does;
-  `nervix-cli restore` starts every run under a fresh reference. After a terminal failed restore,
-  restore into a fresh target name.
+  `nervix-cli restore` starts every run under a fresh reference, while a `RESTORE` statement the CLI
+  reported as not known yet is sent again under its reference when it runs again at the prompt or
+  with `--execution-reference`. After a terminal failed restore, restore into a fresh target name.
   Restore metadata preparation has a separate per-node `restore_metadata` memory grant, defaulting
   to 2 GiB and admitted before decoding or planning. Native lifecycle, Kafka, deduplicator and
   window checkpoints stream through quota-owned files and 64 KiB windows with a fixed 2 MiB bulk

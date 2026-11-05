@@ -57,6 +57,21 @@ pub(super) fn subject_body<'src>(
     )
 }
 
+/// `SET SUBJECT '<name>'` or `SET MODE <mode>`: one part of a `NATS SUBJECT` body.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], NatsSubjectEmitterChange, extra::Err<ParseError<'src>>> + Clone
+{
+    let locator = kw(Identifier::Subject)
+        .ignore_then(external_name::<NatsPublishSubjectName>())
+        .map(NatsSubjectEmitterChange::Subject);
+    let publishing = kw(Identifier::Mode)
+        .ignore_then(mode())
+        .map(NatsSubjectEmitterChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((locator, publishing)))
+        .boxed()
+}
+
 #[cfg(test)]
 mod tests {
     use nervix_models::{

@@ -131,6 +131,13 @@ path = "crates/benchmark/src/bin/nervix-benchmark-load.rs"
 reason = "The external load harness has no node executor; broker polling and metadata queries must not block its async traffic driver."
 
 [[permission]]
+bound = "The test creates one host thread with a 512 KiB stack, blocks it on one prepared command the loopback answers, and joins it before it returns."
+items = ["thread::Builder"]
+owner = "The Rust client's host-thread stack test."
+path = "crates/client-core/src/tests/host_stack.rs"
+reason = "A host blocks on a call from a thread of its own, and only a thread with a chosen stack size shows that the call fits a host's stack; the bounded executor's workers have their own."
+
+[[permission]]
 bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
 items = ["thread::spawn"]
 owner = "C binding shared-session release tests."

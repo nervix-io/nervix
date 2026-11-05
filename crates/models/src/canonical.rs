@@ -15,6 +15,7 @@ mod entity_presentation;
 use std::{fmt::Display, num::NonZeroU64};
 
 pub use entity_presentation::EntityPresentation;
+pub(crate) use entity_presentation::{request_headers_to_plexus, upgrade_headers_to_plexus};
 use error_stack::Report;
 use meticulous::OptionExt as _;
 use thiserror::Error;
@@ -25,10 +26,10 @@ use crate::{
     AlterIngestorOperation, AlterJunction, AlterPlacement, AlterPlacementOperation,
     AlterProcessorOperation, AlterReingestor, AlterRelay, AlterRelayOperation, AlterReorderer,
     AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
-    AlterWireSchemaOperation, AssignmentTarget, AssignmentTargetScope, AvroType, Backup,
-    BackupCapture, BackupResources, BackupScope, BinaryOperator, BranchEviction, BranchPartitions,
-    BranchSelection, ClickHouseValueMapping, ClientConfigEntry, ClientIngestMode,
-    ClientResourceMount, CodecEncoding, CodecEncodingRule, CodecJaqTransformations, CodecName,
+    AlterWireSchemaOperation, Assignment, AssignmentTarget, AssignmentTargetScope, AvroType,
+    Backup, BackupCapture, BackupResources, BackupScope, BinaryOperator, BranchEviction,
+    BranchPartitions, BranchSelection, CborType, ClickHouseValueMapping, ClientConfigEntry,
+    ClientIngestMode, ClientResourceMount, CodecEncodingRule, CodecJaqTransformations, CodecName,
     CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob,
     CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
     CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
@@ -44,14 +45,14 @@ use crate::{
     Expression, FieldScope, Float64Literal, FlushPolicy, GeneralErrorPolicy,
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping,
     IngestTimestampSource, IngestorInput, Inheritance, InputCollectPolicy, InspectionFormat,
-    JsonType, Literal, MaterializedStateDependency, MaterializedStatePolicy, MembershipOperator,
-    MessageErrorPolicy, Model, ModelName, MongoDbConflictAction, MySqlConflictAction, NamePosition,
-    OutputBranch, ParseAsType, PlacementPolicy, PostgresConflictAction, ProcessorInputWhere,
-    ProcessorInputs, ProcessorOutputs, RangeOperator, RelayBranching, RelayName, Restore,
-    RestoreLifecycle, RestoreMode, RestoreScope, RestoreState, RetryPolicy, RouteConstruction,
-    SchemaField, SignalingProtocolName, SignalingStep, SignalingWaitStep, SignalingWireFormat,
-    Statement, SubscriptionLiteral, TransactionInspectionTarget, UnaryOperator, WindowBound,
-    WindowStateLimit, WireSchemaField,
+    Invocation, JsonType, Literal, MaterializedStateDependency, MaterializedStatePolicy,
+    MembershipOperator, MessageErrorPolicy, Model, ModelName, MongoDbConflictAction,
+    MySqlConflictAction, NamePosition, OutputBranch, ParseAsType, PlacementPolicy,
+    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, RangeOperator,
+    RelayBranching, RelayName, Restore, RestoreLifecycle, RestoreMode, RestoreScope, RestoreState,
+    RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName, SignalingStep,
+    SignalingWaitStep, SignalingWireFormat, Statement, SubscriptionLiteral,
+    TransactionInspectionTarget, UnaryOperator, WindowBound, WindowStateLimit, WireSchemaField,
 };
 
 /// The Plexus release canonical rendering writes.
@@ -470,6 +471,14 @@ fn route_construction_to_plexus(
         .join(" "))
 }
 
+/// A target is written as `SET` and `DEFAULT` spell it, so a diagnostic names it the way the
+/// statement does.
+impl std::fmt::Display for AssignmentTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&assignment_target_to_plexus(self))
+    }
+}
+
 /// The field an assignment writes, as `SET` and `DEFAULT` spell it: the bare field, or its scope
 /// and the field.
 fn assignment_target_to_plexus(target: &AssignmentTarget) -> String {
@@ -492,50 +501,14 @@ fn route_construction_clauses(
 ) -> error_stack::Result<Vec<Clause>, CanonicalPlexusError> {
     let mut clauses: Vec<Clause> = Vec::new();
     if let Some(inherit) = &construction.inherit {
-        let clause = match inherit {
-            Inheritance::All => "INHERIT ALL".to_string(),
-            Inheritance::AllExcept(fields) => format!(
-                "INHERIT ALL EXCEPT {}",
-                fields
-                    .iter()
-                    .map(|field| NamePosition::Bare.spell(field.as_str()))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            Inheritance::Fields(fields) => format!(
-                "INHERIT {}",
-                fields
-                    .iter()
-                    .map(|field| format!(
-                        "{}{}",
-                        NamePosition::Bare.spell(field.field.as_str()),
-                        if field.leak_sensitive {
-                            " LEAK SENSITIVE"
-                        } else {
-                            ""
-                        }
-                    ))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        };
-        clauses.push(Clause::line(clause));
+        clauses.push(Clause::line(inheritance_to_plexus(inherit)));
     }
     if !construction.assignments.is_empty() {
-        clauses.push(Clause::aligned(
-            "SET",
-            construction
-                .assignments
-                .iter()
-                .map(|assignment| {
-                    Ok(format!(
-                        "{} = {}",
-                        assignment_target_to_plexus(&assignment.target),
-                        expression_to_plexus(&assignment.value)?
-                    ))
-                })
-                .collect::<error_stack::Result<Vec<_>, CanonicalPlexusError>>()?,
-        ));
+        let mut assignments = Vec::with_capacity(construction.assignments.len());
+        for assignment in &construction.assignments {
+            assignments.push(assignment_to_plexus(assignment)?);
+        }
+        clauses.push(Clause::aligned("SET", assignments));
     }
     if let Some(where_clause) = &construction.where_clause {
         clauses.push(Clause::line(format!(
@@ -544,29 +517,99 @@ fn route_construction_clauses(
         )));
     }
     if !construction.invocations.is_empty() {
-        clauses.push(Clause::line(format!(
-            "INVOKE {}",
-            construction
-                .invocations
-                .iter()
-                .map(|invocation| Ok(format!(
-                    "{}({})",
-                    NamePosition::Called.spell(invocation.function.as_str()),
-                    invocation
-                        .arguments
-                        .iter()
-                        .map(expression_to_plexus)
-                        .collect::<Result<Vec<_>, _>>()?
-                        .join(", ")
-                )))
-                .collect::<error_stack::Result<Vec<_>, CanonicalPlexusError>>()?
-                .join(", ")
-        )));
+        let mut invocations = Vec::with_capacity(construction.invocations.len());
+        for invocation in &construction.invocations {
+            invocations.push(invocation_to_plexus(invocation)?);
+        }
+        clauses.push(Clause::line(format!("INVOKE {}", invocations.join(", "))));
     }
     Ok(clauses)
 }
 
-fn value_mapping_items(
+/// What a construction inherits, written as its `INHERIT` clause.
+fn inheritance_to_plexus(inheritance: &Inheritance) -> String {
+    match inheritance {
+        Inheritance::All => "INHERIT ALL".to_string(),
+        Inheritance::AllExcept(fields) => format!(
+            "INHERIT ALL EXCEPT {}",
+            fields
+                .iter()
+                .map(|field| NamePosition::Bare.spell(field.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Inheritance::Fields(fields) => format!(
+            "INHERIT {}",
+            fields
+                .iter()
+                .map(|field| format!(
+                    "{}{}",
+                    NamePosition::Bare.spell(field.field.as_str()),
+                    if field.leak_sensitive {
+                        " LEAK SENSITIVE"
+                    } else {
+                        ""
+                    }
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// One assignment, written `<target> = <expression>` as a `SET` list writes it.
+fn assignment_to_plexus(
+    assignment: &Assignment,
+) -> error_stack::Result<String, CanonicalPlexusError> {
+    Ok(format!(
+        "{} = {}",
+        assignment_target_to_plexus(&assignment.target),
+        expression_to_plexus(&assignment.value)?
+    ))
+}
+
+/// One invocation, written as the call an `INVOKE` list writes.
+fn invocation_to_plexus(
+    invocation: &Invocation,
+) -> error_stack::Result<String, CanonicalPlexusError> {
+    let mut arguments = Vec::with_capacity(invocation.arguments.len());
+    for argument in &invocation.arguments {
+        arguments.push(expression_to_plexus(argument)?);
+    }
+    Ok(format!(
+        "{}({})",
+        NamePosition::Called.spell(invocation.function.as_str()),
+        arguments.join(", ")
+    ))
+}
+
+impl crate::ConstructionAlteration {
+    /// The alteration as the `ALTER` operation that writes it.
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        match self {
+            Self::SetInherit { inheritance } => {
+                Ok(format!("SET {}", inheritance_to_plexus(inheritance)))
+            }
+            Self::DropInherit => Ok("DROP INHERIT".to_string()),
+            Self::AddSet { assignment } => {
+                Ok(format!("ADD SET {}", assignment_to_plexus(assignment)?))
+            }
+            Self::DropSet { target } => {
+                Ok(format!("DROP SET {}", assignment_target_to_plexus(target)))
+            }
+            Self::AddInvoke { invocation } => {
+                Ok(format!("ADD INVOKE {}", invocation_to_plexus(invocation)?))
+            }
+            Self::DropInvoke { position } => Ok(format!("DROP INVOKE {position}")),
+            Self::SetWhere { where_clause } => {
+                Ok(format!("SET WHERE {}", expression_to_plexus(where_clause)?))
+            }
+            Self::DropWhere => Ok("DROP WHERE".to_string()),
+        }
+    }
+}
+
+pub(crate) fn value_mapping_items(
     values: &[ClickHouseValueMapping],
 ) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
     values
@@ -1400,7 +1443,7 @@ pub fn alter_json_wire_schema_to_canonical_plexus(
 }
 
 pub fn alter_cbor_wire_schema_to_canonical_plexus(
-    alter: &AlterWireSchema<JsonType>,
+    alter: &AlterWireSchema<CborType>,
 ) -> error_stack::Result<String, CanonicalPlexusError> {
     alter_wire_schema_to_plexus("CBOR", alter)
 }
@@ -1774,17 +1817,7 @@ fn codec_jaq_transformations_to_plexus(
 }
 
 fn codec_encoding_rule_to_plexus(rule: &CodecEncodingRule) -> String {
-    format!(
-        "{} AS {}",
-        rule.field.as_str(),
-        codec_encoding_to_plexus(rule.encoding)
-    )
-}
-
-fn codec_encoding_to_plexus(encoding: CodecEncoding) -> &'static str {
-    match encoding {
-        CodecEncoding::Rfc3339 => "RFC3339",
-    }
+    format!("{} AS {}", rule.field.as_str(), rule.encoding.as_ref())
 }
 
 impl CreateBranch {
@@ -1919,7 +1952,7 @@ impl FlushPolicy {
     }
 }
 
-fn commit_policy_to_plexus(policy: &str, max_size: &crate::PayloadSizeLimit) -> String {
+pub(crate) fn commit_policy_to_plexus(policy: &str, max_size: &crate::PayloadSizeLimit) -> String {
     format!("COMMIT EACH {policy} MAX SIZE {max_size}")
 }
 
@@ -1942,6 +1975,14 @@ impl GeneralErrorPolicy {
     /// The general failure clause shared by canonical Plexus and inspection.
     pub fn to_canonical_plexus(&self) -> &'static str {
         general_error_policy_to_plexus(self)
+    }
+
+    /// The word that names this policy after `GENERAL ERROR`.
+    fn keyword(&self) -> &'static str {
+        match self {
+            Self::Ignore => "IGNORE",
+            Self::Log => "LOG",
+        }
     }
 }
 
@@ -2709,6 +2750,7 @@ fn alter_emitter_operation_to_plexus(
             let text = clause_statement(format!("SET TO {reference}"), clauses);
             Ok(text.trim_end_matches(';').to_string())
         }
+        AlterEmitterOperation::Change { change } => change.to_canonical_plexus(),
         AlterEmitterOperation::SetClient { client } => {
             Ok(format!("SET CLIENT {}", client.as_str()))
         }
@@ -2716,15 +2758,12 @@ fn alter_emitter_operation_to_plexus(
             Ok(format!("SET ENCODE USING {}", codec.as_str()))
         }
         AlterEmitterOperation::DropEncode => Ok("DROP ENCODE".to_string()),
+        AlterEmitterOperation::Construction { alteration } => alteration.to_canonical_plexus(),
         AlterEmitterOperation::SetCollect { policy } => {
             Ok(format!("SET {}", collect_policy_to_plexus(policy)))
         }
         AlterEmitterOperation::DropCollect => Ok("DROP COLLECT".to_string()),
         AlterEmitterOperation::SetAttachment { mode } => Ok(format!("SET {}", mode.as_ref())),
-        AlterEmitterOperation::SetPublishingMode { mode } => Ok(format!(
-            "SET MODE {}",
-            mode.publishing().to_canonical_plexus()
-        )),
         AlterEmitterOperation::SetBatch { policy } => {
             Ok(format!("SET {}", emitter_batch_policy_to_plexus(policy)))
         }
@@ -2732,13 +2771,9 @@ fn alter_emitter_operation_to_plexus(
         AlterEmitterOperation::SetFlush { flush_policy } => {
             Ok(format!("SET {}", flush_policy.to_canonical_plexus()))
         }
-        AlterEmitterOperation::SetCommit {
-            commit_each,
-            max_commit_size,
-        } => Ok(format!(
-            "SET {}",
-            commit_policy_to_plexus(commit_each, max_commit_size)
-        )),
+        AlterEmitterOperation::SetGeneralError { policy } => {
+            Ok(format!("SET GENERAL ERROR {}", policy.keyword()))
+        }
         AlterEmitterOperation::AlterEnvelope { alteration } => alteration.to_canonical_plexus(),
     }
 }
@@ -2750,7 +2785,9 @@ pub(crate) trait IngestorBodyPlexus {
 }
 
 /// The canonical Plexus of every operation of an alteration, in order.
-pub(crate) fn alter_ingestor_operations_to_plexus<Source: IngestorBodyPlexus>(
+pub(crate) fn alter_ingestor_operations_to_plexus<
+    Source: IngestorBodyPlexus + crate::IngestorEntityModel,
+>(
     operations: &[AlterIngestorOperation<Source>],
 ) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
     let mut rendered = Vec::with_capacity(operations.len());
@@ -2762,23 +2799,39 @@ pub(crate) fn alter_ingestor_operations_to_plexus<Source: IngestorBodyPlexus>(
 
 /// The canonical Plexus of every operation of an alteration of a transport's ingestor, in order.
 pub(crate) fn alter_transport_ingestor_operations_to_plexus<
-    Operation: crate::connector::TransportIngestorOperation,
+    Source: IngestorBodyPlexus + crate::IngestorEntityModel,
 >(
-    operations: &[Operation],
+    operations: &[crate::AlterTransportIngestorOperation<Source>],
 ) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
     let mut rendered = Vec::with_capacity(operations.len());
     for operation in operations {
-        rendered.push(operation.to_plexus()?);
+        let text = match operation {
+            crate::AlterTransportIngestorOperation::Ingestor(operation) => {
+                alter_ingestor_operation_to_plexus(operation)?
+            }
+            crate::AlterTransportIngestorOperation::SetDecodeUsing { codec } => {
+                format!("SET DECODE USING {}", codec.as_str())
+            }
+        };
+        rendered.push(text);
     }
     Ok(rendered)
 }
 
-pub(crate) fn alter_ingestor_operation_to_plexus<Source: IngestorBodyPlexus>(
+pub(crate) fn alter_ingestor_operation_to_plexus<
+    Source: IngestorBodyPlexus + crate::IngestorEntityModel,
+>(
     operation: &AlterIngestorOperation<Source>,
 ) -> error_stack::Result<String, CanonicalPlexusError> {
     match operation {
         AlterIngestorOperation::SetSource { source } => {
             Ok(format!("SET FROM {}", source.body_to_plexus()))
+        }
+        AlterIngestorOperation::Change { change } => {
+            crate::IngestorEntityChange::to_canonical_plexus(change)
+        }
+        AlterIngestorOperation::SetClient { client } => {
+            Ok(format!("SET CLIENT {}", client.as_str()))
         }
         AlterIngestorOperation::SetQuiesce { quiesce } => {
             Ok(format!("SET QUIESCE {}", ingest_quiesce_to_plexus(quiesce)))
@@ -2808,13 +2861,14 @@ pub(crate) fn alter_ingestor_operation_to_plexus<Source: IngestorBodyPlexus>(
             "REPLACE ROUTE {}",
             processor_output_to_plexus(route)?
         )),
-        AlterIngestorOperation::SetGeneralError { policy } => Ok(format!(
-            "SET GENERAL ERROR {}",
-            match policy {
-                GeneralErrorPolicy::Ignore => "IGNORE",
-                GeneralErrorPolicy::Log => "LOG",
-            }
+        AlterIngestorOperation::AlterRoute { relay, alteration } => Ok(format!(
+            "ALTER ROUTE TO {} {}",
+            relay.as_str(),
+            alteration.to_canonical_plexus()?
         )),
+        AlterIngestorOperation::SetGeneralError { policy } => {
+            Ok(format!("SET GENERAL ERROR {}", policy.keyword()))
+        }
     }
 }
 
@@ -3103,27 +3157,34 @@ fn envelope_clause_texts(
 ) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
     let mut texts = Vec::new();
     for clause in envelope.clauses() {
-        let keywords = clause.kind().keywords();
-        let text = match clause {
-            EnvelopeClause::Persistent | EnvelopeClause::Mandatory | EnvelopeClause::Retain => {
-                keywords.to_string()
-            }
-            EnvelopeClause::DeliverAfter(duration) | EnvelopeClause::Delay(duration) => {
-                format!("{keywords} {duration}")
-            }
-            EnvelopeClause::Timestamp(expression)
-            | EnvelopeClause::ReplyTo(expression)
-            | EnvelopeClause::MessageId(expression)
-            | EnvelopeClause::DeduplicationId(expression) => {
-                format!("{keywords} {}", expression_to_plexus(expression)?)
-            }
-        };
-        texts.push(text);
+        texts.push(envelope_clause_to_plexus(clause)?);
     }
     Ok(texts)
 }
 
-/// Each property an envelope sets, as `'<key>' = <expression>`, in written order.
+/// One envelope clause as canonical Plexus: its keywords, then what it is written with.
+fn envelope_clause_to_plexus(
+    clause: EnvelopeClause<'_>,
+) -> error_stack::Result<String, CanonicalPlexusError> {
+    let keywords = clause.kind().keywords();
+    let text = match clause {
+        EnvelopeClause::Persistent | EnvelopeClause::Mandatory | EnvelopeClause::Retain => {
+            keywords.to_string()
+        }
+        EnvelopeClause::DeliverAfter(duration) | EnvelopeClause::Delay(duration) => {
+            format!("{keywords} {duration}")
+        }
+        EnvelopeClause::Timestamp(expression)
+        | EnvelopeClause::ReplyTo(expression)
+        | EnvelopeClause::MessageId(expression)
+        | EnvelopeClause::DeduplicationId(expression) => {
+            format!("{keywords} {}", expression_to_plexus(expression)?)
+        }
+    };
+    Ok(text)
+}
+
+/// Each of `properties`, as `'<key>' = <expression>`, in written order.
 fn envelope_property_items(
     properties: &[crate::EnvelopeProperty],
 ) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
@@ -3153,16 +3214,14 @@ impl EmitterEnvelope {
 }
 
 impl crate::EmitterEnvelopeAlteration {
-    /// The declaration-gated targeted edit as canonical Plexus.
+    /// The targeted envelope edit as the `ALTER` operation that writes it.
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         match self {
-            Self::SetPersistent => Ok("SET PERSISTENT".to_owned()),
-            Self::DropPersistent => Ok("DROP PERSISTENT".to_owned()),
-            Self::SetTimestamp { expression } => Ok(format!(
-                "SET TIMESTAMP {}",
-                expression_to_plexus(expression)?
+            Self::SetClause { clause } => Ok(format!(
+                "SET {}",
+                envelope_clause_to_plexus(clause.clause())?
             )),
-            Self::DropTimestamp => Ok("DROP TIMESTAMP".to_owned()),
+            Self::DropClause { clause } => Ok(format!("DROP {}", clause.keywords())),
             Self::SetProperties { properties } => Ok(format!(
                 "SET PROPERTIES {{{}}}",
                 envelope_property_items(properties)?.join(", ")
@@ -3175,7 +3234,7 @@ impl crate::EmitterEnvelopeAlteration {
 impl PostgresConflictAction {
     /// The `ON CONFLICT` clause the action writes after the emitter's `VALUES`, absent for an
     /// emitter that writes none.
-    fn conflict_clause(&self) -> Option<String> {
+    pub(crate) fn conflict_clause(&self) -> Option<String> {
         match self {
             Self::None => None,
             Self::DoNothing { target } => {
@@ -3193,7 +3252,7 @@ impl PostgresConflictAction {
 impl MySqlConflictAction {
     /// The `ON CONFLICT` clause the action writes after the emitter's `VALUES`, absent for an
     /// emitter that writes none.
-    fn conflict_clause(&self) -> Option<String> {
+    pub(crate) fn conflict_clause(&self) -> Option<String> {
         match self {
             Self::None => None,
             Self::DoNothing => Some("ON CONFLICT DO NOTHING".to_string()),
@@ -3205,7 +3264,7 @@ impl MySqlConflictAction {
 impl MongoDbConflictAction {
     /// The `ON CONFLICT` clause the action writes after the emitter's `VALUES`, absent for an
     /// emitter that writes none.
-    fn conflict_clause(&self) -> Option<String> {
+    pub(crate) fn conflict_clause(&self) -> Option<String> {
         match self {
             Self::None => None,
             Self::DoNothing { target } => {
@@ -3295,7 +3354,7 @@ fn float_literal(literal: Float64Literal) -> error_stack::Result<String, Canonic
 ///
 /// A duration's `Display` spells every component, as in `1s 500ms`, which a duration literal cannot
 /// hold, so `1500ms` would otherwise render as text that no longer parses. Zero is written in seconds.
-fn duration_literal(nanos: impl Into<u128>) -> String {
+pub(crate) fn duration_literal(nanos: impl Into<u128>) -> String {
     let nanos = nanos.into();
     const UNITS: [(u128, &str); 6] = [
         (86_400_000_000_000, "d"),
@@ -3695,7 +3754,7 @@ mod tests {
             strictness: crate::WireSchemaStrictness::Loose,
             fields: vec![WireSchemaField {
                 name: named("active"),
-                ty: JsonType::Boolean,
+                ty: crate::CborType::Boolean,
                 optional: false,
             }],
         });

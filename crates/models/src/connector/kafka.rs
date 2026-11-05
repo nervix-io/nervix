@@ -19,7 +19,6 @@
 use std::{num::NonZeroU64, time::Duration};
 
 use error_stack::Report;
-use meticulous::OptionExt as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
@@ -433,6 +432,10 @@ impl IngestorEntityBody for KafkaTopicIngestor {
         IngestorReference::Client(&self.client)
     }
 
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
+    }
+
     fn quiesce(&self) -> &IngestQuiesceMode {
         &self.quiesce
     }
@@ -478,48 +481,49 @@ impl KafkaOffsetMode {
     }
 }
 
-/// Operations of a Kafka topic ingestor, retaining shared operations in their original order.
+/// One change an `ALTER KAFKA TOPIC INGESTOR` writes to the body of the ingestor it changes.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub enum KafkaTopicIngestorOperation {
-    Transport(crate::AlterTransportIngestorOperation<KafkaTopicIngestor>),
-    SetStartAt { position: IngestStartPosition },
+pub enum KafkaTopicIngestorChange {
+    /// `SET TOPIC '<topic>'`.
+    Topic(KafkaTopicName),
+    /// `SET OFFSET BY DOMAIN | CONSUMER GROUP '<group>' START AT EARLIEST|LATEST`.
+    OffsetBy(KafkaOffsetMode),
+    /// `SET START AT EARLIEST|LATEST`: where a consumer group starts, its group kept.
+    StartAt(IngestStartPosition),
+    /// `SET MODE <mode>`.
+    Mode(KafkaIngestMode),
 }
 
-impl From<crate::AlterTransportIngestorOperation<KafkaTopicIngestor>>
-    for KafkaTopicIngestorOperation
-{
-    fn from(operation: crate::AlterTransportIngestorOperation<KafkaTopicIngestor>) -> Self {
-        Self::Transport(operation)
-    }
-}
+impl crate::IngestorEntityChange for KafkaTopicIngestorChange {
+    type Entity = KafkaTopicIngestor;
 
-impl super::ingestor::TransportIngestorOperation for KafkaTopicIngestorOperation {
     fn apply_to(
         &self,
-        ingestor: &mut crate::CreateIngestor,
+        entity: &mut KafkaTopicIngestor,
     ) -> error_stack::Result<(), crate::AlterIngestorError> {
         match self {
-            Self::Transport(operation) => operation.apply_to(ingestor),
-            Self::SetStartAt { position } => {
-                let source = ingestor
-                    .input
-                    .transport_source_mut()
-                    .verified(super::entity_union::ALTERED_PAIR_CHECKED);
-                let crate::IngestorEntity::Kafka(KafkaIngestor::Topic(source)) = source else {
-                    unreachable!("{}", super::entity_union::ALTERED_PAIR_CHECKED);
-                };
-                source.offset_mode.set_start_at(*position)
-            }
+            Self::Topic(topic) => entity.topic = topic.clone(),
+            Self::OffsetBy(offset_mode) => entity.offset_mode = offset_mode.clone(),
+            Self::StartAt(position) => entity.offset_mode.set_start_at(*position)?,
+            Self::Mode(mode) => entity.mode = mode.clone(),
         }
+        Ok(())
     }
 
-    fn to_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
-        match self {
-            Self::Transport(operation) => operation.to_plexus(),
-            Self::SetStartAt { position } => Ok(format!("SET START AT {position}")),
-        }
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Topic(topic) => format!("SET TOPIC {}", crate::string_literal(topic.as_str())),
+            Self::OffsetBy(offset_mode) => {
+                format!("SET OFFSET BY {}", offset_mode.to_canonical_plexus())
+            }
+            Self::StartAt(position) => format!("SET START AT {position}"),
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
     }
 }
 
@@ -574,7 +578,7 @@ connector_ingestors! {
     pub enum KafkaTopicIngestorAlteration;
     /// The entities a Kafka source reads.
     pub enum KafkaIngestorEntity {
-        Topic(KafkaTopicIngestor => KafkaTopicIngestorOperation) = "TOPIC", "Kafka";
+        Topic(KafkaTopicIngestor => KafkaTopicIngestorChange) = "TOPIC", "Kafka";
     }
 }
 
@@ -625,15 +629,51 @@ impl EmitterEntityBody for KafkaTopicEmitter {
     }
 }
 
+/// One change an `ALTER KAFKA TOPIC EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum KafkaTopicEmitterChange {
+    /// `SET TOPIC '<name>'`.
+    Topic(KafkaTopicName),
+    /// `SET MODE <mode>`.
+    Mode(KafkaTopicPublishingMode),
+}
+
+impl crate::EmitterEntityChange for KafkaTopicEmitterChange {
+    type Entity = KafkaTopicEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut KafkaTopicEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Topic(name) => entity.topic = name.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Topic(name) => format!("SET TOPIC {}", crate::string_literal(name.as_str())),
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector Kafka = "KAFKA";
     /// What a Kafka emitter writes.
     pub enum KafkaEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum KafkaTopicEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum KafkaEmitterChange;
     /// The entities a Kafka emitter writes.
     pub enum KafkaEmitterEntity {
-        Topic(KafkaTopicEmitter, KafkaTopicPublishingMode) = "TOPIC";
+        Topic(KafkaTopicEmitter, KafkaTopicPublishingMode, KafkaTopicEmitterChange) = "TOPIC";
     }
 }
 

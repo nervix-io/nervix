@@ -15,13 +15,16 @@ The archive holds these files, under their paths below the checkout:
   reads as an object: a file with an execute bit, outside the incremental, fingerprint and build
   script directories, whose name without its extensions names a workspace package or target,
   matched as cargo-llvm-cov 0.8 matches it. Those are the scenario executable, the CLI, the paced
-  simulation driver, the shared client binding, the deadlock report tool and the formatter, so a
-  shard's report reads the objects the build's own report would read;
+  simulation driver, the native Python extension, the C ABI for conformance clients, the deadlock
+  report tool and the formatter, so a shard's report reads the objects the build's own report
+  would read;
 - the Playwright driver that the build script of playwright-rs downloaded into its output
   directory, whose path the scenario executable holds. A scenario executable that names a driver
   the build did not leave fails the pack, rather than leaving a shard to whatever driver it finds;
 - the ONNX fixtures and the ONNX Runtime package the ONNX scenarios load, and the WASM guests the
   WASM processor scenarios upload;
+- the native Python driver wheel under `target/paced-simulation/wheels`, installed by the
+  unpack recipe into a fresh CPython 3.12 environment before scenarios start;
 - `target/scenario-suite/manifest.json`, which names the revision and the checkout the build ran in,
   and every file with its size.
 
@@ -68,6 +71,7 @@ NON_OBJECT_EXTENSIONS = frozenset({".d", ".rlib", ".rmeta"})
 # holds that directory's path from compile time. A build whose download failed names none.
 PLAYWRIGHT_DRIVERS = "build/playwright-rs-*/out/playwright-driver/playwright-*"
 PLAYWRIGHT_DRIVER_PATH = b"/out/playwright-driver/"
+PYTHON_WHEELS = Path("target/paced-simulation/wheels")
 ONNX_FIXTURES = Path("tests/fixtures/onnx")
 WASM_GUESTS = (
     Path("examples/wasm-processors/rust-guest/target/wasm32-unknown-unknown/release/nervix_wasm_processor_rust_guest.wasm"),
@@ -278,6 +282,10 @@ def runtime_inputs(root: Path, executable: Path) -> list[Path]:
     for driver in playwright_drivers(root, executable):
         inputs.extend(files_below(root, driver))
     inputs.extend(generated_inputs(root))
+    wheels = sorted((root / PYTHON_WHEELS).glob("nervix_client-*.whl"))
+    if len(wheels) != 1:
+        raise ShardError(f"expected exactly one Python driver wheel in {PYTHON_WHEELS}, found {len(wheels)}")
+    inputs.append(wheels[0].relative_to(root))
     return inputs
 
 

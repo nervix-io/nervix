@@ -1867,7 +1867,9 @@ paths, each with its own attached Kafka emitter and output topic:
 - **The junction `chaos_life_enrich`.** It reads the branch's row of the materialized relay
   `chaos_life_profiles` with `REQUIRED WAIT`. A profile ingestor fills that relay from
   `chaos_life_profile_input` with `TIMESTAMP AT updated_at`, so the run chooses each row's
-  timestamp, and `LAST BY TIMESTAMP` keeps a branch's row only for a strictly newer one.
+  timestamp, and `LAST BY TIMESTAMP` keeps a branch's row only for a strictly newer one. The
+  JSON wire schema declares `updated_at string`; its codec declares
+  `ENCODE updated_at AS RFC3339` to bind that text to the internal `DATETIME` field.
 - **The generator `chaos_life_generator`.** It emits each branch's materialized row every second.
 - **The detached window `chaos_life_window`.** It aggregates each branch's records in tumbling
   six-second windows: their count, bounds and sum, an `APPROX_COUNT_DISTINCT` of the index modulo 3,

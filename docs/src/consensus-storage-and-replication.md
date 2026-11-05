@@ -249,6 +249,18 @@ position would then acknowledge its probe below the probe's own start, which Ope
 broken invariant: in a debug build its Raft core panics, and every later write on that node fails
 with `raft write failed: panicked`.
 
+The three-node failed-submission regression transfers leadership with a retained log and a
+lagging follower. It arms the successor before the transfer, then fails exactly its next nonempty
+submission to that follower at the sender's failure boundary. Empty management probes and other
+followers continue; the selected follower's later traffic also continues. The captured request
+must start above the first replay batch's end. With OpenRaft's initial midpoint
+`floor(searching_end / 16) * 8` and a 256-entry batch, 528 retained entries are the first history
+whose probe's previous index, 263, exceeds a replay's index 255. The scenario checks the actual
+boundary, transaction attachment and commit, follower catch-up, subsequent writes, and a strict
+read confirmed by the successor. These progress assertions also apply when debug assertions are
+disabled. The one-shot control and captured request are in-memory test state; ordinary builds
+retain only an inert zero-sized control.
+
 The leader permits at most 16 unacknowledged batches for one follower. It also waits whenever its
 unacknowledged bytes plus the next 1 MiB target would exceed 16 MiB. Because one complete command
 may cross the target, measured outstanding bytes may exceed that target budget by the excess of one
@@ -468,27 +480,31 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The dedicated database owns exactly four current keyspaces: `raft_unit_cluster_logs`,
-`raft_unit_cluster_meta`, `raft_unit_cluster_state`, and
-`raft_unit_cluster_snapshots`. Opening it validates the complete keyspace namespace before
-reading any records. This namespace identifies the current Model shape, including a Pulsar
-subscription's required type and an owned subscription's required start position, a Kafka consumer
-group's required start position, the serialized Sentry platform field, an ingestor's
-`TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the receive count
-an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an MQTT TOPIC
-ingestor writes beside its delivery mode, the quality of service an
-MQTT TOPIC emitter writes beside its publishing mode, its retained-publication flag and MQTT 5
-property mappings, a `REDIS PUBSUB`
-ingestor's `CHANNEL` or `PATTERN` subscription, whether a polled HTTP request's header holds a
-literal or names a client secret, `ALTER BRANCH` among the archived statements and the branch
-partition count every resolved branch declaration of the committed schedule carries. Its state
-metadata requires the current `ClusterState` encoding, including committed cluster parameters and the durable restore
-installation gate and the unit-keyed committed schedule in which a relay of a partitioned branch is
-scheduled as one unit per partition. The current shape also requires typed ingestor instancing,
-exact-unit placement-group members and entity-versus-unit transaction gate targets. Native counts
-in commands, queued transactions, progress, outcomes, and plan, report and topology headers
-are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery
-and snapshot installation therefore retain their complete magnitudes. See
+The dedicated database owns exactly four current keyspaces: `raft_instance_wire_logs`,
+`raft_instance_wire_meta`, `raft_instance_wire_state`, and
+`raft_instance_wire_snapshots`. Opening it validates the complete keyspace namespace before
+reading any records. This namespace identifies the current Model shape, including the separate JSON
+and CBOR wire type enums, AVRO representation types, explicit `BASE64` codec encoding, a Pulsar
+subscription's required type, an owned Pulsar subscription's required start position, a Kafka
+consumer group's required start position, the serialized Sentry platform field, an ingestor's
+`TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the receive
+count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an
+MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter
+writes beside its publishing mode, its retained-publication flag and MQTT 5 property mappings, a
+`REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription,
+whether a polled HTTP request's header holds a literal or names a client secret, and the branch
+partition count every resolved branch declaration of the committed schedule carries. It identifies
+the current statement shape as well, which the statements a transaction keeps are stored in:
+`ALTER BRANCH` among those statements, and an `ALTER INGESTOR` or `ALTER EMITTER` operation that
+changes one part of its entity's body, an envelope clause or the properties, or one part of a
+construction where it stands. Its state metadata requires the current `ClusterState` encoding, 12,
+including committed cluster parameters, the durable restore installation gate and the unit-keyed
+committed schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
+The current shape also requires typed ingestor instancing, exact-unit placement-group members
+and entity-versus-unit transaction gate targets. Native counts in commands, queued transactions,
+progress, outcomes, and plan, report and topology
+headers are archived as fixed-width 64-bit values with checked native decoding. Log replay, state
+recovery and snapshot installation therefore retain their complete magnitudes. See
 [Archived Counts](./typed-states.md#archived-counts).
 
 The committed domain schedule stores the current unit map on every scheduled node. Each unit owns

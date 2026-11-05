@@ -16,7 +16,7 @@ use chumsky::prelude::*;
 use nervix_models::{
     ChoiceRequirement, IngestDeliveryKind, IngestQuiesceKind, IngestQuiesceMode,
     IngestorDeclaration as _, IngestorEntityModel as _, MqttIngestMode, MqttQos, MqttSession,
-    MqttTopicFilter, MqttTopicIngestor, UnmetDeliveryRequirement,
+    MqttTopicFilter, MqttTopicIngestor, MqttTopicIngestorChange, UnmetDeliveryRequirement,
 };
 
 use super::delivery::{
@@ -306,6 +306,24 @@ pub(super) fn topic_body<'src>()
                 quiesce,
             },
         )
+        .boxed()
+}
+
+/// `SET TOPIC`, `SET SESSION`, `SET QOS` or `SET MODE`: one part of an `MQTT TOPIC` body. A mode
+/// is read beside no session or quality of service, so whether the result pairs them is checked on
+/// the complete ingestor.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], MqttTopicIngestorChange, extra::Err<ParseError<'src>>> + Clone {
+    let topic = kw(Identifier::Topic)
+        .ignore_then(external_name::<MqttTopicFilter>())
+        .map(MqttTopicIngestorChange::Topic);
+    let session = session_clause().map(MqttTopicIngestorChange::Session);
+    let qos = mqtt_qos_clause().map(MqttTopicIngestorChange::Qos);
+    let mode = kw(Identifier::Mode)
+        .ignore_then(delivery())
+        .map(MqttTopicIngestorChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((topic, session, qos, mode)))
         .boxed()
 }
 

@@ -245,12 +245,18 @@ fn targeted_edits_require_their_entity_declaration_even_when_dropping() {
     let entity = EmitterEntityKind::Sqs(crate::SqsEmitterEntity::Queue);
     let original = EmitterEnvelope::default();
     for alteration in [
-        EmitterEnvelopeAlteration::SetPersistent,
-        EmitterEnvelopeAlteration::DropPersistent,
-        EmitterEnvelopeAlteration::SetTimestamp {
-            expression: text("timestamp"),
+        EmitterEnvelopeAlteration::SetClause {
+            clause: EnvelopeClauseValue::Persistent,
         },
-        EmitterEnvelopeAlteration::DropTimestamp,
+        EmitterEnvelopeAlteration::DropClause {
+            clause: EnvelopeClauseKind::Persistent,
+        },
+        EmitterEnvelopeAlteration::SetClause {
+            clause: EnvelopeClauseValue::Timestamp(text("timestamp")),
+        },
+        EmitterEnvelopeAlteration::DropClause {
+            clause: EnvelopeClauseKind::Timestamp,
+        },
         EmitterEnvelopeAlteration::SetProperties {
             properties: vec![property("content_type")],
         },

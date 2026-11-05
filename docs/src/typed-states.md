@@ -300,18 +300,20 @@ platform string; connector preparation uses it only when the codec's event omits
 A polled HTTP request's header holds a literal or names a client secret as two states of one enum,
 so a value cannot be both or neither, and the Model that names a secret holds its key and never its
 value.
-The registry's `NERVIX UNIT PUBS` archive signature identifies the current Model layout, including
-a Pulsar subscription's required type and an owned subscription's required start position, a Kafka
-consumer group's required start position, the required 16-bit branch partition count, typed ingestor
-instancing, Sentry platform,
-an ingestor's `TIMESTAMP AT metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape,
+The registry's `NERVIX UNIT WIRE` archive signature identifies the current Model layout, including
+the separate JSON and CBOR wire type enums, AVRO representation types, explicit `BASE64` codec
+encoding, a Pulsar subscription's required type and an owned subscription's required start position,
+a Kafka consumer group's required start position, the required 16-bit branch partition count,
+typed ingestor instancing, Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source,
+an SQS QUEUE emitter's `SEND` request shape,
 the receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of
 service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC
 emitter writes beside its publishing mode, its retained-publication flag and MQTT 5 property
-mappings, a `REDIS PUBSUB` ingestor's subscription, which is either
-a `CHANNEL` or a `PATTERN`, and that header state. Consensus's `raft_unit_cluster_` keyspaces and current state
-metadata encoding identify its stored shapes, including the partition count of every resolved branch
-declaration in the committed schedule. The runtime state store's
+mappings, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`,
+and that header state. Consensus's `raft_instance_wire_` keyspaces and current `ClusterState`
+metadata encoding, 12, identify its stored shapes, including the partition count of every resolved branch
+declaration in the committed schedule and the statements a transaction keeps, including per-entity
+`ALTER INGESTOR` and `ALTER EMITTER` operations. The runtime state store's
 `wide-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the
 unsigned 64-bit instance identity and the unit every branch-aggregated metric series carries.
 Fixed intake counts remain `NonZeroU64`; branch partition counts remain `NonZeroU16`. The
@@ -478,6 +480,12 @@ expired, while a settlement sent before losing its answer is separately uncertai
 `START` generation and endpoint contract fingerprint are required values on every successful
 consumer open, so absence cannot be mistaken for a matching contract.
 
+The browser retains an uncertain command's complete original request and issue order. Its retry
+availability is explicitly waiting or ready, with a bounded delay retained for the next attempt.
+The current connection owns the timer futures; ending it releases those waits for recovery on
+the replacement connection. A terminal reply removes the command's retry record. No timestamp or
+request-number sentinel stands for either state, and retry metadata carries no second payload.
+
 **Expression scopes and errors.** The VM frontend receives a scope policy that says whether a
 bare field may be read, written, both, or neither. A generated or set-only route reports an
 unavailable `message` or `input` scope during lowering, rather than inventing a namespace that
@@ -536,8 +544,12 @@ pair is read from the Model and never stored beside it. An ingestor alteration i
 way: its head selects one connector and entity, and the operations of that entity set a source of
 that entity's own Model, so `ALTER KAFKA TOPIC INGESTOR` cannot carry a Redis channel and no kind
 field sits beside the source it sets. Only a transport's operations include the codec that decodes
-its payloads, so a client producer alteration cannot hold one. A stored ingestor of another pair is
-refused by comparing the two kinds. The names an external system owns, such as a Kafka topic or a NATS subject, are distinct
+its payloads, so a client producer alteration cannot hold one. A targeted change, such as
+`SET TOPIC`, `SET MODE` or `DROP HEADERS`, is a value of the entity's own change enum, so a change
+can name only a part that entity's body writes, and an emitter's change is nested by connector and
+then entity in the same way. A change to a construction where it stands is one shared
+`ConstructionAlteration`, which an ingestor applies to the route it names and an emitter to its own
+construction. A stored ingestor of another pair is refused by comparing the two kinds. The names an external system owns, such as a Kafka topic or a NATS subject, are distinct
 types from Nervix names: each is checked against its entity's own rule once, when it is parsed or
 decoded, and keeps its text exactly as written, case included, so a connector sends what the
 statement says. What every source or emitter of a pair
@@ -1225,6 +1237,11 @@ presence. An absent socket after accept failure requires rebind, while the same 
 owns established connection tasks and queued frames; source close ends that retained state.
 The testing capability shares one named listener-fault request between the connector and host:
 the selected bound address and its acknowledgement belong to that same armed request.
+
+The consensus append-submission test control is idle, armed for one follower, or delivered with
+that nonempty request's previous and last log identities and entry count. The delivered variant
+owns its observation, so it cannot also remain armed. A scoped stream control retains its target;
+the ordinary build's inert control is zero-sized and retains no target or shared state.
 
 A Syslog frame's peer is a UDP address, a TCP address or a shared TLS connection identity. Only the
 TLS variant can hold a verified client-certificate subject, whose absence represents a connection

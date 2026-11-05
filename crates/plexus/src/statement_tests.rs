@@ -1353,7 +1353,7 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
             CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
                 user_id integer,
                 created_at string,
-                payload object
+                payload string
             );
         "#,
         None,

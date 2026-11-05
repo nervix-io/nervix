@@ -17,7 +17,7 @@
 use chumsky::prelude::*;
 use nervix_models::{
     PulsarIngestMode, PulsarSubscription, PulsarSubscriptionName, PulsarSubscriptionOwnership,
-    PulsarSubscriptionType, PulsarTopicIngestor, PulsarTopicIngestorOperation, PulsarTopicName,
+    PulsarSubscriptionType, PulsarTopicIngestor, PulsarTopicIngestorChange, PulsarTopicName,
 };
 
 use super::delivery::{
@@ -85,10 +85,16 @@ fn mode<'src>()
     ))
 }
 
-/// A subscription's name, ownership and type, with a required creation position when
+/// A subscription a statement names and who owns it, before the type it reads as.
+struct SubscriptionOwner {
+    name: PulsarSubscriptionName,
+    ownership: PulsarSubscriptionOwnership,
+}
+
+/// `SUBSCRIPTION '<name>'` and who owns it, with a required creation position when
 /// ingestor-owned.
-fn subscription<'src>()
--> impl Parser<'src, &'src [Token], PulsarSubscription, extra::Err<ParseError<'src>>> + Clone {
+fn subscription_owner<'src>()
+-> impl Parser<'src, &'src [Token], SubscriptionOwner, extra::Err<ParseError<'src>>> + Clone {
     let ownership = choice((
         kw_phrase3(Identifier::Owned, Identifier::By, Identifier::Ingestor)
             .ignore_then(start_position())
@@ -98,12 +104,23 @@ fn subscription<'src>()
     kw(Identifier::Subscription)
         .ignore_then(external_name::<PulsarSubscriptionName>())
         .then(ownership)
+        .map(|(name, ownership)| SubscriptionOwner { name, ownership })
+        .boxed()
+}
+
+/// A subscription's name, ownership and type, with a required creation position when
+/// ingestor-owned.
+fn subscription<'src>()
+-> impl Parser<'src, &'src [Token], PulsarSubscription, extra::Err<ParseError<'src>>> + Clone {
+    subscription_owner()
         .then(subscription_type())
-        .map(|((name, ownership), kind)| PulsarSubscription {
-            name,
-            ownership,
-            kind,
-        })
+        .map(
+            |(SubscriptionOwner { name, ownership }, kind)| PulsarSubscription {
+                name,
+                ownership,
+                kind,
+            },
+        )
         .boxed()
 }
 
@@ -118,19 +135,25 @@ fn subscription_type<'src>()
     )))
 }
 
-pub(super) fn alteration<'src>()
--> impl Parser<'src, &'src [Token], nervix_models::AlterIngestor, extra::Err<ParseError<'src>>> + Clone
+/// `SET TOPIC`, `SET SUBSCRIPTION`, `SET START AT`, `SET TYPE` or `SET MODE`: one part of a
+/// `PULSAR TOPIC` body.
+pub(super) fn change<'src>()
+-> impl Parser<'src, &'src [Token], PulsarTopicIngestorChange, extra::Err<ParseError<'src>>> + Clone
 {
-    let operation = choice((
-        kw(Identifier::Set)
-            .ignore_then(start_position())
-            .map(|position| PulsarTopicIngestorOperation::SetStartAt { position }),
-        kw(Identifier::Set)
-            .ignore_then(subscription_type())
-            .map(|kind| PulsarTopicIngestorOperation::SetType { kind }),
-        super::transport_operation(topic_body()).map(PulsarTopicIngestorOperation::Transport),
-    ));
-    super::alteration::<PulsarTopicIngestor, _, _>(operation)
+    let topic = kw(Identifier::Topic)
+        .ignore_then(external_name::<PulsarTopicName>())
+        .map(PulsarTopicIngestorChange::Topic);
+    let owned = subscription_owner().map(|SubscriptionOwner { name, ownership }| {
+        PulsarTopicIngestorChange::Subscription { name, ownership }
+    });
+    let start = start_position().map(PulsarTopicIngestorChange::StartAt);
+    let kind = subscription_type().map(PulsarTopicIngestorChange::Type);
+    let delivery = kw(Identifier::Mode)
+        .ignore_then(mode())
+        .map(PulsarTopicIngestorChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((topic, owned, start, kind, delivery)))
+        .boxed()
 }
 
 #[cfg(test)]

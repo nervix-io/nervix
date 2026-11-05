@@ -227,6 +227,10 @@ impl IngestorEntityBody for SqsQueueIngestor {
         IngestorReference::Client(&self.client)
     }
 
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
+    }
+
     fn quiesce(&self) -> &IngestQuiesceMode {
         &self.quiesce
     }
@@ -280,6 +284,42 @@ impl SqsIngestMode {
                 retry: retry_policy,
             },
         }
+    }
+}
+
+/// One change an `ALTER SQS QUEUE INGESTOR` writes to the body of the ingestor it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum SqsQueueIngestorChange {
+    /// `SET QUEUE '<queue>'`.
+    Queue(SqsQueueName),
+    /// `SET MODE <mode>`.
+    Mode(SqsIngestMode),
+}
+
+impl crate::IngestorEntityChange for SqsQueueIngestorChange {
+    type Entity = SqsQueueIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut SqsQueueIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Queue(queue) => entity.queue = queue.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Queue(queue) => format!("SET QUEUE {}", crate::string_literal(queue.as_str())),
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
     }
 }
 
@@ -391,7 +431,7 @@ connector_ingestors! {
     pub enum SqsQueueIngestorAlteration;
     /// The entities an SQS source reads.
     pub enum SqsIngestorEntity {
-        Queue(SqsQueueIngestor) = "QUEUE", "SQS";
+        Queue(SqsQueueIngestor => SqsQueueIngestorChange) = "QUEUE", "SQS";
     }
 }
 
@@ -583,15 +623,72 @@ impl EmitterEntityBody for SqsQueueEmitter {
     }
 }
 
+/// One change an `ALTER SQS QUEUE EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum SqsQueueEmitterChange {
+    /// `SET QUEUE '<queue>'`.
+    Queue(SqsQueueName),
+    /// `SET FIFO GROUP <expression> | FROM BRANCH`.
+    FifoGroup(SqsFifoGroup),
+    /// `DROP FIFO GROUP`: the emitter sends no message group.
+    DropFifoGroup,
+    /// `SET SEND SINGLE|BATCH`.
+    Send(SqsSend),
+    /// `SET MODE <mode>`.
+    Mode(SqsQueuePublishingMode),
+}
+
+impl crate::EmitterEntityChange for SqsQueueEmitterChange {
+    type Entity = SqsQueueEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut SqsQueueEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Queue(queue) => entity.queue = queue.clone(),
+            Self::FifoGroup(group) => entity.fifo_group = Some(group.clone()),
+            Self::DropFifoGroup => {
+                if entity.fifo_group.take().is_none() {
+                    return Err(error_stack::Report::new(
+                        crate::AlterEmitterError::OptionNotWritten {
+                            entity: <SqsQueueEmitter as crate::EmitterEntityModel>::KIND,
+                            option: "FIFO GROUP",
+                        },
+                    ));
+                }
+            }
+            Self::Send(send) => entity.send = *send,
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Queue(queue) => format!("SET QUEUE {}", crate::string_literal(queue.as_str())),
+            Self::FifoGroup(group) => format!("SET FIFO GROUP {}", group.to_canonical_plexus()?),
+            Self::DropFifoGroup => "DROP FIFO GROUP".to_owned(),
+            Self::Send(send) => format!("SET SEND {}", send.keyword()),
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector Sqs = "SQS";
     /// What an SQS emitter writes.
     pub enum SqsEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum SqsQueueEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum SqsEmitterChange;
     /// The entities an SQS emitter writes.
     pub enum SqsEmitterEntity {
-        Queue(SqsQueueEmitter, SqsQueuePublishingMode) = "QUEUE";
+        Queue(SqsQueueEmitter, SqsQueuePublishingMode, SqsQueueEmitterChange) = "QUEUE";
     }
 }
 

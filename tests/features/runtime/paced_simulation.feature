@@ -2,7 +2,7 @@ Feature: Paced simulation drivers
   The runnable drivers under examples/paced-simulation attach to the domain clock, submit sensor
   readings stamped with the tick centers the clock has reached through a client ingestor, and
   apply and acknowledge the readings the graph constructs through attached client emitters. The
-  rust driver is built on the Rust client library and the python driver on the shared C binding.
+  rust driver is built on the Rust client library and the python driver on the native Python package.
   Every scenario runs the published programs against the published example graph.
 
   @paced_simulation

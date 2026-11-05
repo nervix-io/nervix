@@ -275,6 +275,10 @@ impl IngestorEntityBody for RabbitMqQueueIngestor {
         IngestorReference::Client(&self.client)
     }
 
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
+    }
+
     fn quiesce(&self) -> &IngestQuiesceMode {
         &self.quiesce
     }
@@ -332,6 +336,42 @@ impl RabbitMqIngestMode {
     }
 }
 
+/// One change an `ALTER RABBITMQ QUEUE INGESTOR` writes to the body of the ingestor it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum RabbitMqQueueIngestorChange {
+    /// `SET QUEUE '<queue>'`.
+    Queue(RabbitMqQueueName),
+    /// `SET MODE <mode>`.
+    Mode(RabbitMqIngestMode),
+}
+
+impl crate::IngestorEntityChange for RabbitMqQueueIngestorChange {
+    type Entity = RabbitMqQueueIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut RabbitMqQueueIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Queue(queue) => entity.queue = queue.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Queue(queue) => format!("SET QUEUE {}", crate::string_literal(queue.as_str())),
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
+    }
+}
+
 connector_ingestors! {
     connector RabbitMq = "RABBITMQ";
     /// What a RabbitMQ source reads.
@@ -340,7 +380,7 @@ connector_ingestors! {
     pub enum RabbitMqQueueIngestorAlteration;
     /// The entities a RabbitMQ source reads.
     pub enum RabbitMqIngestorEntity {
-        Queue(RabbitMqQueueIngestor) = "QUEUE", "RabbitMQ";
+        Queue(RabbitMqQueueIngestor => RabbitMqQueueIngestorChange) = "QUEUE", "RabbitMQ";
     }
 }
 
@@ -494,16 +534,97 @@ impl EmitterEntityBody for RabbitMqExchangeEmitter {
     }
 }
 
+/// One change an `ALTER RABBITMQ QUEUE EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum RabbitMqQueueEmitterChange {
+    /// `SET QUEUE '<name>'`.
+    Queue(RabbitMqQueueName),
+    /// `SET MODE <mode>`.
+    Mode(RabbitMqQueuePublishingMode),
+}
+
+impl crate::EmitterEntityChange for RabbitMqQueueEmitterChange {
+    type Entity = RabbitMqQueueEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut RabbitMqQueueEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Queue(name) => entity.queue = name.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Queue(name) => format!("SET QUEUE {}", crate::string_literal(name.as_str())),
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
+/// One change an `ALTER RABBITMQ EXCHANGE EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum RabbitMqExchangeEmitterChange {
+    /// `SET EXCHANGE '<name>'`.
+    Exchange(RabbitMqExchangeName),
+    /// `SET ROUTING KEY <expression>`.
+    RoutingKey(Expression),
+    /// `SET MODE <mode>`.
+    Mode(RabbitMqExchangePublishingMode),
+}
+
+impl crate::EmitterEntityChange for RabbitMqExchangeEmitterChange {
+    type Entity = RabbitMqExchangeEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut RabbitMqExchangeEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Exchange(name) => entity.exchange = name.clone(),
+            Self::RoutingKey(routing_key) => entity.routing_key = routing_key.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Exchange(name) => {
+                format!("SET EXCHANGE {}", crate::string_literal(name.as_str()))
+            }
+            Self::RoutingKey(routing_key) => {
+                format!(
+                    "SET ROUTING KEY {}",
+                    crate::expression_to_plexus(routing_key)?
+                )
+            }
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector RabbitMq = "RABBITMQ";
     /// What a RabbitMQ emitter writes.
     pub enum RabbitMqEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum RabbitMqEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum RabbitMqEmitterChange;
     /// The entities a RabbitMQ emitter writes.
     pub enum RabbitMqEmitterEntity {
-        Queue(RabbitMqQueueEmitter, RabbitMqQueuePublishingMode) = "QUEUE";
-        Exchange(RabbitMqExchangeEmitter, RabbitMqExchangePublishingMode) = "EXCHANGE";
+        Queue(RabbitMqQueueEmitter, RabbitMqQueuePublishingMode, RabbitMqQueueEmitterChange) = "QUEUE";
+        Exchange(RabbitMqExchangeEmitter, RabbitMqExchangePublishingMode, RabbitMqExchangeEmitterChange) = "EXCHANGE";
     }
 }
 
