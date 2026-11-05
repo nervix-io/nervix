@@ -191,7 +191,34 @@ impl SchemaDraft {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum WireFieldType {
     Json(JsonType),
+    Cbor(CborType),
     Avro(AvroType),
+}
+
+impl WireFieldType {
+    fn json(self) -> Option<JsonType> {
+        if let Self::Json(ty) = self {
+            Some(ty)
+        } else {
+            None
+        }
+    }
+
+    fn cbor(self) -> Option<CborType> {
+        if let Self::Cbor(ty) = self {
+            Some(ty)
+        } else {
+            None
+        }
+    }
+
+    fn avro(self) -> Option<AvroType> {
+        if let Self::Avro(ty) = self {
+            Some(ty)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -276,68 +303,51 @@ impl WireSchemaDraft {
         if self.fields.is_empty() {
             return Err(Report::new(SchemaDraftError::FieldsRequired));
         }
-        let mut names = BTreeSet::new();
         match format {
-            WireFormat::Json | WireFormat::Cbor => {
-                let mut fields = Vec::<WireSchemaField<CborType>>::with_capacity(self.fields.len());
-                for (index, draft) in self.fields.iter().enumerate() {
-                    let field = index + 1;
-                    let field_name = FieldName::parse(draft.name.trim()).map_err(|cause| {
-                        cause.change_context(SchemaDraftError::FieldName { field })
-                    })?;
-                    if !names.insert(field_name.clone()) {
-                        return Err(Report::new(SchemaDraftError::DuplicateField {
-                            name: field_name,
-                        }));
-                    }
-                    let Some(WireFieldType::Json(ty)) = draft.ty else {
-                        return Err(Report::new(SchemaDraftError::FieldTypeRequired { field }));
-                    };
-                    fields.push(WireSchemaField {
-                        name: field_name,
-                        ty,
-                        optional: draft.optional,
-                    });
-                }
-                let schema = CreateWireSchema {
-                    name,
-                    strictness,
-                    fields,
-                };
-                if format == WireFormat::Json {
-                    Ok(Model::WireJsonSchema(schema))
-                } else {
-                    Ok(Model::WireCborSchema(schema))
-                }
-            }
-            WireFormat::Avro => {
-                let mut fields = Vec::with_capacity(self.fields.len());
-                for (index, draft) in self.fields.iter().enumerate() {
-                    let field = index + 1;
-                    let field_name = FieldName::parse(draft.name.trim()).map_err(|cause| {
-                        cause.change_context(SchemaDraftError::FieldName { field })
-                    })?;
-                    if !names.insert(field_name.clone()) {
-                        return Err(Report::new(SchemaDraftError::DuplicateField {
-                            name: field_name,
-                        }));
-                    }
-                    let Some(WireFieldType::Avro(ty)) = draft.ty else {
-                        return Err(Report::new(SchemaDraftError::FieldTypeRequired { field }));
-                    };
-                    fields.push(WireSchemaField {
-                        name: field_name,
-                        ty,
-                        optional: draft.optional,
-                    });
-                }
-                Ok(Model::WireAvroSchema(CreateWireSchema {
-                    name,
-                    strictness,
-                    fields,
-                }))
-            }
+            WireFormat::Json => Ok(Model::WireJsonSchema(CreateWireSchema {
+                name,
+                strictness,
+                fields: self.build_fields(WireFieldType::json)?,
+            })),
+            WireFormat::Cbor => Ok(Model::WireCborSchema(CreateWireSchema {
+                name,
+                strictness,
+                fields: self.build_fields(WireFieldType::cbor)?,
+            })),
+            WireFormat::Avro => Ok(Model::WireAvroSchema(CreateWireSchema {
+                name,
+                strictness,
+                fields: self.build_fields(WireFieldType::avro)?,
+            })),
         }
+    }
+
+    fn build_fields<T>(
+        &self,
+        extract: impl Fn(WireFieldType) -> Option<T>,
+    ) -> error_stack::Result<Vec<WireSchemaField<T>>, SchemaDraftError> {
+        let mut names = BTreeSet::new();
+        let mut fields = Vec::with_capacity(self.fields.len());
+        for (index, draft) in self.fields.iter().enumerate() {
+            let field = index + 1;
+            let name = FieldName::parse(draft.name.trim())
+                .map_err(|cause| cause.change_context(SchemaDraftError::FieldName { field }))?;
+            if !names.insert(name.clone()) {
+                return Err(Report::new(SchemaDraftError::DuplicateField { name }));
+            }
+            let Some(written) = draft.ty else {
+                return Err(Report::new(SchemaDraftError::FieldTypeRequired { field }));
+            };
+            let Some(ty) = extract(written) else {
+                return Err(Report::new(SchemaDraftError::FieldTypeRequired { field }));
+            };
+            fields.push(WireSchemaField {
+                name,
+                ty,
+                optional: draft.optional,
+            });
+        }
+        Ok(fields)
     }
 }
 
@@ -562,8 +572,11 @@ mod tests {
     fn each_wire_format_builds_its_own_model_with_every_type() {
         for format in [WireFormat::Json, WireFormat::Cbor, WireFormat::Avro] {
             let types = match format {
-                WireFormat::Json | WireFormat::Cbor => JsonType::iter()
+                WireFormat::Json => JsonType::iter()
                     .map(WireFieldType::Json)
+                    .collect::<Vec<_>>(),
+                WireFormat::Cbor => CborType::iter()
+                    .map(WireFieldType::Cbor)
                     .collect::<Vec<_>>(),
                 WireFormat::Avro => AvroType::iter()
                     .map(WireFieldType::Avro)
@@ -593,7 +606,7 @@ mod tests {
                     assert_eq!(schema.fields.len(), JsonType::iter().count())
                 }
                 (WireFormat::Cbor, Model::WireCborSchema(schema)) => {
-                    assert_eq!(schema.fields.len(), JsonType::iter().count())
+                    assert_eq!(schema.fields.len(), CborType::iter().count())
                 }
                 (WireFormat::Avro, Model::WireAvroSchema(schema)) => {
                     assert_eq!(schema.fields.len(), AvroType::iter().count())

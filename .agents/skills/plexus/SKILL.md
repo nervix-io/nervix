@@ -400,11 +400,10 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   `MAX STATE SIZE` after duration `WIDTH` and `STEP`, a branched window a branch with
   `MAX INSTANCES <n> EVICT LRU`, and the precision or capacity sets both accuracy and memory.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
-  schema. Declare datetime encoding explicitly when required: a JSON or CBOR `string` wire field
-  binds a `DATETIME` field only with `ENCODE <field> AS RFC3339`, while an exact `DATETIME` wire
-  type, like the exact `U8` through `I64`, `F32` and `F64` types, binds only the internal type of
-  its own name. JSON and CBOR carry no NaN or infinity; read `Schemas And Codecs` → `Value
-  Fidelity` before relying on non-finite floats or unsigned Avro list elements.
+  schema. Read `Schemas And Codecs` → `Wire Schemas` for each format's vocabulary and exact
+  binding matrix. Declare text interchange explicitly: `ENCODE <field> AS RFC3339` for a
+  datetime in a JSON or AVRO `string`, and `ENCODE <field> AS BASE64` for bytes in one.
+  Read `Value Fidelity` before relying on non-finite floats or unsigned Avro list elements.
 - For every JAQ-backed codec, use `WITH JAQ TRANSFORMATIONS` and declare `ON INGESTION`,
   `ON EMITTING`, or both in that order. At least one direction is required.
 - An `ON INGESTION` program runs once per value a payload holds, and every object it yields becomes
@@ -439,9 +438,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - Treat JSON, CBOR, and AVRO wire schemas as distinct entity kinds. Their names may coincide, so
   every create, alter, show, drop, and codec reference must include the exact format.
 - Use `BYTES` for arbitrary octets, including `ARRAY` and `VEC` elements. Keep branch key schemas
-  free of `BYTES`. JSON and CBOR wire `BYTES` fields carry padded standard base64 text; AVRO uses
-  native bytes. A cast never converts `BYTES`; use the functions of `Expression Functions` →
-  `Bytes, Encodings And Hashes`.
+  free of `BYTES`. Check the wire representation and required encoding rule in `Schemas And
+  Codecs` → `Codecs`; an AVRO `bytes` field needs no rule. A cast never converts `BYTES`; use the
+  functions of `Expression Functions` → `Bytes, Encodings And Hashes`.
 - Declare wire-schema mode after the entity name with `CREATE WIRE <format> SCHEMA <name> MODE
   STRICT|LOOSE`. Change it with `ALTER WIRE <format> SCHEMA <wire_schema> MODE STRICT|LOOSE`;
   the same format-qualified ALTER form owns field evolution.

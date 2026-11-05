@@ -47,7 +47,7 @@ const DELIMITER_NAMES: [&str; 12] = [
 /// Every keyword Plexus reads, statement and expression keywords alike, spelled as a name spells it:
 /// in lower case. `nervix-plexus` checks this list against the one lexer's keyword set, so a keyword
 /// the language adds is generated as a name as soon as it exists.
-pub const KEYWORDS: [&str; 411] = [
+pub const KEYWORDS: [&str; 409] = [
     "headers",
     "secret",
     "create",
@@ -200,6 +200,7 @@ pub const KEYWORDS: [&str; 411] = [
     "left",
     "right",
     "rfc3339",
+    "base64",
     "file",
     "inputs",
     "inner_input",
@@ -413,10 +414,7 @@ pub const KEYWORDS: [&str; 411] = [
     "float",
     "double",
     "bytes",
-    "record",
-    "enum",
     "map",
-    "fixed",
     "u8",
     "i8",
     "u16",

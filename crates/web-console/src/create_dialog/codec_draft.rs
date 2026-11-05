@@ -246,9 +246,19 @@ impl CodecFormatDraft {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct EncodingRuleDraft {
     pub(super) field: String,
+    pub(super) encoding: CodecEncoding,
+}
+
+impl Default for EncodingRuleDraft {
+    fn default() -> Self {
+        Self {
+            field: String::new(),
+            encoding: CodecEncoding::Rfc3339,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -393,7 +403,7 @@ impl CodecDraft {
             }
             encoding_rules.push(CodecEncodingRule {
                 field,
-                encoding: CodecEncoding::Rfc3339,
+                encoding: rule.encoding,
             });
         }
         Ok(CreateCodec {
@@ -447,7 +457,8 @@ pub(super) enum CodecDraftError {
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
-        CreateStatement, Model, ModelKind, ModelName, NodeRef, RequestedResourceVersion, Statement,
+        CodecEncoding, CreateStatement, Model, ModelKind, ModelName, NodeRef,
+        RequestedResourceVersion, Statement,
     };
     use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
@@ -582,11 +593,28 @@ mod tests {
             binding.select_version(RequestedResourceVersion::Number(7));
         }
         draft.encoding_rules.push(EncodingRuleDraft {
+            encoding: CodecEncoding::Rfc3339,
             field: "created_at".to_string(),
         });
         let numbered = round_trip(&draft);
         assert!(numbered.contains("USING RESOURCE proto_bundle VERSION 7"));
         assert!(numbered.contains("created_at AS RFC3339"));
+    }
+
+    #[test]
+    fn byte_text_encodings_retain_the_selected_kind() {
+        for kind in [CodecFormatKind::WireJson, CodecFormatKind::WireAvro] {
+            let mut draft = draft(kind);
+            let wire = kind
+                .wire_schema_kind()
+                .assured("both schemaful formats name a wire schema");
+            draft.select_wire_schema(&node(wire, "binary_wire"));
+            draft.encoding_rules.push(EncodingRuleDraft {
+                field: "payload".to_string(),
+                encoding: CodecEncoding::Base64,
+            });
+            assert!(round_trip(&draft).contains("ENCODE payload AS BASE64"));
+        }
     }
 
     #[test]

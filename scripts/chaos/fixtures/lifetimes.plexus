@@ -31,12 +31,13 @@ CREATE WIRE JSON SCHEMA chaos_life_profile_wire MODE STRICT (
   branch_name STRING,
   profile_version INTEGER,
   label STRING,
-  updated_at DATETIME
+  updated_at STRING
 );
 
 CREATE CODEC chaos_life_profile_json
   FROM WIRE JSON SCHEMA chaos_life_profile_wire
-  TO SCHEMA chaos_life_profile;
+  TO SCHEMA chaos_life_profile
+  ENCODE updated_at AS RFC3339;
 
 CREATE BRANCH chaos_life_branch SCHEMA chaos_branch_key TTL 10m MAX INSTANCES 16 EVICT LRU;
 
