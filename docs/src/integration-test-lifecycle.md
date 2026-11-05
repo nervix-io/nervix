@@ -697,6 +697,16 @@ compiled Rust binding. The shard restores them at their embedded paths; it does 
 global npm Playwright package. Browser fixtures select the runner's installed Chrome or Chromium.
 The shard's Node.js setup serves native client probes independently of that bundled driver.
 
+The artifact store downloads at most eight 128 MiB parts concurrently and checks each part's exact
+length and SHA-256 before extraction. Each part request uses `curl`, required on the runner, with
+a 120-second total deadline covering name resolution, connection, TLS, response headers and body.
+Connection setup also has a 60-second bound. A stalled or damaged part is fetched again on its
+own, with six attempts and delays of 2, 4, 8, 16 and 30 seconds; completed parts stay verified.
+Signed authentication headers enter the client through standard input, and its user configuration
+is disabled. Redirects are refused and requests keep the store's direct connection. The manifest,
+part-count, verified-byte and elapsed-time logs identify transfer progress before extraction.
+These request bounds leave the workflow's existing job deadline in force.
+
 The CI `scenarios-build` job uses the shared native
 [CI linker](./developing-nervix.md#validation-and-tests) for the server, CLI, unit tests and scenario harness,
 including their instrumented builds. Coverage flags do not replace Wild linker selection.

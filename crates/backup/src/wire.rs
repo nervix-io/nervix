@@ -18,7 +18,21 @@ pub(crate) struct UnitWire {
     lower: u32,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the archive unit rank reserves zero and one rank for every u32 partition index"
+    )
+)]
 const PARTITION_END: u64 = 1u64 << u32::BITS;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "archived instance ranks follow the complete single and u32 partition rank range"
+    )
+)]
 const INSTANCE_START: u64 = PARTITION_END + 1;
 
 impl From<nervix_models::Unit> for UnitWire {

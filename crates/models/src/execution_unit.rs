@@ -17,7 +17,21 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the packed unit rank reserves zero and one rank for every u32 partition index"
+    )
+)]
 const PARTITION_END: u64 = 1u64 << u32::BITS;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "instance ranks follow the complete single and u32 partition rank range"
+    )
+)]
 const INSTANCE_START: u64 = PARTITION_END + 1;
 
 /// A semantic view of an execution unit, rather than a second identity or storage key.
@@ -71,6 +85,13 @@ pub struct Unit {
 impl Unit {
     pub const SINGLE: Self = Self { upper: 0, lower: 0 };
     pub const FIRST_INSTANCE: Self = Self::from_rank(INSTANCE_START);
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "a u64 packed rank leaves exactly this range after the fixed instance prefix"
+        )
+    )]
     pub const MAX_INSTANCE_INDEX: u64 = u64::MAX - INSTANCE_START;
 
     pub const fn partition(index: u32) -> Self {

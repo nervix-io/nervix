@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
@@ -159,6 +160,8 @@ class FakeBucket:
         self.requests: list[tuple[str, str]] = []
         self.failures: list[tuple[str, int]] = []
         self.corrupted: list[str] = []
+        self.stalled_key: str | None = None
+        self.release_stalled = threading.Event()
         self.lock = threading.Lock()
         bucket = self
 
@@ -213,6 +216,20 @@ class FakeBucket:
                 if body is None:
                     self.answer(404)
                     return
+                with bucket.lock:
+                    stalled = bucket.stalled_key == self.key()
+                    if stalled:
+                        bucket.stalled_key = None
+                if stalled:
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body[:1])
+                    self.wfile.flush()
+                    bucket.release_stalled.wait(10)
+                    with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                        self.wfile.write(body[1:])
+                    return
                 self.answer(200, b"damaged" + body[7:] if corrupted else body)
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -250,7 +267,7 @@ class TransferTests(unittest.TestCase):
         self.fake = FakeBucket()
         self.addCleanup(self.fake.close)
         self.bucket = self.fake.client()
-        sleeping = mock.patch.object(artifacts.time, "sleep")
+        sleeping = mock.patch.object(artifacts, "sleep")
         self.sleeps = sleeping.start()
         self.addCleanup(sleeping.stop)
         temporary = mock.patch.dict(os.environ, {"RUNNER_TEMP": str(self.work)})
@@ -317,6 +334,49 @@ class TransferTests(unittest.TestCase):
             self.fake.corrupted = ["part-1"]
             artifacts.download(self.bucket, "7", "checked", "", self.work / "out")
         self.assertEqual(self.extracted(self.work / "out"), files)
+
+    def test_a_stalled_part_is_retried_before_the_job_deadline(self) -> None:
+        body = b"complete part" * 100
+        self.fake.objects["slow-part"] = body
+        self.fake.stalled_key = "slow-part"
+        release = threading.Timer(5, self.fake.release_stalled.set)
+        release.start()
+        try:
+            with self.quiet(), mock.patch.object(artifacts, "PART_TRANSFER_SECONDS", 0.5, create=True):
+                self.bucket.get_file(
+                    "slow-part", self.work / "received", len(body), hashlib.sha256(body).hexdigest()
+                )
+            requests = [key for method, key in self.fake.requests if method == "GET"]
+            self.assertEqual(requests, ["slow-part", "slow-part"])
+            self.assertFalse(self.fake.release_stalled.is_set())
+            self.assertEqual((self.work / "received").read_bytes(), body)
+        finally:
+            release.cancel()
+            self.fake.release_stalled.set()
+            release.join()
+
+    def test_a_refused_download_is_not_retried(self) -> None:
+        self.fake.failures = [("refused-part", 403)]
+        with self.quiet(), self.assertRaisesRegex(artifacts.ArtifactError, "answered 403 AccessDenied"):
+            self.bucket.get_file("refused-part", self.work / "received", 1, "unused")
+        self.assertEqual(self.fake.requests, [("GET", "refused-part")])
+        self.assertEqual(self.sleeps.call_count, 0)
+
+    def test_a_part_keeps_its_literal_object_key(self) -> None:
+        key = "parts/../literal [part]?name"
+        body = b"the exact object"
+        self.fake.objects[key] = body
+        with self.quiet():
+            self.bucket.get_file(key, self.work / "received", len(body), hashlib.sha256(body).hexdigest())
+        self.assertEqual(self.fake.requests, [("GET", key)])
+        self.assertEqual((self.work / "received").read_bytes(), body)
+
+    def test_a_download_that_keeps_failing_exhausts_its_attempts(self) -> None:
+        self.fake.failures = [("unavailable-part", 503)] * artifacts.TRANSFER_ATTEMPTS
+        with self.quiet(), self.assertRaisesRegex(artifacts.ArtifactError, "failed 6 times"):
+            self.bucket.get_file("unavailable-part", self.work / "received", 1, "unused")
+        self.assertEqual(len(self.fake.requests), artifacts.TRANSFER_ATTEMPTS)
+        self.assertEqual([call.args[0] for call in self.sleeps.call_args_list], [2, 4, 8, 16, 30])
 
     def test_an_upload_without_its_manifest_cannot_be_read(self) -> None:
         self.fake.failures = [("manifest.json", 403)]

@@ -1687,6 +1687,10 @@ coverage-harness-liveness-report output:
 ci-artifact-download run *args:
     python3 -m scripts.ci_artifacts download --run {{ quote(run) }} {{ args }}
 
+# Verify archive selection, integrity and bounded part transfers without a remote bucket.
+test-ci-artifacts *args:
+    python3 -m unittest scripts.tests.test_ci_artifacts {{ args }}
+
 # Judge whether a pull request's head revision holds the complete evidence a release needs: every
 # check tests/release-evidence.toml requires passed on that revision and the label of every
 # label-gated method is on the pull request. Writes the register, with every gap an owner of tracked

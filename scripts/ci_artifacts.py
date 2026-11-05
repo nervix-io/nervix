@@ -55,12 +55,13 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 import tarfile
 import tempfile
-import time
+from time import monotonic, sleep
 from typing import BinaryIO, TypeVar
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 import uuid
 from xml.etree import ElementTree
 
@@ -69,9 +70,10 @@ CONCURRENT_TRANSFERS = 8
 # Six attempts wait 2, 4, 8, 16 and 30 seconds between them: a minute of a store being away.
 TRANSFER_ATTEMPTS = 6
 LONGEST_BACKOFF_SECONDS = 30
-# How long a connection may make no progress at all. A transfer that progresses has no limit here;
-# the job's own timeout bounds it.
+# Metadata exchanges and connection setup keep their inactivity bound. A part also has a total
+# request bound, including name resolution, headers and a body that makes only tiny progress.
 SOCKET_SECONDS = 60
+PART_TRANSFER_SECONDS = 120
 SOCKET_BLOCK_BYTES = 1024 * 1024
 GZIP_DEFAULT_LEVEL = 1
 # The key prefix of an upload's parts, which the bucket's lifecycle rules match.
@@ -114,7 +116,7 @@ def with_retries(what: str, operation: Callable[[], T]) -> T:
                 raise ArtifactError(f"{what} failed {attempt} times, last with {error}") from error
             delay = min(2**attempt, LONGEST_BACKOFF_SECONDS)
             print(f"{what}: attempt {attempt} failed with {error}; retrying in {delay} s", flush=True)
-            time.sleep(delay)
+            sleep(delay)
     raise AssertionError("the last attempt returns or raises")
 
 
@@ -183,6 +185,31 @@ class Bucket:
             raise ArtifactError("R2_ARTIFACTS_ENDPOINT must be a URL, starting with https://")
         return cls(**values)
 
+    def object_path(self, key: str) -> str:
+        return "/" + quote(f"{self.name}/{key}" if key else self.name, safe="/-_.~")
+
+    def signed_headers(self, method: str, path: str, query: str) -> dict[str, str]:
+        endpoint = urlsplit(self.endpoint)
+        signed = {
+            "host": endpoint.netloc,
+            "x-amz-content-sha256": UNSIGNED_PAYLOAD,
+            "x-amz-date": datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ"),
+        }
+        headers = dict(signed)
+        headers["Authorization"] = authorization(
+            self.access_key, self.secret_key, REGION, method, path, query, signed, UNSIGNED_PAYLOAD
+        )
+        return headers
+
+    def check_response(self, method: str, key: str, status: int, body: Callable[[], bytes]) -> None:
+        if status == 404:
+            raise Missing(key)
+        if status in TRANSIENT_STATUSES or status >= 500:
+            raise Transient(f"status {status}")
+        if status >= 300:
+            reason = error_code(body())
+            raise ArtifactError(f"{method} of {key or 'the bucket'} answered {status} {reason}")
+
     @contextlib.contextmanager
     def exchange(
         self,
@@ -195,16 +222,8 @@ class Bucket:
         """One signed request, whose response is open inside the block. A status a retry can
         change raises Transient, and an absent object raises Missing."""
         endpoint = urlsplit(self.endpoint)
-        path = "/" + quote(f"{self.name}/{key}" if key else self.name, safe="/-_.~")
-        signed = {
-            "host": endpoint.netloc,
-            "x-amz-content-sha256": UNSIGNED_PAYLOAD,
-            "x-amz-date": datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ"),
-        }
-        headers = dict(signed)
-        headers["Authorization"] = authorization(
-            self.access_key, self.secret_key, REGION, method, path, query, signed, UNSIGNED_PAYLOAD
-        )
+        path = self.object_path(key)
+        headers = self.signed_headers(method, path, query)
         if method == "PUT":
             headers["Content-Length"] = str(length)
         kind = http.client.HTTPSConnection if endpoint.scheme == "https" else http.client.HTTPConnection
@@ -213,13 +232,7 @@ class Bucket:
             target = f"{path}?{query}" if query else path
             connection.request(method, target, body=body, headers=headers)
             response = connection.getresponse()
-            if response.status == 404:
-                raise Missing(key)
-            if response.status in TRANSIENT_STATUSES or response.status >= 500:
-                raise Transient(f"status {response.status}")
-            if response.status >= 300:
-                reason = error_code(response.read())
-                raise ArtifactError(f"{method} of {key or 'the bucket'} answered {response.status} {reason}")
+            self.check_response(method, key, response.status, response.read)
             yield response
         finally:
             connection.close()
@@ -249,11 +262,38 @@ class Bucket:
         """Fetch one part, and fetch it again if it does not match its manifest entry."""
 
         def attempt() -> None:
+            endpoint = urlsplit(self.endpoint)
+            target = self.object_path(key)
+            url = urlunsplit((endpoint.scheme, endpoint.netloc, target, "", ""))
+            headers = self.signed_headers("GET", target, "")
+            # curl owns the complete request deadline, including DNS, TLS, response headers and
+            # slow body progress. Authentication goes over stdin, never a process argument.
+            configuration = "\n".join(
+                f"header = {json.dumps(f'{name}: {value}')}" for name, value in headers.items()
+            )
+            try:
+                result = subprocess.run(
+                    [
+                        "curl", "--disable", "--silent", "--show-error", "--path-as-is",
+                        "--noproxy", "*",
+                        "--proto", "=http,https", "--connect-timeout", str(SOCKET_SECONDS),
+                        "--max-time", str(PART_TRANSFER_SECONDS), "--output", str(path),
+                        "--write-out", "%{http_code}", "--config", "-", url,
+                    ],
+                    input=configuration,
+                    capture_output=True,
+                    text=True,
+                    timeout=PART_TRANSFER_SECONDS + 5,
+                )
+            except subprocess.TimeoutExpired as error:
+                raise Transient("part request did not end by its total deadline") from error
+            if result.returncode:
+                raise Transient(f"part request exited {result.returncode}: {result.stderr.strip()}")
+            self.check_response("GET", key, int(result.stdout), path.read_bytes)
             digest = hashlib.sha256()
             received = 0
-            with self.exchange("GET", key) as response, path.open("wb") as output:
-                while block := response.read(SOCKET_BLOCK_BYTES):
-                    output.write(block)
+            with path.open("rb") as body:
+                while block := body.read(SOCKET_BLOCK_BYTES):
                     digest.update(block)
                     received += len(block)
             if received != length or digest.hexdigest() != sha256:
@@ -545,12 +585,12 @@ def fetch(bucket: Bucket, run: str, name: str, destination: Path) -> None:
         paths = [Path(directory) / f"part-{index}" for index in range(len(parts))]
 
         def receive(index: int) -> None:
-            started = time.monotonic()
+            started = monotonic()
             key = f"{prefix}/{run}/{name}/{upload_id}/part-{index}"
             bucket.get_file(key, paths[index], parts[index].length, parts[index].sha256)
             print(
                 f"{name}: verified part {index + 1}/{len(parts)}, "
-                f"{parts[index].length} bytes in {time.monotonic() - started:.1f}s",
+                f"{parts[index].length} bytes in {monotonic() - started:.1f}s",
                 flush=True,
             )
 
