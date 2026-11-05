@@ -215,6 +215,8 @@ current connection, retry and deadline limits.
   coincide. They declare `MODE STRICT|LOOSE` after their names, and a mode-only change uses `ALTER
   WIRE <format> SCHEMA <wire_schema> MODE STRICT|LOOSE`. SYSLOG is a predefined singleton wire
   schema referenced directly with `FROM SYSLOG`; it has no name or model lifecycle.
+- CBOR wire fields use exactly `integer`, `float`, `boolean`, `text`, `bytes`, or `array`. `bytes`
+  carries native CBOR byte strings; `DATETIME` binds `text` with `ENCODE field AS RFC3339`.
 - Every codec explicitly declares text interchange with `ENCODE field AS RFC3339` for datetimes
   and `ENCODE field AS BASE64` for bytes in JSON or AVRO strings. Read `Schemas And Codecs` for
   the exact binding matrix and native byte representations. Every JAQ-backed

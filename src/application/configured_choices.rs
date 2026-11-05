@@ -1626,7 +1626,7 @@ mod tests {
                 strictness: WireSchemaStrictness::Loose,
                 fields: vec![WireSchemaField {
                     name: FieldName::parse("message").assured("valid field"),
-                    ty: nervix_models::CborType::String,
+                    ty: nervix_models::CborType::Text,
                     optional: false,
                 }],
             }),

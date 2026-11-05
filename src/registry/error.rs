@@ -729,7 +729,7 @@ mod tests {
             strictness: Default::default(),
             fields: vec![WireSchemaField {
                 name: named("value"),
-                ty: nervix_models::CborType::String,
+                ty: nervix_models::CborType::Text,
                 optional: false,
             }],
         }));

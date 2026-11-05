@@ -113,6 +113,7 @@ bytes = { workspace = true }
 chitchat = { workspace = true }
 chrono = { workspace = true }
 ciborium = { workspace = true }
+ciborium-ll = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 clap_complete = { workspace = true }
 error-stack = { workspace = true }
@@ -446,6 +447,7 @@ chitchat = "0.10.1"
 chrono = "0.4.44"
 chumsky = "0.12.0"
 ciborium = "0.2"
+ciborium-ll = "0.2"
 clap = "4.6.0"
 clap_complete = "4.6.0"
 clickhouse = { version = "0.15.0", default-features = true }

@@ -143,8 +143,9 @@ branches. Schema fields are added in declaration order and can be moved or remov
 field selects its exact scalar type, then may wrap it in any sequence of variable vectors and
 fixed arrays; each fixed array needs a positive length. Optional and sensitive flags are separate
 controls. Wire fields select the types of their chosen format and an explicit `STRICT` or `LOOSE`
-mode. JSON offers `string`, `number`, `integer`, `boolean`, and `array`; AVRO offers `boolean`,
-`int`, `long`, `float`, `double`, `string`, `bytes`, and `array`. Codec field encoding controls
+mode. JSON offers `string`, `number`, `integer`, `boolean`, and `array`; CBOR offers `integer`,
+`float`, `boolean`, `text`, `bytes`, and `array`, with native byte strings for `bytes`. AVRO offers
+`boolean`, `int`, `long`, `float`, `double`, `string`, `bytes`, and `array`. Codec field encoding controls
 select `RFC3339` or `BASE64` for explicit text interchange, as described in
 [Schemas And Codecs](schemas-and-codecs.md#codecs).
 A wire schema's format is part of its identity, so JSON, CBOR, and AVRO definitions may

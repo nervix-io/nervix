@@ -29706,6 +29706,144 @@ async fn when_encoded_http_payload_is_posted(
         .expect("failed to post encoded http payload");
 }
 
+#[when(
+    expr = "http CBOR payload with byte string field {string} is posted to host {string} path \
+            {string}"
+)]
+async fn when_cbor_http_payload_with_bytes_is_posted(
+    world: &mut ScenarioWorld,
+    field: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    use ciborium::value::Value as CborValue;
+
+    let payload = expand_placeholders(world, docstring(step));
+    let json: serde_json::Value =
+        serde_json::from_str(&payload).expect("CBOR fixture must be valid JSON");
+    let mut cbor = CborValue::serialized(&json).expect("JSON fixture fits a CBOR value");
+    let CborValue::Map(entries) = &mut cbor else {
+        panic!("CBOR fixture must be a map");
+    };
+    let (_, value) = entries
+        .iter_mut()
+        .find(|(key, _)| matches!(key, CborValue::Text(name) if name == &field))
+        .expect("CBOR fixture must contain the byte string field");
+    let CborValue::Text(encoded) = value else {
+        panic!("CBOR fixture byte string must be written as base64 text");
+    };
+    let bytes = BASE64_STANDARD
+        .decode(encoded.as_bytes())
+        .expect("CBOR fixture byte string must be valid base64");
+    *value = CborValue::Bytes(bytes);
+
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&cbor, &mut encoded).expect("CBOR fixture must encode");
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    world
+        .cluster()
+        .publish_http_bytes("node-1", &host, &path, &encoded, "application/cbor")
+        .await
+        .expect("failed to post CBOR payload with a byte string");
+}
+
+#[when(
+    expr = "http CBOR payload with NaN float field {string} is posted to host {string} path \
+            {string}"
+)]
+async fn when_cbor_http_payload_with_nan_is_posted(
+    world: &mut ScenarioWorld,
+    field: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    use ciborium::value::Value as CborValue;
+
+    let payload = expand_placeholders(world, docstring(step));
+    let json: serde_json::Value = serde_json::from_str(&payload).expect("fixture is JSON");
+    let mut cbor = CborValue::serialized(&json).expect("fixture fits CBOR");
+    let CborValue::Map(entries) = &mut cbor else {
+        panic!("fixture is a map");
+    };
+    let (_, value) = entries
+        .iter_mut()
+        .find(|(key, _)| matches!(key, CborValue::Text(name) if name == &field))
+        .expect("the float field exists");
+    *value = CborValue::Float(f64::NAN);
+    let (_, body) = entries
+        .iter_mut()
+        .find(|(key, _)| matches!(key, CborValue::Text(name) if name == "body"))
+        .expect("the byte string field exists");
+    let CborValue::Text(encoded_body) = body else {
+        panic!("the byte string fixture is base64 text");
+    };
+    let bytes = BASE64_STANDARD
+        .decode(encoded_body.as_bytes())
+        .expect("the byte string fixture is valid base64");
+    *body = CborValue::Bytes(bytes);
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&cbor, &mut encoded).expect("CBOR fixture encodes");
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    world
+        .cluster()
+        .publish_http_bytes("node-1", &host, &path, &encoded, "application/cbor")
+        .await
+        .expect("failed to post CBOR payload with NaN");
+}
+
+#[when(
+    expr = "http CBOR payload with invalid {string} at field {string} is posted to host {string} \
+            path {string}"
+)]
+async fn when_cbor_http_payload_with_invalid_value_is_posted(
+    world: &mut ScenarioWorld,
+    invalid: String,
+    field: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    use ciborium::value::Value as CborValue;
+
+    let payload = expand_placeholders(world, docstring(step));
+    let json: serde_json::Value = serde_json::from_str(&payload).expect("fixture is JSON");
+    let mut cbor = CborValue::serialized(&json).expect("fixture fits CBOR");
+    let CborValue::Map(entries) = &mut cbor else {
+        panic!("fixture is a map");
+    };
+    let index = entries
+        .iter()
+        .position(|(key, _)| matches!(key, CborValue::Text(name) if name == &field))
+        .expect("the invalid field exists");
+    match invalid.as_str() {
+        "tagged item" => {
+            entries[index].1 = CborValue::Tag(42, Box::new(CborValue::Bytes(vec![0, 255])));
+        }
+        "non-text map key" => {
+            entries[index].1 =
+                CborValue::Map(vec![(CborValue::Integer(7.into()), CborValue::Bool(true))]);
+        }
+        "repeated key" => {
+            let duplicate = entries[index].clone();
+            entries.push(duplicate);
+        }
+        _ => panic!("unknown invalid CBOR fixture: {invalid}"),
+    }
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&cbor, &mut encoded).expect("CBOR fixture encodes");
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    world
+        .cluster()
+        .publish_http_bytes("node-1", &host, &path, &encoded, "application/cbor")
+        .await
+        .expect("failed to post invalid CBOR payload");
+}
+
 #[when(expr = "http payload is posted to host {string} path {string} and fails")]
 async fn when_http_payload_is_posted_and_fails(
     world: &mut ScenarioWorld,
@@ -35032,6 +35170,80 @@ async fn then_within_duration_the_observed_broker_receives_exactly_these_encoded
         *expected.entry(ExpectedBrokerPayload(payload)).or_insert(0) += 1;
     }
     receive_exactly_these_broker_messages(world, &duration, expected).await;
+}
+
+#[then(
+    expr = "within {string} the observed broker receives one CBOR event with byte string {string}"
+)]
+async fn then_observed_broker_receives_cbor_bytes(
+    world: &mut ScenarioWorld,
+    duration: String,
+    expected_bytes: String,
+) {
+    use ciborium::value::Value as CborValue;
+
+    let duration = parse_duration_text(&duration).expect("step duration must be valid");
+    let message = world
+        .broker_observer
+        .as_mut()
+        .expect("broker observer must exist")
+        .try_next_message(duration)
+        .await
+        .expect("failed while waiting for a CBOR broker message")
+        .expect("timed out waiting for a CBOR broker message");
+    let value: CborValue =
+        ciborium::from_reader(message.bytes.as_slice()).expect("broker payload must be CBOR");
+    let CborValue::Map(fields) = value else {
+        panic!("CBOR event must be a map");
+    };
+    assert_eq!(fields.len(), 4, "CBOR event must have four fields");
+    let field = |name: &str| {
+        fields
+            .iter()
+            .find(|(key, _)| matches!(key, CborValue::Text(key) if key == name))
+            .map(|(_, value)| value)
+            .unwrap_or_else(|| panic!("CBOR event must have field '{name}'"))
+    };
+    assert!(matches!(field("uid"), CborValue::Integer(value) if u64::try_from(*value) == Ok(7)));
+    assert!(matches!(field("temperature"), CborValue::Float(value) if *value == 1.25));
+    assert!(
+        matches!(field("occurred_at"), CborValue::Text(value) if value == "2024-02-29T12:34:56+00:00")
+    );
+    let expected = BASE64_STANDARD
+        .decode(expected_bytes.as_bytes())
+        .expect("expected CBOR bytes must be valid base64");
+    assert!(matches!(field("body"), CborValue::Bytes(value) if value == &expected));
+    let extra = world
+        .broker_observer
+        .as_mut()
+        .expect("broker observer must exist")
+        .try_next_message(Duration::from_millis(500))
+        .await
+        .expect("failed while checking for an extra CBOR message");
+    assert!(extra.is_none(), "CBOR emitter published an extra message");
+}
+
+#[then(expr = "within {string} the observed broker receives one CBOR event with NaN float")]
+async fn then_observed_broker_receives_cbor_nan(world: &mut ScenarioWorld, duration: String) {
+    use ciborium::value::Value as CborValue;
+
+    let duration = parse_duration_text(&duration).expect("step duration must be valid");
+    let message = world
+        .broker_observer
+        .as_mut()
+        .expect("broker observer exists")
+        .try_next_message(duration)
+        .await
+        .expect("failed while waiting for a CBOR broker message")
+        .expect("timed out waiting for a CBOR broker message");
+    let value: CborValue =
+        ciborium::from_reader(message.bytes.as_slice()).expect("broker payload must be CBOR");
+    let CborValue::Map(fields) = value else {
+        panic!("CBOR event must be a map");
+    };
+    assert!(fields.iter().any(|(key, value)| {
+        matches!((key, value), (CborValue::Text(name), CborValue::Float(number)) if name == "temperature" && number.is_nan())
+    }));
 }
 
 /// Like the payload step, where every table row is one exact message: its payload and the key,

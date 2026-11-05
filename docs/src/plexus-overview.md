@@ -38,6 +38,10 @@ transition checks and bootstrap seed rules.
 
 Core create statements:
 
+The `<cbor_type>` in a declared CBOR wire schema is one of `integer`, `float`, `boolean`, `text`,
+`bytes`, or `array`. `DATETIME` uses `text` with an `RFC3339` codec rule, and `BYTES` uses native
+CBOR byte strings.
+
 ```plexus,ignore
 CREATE [IF NOT EXISTS] USER <name> WITH PASSWORD '<password>';
 
