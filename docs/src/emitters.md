@@ -645,6 +645,13 @@ accounting, the logical Arrow data of the finalized record, while a request with
 no payload bytes. A request's method, target and headers and the response add nothing to either
 counter, and the counters carry only the ordinary graph labels, never a request value.
 
+The `destination:` section of `DESCRIBE EMITTER` separately reports host publish and commit
+attempts and their elapsed wall durations. Retried host attempts each count once, while the
+`sent` counters above continue to count each delivered record once. All operation/outcome
+children exist at zero when the task starts. See
+[Connector Interactions](metrics-and-observability.md#connector-interactions) for the families,
+bounded outcomes, labels and process-local lifetime.
+
 ## Batching
 
 An emitter may declare two hard limits for every batch it publishes, written after the complete emitter

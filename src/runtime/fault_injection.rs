@@ -117,6 +117,15 @@ impl ConfiguredFaultInjection {
         None
     }
 
+    pub(in crate::runtime) fn received_emitter_record_outcome(
+        &self,
+        _emitter: &EmitterName,
+        _records: usize,
+        outcome: nervix_connector::PerRecordOutcome<nervix_connector::EmitterRecordId>,
+    ) -> nervix_connector::PerRecordOutcome<nervix_connector::EmitterRecordId> {
+        outcome
+    }
+
     pub(in crate::runtime) fn syslog_ingestor_bind_addr(
         &self,
         _node_id: &ClusterNodeName,

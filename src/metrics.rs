@@ -60,11 +60,16 @@ use strum::{AsRefStr, EnumIter, IntoEnumIterator};
 use tikv_jemalloc_ctl::{epoch, epoch_mib, stats};
 
 mod command_execution;
+mod connector;
 mod interconnection;
 mod restore_staging;
 mod session;
 
 use command_execution::CommandExecutionMetrics;
+use connector::ConnectorInteractionMetrics;
+pub(crate) use connector::{
+    EmitterAttemptOperation, EmitterAttemptOutcome, EmitterInteractionMetrics,
+};
 pub use interconnection::NodeObservations;
 use interconnection::{InterconnectionCollector, InterconnectionCollectorHandle};
 use restore_staging::RestoreStagingMetrics;
@@ -156,8 +161,29 @@ const NO_DOMAIN_TIMESTAMP: i64 = i64::MIN;
 const NO_HISTOGRAM_CAPACITY: u64 = u64::MAX;
 const NO_WALL_ELAPSED_NANOS: u64 = u64::MAX;
 const NO_EMA_VALUE_BITS: u64 = f64::NAN.to_bits();
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the one-minute rate display has a fixed observation window"
+    )
+)]
 const ONE_MINUTE: Duration = Duration::from_secs(60);
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the fifteen-minute rate display has a fixed observation window"
+    )
+)]
 const FIFTEEN_MINUTES: Duration = Duration::from_secs(15 * 60);
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the rate display's decay horizon is twenty time constants per named window"
+    )
+)]
 const RATE_DECAY_TAU_FRACTION: f64 = 20.0;
 const WALL_HISTOGRAM_1M_STEP: Duration = Duration::from_secs(10);
 const WALL_HISTOGRAM_15M_STEP: Duration = Duration::from_secs(60);
@@ -1576,6 +1602,7 @@ pub struct RuntimeMetrics {
 /// Every series one node records into, plus the Prometheus registry they are exported through.
 #[derive(Debug)]
 struct MetricSeries {
+    connector: ConnectorInteractionMetrics,
     counters: DashMap<MetricKey, Arc<CounterSeries>>,
     histograms: DashMap<MetricKey, Arc<HistogramSeries>>,
     branch_counters: DashMap<BranchMetricKey, Arc<CounterSeries>>,
@@ -1685,14 +1712,17 @@ struct JemallocMetricsCollector {
 
 impl Default for RuntimeMetrics {
     fn default() -> Self {
+        let prometheus = PrometheusMetrics::new();
+        let connector = ConnectorInteractionMetrics::register(&prometheus.registry);
         Self {
             series: Arc::new(MetricSeries {
+                connector,
                 counters: DashMap::new(),
                 histograms: DashMap::new(),
                 branch_counters: DashMap::new(),
                 branch_histograms: DashMap::new(),
                 branch_instance_references: DashMap::new(),
-                prometheus: PrometheusMetrics::new(),
+                prometheus,
             }),
         }
     }
@@ -2386,7 +2416,9 @@ impl PrometheusMetrics {
         let encoder = TextEncoder::new();
         let mut metric_families = self.registry.gather();
         for family in &mut metric_families {
-            if family.get_field_type() != MetricType::HISTOGRAM {
+            if family.get_field_type() != MetricType::HISTOGRAM
+                || family.name() == connector::PUBLISH_DURATION
+            {
                 continue;
             }
             family

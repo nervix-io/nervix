@@ -459,6 +459,11 @@ The compiler accepts this contract on a constant, including an associated consta
 source scanner validates the gate before excluding a constant, including inactive code. The
 reason remains reviewed evidence; neither parser nor compiler proves its prose true.
 
+The one-minute and fifteen-minute metric EMA windows, their decay conversion and the published
+connector-interaction duration buckets are fixed observation contracts. Their declarations carry
+the fixed reasons in the metric owners; they are not node settings. The current resolution is
+documented in [Metrics And Observability](metrics-and-observability.md#connector-interactions).
+
 `just ratchet --show hidden_tunables` lists the temporary count's sites. It counts numeric
 `const` items of types `Duration`, `usize`, `u64`, `u32`, `u16`, `u8`, `i64`, `i32`, `f64`,
 `NonZero*` and `ByteUnit`, plus numeric literal policy calls for duration construction, channel

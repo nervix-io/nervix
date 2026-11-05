@@ -129,6 +129,7 @@ use wasm_reset_publication::{WasmResetPublicationAuthorityLoss, WasmResetPublica
 enum EmitterFaultMode {
     Fail,
     Stall,
+    UnknownRecord,
 }
 
 /// A consensus storage failure a scenario armed for a node before that node started.
@@ -1168,6 +1169,37 @@ impl FaultInjection {
         self.inner
             .emitter_faults
             .remove(&emitter.to_ascii_lowercase());
+    }
+
+    /// Replaces the next record write's answers with an identity outside that exact write.
+    pub fn answer_next_emitter_with_unknown_record(&self, emitter: &str) {
+        self.inner.emitter_faults.insert(
+            emitter.to_ascii_lowercase(),
+            EmitterFaultMode::UnknownRecord,
+        );
+    }
+
+    pub(crate) fn received_emitter_record_outcome(
+        &self,
+        emitter: &EmitterName,
+        records: usize,
+        outcome: nervix_connector::PerRecordOutcome<nervix_connector::EmitterRecordId>,
+    ) -> nervix_connector::PerRecordOutcome<nervix_connector::EmitterRecordId> {
+        if records == 0 {
+            return outcome;
+        }
+        let armed = self
+            .inner
+            .emitter_faults
+            .remove_if(emitter.as_str(), |_, mode| {
+                *mode == EmitterFaultMode::UnknownRecord
+            });
+        if armed.is_none() {
+            return outcome;
+        }
+        let mut answer = nervix_connector::PerRecordOutcome::with_capacity(1);
+        answer.deliver(nervix_connector::EmitterRecordId::new(records));
+        answer
     }
 
     pub fn clear_all_emitter_faults(&self) {

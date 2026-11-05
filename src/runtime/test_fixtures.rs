@@ -1360,6 +1360,12 @@ pub(super) fn emitter_context() -> EmitterConnectorContext {
         metrics_dirty: BranchMetricsMark::default(),
         status: runtime.emitter_status(&key),
         confirmation_waits: runtime.emitter_confirmation_counter(&key),
+        interactions: runtime.inner.metrics.register_emitter_interactions(
+            &domain,
+            &emitter,
+            None,
+            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic),
+        ),
         runtime,
         clock: test_domain_clock(&domain),
         domain,

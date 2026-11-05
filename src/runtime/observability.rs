@@ -325,6 +325,9 @@ impl Runtime {
             .describe_global_target(domain, kind, identifier.clone());
         if kind.eq_ignore_ascii_case(ModelKind::Emitter.as_str()) {
             let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, identifier);
+            let mut destination = self.inner.metrics.describe_emitter_interactions(&key);
+            destination.append(&mut lines);
+            lines = destination;
             if let Some(endpoint) = self.inner.client_emitters.get(&key) {
                 lines.extend(endpoint.metric_lines());
             }
