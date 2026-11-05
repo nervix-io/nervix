@@ -38,10 +38,15 @@ delivery during downstream stalls; it distinguishes QoS 0 overflow, acknowledged
 the counters that expose each outcome, and the refusal of a broker grant below the declared QoS.
 For MQTT retained publication, typed publish properties and user-property headers, read
 [Emitters → MQTT](../../../docs/src/emitters.md#mqtt) for their exact types, limits and retry contract.
-For Pulsar source identity, keys, redelivery and event-time windows, read
-[Ingestors → Pulsar](../../../docs/src/ingestors.md#pulsar) and its metadata table. Choose
+For Pulsar topic names, subscription ownership, creation position, TYPE and instances, read
+[Ingestors → Pulsar](../../../docs/src/ingestors.md#pulsar) before choosing the source. Its client
+reference owns the shared authentication and TLS keys, and its metadata table owns source identity,
+keys, redelivery and event-time windows. Choose
 `TIMESTAMP AT metadata.event_time` or `TIMESTAMP AT metadata.publish_time` deliberately: an absent
 event time stays null, while an explicit epoch time is preserved.
+For Pulsar receipt deadlines, event times and delayed delivery, read
+[Emitters → Pulsar](../../../docs/src/emitters.md#pulsar). Check the generated capability mirror
+before carrying an option from one direction to the other.
 
 For RabbitMQ consumption choose `MODE NO ACK`, `MODE ACK SEQUENTIAL`, or
 `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
