@@ -860,19 +860,25 @@ configuration until the commit.
 is soft state in the leader's memory: it routes commands, and it is gone after a leader change or
 when the session ends. An open transaction that expires takes its binding with it. A transaction
 that finishes otherwise, such as a commit that another request admitted before this session attached,
-keeps the binding of the session that holds it: that session's next request for the transaction is
-answered from the transaction's recorded outcome, and that answer ends the binding. A session binds
-an existing transaction with `AttachTransactionRequest`,
-which the leader grants only to the transaction's owner; the reply is `TransactionAttached` with the
-current status, `TransactionAlreadyFinished` with the final status and aggregate outcome while its
-tombstone is retained, or a failure for an identity that is unknown or retained no longer. A leader
-that holds no binding for the session's transaction answers the session's next transaction request
-with `TransactionDetached`, and the client attaches again and repeats the request under the same
+keeps the binding of the session that holds it. While the tombstone remains, that session's next
+request for the transaction is answered from its recorded outcome and ends the binding. Once the
+tombstone has been removed, a COMMIT or REVERT from that session reports the transaction unknown,
+ends the binding, and lets the session begin another transaction. A session binds an existing
+transaction with `AttachTransactionRequest`, which the leader grants only to the transaction's
+owner; the reply is `TransactionAttached` with the current status, `TransactionAlreadyFinished`
+with the final status and aggregate outcome while its
+tombstone is retained, or a failure for an identity that is unknown or retained no longer. An attach
+that reports an identity unknown also ends any binding that this same session still holds for that
+identity. A leader that holds no binding for the session's transaction answers the session's next
+transaction request with `TransactionDetached`, and the client attaches again and repeats the request under the same
 reference. An attach that reports the transaction already finished binds nothing, and a session that
 still named that transaction no longer holds it. A finished or failed attach does not resolve
 commands whose replies were lost: the client repeats each under its own execution reference and
-expected position. The leader returns a
-recorded outcome before planning a new request; a command it never admitted receives a failure.
+expected position. The leader returns a recorded outcome before planning a new request; a command
+it never admitted receives a failure.
+The unknown-transaction failure of a new request does not establish the outcome of an earlier
+request whose reply was lost. Its execution reference still determines whether that earlier
+outcome can be recovered; after the reference expires, its outcome remains unknown.
 Attaching from a second session takes the binding over, and the displaced session's next
 transaction request receives `TransactionTakenOver` before anything is admitted. While a session
 holds a transaction, the server refuses the requests that belong to the session rather than the
