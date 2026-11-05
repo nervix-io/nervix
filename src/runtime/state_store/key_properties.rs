@@ -13,7 +13,6 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use meticulous::ResultExt as _;
 use nervix_arbitrary::{Arbitrary, Domain};
 
 use super::{

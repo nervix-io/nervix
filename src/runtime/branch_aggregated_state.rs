@@ -17,6 +17,7 @@ use crate::metrics::{RuntimeMetrics, RuntimeMetricsSnapshot};
 
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
     use nervix_models::{ModelKind, ModelName, Unit};
 
     use super::*;

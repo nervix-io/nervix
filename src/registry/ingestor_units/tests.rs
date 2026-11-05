@@ -7,7 +7,6 @@
 
 use std::collections::BTreeSet;
 
-use meticulous::ResultExt as _;
 use nervix_models::{BranchPartitions, IngestorInput, Model, PlacementPolicy};
 use nonzero_ext::nonzero;
 

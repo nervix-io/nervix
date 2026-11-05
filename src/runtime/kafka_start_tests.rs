@@ -10,7 +10,6 @@
     nervix::layer(harness, reason = "tests the production Kafka start boundary")
 )]
 
-use meticulous::ResultExt as _;
 use nervix_models::{DomainStartPoint, DomainStatus, DomainTimeRate, Statement};
 
 use super::*;

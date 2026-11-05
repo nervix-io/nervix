@@ -167,6 +167,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | `CONSUMER 'nervix'` (string literal checked by nats_consumer); required |  |
 | Headers | `read_header`, `read_headers`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |  |
+| Instancing | single |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
 | Metadata | Not offered: The current stream declaration exposes message headers but no typed stream, consumer, sequence, timestamp or delivery-count metadata namespace. |  |
 | Every live node | no; scheduled owner |  |

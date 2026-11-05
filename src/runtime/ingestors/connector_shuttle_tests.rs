@@ -15,7 +15,6 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use meticulous::ResultExt as _;
 use nervix_connector::{IngestMetadataRow, IngestorReadCancellation};
 use nervix_connector_fake::{FakeIngestor as ChannelIngestor, FakeMessage as ChannelMessage};
 use nervix_model_harness::shuttle::{check_pct, check_random};
