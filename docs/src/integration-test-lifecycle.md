@@ -19,16 +19,20 @@ name, and the console recorder checks an opened WSS connection to the advertised
 ## Focused Native Command Recovery
 
 `just test-client-foreign-execution` runs exactly the native-client and CLI foreign-reference
-outlines on one and three nodes, with retries disabled. It builds the server's console assets,
-loads the ONNX runtime and builds the CLI before starting the scenario runner. These cases start
-no paced simulation or Python driver, so the focused recipe does not build those tools. The
-ordinary scenario runner and its startup, execution, parallelism and teardown budgets are
-unchanged. Broad `just test-scenarios` and CI keep their complete tool prerequisites.
-The recipe checks that all four cases execute and keeps its output under
-`target/client-foreign-execution`.
+outlines on one and three nodes, and `just test-client-reply-kind` the native-client and CLI
+outlines whose command is answered with a reply of another kind, each with retries disabled. Both
+run through `just test-client-recovery-witnesses <witnesses> <name>`, which builds the server's
+console assets, loads the ONNX runtime and builds the CLI before starting the scenario runner with
+`name` as its scenario filter. These cases start no paced simulation or Python driver, so the
+focused recipes do not build those tools. The ordinary scenario runner and its startup, execution,
+parallelism and teardown budgets are unchanged. Broad `just test-scenarios` and CI keep their
+complete tool prerequisites. Each recipe checks that all four of its cases execute and keeps its
+output under `target/<witnesses>`, `target/client-foreign-execution` and
+`target/client-reply-kind`.
 
 The focused client owner can be explored with
-`just test-client-shuttle exchange::shuttle_tests::shuttle_a_foreign_reply_racing_registration_interrupts_every_waiter`.
+`just test-client-shuttle exchange::shuttle_tests::shuttle_a_foreign_reply_racing_registration_interrupts_every_waiter`
+or `just test-client-shuttle exchange::shuttle_tests::shuttle_a_reply_of_another_kind_racing_registration_interrupts_every_waiter`.
 It runs that production owner's declared exploration and its nondeterminism check in a separate
 Shuttle build directory, retaining failing schedules. The canonical `just test-shuttle` inventory
 and package-wide discovery still qualify the full selection in CI.

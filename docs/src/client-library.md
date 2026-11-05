@@ -70,6 +70,16 @@ command through normal session recovery, preserving its reference, query, domain
 position and preview. If recovery cannot finish, the call reports `UncertainCommand` under the
 original reference. It never returns the foreign outcome or adopts its transaction or redirect.
 
+A reply of a kind that cannot answer its request, such as a domain listing under a command's
+request identity, ends its session the same way, before the client applies anything it carries.
+Every request still waiting on that session ends as interrupted and is recovered as after any
+other lost session: a command is repeated under its original reference. When recovery cannot
+finish, a command reports `UncertainCommand` under that reference and a read such as
+`list_domains` reports `RequestInterrupted`, each above the typed `ReplyKindMismatch` that names
+the request and the reply's kind. The client adopts no subscription, clock attachment, producer, transaction or
+redirect from such a reply. A late reply, whose call stopped waiting, completes nothing and is
+followed as before.
+
 `execute_prepared_with_cancellation` takes a `CancellationToken` its caller may cancel. While a
 command, `BACKUP` included, waits for its reply, cancelling the token sends `CancelRequest` for it,
 and the call keeps waiting for the reply that ends the command. A command the server cancelled

@@ -455,6 +455,7 @@ tags = [
   "@backup_wait",
   "@client_wire_backup_outage",
   "@client_foreign_execution",
+  "@client_reply_kind",
   "@stopped_checkpoint_writes",
   "@backup_cut_diagnostics",
   "@backup_parked_wait",
@@ -3576,6 +3577,8 @@ path = "crates/client-core/src/client.rs"
 workloads = [
   "scenario.client-foreign-execution",
   "stress.client-foreign-execution",
+  "scenario.client-reply-kind",
+  "stress.client-reply-kind",
   "paced.reopen-generation",
   "paced.delayed-refusal",
   "scenario.backup-lease-release-recovery",
@@ -3623,6 +3626,8 @@ path = "crates/client-core/src/exchange.rs"
 workloads = [
   "scenario.client-foreign-execution",
   "stress.client-foreign-execution",
+  "scenario.client-reply-kind",
+  "stress.client-reply-kind",
   "scenario.client-alter-drain",
   "paced.reopen-generation",
   "scenario.backup-lease-release-recovery",
@@ -5079,4 +5084,24 @@ id = "stress.client-foreign-execution"
 invariant = "A foreign command outcome ends its session and the client recovers the original command under its own execution reference, without adopting the foreign failure."
 invocation = "stress-scenarios"
 scenario = "A native command recovers its own execution after a foreign command reply on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Native-client command registration with its reply kind, reply-kind validation, exchange termination and reconnect through the client's tracked pending-reply lock on one and three nodes. Async command and reconnect locks, network waits and reply-kind comparisons remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "scenario.client-reply-kind"
+invariant = "A reply of another kind under a command's request identity ends its session before any of its effects apply, and the client recovers the original command under its own execution reference."
+invocation = "scenarios"
+scenario = "A native command recovers its own execution after a reply of another kind on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: native-client registration with its reply kind, validation, exchange close and reconnect through the tracked pending-reply lock. Async locks and network waits remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/client_wire_failures.feature"
+id = "stress.client-reply-kind"
+invariant = "A reply of another kind under a command's request identity ends its session before any of its effects apply, and the client recovers the original command under its own execution reference."
+invocation = "stress-scenarios"
+scenario = "A native command recovers its own execution after a reply of another kind on <cluster_size> nodes"
 selections = ["deloxide-stress"]

@@ -1153,9 +1153,15 @@ async fn serve_command(
     } else {
         None
     };
-    let queued = shared
-        .finish_with(request_id, ReplyBody::Command(Box::new(outcome)))
-        .await;
+    let body = ReplyBody::Command(Box::new(outcome));
+    #[cfg(feature = "testing")]
+    let body = shared
+        .service
+        .inner
+        .runtime
+        .fault_injection()
+        .substitute_command_reply_kind(&reply_script_request, body);
+    let queued = shared.finish_with(request_id, body).await;
     if queued == QueuedReply::Reply {
         disposition
     } else {

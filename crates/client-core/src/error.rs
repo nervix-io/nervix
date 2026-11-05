@@ -15,8 +15,8 @@
 )]
 
 use nervix_client_wire::{
-    CancellationStage, ClientRequest, CommandDisposition, EmitterOpenRefusal, ReplyBody,
-    RequestRejection,
+    CancellationStage, ClientRequest, ClientRequestKind, CommandDisposition, EmitterOpenRefusal,
+    ReplyBody, ReplyBodyKind, RequestRejection,
 };
 use nervix_models::{ClientProducerRefusal, CommandExecutionReference, ResourceUploadIdentity};
 use thiserror::Error;
@@ -82,26 +82,32 @@ pub enum EventStreamKind {
 
 impl From<&ClientRequest> for RequestKind {
     fn from(request: &ClientRequest) -> Self {
+        Self::from(ClientRequestKind::from(request))
+    }
+}
+
+impl From<ClientRequestKind> for RequestKind {
+    fn from(request: ClientRequestKind) -> Self {
         match request {
-            ClientRequest::Command(_) => Self::Command,
-            ClientRequest::Suggest(_) => Self::Suggest,
-            ClientRequest::Choice(_) => Self::Choice,
-            ClientRequest::ListDomains => Self::ListDomains,
-            ClientRequest::SelectDomain(_) => Self::SelectDomain,
-            ClientRequest::AttachTransaction(_) => Self::AttachTransaction,
-            ClientRequest::InspectTransaction(_) => Self::InspectTransaction,
-            ClientRequest::Subscribe(_) => Self::Subscribe,
-            ClientRequest::Unsubscribe(_) => Self::Unsubscribe,
-            ClientRequest::Cancel(_) => Self::Cancel,
-            ClientRequest::AttachDomainClock(_) => Self::AttachDomainClock,
-            ClientRequest::DetachDomainClock(_) => Self::DetachDomainClock,
-            ClientRequest::OpenIngestor(_) => Self::OpenIngestor,
-            ClientRequest::SubmitBatch(_) => Self::SubmitBatch,
-            ClientRequest::CloseIngestor(_) => Self::CloseIngestor,
-            ClientRequest::OpenEmitter(_) => Self::OpenEmitter,
-            ClientRequest::ReadEmitterBatch(_) => Self::ReadEmitterBatch,
-            ClientRequest::SettleEmitterBatch(_) => Self::SettleEmitterBatch,
-            ClientRequest::CloseEmitter(_) => Self::CloseEmitter,
+            ClientRequestKind::Command => Self::Command,
+            ClientRequestKind::Suggest => Self::Suggest,
+            ClientRequestKind::Choice => Self::Choice,
+            ClientRequestKind::ListDomains => Self::ListDomains,
+            ClientRequestKind::SelectDomain => Self::SelectDomain,
+            ClientRequestKind::AttachTransaction => Self::AttachTransaction,
+            ClientRequestKind::InspectTransaction => Self::InspectTransaction,
+            ClientRequestKind::Subscribe => Self::Subscribe,
+            ClientRequestKind::Unsubscribe => Self::Unsubscribe,
+            ClientRequestKind::Cancel => Self::Cancel,
+            ClientRequestKind::AttachDomainClock => Self::AttachDomainClock,
+            ClientRequestKind::DetachDomainClock => Self::DetachDomainClock,
+            ClientRequestKind::OpenIngestor => Self::OpenIngestor,
+            ClientRequestKind::SubmitBatch => Self::SubmitBatch,
+            ClientRequestKind::CloseIngestor => Self::CloseIngestor,
+            ClientRequestKind::OpenEmitter => Self::OpenEmitter,
+            ClientRequestKind::ReadEmitterBatch => Self::ReadEmitterBatch,
+            ClientRequestKind::SettleEmitterBatch => Self::SettleEmitterBatch,
+            ClientRequestKind::CloseEmitter => Self::CloseEmitter,
         }
     }
 }
@@ -219,6 +225,14 @@ pub enum ClientError {
         expected: CommandExecutionReference,
         received: CommandExecutionReference,
     },
+    /// A reply named a request of the session and was of a kind that cannot answer it. The
+    /// session ended before anything applied the reply, and every request still waiting on it was
+    /// interrupted.
+    #[error("a {reply} reply cannot answer the {request} request")]
+    ReplyKindMismatch {
+        request: RequestKind,
+        reply: ReplyBodyKind,
+    },
     #[error("upload response identity '{received}' does not match request identity '{expected}'")]
     UploadIdentityMismatch {
         expected: ResourceUploadIdentity,
@@ -288,6 +302,7 @@ impl ClientError {
             Self::RequestDeadline { .. }
             | Self::RequestInterrupted { .. }
             | Self::ExecutionReferenceMismatch { .. }
+            | Self::ReplyKindMismatch { .. }
             | Self::ConnectServer(_)
             | Self::SessionOpenDeadline
             | Self::RetryDeadline
@@ -315,7 +330,8 @@ impl ClientError {
             Self::SessionClosed
             | Self::RequestDeadline { .. }
             | Self::RequestInterrupted { .. }
-            | Self::ExecutionReferenceMismatch { .. } => true,
+            | Self::ExecutionReferenceMismatch { .. }
+            | Self::ReplyKindMismatch { .. } => true,
             Self::Transport(status) => matches!(
                 status.code(),
                 tonic::Code::Cancelled

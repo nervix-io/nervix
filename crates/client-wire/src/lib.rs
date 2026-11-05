@@ -122,7 +122,7 @@ pub use row::{
     CellView, CellWriter, CellsView, EmptyBranchKey, RowBatchView, RowBranch, RowConformanceError,
     RowLocation, RowSchema,
 };
-pub use server::{Reply, ReplyBody, ReplyDelivery, ServerEvent, ServerMessage};
+pub use server::{Reply, ReplyBody, ReplyBodyKind, ReplyDelivery, ServerEvent, ServerMessage};
 pub use subscription::{
     RowsSkippedCause, SubscriptionDeliveryLost, SubscriptionEndReason, SubscriptionEnded,
     SubscriptionHandle, SubscriptionRows, SubscriptionRowsEncoder, SubscriptionRowsSkipped,

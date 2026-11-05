@@ -1,8 +1,8 @@
 //! Controlled substitutions in replies to an already executed session command.
 //!
 //! Layer: test harness, outside the product layer order.
-//! - **Owns.** A domain/query's scripted replies, three uncertain ones or one naming another
-//!   execution, and the execution identities the script observed.
+//! - **Owns.** A domain/query's scripted replies, three uncertain ones, one naming another
+//!   execution or one of another reply kind, and the execution identities the script observed.
 //! - **Depends on.** Public session outcomes, vocabulary identities and the shared test injector.
 //! - **Must not know.** Browser state, client retries, consensus implementation or graph execution.
 
@@ -16,9 +16,10 @@
 
 use meticulous::ResultExt as _;
 use nervix_client_wire::{
-    CommandDisposition, CommandOutcome, CommandRequest, OutcomeOrigin, UnknownOutcomeCause,
+    CommandDisposition, CommandOutcome, CommandRequest, DomainInfo, DomainList, OutcomeOrigin,
+    ReplyBody, UnknownOutcomeCause,
 };
-use nervix_models::{CommandExecutionReference, DomainName};
+use nervix_models::{CommandExecutionReference, DomainName, DomainPace, DomainStatus};
 
 use super::FaultInjection;
 
@@ -45,6 +46,9 @@ enum CommandReplySubstitution {
     /// The first reply is a failure under another execution's reference; the second is the
     /// command's own.
     ForeignExecution { foreign: CommandExecutionReference },
+    /// The first reply is a listing of the command's domain, a valid reply of another kind than a
+    /// command is answered with; the second is the command's own.
+    AnotherKind,
 }
 
 /// What a foreign-execution script observed of its command.
@@ -98,6 +102,35 @@ impl FaultInjection {
         );
     }
 
+    /// Answers the first successful reply for exactly this domain and query with a listing of the
+    /// domain, a reply of another kind than a command is answered with, under the command's own
+    /// request identity. Execution and its stored outcome are left intact, so the command's own
+    /// outcome answers it when it is sent again.
+    pub fn answer_command_with_another_reply_kind(&self, domain: DomainName, query: String) {
+        self.inner.command_reply_scripts.insert(
+            domain,
+            CommandReplyScript {
+                query,
+                substitution: CommandReplySubstitution::AnotherKind,
+                references: Vec::new(),
+            },
+        );
+    }
+
+    /// The references of the command's first two successful replies, the one answered with
+    /// another reply kind and the one that followed it, or `None` while another script, or none,
+    /// is armed for `domain`.
+    pub fn another_reply_kind_references(
+        &self,
+        domain: &DomainName,
+    ) -> Option<Vec<CommandExecutionReference>> {
+        let script = self.inner.command_reply_scripts.get(domain)?;
+        let CommandReplySubstitution::AnotherKind = &script.substitution else {
+            return None;
+        };
+        Some(script.references.clone())
+    }
+
     /// What the foreign-execution script armed for `domain` observed, or `None` while another
     /// script, or none, is armed there.
     pub fn foreign_execution_observation(
@@ -135,6 +168,31 @@ impl FaultInjection {
         }
         script.substitute(request, outcome);
     }
+
+    /// Replaces the reply of a successful outcome for the armed script's exact domain/query with
+    /// a reply of another kind when its substitution asks for one, recording only as many
+    /// references as it observes. Every other reply is returned unchanged.
+    pub(crate) fn substitute_command_reply_kind(
+        &self,
+        request: &CommandRequest,
+        body: ReplyBody,
+    ) -> ReplyBody {
+        let Some(domain) = &request.domain else {
+            return body;
+        };
+        let Some(mut script) = self.inner.command_reply_scripts.get_mut(domain) else {
+            return body;
+        };
+        let ReplyBody::Command(outcome) = &body else {
+            return body;
+        };
+        if script.query != request.query
+            || !matches!(outcome.disposition, CommandDisposition::Completed { .. })
+        {
+            return body;
+        }
+        script.replace_kind(request, domain, body)
+    }
 }
 
 impl CommandReplyScript {
@@ -168,7 +226,45 @@ impl CommandReplyScript {
                 1 => self.references.push(request.execution_reference.clone()),
                 _ => {}
             },
+            // Its reply is replaced as a whole, after the outcome is built.
+            CommandReplySubstitution::AnotherKind => {}
         }
+    }
+
+    /// The reply its command's successful attempts have reached, when the script replaces the
+    /// first one with a reply of another kind.
+    fn replace_kind(
+        &mut self,
+        request: &CommandRequest,
+        domain: &DomainName,
+        body: ReplyBody,
+    ) -> ReplyBody {
+        let CommandReplySubstitution::AnotherKind = &self.substitution else {
+            return body;
+        };
+        match self.references.len() {
+            0 => {
+                self.references.push(request.execution_reference.clone());
+                Self::domain_listing(domain)
+            }
+            1 => {
+                self.references.push(request.execution_reference.clone());
+                body
+            }
+            _ => body,
+        }
+    }
+
+    /// A listing of `domain`, as a server answers a request to list the domains.
+    fn domain_listing(domain: &DomainName) -> ReplyBody {
+        ReplyBody::DomainList(DomainList {
+            domains: vec![DomainInfo {
+                start_version: 1,
+                domain: domain.clone(),
+                status: DomainStatus::Running,
+                pace: DomainPace::Unpaced,
+            }],
+        })
     }
 
     /// The outcome of another execution that failed, as a server answers one: every field this

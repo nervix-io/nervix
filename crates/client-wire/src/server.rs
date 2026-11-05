@@ -40,8 +40,14 @@ use crate::{
     wire,
 };
 
-/// The complete body of a reply.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The complete body of a reply. [`ReplyBodyKind`] names which reply it is, without its fields,
+/// and its `snake_case` name is how a diagnostic names it.
+#[derive(Debug, Clone, PartialEq, Eq, strum::EnumDiscriminants)]
+#[strum_discriminants(
+    name(ReplyBodyKind),
+    derive(Hash, strum::Display, strum::IntoStaticStr, strum::EnumIter),
+    strum(serialize_all = "snake_case")
+)]
 pub enum ReplyBody {
     Command(Box<CommandOutcome>),
     Attach(AttachOutcome),

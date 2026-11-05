@@ -331,22 +331,29 @@ test-scenarios *args: tests-deps
     cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
 # Run the native-client and CLI foreign-reference witnesses with only the tools they start.
-test-client-foreign-execution: build-web-console download-onnxruntime build-test-cli
+test-client-foreign-execution: (test-client-recovery-witnesses "client-foreign-execution" "(A native command|The CLI) recovers its own execution after a foreign command reply")
+
+# Run the native-client and CLI reply-kind witnesses with only the tools they start.
+test-client-reply-kind: (test-client-recovery-witnesses "client-reply-kind" "(A native command|The CLI) recovers its own execution after a reply of another kind")
+
+# Its output stays under the target directory's `witnesses` folder.
+# Run the four one- and three-node native-client and CLI outlines `name` selects, with their tools.
+test-client-recovery-witnesses witnesses name: build-web-console download-onnxruntime build-test-cli
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    mkdir -p {{ quote(cargo_target_dir + "/client-foreign-execution") }}
-    output="$(mktemp {{ quote(cargo_target_dir + "/client-foreign-execution/run.XXXXXXXX.log") }})"
+    mkdir -p {{ quote(cargo_target_dir + "/" + witnesses) }}
+    output="$(mktemp {{ quote(cargo_target_dir + "/" + witnesses + "/run.XXXXXXXX.log") }})"
     result=0
-    cargo test --package nervix-scenarios --test scenarios -- --name '(A native command|The CLI) recovers its own execution after a foreign command reply' --retry 0 | tee "$output" || result=$?
-    python3 - "$output" <<'PY'
+    cargo test --package nervix-scenarios --test scenarios -- --name {{ quote(name) }} --retry 0 | tee "$output" || result=$?
+    python3 - "$output" {{ quote(witnesses) }} <<'PY'
     import re
     import sys
     from pathlib import Path
     output = re.sub(r"\x1b\[[0-9;]*m", "", Path(sys.argv[1]).read_text())
     counts = re.findall(r"^(\d+) scenarios?(?: \(|$)", output, re.MULTILINE)
     if counts != ["4"]:
-        raise SystemExit(f"foreign execution witnesses must execute four scenarios; reported counts: {counts}")
+        raise SystemExit(f"{sys.argv[2]} witnesses must execute four scenarios; reported counts: {counts}")
     PY
     exit "$result"
 
