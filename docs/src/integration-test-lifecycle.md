@@ -41,6 +41,17 @@ accounting remain in force. Each record declares its selected owners and feature
 `whole_workspace` to false; this scope cannot enter a whole-workspace coverage collection.
 `just test-client-recovery-runner` checks scope completeness against feature discovery.
 
+## Delayed Consensus Heartbeat Answers
+
+The leader-lease regression uses a testing-only control on each follower's consensus probe. The
+follower processes an empty Raft append before the control delays its response, so it keeps hearing
+the leader while the leader must decide whether to accept a late acknowledgement. The fixture
+counts requests that reached the delayed path. The three-node scenario requires both followers to
+have received at least two, the same node to remain leader in the same term for longer than one
+lease, and a write through that leader to commit within its stated budget. Its wait observes the
+request counts and the elapsed lease interval together; it does not infer the delay from a silence
+window. Ordinary builds carry none of the delay control.
+
 ## Paced Interconnect Fixture
 
 The separate failed-append regression establishes retained history on all three nodes before
