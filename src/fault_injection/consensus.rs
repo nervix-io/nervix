@@ -1,8 +1,9 @@
-//! Consensus stream controls and observations exposed to the fault harness.
+//! Consensus membership and stream controls exposed to the fault harness.
 //!
 //! Layer: test harness, outside the product layer order.
 //!
-//! - **Owns.** Per-peer append controls and observations from a running node's consensus probe.
+//! - **Owns.** Membership interruption and per-peer append controls and observations from a
+//!   running node's consensus probe.
 //! - **Depends on.** The harness's shared probe registry and vocabulary node identities.
 //! - **Must not know.** Plexus, graph placement, runtime state or Raft retry policy.
 
@@ -12,6 +13,27 @@ use nervix_models::ClusterNodeName;
 use super::FaultInjection;
 
 impl FaultInjection {
+    /// Interrupt a promotion on whichever current node leads, after its joint entry applies.
+    pub async fn interrupt_voter_promotion(&self, joining: ClusterNodeName) {
+        for probe in self.consensus_test_probes() {
+            nervix_primitives::task::consume_budget().await;
+            probe.interrupt_voter_promotion(joining.clone()).await;
+        }
+    }
+
+    pub async fn interrupted_membership(
+        &self,
+        joining: &ClusterNodeName,
+    ) -> Option<nervix_consensus::InterruptedMembership> {
+        for probe in self.consensus_test_probes() {
+            nervix_primitives::task::consume_budget().await;
+            if let Some(witness) = probe.interrupted_membership(joining).await {
+                return Some(witness);
+            }
+        }
+        None
+    }
+
     /// Arm one data submission on the future leader, before transferring leadership to it.
     pub async fn fail_next_append_submission(
         &self,
