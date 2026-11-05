@@ -327,22 +327,20 @@ fn bolero_model_roundtrip_canonical_plexus() {
 }
 
 #[test]
-fn postgres_update_corpus_keeps_a_mapped_column_to_update() {
-    let seeds: [&[u8]; 2] = [
-        include_bytes!(
-            "__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_plexus/corpus/\
-             postgres-update-column"
-        ),
-        include_bytes!(
-            "__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_plexus/corpus/\
-             postgres_update_covering_every_column"
-        ),
-    ];
-    for bytes in seeds {
-        let mut arbitrary = Arbitrary::new(bytes, Domain::Plexus);
-        let Model::Emitter(emitter) = arbitrary.model() else {
-            panic!("current emitter seed");
-        };
+fn postgres_update_generation_keeps_a_mapped_column_to_update() {
+    let mut checked = 0;
+    for seed in 0..=u8::MAX {
+        let bytes = (0..512_u16)
+            .map(|index| {
+                index.to_le_bytes()[0]
+                    .wrapping_mul(31)
+                    .wrapping_add(seed.wrapping_mul(17))
+            })
+            .collect::<Vec<_>>();
+        let mut arbitrary = Arbitrary::new(&bytes, Domain::Plexus);
+        let emitter = arbitrary.create_emitter_to(nervix_models::EmitterEntityKind::Postgres(
+            nervix_models::PostgresEmitterEntity::Table,
+        ));
         let nervix_models::EmitterEntity::Postgres(nervix_models::PostgresEmitter::Table(
             destination,
         )) = emitter.connector.as_ref()
@@ -352,8 +350,9 @@ fn postgres_update_corpus_keeps_a_mapped_column_to_update() {
         let nervix_models::PostgresConflictAction::DoUpdate { target } =
             &destination.conflict_action
         else {
-            panic!("current update policy");
+            continue;
         };
+        checked += 1;
         assert!(!target.is_empty());
         assert!(
             destination
@@ -365,6 +364,10 @@ fn postgres_update_corpus_keeps_a_mapped_column_to_update() {
             nervix_models::CreateStatement::new(Box::new(Model::Emitter(emitter)), false),
         )));
     }
+    assert!(
+        checked >= 2,
+        "the current generator reaches Postgres updates"
+    );
 }
 
 #[test]
