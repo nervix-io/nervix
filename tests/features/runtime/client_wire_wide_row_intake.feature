@@ -37,16 +37,14 @@ Feature: Establishing a wide subscription row after a refused input handoff
       """
       CREATE SUBSCRIPTION wide_seen TO wide_records;
       """
-    And http payload begins acknowledged posting within "30s" to node "node-1" with host "wide-rows-{{test_id}}.example.com" path "/records"
+    And http payload is acknowledged within "30s" by node "node-1" with host "wide-rows-{{test_id}}.example.com" path "/records" after releasing paced node "node-3" on server error "failed to forward output to relay 'wide_records'"
       """
       {"sequence":1,"note":"{{wide_note}}"}
       """
-    Then within "30s" the active session observes a server error containing
+    Then the last server error contains
       """
       failed to forward output to relay 'wide_records'
       """
-    When the inbound interconnect byte pacing of node "node-3" is released
-    Then the background acknowledged http publish succeeds
     And within "30s" client "subscriber" receives a subscription payload
       """
       {"note":"{{wide_note}}","sequence":1}

@@ -197,6 +197,8 @@ class InventoryTests(unittest.TestCase):
             "client-ffi-field-descriptors-malformed",
             "client-host-arrow-columns",
             "client-host-typed-field-descriptors",
+            "client-jvm-columns",
+            "client-jvm-fields",
             "branch-membership",
             "restore-installation-wire",
             "backup-capture-wire",
@@ -405,6 +407,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-client-wire",
             "nervix-client-ffi",
             "nervix-client-host",
+            "nervix-client-jvm",
             "nervix-server",
             "nervix-plexus",
             "nervix-plexus-format",
@@ -978,6 +981,15 @@ class ExecutionTests(unittest.TestCase):
         with mock.patch.object(bolero, "command", return_value=missing_cases):
             with self.assertRaisesRegex(bolero.BoleroError, f"expected {iterations}"):
                 bolero.test_targets(self.inventory, (self.target,))
+
+    def test_jvm_classes_are_prepared_before_its_registered_harness(self) -> None:
+        target = dataclasses.replace(self.target, package="nervix-client-jvm", features=("jvm-tests",))
+        good = self.ordinary_result(target)
+        with mock.patch.object(bolero, "command", return_value=good) as command:
+            bolero.test_targets(self.inventory, (target,))
+        self.assertEqual(command.call_args_list[0], mock.call(["just", "build-client-jvm-tests"], timeout=1800))
+        self.assertIn("--no-run", command.call_args_list[1].args[0])
+        self.assertIn("--exact", command.call_args_list[2].args[0])
 
     def test_ordinary_prepares_each_exact_harness_before_bounded_execution(self) -> None:
         target = dataclasses.replace(self.target, package="nervix-server", features=())
