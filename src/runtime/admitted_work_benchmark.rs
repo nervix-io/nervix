@@ -239,6 +239,14 @@ impl TransformedEncodingBenchmark {
                 ),
                 status: node_runtime.emitter_status(&key),
                 confirmation_waits: node_runtime.emitter_confirmation_counter(&key),
+                interactions: node_runtime.inner.metrics.register_emitter_interactions(
+                    &domain,
+                    &emitter,
+                    None,
+                    nervix_models::EmitterEntityKind::Kafka(
+                        nervix_models::KafkaEmitterEntity::Topic,
+                    ),
+                ),
                 runtime: node_runtime,
                 domain,
                 emitter,

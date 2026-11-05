@@ -703,6 +703,10 @@ Choose checks relevant to the configured graph:
   incomplete application batches, retries, ACKs and rejections.
 - Read `Ingestors` and `Emitters` for the `SHOW INGESTORS`, `SHOW EMITTERS` and `DESCRIBE`
   inspection contracts, including effective options versus canonical `SHOW CREATE` configuration.
+- `DESCRIBE EMITTER` also reports connector publish/commit attempts and wall durations under
+  `destination:`. Read `Metrics And Observability` → `Connector Interactions` for the bounded
+  outcomes, registered-at-zero children and process-local history. These attempts are separate
+  from edge counters, which count each delivered record once.
 - The observability server's `/metrics` endpoint reports raw graph-edge counters and histograms,
   including batch-size resolution for tuning collection and flush boundaries. Read `Metrics And
   Observability` for the current histogram buckets. The endpoint also reports
