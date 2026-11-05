@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """A paced sensor simulation that produces into and consumes from a Nervix graph through the
-shared C binding, from CPython through ctypes.
+native Python package, nervix_client, over the Rust client.
 
 It is the Python half of the runnable paced simulation under examples/paced-simulation: it does
 what the Rust driver beside it does, prints the same report and writes the same ledger and effect
@@ -15,13 +15,13 @@ reading's own identity, and only then acknowledges it. Every reading is written 
 application-owned ledger before it is submitted, so a reading whose outcome is lost can be
 replayed deliberately with --replay.
 
-Only the standard library is used. ctypes releases the GIL around every call into the binding, so
+The package releases the GIL around every blocking call, so
 the clock, consumer, inspection and outcome threads wait in the binding side by side, and
 cancelling a token wakes whichever of them waits on it.
 """
 
 import argparse
-import ctypes
+from array import array
 import json
 import os
 import re
@@ -32,282 +32,57 @@ import time
 from datetime import datetime, timezone
 from enum import Enum
 
-# ---- The shared binding -------------------------------------------------------------------------
+import nervix_client as nx
 
-BYTES_P = ctypes.POINTER(ctypes.c_uint8)
-OUT_BYTES = ctypes.POINTER(BYTES_P)
-SIZE = ctypes.c_size_t
-OUT_SIZE = ctypes.POINTER(SIZE)
-HANDLE = ctypes.c_void_p
-OUT_HANDLE = ctypes.POINTER(HANDLE)
-U32 = ctypes.c_uint32
-U64 = ctypes.c_uint64
-I32 = ctypes.c_int32
-I64 = ctypes.c_int64
-BOOL = ctypes.c_bool
-
-ERROR_INVALID_ARGUMENT = 1
-ERROR_CONNECT = 2
-ERROR_UNCERTAIN = 4
-ERROR_REJECTED = 5
-ERROR_DEADLINE = 6
-ERROR_CANCELLED = 7
-ERROR_TYPE = 10
-ERROR_CLOSED = 11
-ERROR_INTERRUPTED = 12
-ERROR_REOPEN_REQUIRED = 13
-
-DISPOSITION_COMPLETED = 1
-
-TYPE_U64 = 7
-TYPE_I64 = 8
-TYPE_STRING = 12
-TYPE_DATETIME = 14
-
-CLOCK_EVENT_STATE = 1
-CLOCK_EVENT_TICK = 2
-CLOCK_EVENT_ENDED = 3
-CLOCK_EVENT_INTERRUPTED = 4
-CLOCK_EVENT_RESTORATION_FAILED = 5
-
-CLOCK_STOPPED = 1
-CLOCK_UNINSTALLED = 2
-CLOCK_UNPACED = 3
-CLOCK_PACED = 4
-
-ENDPOINT_CLOSED = 5
-ADMISSION_SUSPENDED = 2
-
-SUBMISSION_NOT_ADMITTED = 1
-SUBMISSION_COMPLETED = 2
-SUBMISSION_PROCESSING_FAILED = 3
-SUBMISSION_OUTCOME_UNKNOWN = 4
-
-# Why an endpoint refused to open, as nx_open_refusal numbers it, in the words both drivers print.
+# The report and ledger use the same names as the Rust driver. Decisions use the package's
+# typed outcomes; these tables only render them.
 REFUSALS = {
-    1: "domain not found",
-    2: "domain stopped",
-    3: "endpoint not found",
-    4: "not a client endpoint",
-    5: "endpoint unavailable",
-    6: "schema mismatch",
-    7: "too many endpoints",
-    8: "session capacity exhausted",
-    9: "node capacity exhausted",
-    10: "invalid limits",
-    11: "in transaction",
+    nx.OpenRefusal.DOMAIN_NOT_FOUND: "domain not found",
+    nx.OpenRefusal.DOMAIN_STOPPED: "domain stopped",
+    nx.OpenRefusal.ENDPOINT_NOT_FOUND: "endpoint not found",
+    nx.OpenRefusal.NOT_CLIENT_ENDPOINT: "not a client endpoint",
+    nx.OpenRefusal.ENDPOINT_UNAVAILABLE: "endpoint unavailable",
+    nx.OpenRefusal.SCHEMA_MISMATCH: "schema mismatch",
+    nx.OpenRefusal.TOO_MANY_ENDPOINTS: "too many endpoints",
+    nx.OpenRefusal.SESSION_CAPACITY_EXHAUSTED: "session capacity exhausted",
+    nx.OpenRefusal.NODE_CAPACITY_EXHAUSTED: "node capacity exhausted",
+    nx.OpenRefusal.INVALID_LIMITS: "invalid limits",
+    nx.OpenRefusal.IN_TRANSACTION: "in transaction",
 }
-REFUSAL_ENDPOINT_UNAVAILABLE = 5
-REFUSAL_DOMAIN_STOPPED = 2
-# Why a submission was not admitted, as nx_submission_refusal numbers it.
 SUBMISSION_REFUSALS = {
-    1: "invalid_batch",
-    2: "suspended",
-    3: "busy",
-    4: "draining",
-    5: "producer_ended",
-    6: "credit_exceeded",
+    nx.SubmissionRefusal.INVALID_BATCH: "invalid_batch",
+    nx.SubmissionRefusal.SUSPENDED: "suspended",
+    nx.SubmissionRefusal.BUSY: "busy",
+    nx.SubmissionRefusal.DRAINING: "draining",
+    nx.SubmissionRefusal.PRODUCER_ENDED: "producer_ended",
+    nx.SubmissionRefusal.CREDIT_EXCEEDED: "credit_exceeded",
 }
-PROCESSING_FAILURES = {1: "ack_timeout", 2: "rejected"}
-UNCERTAINTIES = {1: "interrupted", 2: "owner_lost", 3: "session_lost"}
+PROCESSING_FAILURES = {
+    nx.ProcessingFailure.ACK_TIMED_OUT: "ack_timeout",
+    nx.ProcessingFailure.REJECTED: "rejected",
+}
+UNCERTAINTIES = {
+    nx.Uncertainty.INTERRUPTED: "interrupted",
+    nx.Uncertainty.OWNER_LOST: "owner_lost",
+    nx.Uncertainty.SESSION_LOST: "session_lost",
+}
 REOPEN_REASONS = {
-    1: "domain_stopped",
-    2: "endpoint_removed",
-    3: "schema_changed",
-    4: "contract_changed",
-    5: "generation_changed",
-    6: "protocol_violated",
-    7: "refused",
+    nx.ReopenReason.DOMAIN_STOPPED: "domain_stopped",
+    nx.ReopenReason.ENDPOINT_REMOVED: "endpoint_removed",
+    nx.ReopenReason.SCHEMA_CHANGED: "schema_changed",
+    nx.ReopenReason.CONTRACT_CHANGED: "contract_changed",
+    nx.ReopenReason.GENERATION_CHANGED: "generation_changed",
+    nx.ReopenReason.PROTOCOL_VIOLATED: "protocol_violated",
+    nx.ReopenReason.REFUSED: "refused",
 }
 SETTLEMENTS = {
-    1: "confirmed",
-    2: "stale_reference",
-    3: "wrong_consumer",
-    4: "invalid_reason",
-    5: "consumer_ended",
+    nx.Settlement.CONFIRMED: "confirmed",
+    nx.Settlement.STALE_REFERENCE: "stale_reference",
+    nx.Settlement.WRONG_CONSUMER: "wrong_consumer",
+    nx.Settlement.INVALID_REASON: "invalid_reason",
+    nx.Settlement.CONSUMER_ENDED: "consumer_ended",
 }
-CLOCK_END_REASONS = {1: "domain_removed"}
-
-
-class Binding:
-    """The functions of the shared binding this driver calls, declared once."""
-
-    def __init__(self, path):
-        self.library = ctypes.CDLL(path)
-        declare = self.declare
-        declare("nx_error_kind_of", I32, HANDLE)
-        declare("nx_error_message", None, HANDLE, OUT_BYTES, OUT_SIZE)
-        declare("nx_error_open_refusal", BOOL, HANDLE, ctypes.POINTER(I32))
-        declare("nx_error_free", None, HANDLE)
-        declare("nx_cancel_new", HANDLE)
-        declare("nx_cancel_trigger", None, HANDLE)
-        declare("nx_cancel_free", None, HANDLE)
-        declare(
-            "nx_session_connect", HANDLE,
-            ctypes.c_char_p, SIZE, ctypes.c_char_p, SIZE, ctypes.c_char_p, SIZE,
-            ctypes.c_char_p, SIZE, HANDLE, OUT_HANDLE,
-        )
-        declare("nx_session_free", None, HANDLE)
-        declare("nx_session_prepare", HANDLE, HANDLE, ctypes.c_char_p, SIZE, HANDLE, OUT_HANDLE)
-        declare("nx_execution_free", None, HANDLE)
-        declare("nx_session_execute", HANDLE, HANDLE, HANDLE, HANDLE, OUT_HANDLE)
-        declare("nx_outcome_disposition", I32, HANDLE)
-        declare("nx_outcome_message", None, HANDLE, OUT_BYTES, OUT_SIZE)
-        declare("nx_outcome_free", None, HANDLE)
-        declare("nx_schema_free", None, HANDLE)
-        declare("nx_session_next_clock_event", HANDLE, HANDLE, HANDLE, OUT_HANDLE)
-        declare("nx_clock_event_kind_of", I32, HANDLE)
-        declare("nx_clock_event_domain", None, HANDLE, OUT_BYTES, OUT_SIZE)
-        declare("nx_clock_event_generation", HANDLE, HANDLE, ctypes.POINTER(U64))
-        declare("nx_clock_event_state", HANDLE, HANDLE, ctypes.POINTER(I32))
-        declare(
-            "nx_clock_event_paced", HANDLE, HANDLE, ctypes.POINTER(U64), ctypes.POINTER(U64),
-            ctypes.POINTER(I64), ctypes.POINTER(I64), ctypes.POINTER(ctypes.c_double),
-        )
-        declare("nx_clock_event_end_reason", HANDLE, HANDLE, ctypes.POINTER(I32))
-        declare("nx_clock_event_release", None, HANDLE)
-        declare("nx_session_domain_clock", HANDLE, HANDLE, ctypes.c_char_p, SIZE, OUT_HANDLE)
-        declare("nx_domain_clock_generation", U64, HANDLE)
-        declare("nx_domain_clock_state", I32, HANDLE)
-        declare(
-            "nx_domain_clock_paced", HANDLE, HANDLE, ctypes.POINTER(U64), ctypes.POINTER(U64),
-            ctypes.POINTER(I64), ctypes.POINTER(I64), ctypes.POINTER(ctypes.c_double),
-        )
-        declare("nx_domain_clock_logical_time_at", HANDLE, HANDLE, I64, ctypes.POINTER(I64))
-        declare(
-            "nx_domain_clock_wall_duration_until", HANDLE, HANDLE, I64, I64, ctypes.POINTER(U64)
-        )
-        declare(
-            "nx_domain_clock_admission_window", HANDLE, HANDLE, I64, ctypes.POINTER(BOOL),
-            ctypes.POINTER(I64), ctypes.POINTER(I64),
-        )
-        declare("nx_domain_clock_admits", HANDLE, HANDLE, I64, I64, ctypes.POINTER(BOOL))
-        declare("nx_domain_clock_retain", HANDLE, HANDLE)
-        declare("nx_domain_clock_release", None, HANDLE)
-        declare("nx_fields_new", HANDLE)
-        declare("nx_fields_add", HANDLE, HANDLE, ctypes.c_char_p, SIZE, I32, U32, BOOL, BOOL)
-        declare("nx_fields_free", None, HANDLE)
-        declare(
-            "nx_session_open_ingestor", HANDLE, HANDLE, ctypes.c_char_p, SIZE, ctypes.c_char_p,
-            SIZE, HANDLE, U32, U64, HANDLE, OUT_HANDLE,
-        )
-        declare("nx_producer_schema", HANDLE, HANDLE, OUT_HANDLE)
-        declare("nx_producer_generation", U64, HANDLE)
-        declare("nx_producer_admission", I32, HANDLE)
-        declare("nx_producer_reopen_reason", BOOL, HANDLE, ctypes.POINTER(I32), ctypes.POINTER(I32))
-        declare(
-            "nx_producer_grant", None, HANDLE, ctypes.POINTER(U32), ctypes.POINTER(U64),
-            ctypes.POINTER(U32), ctypes.POINTER(U64),
-        )
-        declare("nx_producer_submit", HANDLE, HANDLE, HANDLE, HANDLE, ctypes.POINTER(U64))
-        declare("nx_producer_rejoin", HANDLE, HANDLE, U64, HANDLE, OUT_HANDLE)
-        declare("nx_producer_close", HANDLE, HANDLE, HANDLE)
-        declare("nx_producer_free", None, HANDLE)
-        declare("nx_submission_outcome_result", I32, HANDLE)
-        declare("nx_submission_outcome_refusal", HANDLE, HANDLE, ctypes.POINTER(I32))
-        declare("nx_submission_outcome_failure", HANDLE, HANDLE, ctypes.POINTER(I32))
-        declare("nx_submission_outcome_uncertainty", HANDLE, HANDLE, ctypes.POINTER(I32))
-        declare("nx_submission_outcome_free", None, HANDLE)
-        declare(
-            "nx_session_subscribe_emitter", HANDLE, HANDLE, ctypes.c_char_p, SIZE,
-            ctypes.c_char_p, SIZE, HANDLE, U32, U64, HANDLE, OUT_HANDLE,
-        )
-        declare("nx_consumer_generation", U64, HANDLE)
-        declare(
-            "nx_consumer_grant", None, HANDLE, ctypes.POINTER(U32), ctypes.POINTER(U64),
-            ctypes.POINTER(U32), ctypes.POINTER(U64),
-        )
-        declare("nx_consumer_state", I32, HANDLE)
-        declare("nx_consumer_reopen_reason", BOOL, HANDLE, ctypes.POINTER(I32), ctypes.POINTER(I32))
-        declare("nx_consumer_next", HANDLE, HANDLE, HANDLE, OUT_HANDLE)
-        declare("nx_consumer_close", HANDLE, HANDLE, HANDLE)
-        declare("nx_consumer_free", None, HANDLE)
-        declare("nx_delivery_batch", HANDLE, HANDLE, OUT_HANDLE)
-        declare("nx_delivery_ack", HANDLE, HANDLE, HANDLE, ctypes.POINTER(I32))
-        declare("nx_delivery_retry", HANDLE, HANDLE, HANDLE, ctypes.POINTER(I32))
-        declare("nx_delivery_reject", HANDLE, HANDLE, ctypes.c_char_p, SIZE, HANDLE,
-                ctypes.POINTER(I32))
-        declare("nx_delivery_release", None, HANDLE)
-        declare("nx_batch_row_count", SIZE, HANDLE)
-        declare("nx_batch_ipc", HANDLE, HANDLE, OUT_BYTES, OUT_SIZE)
-        declare("nx_batch_fixed", HANDLE, HANDLE, SIZE, SIZE, ctypes.c_void_p, SIZE)
-        declare(
-            "nx_batch_varlen", HANDLE, HANDLE, SIZE, SIZE, ctypes.POINTER(U64), SIZE, BYTES_P,
-            SIZE, OUT_SIZE,
-        )
-        declare("nx_batch_release", None, HANDLE)
-        declare("nx_batch_builder_new", HANDLE, HANDLE, SIZE, OUT_HANDLE)
-        declare("nx_batch_builder_fixed", HANDLE, HANDLE, SIZE, SIZE, ctypes.c_void_p, SIZE)
-        declare(
-            "nx_batch_builder_varlen", HANDLE, HANDLE, SIZE, SIZE, ctypes.POINTER(U64), SIZE,
-            BYTES_P, SIZE,
-        )
-        declare("nx_batch_builder_finish", HANDLE, HANDLE, OUT_HANDLE)
-        declare("nx_batch_builder_free", None, HANDLE)
-
-    def declare(self, name, restype, *argtypes):
-        function = getattr(self.library, name)
-        function.restype = restype
-        function.argtypes = list(argtypes)
-        setattr(self, name, function)
-
-
-NX = None
-
-
-class BindingError(Exception):
-    """A failure the binding returned, with its nx_error_kind and, for a refused open, why."""
-
-    def __init__(self, kind, message, refusal):
-        super().__init__(message)
-        self.kind = kind
-        self.message = message
-        self.refusal = refusal
-
-
-def borrowed(pointer, length):
-    """Copies bytes the binding lent for the duration of a call."""
-    if length.value == 0:
-        return b""
-    return ctypes.string_at(pointer, length.value)
-
-
-def check(error):
-    """Raises the error a call returned, releasing it."""
-    if not error:
-        return
-    message, message_len = BYTES_P(), SIZE()
-    NX.nx_error_message(error, ctypes.byref(message), ctypes.byref(message_len))
-    refusal = I32()
-    refused = NX.nx_error_open_refusal(error, ctypes.byref(refusal))
-    failure = BindingError(
-        NX.nx_error_kind_of(error),
-        borrowed(message, message_len).decode(),
-        refusal.value if refused else None,
-    )
-    NX.nx_error_free(error)
-    raise failure
-
-
-def text(value):
-    encoded = value.encode()
-    return encoded, len(encoded)
-
-
-class Cancel:
-    """A cancellation token: triggering it ends every wait on it, now and later."""
-
-    def __init__(self):
-        self.handle = NX.nx_cancel_new()
-
-    def trigger(self):
-        NX.nx_cancel_trigger(self.handle)
-
-    def __del__(self):
-        # At interpreter exit the module's globals may already be cleared; the ending process
-        # frees the token then.
-        if NX is not None:
-            NX.nx_cancel_free(self.handle)
+CLOCK_END_REASONS = {nx.ClockEndReason.DOMAIN_REMOVED: "domain_removed"}
 
 
 # ---- Report ------------------------------------------------------------------------------------
@@ -469,11 +244,8 @@ def options(arguments):
     parser = argparse.ArgumentParser(
         prog="paced_simulation.py",
         description="Paced sensor simulation over a Nervix client ingestor and attached client "
-        "emitters, through the shared C binding.",
+        "emitters, through the native Python package.",
     )
-    parser.add_argument("--library", default=os.environ.get("NERVIX_CLIENT_LIBRARY"),
-                        help="the shared binding, libnervix_client_ffi; default "
-                        "$NERVIX_CLIENT_LIBRARY")
     parser.add_argument("--server", default="http://127.0.0.1:47391",
                         help="the gRPC session endpoint of any live node")
     parser.add_argument("--username", default=os.environ.get("NERVIX_USERNAME"))
@@ -502,10 +274,6 @@ def options(arguments):
     parser.add_argument("--follow-generations", action="store_true")
     parser.add_argument("--deadline", type=duration_argument, default=600_000_000_000)
     settings = parser.parse_args(arguments)
-    if settings.library is None:
-        raise ConfigurationError(
-            "the shared binding is not named; pass --library or set NERVIX_CLIENT_LIBRARY"
-        )
     for option in ("sensors", "burst", "consumers", "credit_batches", "credit_bytes"):
         if getattr(settings, option) < 1:
             raise ConfigurationError(f"--{option.replace('_', '-')} must be at least one")
@@ -531,13 +299,13 @@ def options(arguments):
 
 # The fields of the example's schemas, in declared order: name and type. None of them is optional
 # or sensitive.
-READING_FIELDS = [("reading_id", TYPE_STRING), ("sensor", TYPE_STRING), ("tick", TYPE_U64),
-                  ("occurred_at", TYPE_DATETIME), ("value", TYPE_I64)]
-OBSERVED_FIELDS = [("reading_id", TYPE_STRING), ("sensor", TYPE_STRING), ("tick", TYPE_U64),
-                   ("occurred_at", TYPE_DATETIME), ("admitted_at", TYPE_DATETIME),
-                   ("timestamp_source", TYPE_STRING), ("value", TYPE_I64)]
-REJECTED_FIELDS = [("reading_id", TYPE_STRING), ("occurred_at", TYPE_DATETIME),
-                   ("error_code", TYPE_STRING), ("error_message", TYPE_STRING)]
+READING_FIELDS = [("reading_id", nx.FieldType.STRING), ("sensor", nx.FieldType.STRING), ("tick", nx.FieldType.U64),
+                  ("occurred_at", nx.FieldType.DATETIME), ("value", nx.FieldType.I64)]
+OBSERVED_FIELDS = [("reading_id", nx.FieldType.STRING), ("sensor", nx.FieldType.STRING), ("tick", nx.FieldType.U64),
+                   ("occurred_at", nx.FieldType.DATETIME), ("admitted_at", nx.FieldType.DATETIME),
+                   ("timestamp_source", nx.FieldType.STRING), ("value", nx.FieldType.I64)]
+REJECTED_FIELDS = [("reading_id", nx.FieldType.STRING), ("occurred_at", nx.FieldType.DATETIME),
+                   ("error_code", nx.FieldType.STRING), ("error_message", nx.FieldType.STRING)]
 
 
 class Reading:
@@ -567,107 +335,56 @@ class Reading:
 
 
 def fields(declared):
-    """The expected fields an open declares, which the binding copies."""
-    handle = NX.nx_fields_new()
-    try:
-        for name, kind in declared:
-            encoded, length = text(name)
-            check(NX.nx_fields_add(handle, encoded, length, kind, 0, False, False))
-    except BindingError:
-        NX.nx_fields_free(handle)
-        raise
-    return handle
+    """The expected fields an endpoint open declares, in the graph's field order."""
+    expected = nx.Fields()
+    for name, kind in declared:
+        expected.add(name, kind)
+    return expected
 
 
 def varlen(values):
     """The offsets and bytes of a STRING column."""
-    encoded = [value.encode() for value in values]
-    offsets = (U64 * (len(encoded) + 1))()
-    position = 0
-    for index, value in enumerate(encoded):
-        offsets[index] = position
-        position += len(value)
-    offsets[len(encoded)] = position
-    data = (ctypes.c_uint8 * max(position, 1)).from_buffer_copy(b"".join(encoded).ljust(1, b"\0"))
-    return offsets, data, position
+    offsets = [0]
+    encoded = []
+    for value in values:
+        encoded.append(value.encode())
+        offsets.append(offsets[-1] + len(encoded[-1]))
+    return offsets, b"".join(encoded)
 
 
 def build_batch(schema, readings):
-    """One batch of readings, set column by column through the binding's builder."""
-    builder = HANDLE()
-    check(NX.nx_batch_builder_new(schema, len(readings), ctypes.byref(builder)))
-    try:
-        for column, values in ((0, [reading.reading_id for reading in readings]),
-                               (1, [reading.sensor for reading in readings])):
-            offsets, data, length = varlen(values)
-            check(NX.nx_batch_builder_varlen(builder, column, 0, offsets, len(offsets), data,
-                                             length))
-        ticks = (U64 * len(readings))(*[reading.tick for reading in readings])
-        check(NX.nx_batch_builder_fixed(builder, 2, 0, ticks, ctypes.sizeof(ticks)))
-        occurred = (I64 * len(readings))(*[reading.occurred_at for reading in readings])
-        check(NX.nx_batch_builder_fixed(builder, 3, 0, occurred, ctypes.sizeof(occurred)))
-        values = (I64 * len(readings))(*[reading.value for reading in readings])
-        check(NX.nx_batch_builder_fixed(builder, 4, 0, values, ctypes.sizeof(values)))
-        batch = HANDLE()
-        check(NX.nx_batch_builder_finish(builder, ctypes.byref(batch)))
-        return batch
-    finally:
-        NX.nx_batch_builder_free(builder)
-
-
-def batch_bytes(batch):
-    """The size of a batch's canonical Arrow IPC stream, which its credit is charged by."""
-    ipc, ipc_len = BYTES_P(), SIZE()
-    check(NX.nx_batch_ipc(batch, ctypes.byref(ipc), ctypes.byref(ipc_len)))
-    return ipc_len.value
-
-
-def read_strings(batch, column, rows):
-    offsets = (U64 * (rows + 1))()
-    length = SIZE()
-    check(NX.nx_batch_varlen(batch, column, 0, offsets, rows + 1, None, 0, ctypes.byref(length)))
-    data = (ctypes.c_uint8 * max(length.value, 1))()
-    check(NX.nx_batch_varlen(batch, column, 0, offsets, rows + 1, data, length.value,
-                             ctypes.byref(length)))
-    raw = bytes(data)[: length.value]
-    return [raw[offsets[row]:offsets[row + 1]].decode() for row in range(rows)]
-
-
-def read_fixed(batch, column, rows, element):
-    values = (element * rows)()
-    check(NX.nx_batch_fixed(batch, column, 0, values, ctypes.sizeof(values)))
-    return list(values)
+    """One batch of readings, set column by column through the package's builder."""
+    builder = nx.BatchBuilder(schema, len(readings))
+    for column, values in ((0, [reading.reading_id for reading in readings]),
+                           (1, [reading.sensor for reading in readings])):
+        offsets, data = varlen(values)
+        builder.varlen(column, 0, offsets, data)
+    builder.fixed(2, 0, array("Q", (reading.tick for reading in readings)).tobytes())
+    builder.fixed(3, 0, array("q", (reading.occurred_at for reading in readings)).tobytes())
+    builder.fixed(4, 0, array("q", (reading.value for reading in readings)).tobytes())
+    return builder.finish()
 
 
 def observed_readings(batch):
-    """The readings of one delivery of the output emitter, by the observed_reading columns."""
-    rows = NX.nx_batch_row_count(batch)
-    identities = read_strings(batch, 0, rows)
-    sensors = read_strings(batch, 1, rows)
-    ticks = read_fixed(batch, 2, rows, U64)
-    occurred = read_fixed(batch, 3, rows, I64)
-    admitted = read_fixed(batch, 4, rows, I64)
-    sources = read_strings(batch, 5, rows)
-    values = read_fixed(batch, 6, rows, I64)
+    """The readings of one delivery, copied in bulk from its typed columns."""
+    identities, sensors, ticks, occurred, admitted, sources, values = (
+        batch.column(column) for column in range(7)
+    )
     return [
         {"reading_id": identities[row], "sensor": sensors[row], "tick": ticks[row],
          "occurred_at": occurred[row], "admitted_at": admitted[row],
          "timestamp_source": sources[row], "value": values[row]}
-        for row in range(rows)
+        for row in range(batch.row_count)
     ]
 
 
 def rejection_notices(batch):
-    """The notices of one delivery of the rejection emitter, by the rejected_reading columns."""
-    rows = NX.nx_batch_row_count(batch)
-    identities = read_strings(batch, 0, rows)
-    occurred = read_fixed(batch, 1, rows, I64)
-    codes = read_strings(batch, 2, rows)
-    messages = read_strings(batch, 3, rows)
+    """The notices of one delivery, copied in bulk from its typed columns."""
+    identities, occurred, codes, messages = (batch.column(column) for column in range(4))
     return [
         {"reading_id": identities[row], "occurred_at": occurred[row], "error_code": codes[row],
          "error_message": messages[row]}
-        for row in range(rows)
+        for row in range(batch.row_count)
     ]
 
 
@@ -801,65 +518,6 @@ class EffectStore:
 # ---- The domain clock --------------------------------------------------------------------------
 
 
-def paced_fields(accessor, handle):
-    """The committed clock of a paced generation, read from a clock or a STATE event."""
-    period, skew, origin, anchor = U64(), U64(), I64(), I64()
-    rate = ctypes.c_double()
-    check(accessor(handle, ctypes.byref(period), ctypes.byref(skew), ctypes.byref(origin),
-                   ctypes.byref(anchor), ctypes.byref(rate)))
-    return {"period": period.value, "skew": skew.value, "origin": origin.value,
-            "anchor": anchor.value, "rate": rate.value}
-
-
-def session_clock(session, domain):
-    """The latest clock the session observed for the domain, or None when it follows none."""
-    handle = HANDLE()
-    encoded, length = text(domain)
-    check(NX.nx_session_domain_clock(session, encoded, length, ctypes.byref(handle)))
-    if not handle.value:
-        return None
-    return DomainClock(handle)
-
-
-class DomainClock:
-    """One read of the clock the session follows, released when collected."""
-
-    def __init__(self, handle):
-        self.handle = handle
-
-    def __del__(self):
-        if NX is not None:
-            NX.nx_domain_clock_release(self.handle)
-
-    def generation(self):
-        return NX.nx_domain_clock_generation(self.handle)
-
-    def state(self):
-        return NX.nx_domain_clock_state(self.handle)
-
-    def paced(self):
-        return paced_fields(NX.nx_domain_clock_paced, self.handle)
-
-    def logical_time_at(self, utc):
-        logical = I64()
-        check(NX.nx_domain_clock_logical_time_at(self.handle, utc, ctypes.byref(logical)))
-        return logical.value
-
-    def wall_duration_until(self, utc, target):
-        wait = U64()
-        check(NX.nx_domain_clock_wall_duration_until(self.handle, utc, target,
-                                                      ctypes.byref(wait)))
-        return wait.value
-
-    def window(self, utc):
-        has_window, earliest, latest = BOOL(), I64(), I64()
-        check(NX.nx_domain_clock_admission_window(self.handle, utc, ctypes.byref(has_window),
-                                                  ctypes.byref(earliest), ctypes.byref(latest)))
-        if not has_window.value:
-            return None
-        return Window(self, utc, earliest.value, latest.value)
-
-
 class Window:
     """The event times a TIMESTAMP AT ingestor admits at one UTC instant."""
 
@@ -868,22 +526,26 @@ class Window:
         self.utc = utc
         self.earliest = earliest
         self.latest = latest
-        self.skew = clock.paced()["skew"]
+        self.skew = clock.paced.skew
+
+    @classmethod
+    def at(cls, clock, utc):
+        bounds = clock.admission_window(utc)
+        if bounds is None:
+            return None
+        return cls(clock, utc, *bounds)
 
     def contains(self, event):
-        admitted = BOOL()
-        check(NX.nx_domain_clock_admits(self.clock.handle, self.utc, event,
-                                        ctypes.byref(admitted)))
-        return admitted.value
+        return self.clock.admits(self.utc, event)
 
 
 def clock_line(generation, state, paced):
     """The report line of a clock observation."""
-    if state == CLOCK_PACED:
-        return (f"CLOCK generation={generation} state=paced period={duration_text(paced['period'])} "
-                f"skew={duration_text(paced['skew'])} origin={rfc3339(paced['origin'])} "
-                f"anchor={rfc3339(paced['anchor'])} rate={rate_text(paced['rate'])}")
-    names = {CLOCK_STOPPED: "stopped", CLOCK_UNINSTALLED: "uninstalled", CLOCK_UNPACED: "unpaced"}
+    if state == nx.ClockState.PACED:
+        return (f"CLOCK generation={generation} state=paced period={duration_text(paced.period)} "
+                f"skew={duration_text(paced.skew)} origin={rfc3339(paced.origin)} "
+                f"anchor={rfc3339(paced.anchor)} rate={rate_text(paced.rate)}")
+    names = {nx.ClockState.STOPPED: "stopped", nx.ClockState.UNINSTALLED: "uninstalled", nx.ClockState.UNPACED: "unpaced"}
     return f"CLOCK generation={generation} state={names[state]}"
 
 
@@ -892,11 +554,11 @@ PACED, PAUSED, STOPPED, UNPACED, ENDED = "paced", "paused", "stopped", "unpaced"
 
 def pace_of(generation, state):
     """What a clock observation lets the simulation do: pace by it, wait, or stop."""
-    if state == CLOCK_PACED:
+    if state == nx.ClockState.PACED:
         return (PACED, generation)
-    if state == CLOCK_UNINSTALLED:
+    if state == nx.ClockState.UNINSTALLED:
         return (PAUSED, generation)
-    if state == CLOCK_STOPPED:
+    if state == nx.ClockState.STOPPED:
         return (STOPPED, generation)
     return (UNPACED, generation)
 
@@ -912,7 +574,7 @@ class Clock:
         self.condition = threading.Condition()
         self.pace = initial
         self.changes = 0
-        self.cancel = Cancel()
+        self.cancel = nx.Cancel()
         self.thread = threading.Thread(target=self.follow, name="clock", daemon=True)
 
     def start(self):
@@ -946,12 +608,10 @@ class Clock:
 
     def follow(self):
         while True:
-            event = HANDLE()
             try:
-                check(NX.nx_session_next_clock_event(self.session, self.cancel.handle,
-                                                     ctypes.byref(event)))
-            except BindingError as failure:
-                if failure.kind == ERROR_CANCELLED:
+                event = self.session.next_clock_event(cancel=self.cancel)
+            except nx.ClientError as failure:
+                if failure.kind == nx.FailureKind.CANCELLED:
                     return
                 line(f"CLOCK unavailable reason={failure.message}")
                 time.sleep(1.0)
@@ -960,45 +620,37 @@ class Clock:
                 if not self.observe(event):
                     return
             finally:
-                NX.nx_clock_event_release(event)
+                del event
 
     def observe(self, event):
-        kind = NX.nx_clock_event_kind_of(event)
-        if kind == CLOCK_EVENT_TICK:
+        if event.kind == nx.ClockEventKind.TICK:
             self.counters.add("ticks_observed")
             return True
-        if kind == CLOCK_EVENT_STATE:
-            generation, state = U64(), I32()
-            check(NX.nx_clock_event_generation(event, ctypes.byref(generation)))
-            check(NX.nx_clock_event_state(event, ctypes.byref(state)))
-            paced = None
-            if state.value == CLOCK_PACED:
-                paced = paced_fields(NX.nx_clock_event_paced, event)
-            line(clock_line(generation.value, state.value, paced))
-            self.publish(pace_of(generation.value, state.value))
+        if event.kind == nx.ClockEventKind.STATE:
+            paced = event.paced if event.state == nx.ClockState.PACED else None
+            line(clock_line(event.generation, event.state, paced))
+            self.publish(pace_of(event.generation, event.state))
             return True
-        if kind == CLOCK_EVENT_INTERRUPTED:
+        if event.kind == nx.ClockEventKind.INTERRUPTED:
             line(f"INTERRUPTED clock domain={self.domain}")
             pace, _ = self.current()
             if pace[0] == PACED:
                 self.publish((PAUSED, pace[1]))
             return True
-        if kind == CLOCK_EVENT_RESTORATION_FAILED:
+        if event.kind == nx.ClockEventKind.RESTORATION_FAILED:
             line(f"CLOCK restoration_failed domain={self.domain}")
             return True
-        reason = I32()
-        check(NX.nx_clock_event_end_reason(event, ctypes.byref(reason)))
-        line(f"CLOCK ended domain={self.domain} reason={CLOCK_END_REASONS[reason.value]}")
+        line(f"CLOCK ended domain={self.domain} reason={CLOCK_END_REASONS[event.end_reason]}")
         self.publish((ENDED, None))
         return False
 
     def snapshot(self):
-        return session_clock(self.session, self.domain)
+        return self.session.domain_clock(self.domain)
 
     def paced(self, generation):
         """The paced clock of `generation` as the session last observed it, if it still has it."""
         clock = self.snapshot()
-        if clock is None or clock.generation() != generation or clock.state() != CLOCK_PACED:
+        if clock is None or clock.generation != generation or clock.state != nx.ClockState.PACED:
             return None
         return clock
 
@@ -1017,65 +669,45 @@ class Clock:
             clock = self.snapshot()
             if clock is None:
                 return ("moved", (ENDED, None))
-            if clock.generation() != generation:
+            if clock.generation != generation:
                 self.wait_change(changes, stopping, timeout=OPEN_RETRY_DELAY)
                 return ("recheck", None)
             now = time.time_ns()
             try:
                 wait = clock.wall_duration_until(now, center)
-            except BindingError as failure:
-                if failure.kind != ERROR_TYPE:
+            except nx.ClientError as failure:
+                if failure.kind != nx.FailureKind.TYPE:
                     raise
                 self.wait_change(changes, stopping, timeout=OPEN_RETRY_DELAY)
                 return ("recheck", None)
             if wait > 0:
                 self.wait_change(changes, stopping, timeout=min(wait / 1e9, OPEN_RETRY_DELAY))
                 return ("recheck", None)
-            window = clock.window(now)
+            window = Window.at(clock, now)
             if window is None:
                 return ("moved", (UNPACED, generation))
             return ("center", window)
 
 
 def attach(session, domain):
-    """Attaches the session to the clock of `domain` and returns the clock the attach reported."""
-    query, length = text("ATTACH DOMAIN CLOCK;")
-    execution = HANDLE()
-    check(NX.nx_session_prepare(session, query, length, None, ctypes.byref(execution)))
-    outcome = HANDLE()
+    """Attaches to the active domain clock before the driver reads its state."""
     try:
-        check(NX.nx_session_execute(session, execution, None, ctypes.byref(outcome)))
-    except BindingError as failure:
+        execution = session.prepare("ATTACH DOMAIN CLOCK;")
+        outcome = session.execute(execution)
+    except nx.ClientError as failure:
         raise ConfigurationError(
             f"cannot attach to the clock of domain '{domain}': {failure.message}"
         ) from failure
-    finally:
-        NX.nx_execution_free(execution)
-    try:
-        disposition = NX.nx_outcome_disposition(outcome)
-        message, message_len = BYTES_P(), SIZE()
-        NX.nx_outcome_message(outcome, ctypes.byref(message), ctypes.byref(message_len))
-        reported = borrowed(message, message_len).decode()
-    finally:
-        NX.nx_outcome_free(outcome)
-    if disposition != DISPOSITION_COMPLETED:
-        raise ConfigurationError(f"cannot attach to the clock of domain '{domain}': {reported}")
+    if outcome.disposition != nx.Disposition.COMPLETED:
+        raise ConfigurationError(f"cannot attach to the clock of domain '{domain}': {outcome.message}")
 
 
 def detach(session):
-    query, length = text("DETACH DOMAIN CLOCK;")
-    execution = HANDLE()
-    outcome = HANDLE()
     try:
-        check(NX.nx_session_prepare(session, query, length, None, ctypes.byref(execution)))
-        check(NX.nx_session_execute(session, execution, None, ctypes.byref(outcome)))
-    except BindingError as failure:
+        execution = session.prepare("DETACH DOMAIN CLOCK;")
+        session.execute(execution)
+    except nx.ClientError as failure:
         line(f"CLOCK detach_failed reason={failure.message}")
-    finally:
-        if execution.value:
-            NX.nx_execution_free(execution)
-        if outcome.value:
-            NX.nx_outcome_free(outcome)
 
 
 class TickGrid:
@@ -1083,8 +715,8 @@ class TickGrid:
 
     def __init__(self, generation, paced):
         self.generation = generation
-        self.origin = paced["origin"]
-        self.period = paced["period"]
+        self.origin = paced.origin
+        self.period = paced.period
 
     def reached(self, logical):
         """The newest tick center at or before the logical instant."""
@@ -1111,126 +743,97 @@ class OpenIntent(Enum):
 
 
 def open_endpoint(open_call, endpoint, role, intent=OpenIntent.CURRENT_GENERATION):
-    """Opens a producer or a consumer of `endpoint`, asking again while the endpoint is not
-    running on its node yet."""
+    """Opens an endpoint, asking again while it is not running on its node yet."""
     deadline = time.monotonic() + OPEN_RETRY_BUDGET
     while True:
-        handle = HANDLE()
         try:
-            check(open_call(ctypes.byref(handle)))
-            return handle
-        except BindingError as failure:
-            if failure.refusal is None:
+            return open_call()
+        except nx.ClientError as failure:
+            refusal = failure.open_refusal
+            if refusal is None:
                 raise ConfigurationError(
                     f"cannot open a {role} on {endpoint}: {failure.message}"
                 ) from failure
-            retryable = failure.refusal == REFUSAL_ENDPOINT_UNAVAILABLE or (
+            retryable = refusal == nx.OpenRefusal.ENDPOINT_UNAVAILABLE or (
                 intent == OpenIntent.FOLLOWING_START
-                and failure.refusal == REFUSAL_DOMAIN_STOPPED
+                and refusal == nx.OpenRefusal.DOMAIN_STOPPED
             )
             if retryable and time.monotonic() < deadline:
                 time.sleep(OPEN_RETRY_DELAY)
                 continue
             raise ConfigurationError(
-                f"{endpoint} refused the {role}: {REFUSALS[failure.refusal]}"
+                f"{endpoint} refused the {role}: {REFUSALS[refusal]}"
             ) from failure
 
 
 def open_consumer(session, domain, emitter, declared):
     expected = fields(declared)
-    try:
-        domain_text, domain_len = text(domain)
-        emitter_text, emitter_len = text(emitter)
-        return open_endpoint(
-            lambda out: NX.nx_session_subscribe_emitter(
-                session, domain_text, domain_len, emitter_text, emitter_len, expected, 4,
-                1024 * 1024, None, out),
-            f"emitter '{emitter}' of domain '{domain}'",
-            "consumer",
-        )
-    finally:
-        NX.nx_fields_free(expected)
+    return open_endpoint(
+        lambda: session.subscribe_emitter(domain, emitter, expected, batches=4, bytes=1024 * 1024),
+        f"emitter '{emitter}' of domain '{domain}'",
+        "consumer",
+    )
 
 
 def open_producer(session, settings, intent=OpenIntent.CURRENT_GENERATION):
     expected = fields(READING_FIELDS)
-    try:
-        domain_text, domain_len = text(settings.domain)
-        ingestor_text, ingestor_len = text(settings.ingestor)
-        return open_endpoint(
-            lambda out: NX.nx_session_open_ingestor(
-                session, domain_text, domain_len, ingestor_text, ingestor_len, expected,
-                settings.credit_batches, settings.credit_bytes, None, out),
-            f"ingestor '{settings.ingestor}' of domain '{settings.domain}'",
-            "producer",
-            intent,
-        )
-    finally:
-        NX.nx_fields_free(expected)
-
-
-def grant(function, handle):
-    batches, size, rows, batch_size = U32(), U64(), U32(), U64()
-    function(handle, ctypes.byref(batches), ctypes.byref(size), ctypes.byref(rows),
-             ctypes.byref(batch_size))
-    return batches.value, size.value, rows.value, batch_size.value
+    return open_endpoint(
+        lambda: session.open_ingestor(
+            settings.domain, settings.ingestor, expected,
+            batches=settings.credit_batches, bytes=settings.credit_bytes),
+        f"ingestor '{settings.ingestor}' of domain '{settings.domain}'",
+        "producer",
+        intent,
+    )
 
 
 def consumer_line(name, emitter, consumer):
-    batches, size, _, _ = grant(NX.nx_consumer_grant, consumer)
-    generation = NX.nx_consumer_generation(consumer)
-    return (f"CONSUMER opened consumer={name} emitter={emitter} generation={generation} "
-            f"batches={batches} bytes={size}")
+    grant = consumer.grant
+    return (f"CONSUMER opened consumer={name} emitter={emitter} generation={consumer.generation} "
+            f"batches={grant.batches} bytes={grant.bytes}")
 
 
 def producer_line(settings, producer):
-    batches, size, rows, batch_size = grant(NX.nx_producer_grant, producer)
-    generation = NX.nx_producer_generation(producer)
-    return (f"PRODUCER opened ingestor={settings.ingestor} generation={generation} "
-            f"batches={batches} bytes={size} max_batch_rows={rows} max_batch_bytes={batch_size}")
+    grant = producer.grant
+    return (f"PRODUCER opened ingestor={settings.ingestor} generation={producer.generation} "
+            f"batches={grant.batches} bytes={grant.bytes} max_batch_rows={grant.max_batch_rows} "
+            f"max_batch_bytes={grant.max_batch_bytes}")
 
 
 class Reopen:
-    """The binding's reopen reason, including whether another START is required."""
+    """The endpoint's typed reopen reason and its application reporting policy."""
 
-    def __init__(self, reason, refusal):
-        self.reason = reason
-        self.refusal = refusal
+    def __init__(self, reopen):
+        self.reason = reopen.reason
+        self.refusal = reopen.refusal
 
     @classmethod
-    def read(cls, accessor, handle):
-        reason, refusal = I32(), I32()
-        if not accessor(handle, ctypes.byref(reason), ctypes.byref(refusal)):
+    def of(cls, endpoint):
+        reopen = endpoint.reopen
+        if reopen is None:
             return None
-        return cls(reason.value, refusal.value if reason.value == 7 else None)
+        return cls(reopen)
 
     def waits_for_generation(self):
-        # nx_reopen_reason: DOMAIN_STOPPED and GENERATION_CHANGED are the lifecycle endings.
-        return self.reason in (1, 5)
+        return self.reason in (nx.ReopenReason.DOMAIN_STOPPED, nx.ReopenReason.GENERATION_CHANGED)
 
     def text(self):
-        if self.reason == 7:
+        if self.reason == nx.ReopenReason.REFUSED:
             return f"refused ({REFUSALS[self.refusal]})"
         return REOPEN_REASONS[self.reason]
 
 
 class Producer:
-    """One binding handle, its schema and the credit only its own submissions hold.
+    """One native producer, its schema and the credit only its own submissions hold.
 
-    Each outcome thread retains this owner, so replacing the run's producer cannot free the
-    binding handle or release credit against the replacement while that thread still uses it.
+    Each outcome thread retains this owner, so replacing the run's producer cannot release
+    credit against the replacement while that thread still uses the previous producer.
     """
 
-    def __init__(self, handle):
-        self.handle = handle
-        self.schema = HANDLE()
+    def __init__(self, endpoint):
+        self.endpoint = endpoint
+        self.schema = endpoint.schema
         self.outstanding = {"batches": 0, "bytes": 0}
-        check(NX.nx_producer_schema(handle, ctypes.byref(self.schema)))
-
-    def __del__(self):
-        if NX is not None:
-            NX.nx_schema_free(self.schema)
-            NX.nx_producer_free(self.handle)
 
 
 class ConsumerLoop:
@@ -1243,7 +846,7 @@ class ConsumerLoop:
         self.kind = kind
         self.processing_time = processing_time
         self.leave_after = leave_after
-        self.cancel = Cancel()
+        self.cancel = nx.Cancel()
         self.thread = None
 
     def start(self, consumer):
@@ -1255,58 +858,50 @@ class ConsumerLoop:
         self.cancel.trigger()
 
     def loop(self, consumer):
-        generation = NX.nx_consumer_generation(consumer)
+        generation = consumer.generation
         handled = 0
-        try:
-            while not self.run.stopped.is_set():
-                delivery = HANDLE()
-                try:
-                    check(NX.nx_consumer_next(consumer, self.cancel.handle,
-                                              ctypes.byref(delivery)))
-                except BindingError as failure:
-                    if failure.kind in (ERROR_CANCELLED, ERROR_CLOSED):
-                        break
-                    if failure.kind == ERROR_INTERRUPTED:
-                        line(f"INTERRUPTED consumer={self.name} emitter={self.emitter}")
-                        continue
-                    if failure.kind == ERROR_REOPEN_REQUIRED:
-                        reason = Reopen.read(NX.nx_consumer_reopen_reason, consumer)
-                        if reason is None:
-                            self.run.fail(ConfigurationError(
-                                f"cannot reopen consumer '{self.name}': the binding gave no reason"
-                            ))
-                            break
-                        line(f"CONSUMER reopen_required consumer={self.name} "
-                             f"emitter={self.emitter} reason={reason.text()}")
-                        reopened = self.reopen(generation, reason)
-                        if reopened is None:
-                            break
-                        NX.nx_consumer_free(consumer)
-                        consumer = reopened
-                        generation = NX.nx_consumer_generation(consumer)
-                        continue
-                    if failure.kind == ERROR_CONNECT:
-                        line(f"CONSUMER unavailable consumer={self.name} emitter={self.emitter}")
-                        if self.run.stopped.wait(1.0):
-                            break
-                        continue
-                    line(f"CONSUMER failed consumer={self.name} emitter={self.emitter} "
-                         f"reason={failure.message}")
+        while not self.run.stopped.is_set():
+            try:
+                delivery = consumer.next(cancel=self.cancel)
+            except nx.ClientError as failure:
+                if failure.kind in (nx.FailureKind.CANCELLED, nx.FailureKind.CLOSED):
                     break
-                try:
-                    self.handle(delivery, generation)
-                finally:
-                    NX.nx_delivery_release(delivery)
-                handled += 1
-                if self.leave_after is not None and handled >= self.leave_after:
-                    self.close(consumer)
-                    self.run.counters.add("consumers_left")
-                    line(f"CONSUMER left consumer={self.name} emitter={self.emitter} "
-                         f"deliveries={handled}")
-                    return
-            self.close(consumer)
-        finally:
-            NX.nx_consumer_free(consumer)
+                if failure.kind == nx.FailureKind.INTERRUPTED:
+                    line(f"INTERRUPTED consumer={self.name} emitter={self.emitter}")
+                    continue
+                if failure.kind == nx.FailureKind.REOPEN_REQUIRED:
+                    reason = Reopen.of(consumer)
+                    if reason is None:
+                        self.run.fail(ConfigurationError(
+                            f"cannot reopen consumer '{self.name}': the binding gave no reason"
+                        ))
+                        break
+                    line(f"CONSUMER reopen_required consumer={self.name} "
+                         f"emitter={self.emitter} reason={reason.text()}")
+                    reopened = self.reopen(generation, reason)
+                    if reopened is None:
+                        break
+                    consumer = reopened
+                    generation = consumer.generation
+                    continue
+                if failure.kind == nx.FailureKind.CONNECT:
+                    line(f"CONSUMER unavailable consumer={self.name} emitter={self.emitter}")
+                    if self.run.stopped.wait(1.0):
+                        break
+                    continue
+                line(f"CONSUMER failed consumer={self.name} emitter={self.emitter} "
+                     f"reason={failure.message}")
+                break
+            self.handle(delivery, generation)
+            # A delivery owns its batch until it is collected, including across a settlement.
+            del delivery
+            handled += 1
+            if self.leave_after is not None and handled >= self.leave_after:
+                self.close(consumer)
+                self.run.counters.add("consumers_left")
+                line(f"CONSUMER left consumer={self.name} emitter={self.emitter} deliveries={handled}")
+                return
+        self.close(consumer)
 
     def reopen(self, generation, reason):
         """Accepts a changed contract now; a lifecycle ending waits for the next START."""
@@ -1320,27 +915,21 @@ class ConsumerLoop:
             self.run.fail(failure)
             return None
         line(f"CONSUMER reopened consumer={self.name} emitter={self.emitter} "
-             f"generation={NX.nx_consumer_generation(consumer)}")
+             f"generation={consumer.generation}")
         return consumer
 
     def handle(self, delivery, generation):
-        batch = HANDLE()
         try:
-            check(NX.nx_delivery_batch(delivery, ctypes.byref(batch)))
-        except BindingError as failure:
+            batch = delivery.batch
+        except nx.ClientError as failure:
             line(f"DELIVERY undecodable consumer={self.name} emitter={self.emitter} "
                  f"reason={failure.message}")
-            reason, length = text("the delivery does not decode")
-            self.settle("REJECT", lambda settlement: NX.nx_delivery_reject(
-                delivery, reason, length, None, settlement))
+            self.settle("REJECT", lambda: delivery.reject("the delivery does not decode"))
             return
-        try:
-            if self.kind == "reading":
-                records = observed_readings(batch)
-            else:
-                records = rejection_notices(batch)
-        finally:
-            NX.nx_batch_release(batch)
+        if self.kind == "reading":
+            records = observed_readings(batch)
+        else:
+            records = rejection_notices(batch)
         line(f"PROCESSING consumer={self.name} emitter={self.emitter} rows={len(records)}")
         if self.processing_time > 0:
             time.sleep(self.processing_time / 1e9)
@@ -1375,22 +964,19 @@ class ConsumerLoop:
         except OSError as failure:
             # The effect was not recorded, so the delivery must come again: ask for a retry.
             error_line(f"cannot record an effect: {failure}")
-            self.settle("RETRY", lambda settlement: NX.nx_delivery_retry(delivery, None,
-                                                                          settlement))
+            self.settle("RETRY", delivery.retry)
             return
         line(f"DELIVERY consumer={self.name} emitter={self.emitter} rows={len(records)} "
              f"applied={applied} duplicates={duplicates}")
-        self.settle("ACK", lambda settlement: NX.nx_delivery_ack(delivery, None, settlement))
+        self.settle("ACK", delivery.ack)
 
     def settle(self, action, call):
-        settlement = I32()
         try:
-            check(call(ctypes.byref(settlement)))
-            outcome = SETTLEMENTS[settlement.value]
-        except BindingError as failure:
-            if failure.kind == ERROR_UNCERTAIN:
+            outcome = SETTLEMENTS[call()]
+        except nx.ClientError as failure:
+            if failure.kind == nx.FailureKind.UNCERTAIN:
                 outcome = "unknown"
-            elif failure.kind == ERROR_REJECTED:
+            elif failure.kind == nx.FailureKind.REJECTED:
                 outcome = "expired"
             else:
                 outcome = f"failed reason={failure.message}"
@@ -1398,8 +984,8 @@ class ConsumerLoop:
 
     def close(self, consumer):
         try:
-            check(NX.nx_consumer_close(consumer, None))
-        except BindingError as failure:
+            consumer.close()
+        except nx.ClientError as failure:
             line(f"CONSUMER close_failed consumer={self.name} emitter={self.emitter} "
                  f"reason={failure.message}")
 
@@ -1412,18 +998,13 @@ CLOSE_BUDGET = 30.0
 
 def outcome_of(outcome):
     """The ledger's outcome and cause of a submission's terminal outcome."""
-    result = NX.nx_submission_outcome_result(outcome)
-    if result == SUBMISSION_COMPLETED:
+    if outcome.result == nx.SubmissionResult.COMPLETED:
         return "completed", ""
-    cause = I32()
-    if result == SUBMISSION_NOT_ADMITTED:
-        check(NX.nx_submission_outcome_refusal(outcome, ctypes.byref(cause)))
-        return "not_admitted", SUBMISSION_REFUSALS[cause.value]
-    if result == SUBMISSION_PROCESSING_FAILED:
-        check(NX.nx_submission_outcome_failure(outcome, ctypes.byref(cause)))
-        return "processing_failed", PROCESSING_FAILURES[cause.value]
-    check(NX.nx_submission_outcome_uncertainty(outcome, ctypes.byref(cause)))
-    return "outcome_unknown", UNCERTAINTIES[cause.value]
+    if outcome.result == nx.SubmissionResult.NOT_ADMITTED:
+        return "not_admitted", SUBMISSION_REFUSALS[outcome.refusal]
+    if outcome.result == nx.SubmissionResult.PROCESSING_FAILED:
+        return "processing_failed", PROCESSING_FAILURES[outcome.failure]
+    return "outcome_unknown", UNCERTAINTIES[outcome.uncertainty]
 
 
 def outcome_line(tick, readings, kind, cause):
@@ -1440,8 +1021,8 @@ class Run:
         self.counters = Counters()
         self.stopped = threading.Event()
         self.planning_stopped = threading.Event()
-        self.planning = Cancel()
-        self.refusal_cancel = Cancel()
+        self.planning = nx.Cancel()
+        self.refusal_cancel = nx.Cancel()
         self.generation_lock = threading.Condition()
         self.generation = None
         self.session = None
@@ -1495,22 +1076,14 @@ class Run:
             raise self.refused
 
     def connect(self):
-        server, server_len = text(self.settings.server)
-        domain, domain_len = text(self.settings.domain)
-        username, username_len = text(self.settings.username or "")
-        password, password_len = text(self.settings.password or "")
-        session = HANDLE()
         try:
-            check(NX.nx_session_connect(
-                server, server_len, domain, domain_len,
-                username if self.settings.username else None, username_len,
-                password if self.settings.password else None, password_len,
-                None, ctypes.byref(session)))
-        except BindingError as failure:
+            self.session = nx.Session(
+                self.settings.server, domain=self.settings.domain,
+                username=self.settings.username, password=self.settings.password)
+        except nx.ClientError as failure:
             raise ConfigurationError(
                 f"cannot connect to '{self.settings.server}': {failure.message}"
             ) from failure
-        self.session = session
 
     def starting_generation(self):
         """The generation a run starts in: the attached clock's, once the node installed it."""
@@ -1547,24 +1120,24 @@ class Run:
 
     def install_producer(self, producer):
         self.producer = producer
-        line(producer_line(self.settings, producer.handle))
-        return NX.nx_producer_generation(producer.handle)
+        line(producer_line(self.settings, producer.endpoint))
+        return producer.endpoint.generation
 
     def close_producer(self):
         try:
-            check(NX.nx_producer_close(self.producer.handle, self.refusal_cancel.handle))
-        except BindingError as failure:
+            self.producer.endpoint.close(cancel=self.refusal_cancel)
+        except nx.ClientError as failure:
             self.check_refusal()
             line(f"PRODUCER close_failed reason={failure.message}")
 
     def reopen(self, grid):
         """Accepts a changed contract with fresh credit, leaving pending outcomes with their owner."""
-        reason = Reopen.read(NX.nx_producer_reopen_reason, self.producer.handle)
+        reason = Reopen.of(self.producer.endpoint)
         if reason is None or reason.waits_for_generation():
             return grid
         self.close_producer()
         producer = Producer(open_producer(self.session, self.settings))
-        opened = NX.nx_producer_generation(producer.handle)
+        opened = producer.endpoint.generation
         if opened != grid.generation:
             # START raced the open. The clock and --follow-generations still decide whether
             # this run may plan in that generation.
@@ -1657,7 +1230,7 @@ class Run:
             if grid.generation != generation:
                 tick = self.first_tick(grid)
                 continue
-            if NX.nx_producer_admission(self.producer.handle) == ADMISSION_SUSPENDED:
+            if self.producer.endpoint.admission == nx.Admission.SUSPENDED:
                 self.planning_stopped.wait(OPEN_RETRY_DELAY)
                 continue
             number = planned + 1
@@ -1667,7 +1240,7 @@ class Run:
                     return
                 # The window moves on while a batch waits for credit, so it is read again now.
                 clock = self.clock.paced(grid.generation)
-                window = clock.window(time.time_ns()) if clock is not None else None
+                window = Window.at(clock, time.time_ns()) if clock is not None else None
                 if window is None:
                     continue
                 planned = number
@@ -1679,7 +1252,7 @@ class Run:
                      f"window={rfc3339(window.earliest)}..{rfc3339(window.latest)}")
                 self.send(prepared)
             finally:
-                NX.nx_batch_release(prepared["batch"])
+                del prepared
             tick += 1
 
     def plan(self, generation, tick, center, window, planned):
@@ -1700,10 +1273,9 @@ class Run:
     def prepare(self, tick, readings):
         """Encodes the readings of one tick as the producer's batch."""
         batch = build_batch(self.producer.schema, readings)
-        size = batch_bytes(batch)
-        _, _, _, max_batch_bytes = grant(NX.nx_producer_grant, self.producer.handle)
+        size = len(batch.ipc)
+        max_batch_bytes = self.producer.endpoint.grant.max_batch_bytes
         if size > max_batch_bytes:
-            NX.nx_batch_release(batch)
             raise RuntimeError(f"cannot submit the readings of tick {tick}: its {size} bytes "
                                f"exceed the {max_batch_bytes} bytes one submission may carry")
         return {"tick": tick, "readings": readings, "batch": batch, "size": size}
@@ -1711,11 +1283,12 @@ class Run:
     def wait_for_credit(self, size):
         """Waits until a batch of `size` bytes fits in the producer's credit beside the batches it
         holds. Returns False when the planning stops first."""
-        batches, granted, _, _ = grant(NX.nx_producer_grant, self.producer.handle)
+        grant = self.producer.endpoint.grant
+        batches, granted = grant.batches, grant.bytes
         reported = False
         with self.credit:
             while True:
-                if Reopen.read(NX.nx_producer_reopen_reason, self.producer.handle) is not None:
+                if Reopen.of(self.producer.endpoint) is not None:
                     # This already-planned batch reaches send's definitely-unsent ledger path.
                     return True
                 held = self.producer.outstanding
@@ -1740,23 +1313,21 @@ class Run:
                         if self.settings.timestamps == "at" and reading.stamp == "before_window"]
         self.ledger.readings(readings, self.settings.ingestor, self.settings.timestamps)
         self.counters.add("readings", len(readings))
-        submission = U64()
         while True:
             try:
-                check(NX.nx_producer_submit(self.producer.handle, batch, self.planning.handle,
-                                            ctypes.byref(submission)))
+                submission = self.producer.endpoint.submit(batch, cancel=self.planning)
                 break
-            except BindingError as failure:
-                if failure.kind == ERROR_CANCELLED:
+            except nx.ClientError as failure:
+                if failure.kind == nx.FailureKind.CANCELLED:
                     # A submission that still waits for credit has sent nothing.
                     self.not_sent(tick, reading_ids, "not_sent")
                     return
-                if failure.kind == ERROR_CONNECT:
+                if failure.kind == nx.FailureKind.CONNECT:
                     line("PRODUCER unavailable retry_after=1s")
                     self.planning_stopped.wait(1.0)
                     continue
-                if failure.kind in (ERROR_CLOSED, ERROR_REOPEN_REQUIRED):
-                    reason = Reopen.read(NX.nx_producer_reopen_reason, self.producer.handle)
+                if failure.kind in (nx.FailureKind.CLOSED, nx.FailureKind.REOPEN_REQUIRED):
+                    reason = Reopen.of(self.producer.endpoint)
                     cause = ("not_sent" if reason is not None and not reason.waits_for_generation()
                              else "producer_ended")
                     self.not_sent(tick, reading_ids, cause)
@@ -1771,7 +1342,7 @@ class Run:
         thread = threading.Thread(
             target=self.await_outcome,
             args=(self.producer, tick, reading_ids, rejected_ids, size,
-                  submission.value),
+                  submission),
             name=f"outcome-{tick}", daemon=True)
         thread.start()
         self.outcomes.append(thread)
@@ -1783,12 +1354,9 @@ class Run:
 
     def await_outcome(self, producer, tick, reading_ids, rejected_ids, size,
                       submission):
-        outcome = HANDLE()
-        check(NX.nx_producer_rejoin(producer.handle, submission, None, ctypes.byref(outcome)))
-        try:
-            kind, cause = outcome_of(outcome)
-        finally:
-            NX.nx_submission_outcome_free(outcome)
+        outcome = producer.endpoint.rejoin(submission)
+        kind, cause = outcome_of(outcome)
+        del outcome
         with self.credit:
             producer.outstanding["batches"] -= 1
             producer.outstanding["bytes"] -= size
@@ -1824,7 +1392,7 @@ class Run:
         while True:
             clock = self.clock.paced(opened)
             if clock is not None:
-                paced = clock.paced()
+                paced = clock.paced
                 break
             _, changes = self.clock.current()
             remaining = deadline - time.monotonic()
@@ -1866,18 +1434,18 @@ class Run:
                 if not admissible:
                     continue
                 if len(admissible) != len(prepared["readings"]):
-                    NX.nx_batch_release(prepared["batch"])
+                    del prepared["batch"]
                     prepared = self.prepare(tick, admissible)
                 line(f"REPLAY tick={tick} readings={len(prepared['readings'])}")
                 self.send(prepared)
             finally:
-                NX.nx_batch_release(prepared["batch"])
+                del prepared
 
     def admissible(self, readings, grid):
         """The readings a replay may still submit: under TIMESTAMP AT, those whose event time the
         window admits now. The others are reported, and stay unresolved in the ledger."""
         clock = self.clock.paced(grid.generation)
-        window = clock.window(time.time_ns()) if clock is not None else None
+        window = Window.at(clock, time.time_ns()) if clock is not None else None
         admissible = []
         for reading in readings:
             if self.settings.timestamps == "now":
@@ -1937,41 +1505,29 @@ class Run:
             self.counters.add("inspections")
 
     def execute(self, query):
-        encoded, length = text(query)
-        execution = HANDLE()
-        outcome = HANDLE()
         try:
-            check(NX.nx_session_prepare(self.session, encoded, length, None,
-                                        ctypes.byref(execution)))
-            check(NX.nx_session_execute(self.session, execution, None, ctypes.byref(outcome)))
-            message, message_len = BYTES_P(), SIZE()
-            NX.nx_outcome_message(outcome, ctypes.byref(message), ctypes.byref(message_len))
-            return borrowed(message, message_len).decode()
-        except BindingError as failure:
+            execution = self.session.prepare(query)
+            return self.session.execute(execution).message
+        except nx.ClientError as failure:
             line(f"INSPECT failed reason={failure.message}")
             return None
-        finally:
-            if execution.value:
-                NX.nx_execution_free(execution)
-            if outcome.value:
-                NX.nx_outcome_free(outcome)
 
     def execute_run(self):
         """Runs the simulation, from connecting to the summary. Returns the exit status."""
         self.connect()
         line(f"CONNECTED server={self.settings.server} domain={self.settings.domain}")
         attach(self.session, self.settings.domain)
-        snapshot = session_clock(self.session, self.settings.domain)
+        snapshot = self.session.domain_clock(self.settings.domain)
         if snapshot is None:
             raise ConfigurationError(
                 f"cannot attach to the clock of domain '{self.settings.domain}': the session "
                 f"follows no clock of it"
             )
-        state = snapshot.state()
-        paced = snapshot.paced() if state == CLOCK_PACED else None
-        line(clock_line(snapshot.generation(), state, paced))
+        state = snapshot.state
+        paced = snapshot.paced if state == nx.ClockState.PACED else None
+        line(clock_line(snapshot.generation, state, paced))
         self.clock = Clock(self.session, self.settings.domain, self.counters,
-                           pace_of(snapshot.generation(), state))
+                           pace_of(snapshot.generation, state))
         self.clock.start()
         generation = self.starting_generation()
         self.effects = EffectStore(self.settings.effects)
@@ -1987,7 +1543,7 @@ class Run:
                 f"the clock of domain '{self.settings.domain}' changed while the simulation "
                 f"started; run the simulation again"
             )
-        grid = TickGrid(generation, clock.paced())
+        grid = TickGrid(generation, clock.paced)
         inspector = None
         if self.settings.inspect_every is not None:
             inspector = threading.Thread(target=self.inspect, name="inspector", daemon=True)
@@ -2034,13 +1590,11 @@ class Run:
 
 
 def main(arguments):
-    global NX
     try:
         settings = options(arguments)
     except ConfigurationError as failure:
         error_line(str(failure))
         return 2
-    NX = Binding(settings.library)
     run = Run(settings)
 
     def interrupt(signum, frame):
@@ -2056,7 +1610,7 @@ def main(arguments):
         except ConfigurationError as failure:
             error_line(str(failure))
             status["code"] = 2
-        except (BindingError, OSError, RuntimeError) as failure:
+        except (nx.ClientError, OSError, RuntimeError) as failure:
             error_line(str(failure))
             status["code"] = 1
 

@@ -1811,6 +1811,13 @@ describe test selection, not a product wait deadline. The executor-saturation lo
 testing fault control. The [concurrent map inventory](https://github.com/nervix-io/nervix/blob/main/tests/concurrent-map-inventory-ledger.md)
 records the runtime ownership review; source contracts and expectations are the executable policy.
 
+The console's uncertain-command reply fixture uses a testing-only domain/query map after command
+execution. It substitutes three replies and retains at most four execution references, releases
+each map guard before queuing the reply, and drops the map with the scenario's injector. Its
+DashMap accesses and browser timers are untracked by Deloxide. The browser retry queue has one
+task owner; deterministic owner tests and public one- and three-node scenarios check its ordering,
+backoff and retained session attachments.
+
 ### Complete analysis and qualification
 
 The isolated tooling workspace uses `nightly-2026-09-17`; product builds use stable. The twelve
@@ -2190,6 +2197,10 @@ column builder, TLS rebinding of every HTTPS listener, batched inference over in
 a restarted voter's ownership, and graceful shutdown with a slow cordon release and diagnostic
 server processes that stop gracefully, and its
 `stress-paced-simulation` invocation of the paced-driver scenarios with the stressed Rust driver.
+The Python companion uses the ordinary `nervix_client` package installed with the prerequisites.
+The runner selects that prepared interpreter explicitly, independently of its diagnostic Cargo
+target directory. The detector observes the diagnostic nodes those scenarios drive; it does not
+track synchronization inside the Python host or its ordinary client package.
 Endpoint ACK lifecycle examples carry `@deloxide_stress_endpoint_ack` and run in the separate
 `stress-endpoint-acknowledgement` invocation. Its serial process has a 900-second bound, including
 the existing 360-second teardown reserve. The baseline lifecycle process has a 3,960-second bound,

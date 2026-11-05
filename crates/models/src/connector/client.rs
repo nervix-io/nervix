@@ -150,7 +150,37 @@ connector_ingestor_kinds! {
     connector Client = "CLIENT";
     /// The entities a client source reads.
     pub enum ClientIngestorEntity {
-        Producer(ClientProducerIngestor) = "PRODUCER", "Client batches";
+        Producer(ClientProducerIngestor => ClientProducerIngestorChange) = "PRODUCER", "Client batches";
+    }
+}
+
+/// One change an `ALTER CLIENT PRODUCER INGESTOR` writes to the body of the ingestor it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum ClientProducerIngestorChange {
+    /// `SET MODE <mode>`.
+    Mode(ClientIngestMode),
+}
+
+impl crate::IngestorEntityChange for ClientProducerIngestorChange {
+    type Entity = ClientProducerIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut ClientProducerIngestor,
+    ) -> error_stack::Result<(), AlterIngestorError> {
+        match self {
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        let text = match self {
+            Self::Mode(mode) => format!("SET MODE {}", mode.to_canonical_plexus()),
+        };
+        Ok(text)
     }
 }
 
@@ -206,9 +236,8 @@ impl From<Vec<AlterIngestorOperation<ClientProducerIngestor>>> for IngestorAlter
 }
 
 impl AlteredIngestorEntity for ClientProducerIngestor {
-    fn set_into(&self, input: &mut IngestorInput) {
-        let source = input.client_entity_mut().verified(ALTERED_PAIR_CHECKED);
-        *source = self.clone();
+    fn entity_of_mut(input: &mut IngestorInput) -> &mut Self {
+        input.client_entity_mut().verified(ALTERED_PAIR_CHECKED)
     }
 
     /// A client source writes no quiesce mode: it honors `SUSPEND` alone, which setting changes
@@ -224,6 +253,11 @@ impl AlteredIngestorEntity for ClientProducerIngestor {
             }));
         }
         Ok(())
+    }
+
+    /// A client source names the schema its producers write, and reads through no client.
+    fn client_of_mut(_input: &mut IngestorInput) -> Option<&mut ClientName> {
+        None
     }
 }
 
@@ -262,15 +296,47 @@ impl EmitterEntityBody for ClientConsumerEmitter {
     }
 }
 
+/// One change an `ALTER CLIENT CONSUMER EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum ClientConsumerEmitterChange {
+    /// `SET MODE <mode>`.
+    Mode(ClientConsumerPublishingMode),
+}
+
+impl crate::EmitterEntityChange for ClientConsumerEmitterChange {
+    type Entity = ClientConsumerEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut ClientConsumerEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector Client = "CLIENT";
     /// What a client emitter writes.
     pub enum ClientEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum ClientEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum ClientEmitterChange;
     /// The entities a client emitter writes.
     pub enum ClientEmitterEntity {
-        Consumer(ClientConsumerEmitter, ClientConsumerPublishingMode) = "CONSUMER";
+        Consumer(ClientConsumerEmitter, ClientConsumerPublishingMode, ClientConsumerEmitterChange) = "CONSUMER";
     }
 }
 
