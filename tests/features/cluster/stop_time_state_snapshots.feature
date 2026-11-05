@@ -23,7 +23,7 @@ Feature: State snapshots written while a node stops
       CREATE RELAY readings SCHEMA reading UNBRANCHED;
       CREATE RELAY reading_summaries SCHEMA reading_summary UNBRANCHED;
       CREATE VHOST edge stop-snapshot-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/readings' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_source
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec

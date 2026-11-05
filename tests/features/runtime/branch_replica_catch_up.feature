@@ -112,7 +112,7 @@ Feature: Replica catch-up of branch-keyed state
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
       CREATE VHOST edge dedup-catch-up-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/dedup' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/dedup';
       CREATE HTTP ENDPOINT INGESTOR source_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec

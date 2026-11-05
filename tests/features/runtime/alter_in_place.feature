@@ -345,7 +345,7 @@ Feature: Altering an ingestor or an emitter in place
         FROM WIRE JSON SCHEMA altered_event_wire TO SCHEMA altered_event;
       CREATE RELAY altered_events SCHEMA altered_event UNBRANCHED;
       CREATE VHOST altered_edge http-{{test_id}}-alter-in-place.example.com;
-      CREATE ENDPOINT altered_ingress ON altered_edge PATH '/alter-in-place' TYPE HTTP;
+      CREATE HTTP ENDPOINT altered_ingress ON altered_edge PATH '/alter-in-place';
       CREATE ZEROMQ CLIENT altered_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'

@@ -344,8 +344,12 @@ pub(in crate::registry) fn endpoint(
         name: EndpointName::parse(name).expect("valid identifier"),
         on_vhost: VhostName::parse(vhost_name).expect("valid identifier"),
         path: path.to_string(),
-        endpoint_type,
-        signaling_protocol: None,
+        kind: match endpoint_type {
+            nervix_models::EndpointType::Http => nervix_models::EndpointKind::Http,
+            nervix_models::EndpointType::Websockets => nervix_models::EndpointKind::Websockets {
+                signaling_protocol: None,
+            },
+        },
     })
 }
 

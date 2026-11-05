@@ -211,7 +211,7 @@ Feature: Kafka ingestor domain pacing
         TO events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE VHOST edge control-{{test_id}}.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR healthy_source
         FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED

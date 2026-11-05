@@ -1034,8 +1034,8 @@ under the same head. `DECODE USING <codec>`, the timestamp, the filter, the rout
 | Head | Reads | Section |
 | --- | --- | --- |
 | `HTTP REQUEST` | Responses to the requests an `HTTP CLIENT` sends on a cadence | [`HTTP REQUEST`](#http-request) |
-| `HTTP ENDPOINT` | Requests to a `TYPE HTTP` endpoint | [Endpoints](#http-endpoint-and-websockets-endpoint) |
-| `WEBSOCKETS ENDPOINT` | Frames on connections to a `TYPE WEBSOCKETS` endpoint | [Endpoints](#http-endpoint-and-websockets-endpoint) |
+| `HTTP ENDPOINT` | Requests to an `HTTP ENDPOINT` | [Endpoints](#http-endpoint-and-websockets-endpoint) |
+| `WEBSOCKETS ENDPOINT` | Frames on connections to a `WEBSOCKETS ENDPOINT` | [Endpoints](#http-endpoint-and-websockets-endpoint) |
 | `WEBSOCKETS CONNECTION` | Frames on the outbound connection of a `WEBSOCKETS CLIENT` | [`WEBSOCKETS CONNECTION`](#websockets-connection) |
 | `KAFKA TOPIC` | A topic, through a `KAFKA CLIENT` | [Kafka](#kafka) |
 | `PULSAR TOPIC` | A topic, through a `PULSAR CLIENT` | [Pulsar](#pulsar) |
@@ -2901,11 +2901,24 @@ See the [WEBSOCKETS ENDPOINT capability and mirror reference](connector-capabili
 <!-- connector-matrix:ingest-websockets-endpoint:end -->
 
 This is how Nervix receives inbound HTTP requests and WebSocket connections on its own server-side
-endpoints. An `HTTP ENDPOINT` ingestor reads an endpoint declared `TYPE HTTP`, and a
-`WEBSOCKETS ENDPOINT` ingestor reads one declared `TYPE WEBSOCKETS`; completion after `FROM` offers
-only endpoints of that type. An endpoint of the other type is refused when the statement is
-applied, with a message such as `requires a TYPE HTTP endpoint, but endpoint 'stream' is TYPE
-WEBSOCKETS`. Both heads take the same body.
+endpoints. Declare the endpoint kind in its head:
+
+```text
+CREATE [IF NOT EXISTS] HTTP ENDPOINT <name> ON <vhost> PATH '<path>';
+CREATE [IF NOT EXISTS] WEBSOCKETS ENDPOINT <name> ON <vhost> PATH '<path>'
+  [WITH SIGNALING PROTOCOL <protocol>];
+```
+
+The path starts with `/`. Only the WebSockets endpoint body accepts a signaling protocol.
+`SHOW CREATE ENDPOINT <name>` renders the same kinded declaration, and `DESCRIBE ENDPOINT <name>`
+reports `kind: HTTP ENDPOINT` or `kind: WEBSOCKETS ENDPOINT`. Inspection and deletion address an
+endpoint by name with `SHOW CREATE ENDPOINT`, `DESCRIBE ENDPOINT`, or `DROP ENDPOINT`.
+
+An `HTTP ENDPOINT` ingestor reads an `HTTP ENDPOINT`, and a `WEBSOCKETS ENDPOINT` ingestor reads a
+`WEBSOCKETS ENDPOINT`; completion after `FROM` offers only endpoints of that kind. An endpoint of
+the other kind is refused when the statement is applied, with a message such as
+`requires a HTTP ENDPOINT, but endpoint 'stream' is WEBSOCKETS ENDPOINT`. Both ingestor heads take
+the same body.
 
 Both endpoint entities accept `MODE NO ACK` or `MODE ACK MAX <n> ACK TIMEOUT <duration>`.
 The ACK window is explicit: `MAX` is 1–65,535 outstanding payloads per ingestor on each node.
@@ -3261,8 +3274,8 @@ new session on the new owner.
 `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER` ingestors are different because
 their listeners execute on every live cluster node.
 
-A `WEBSOCKETS CLIENT` can declare `WITH SIGNALING PROTOCOL <name>` after its name. Server-side WebSocket endpoints can declare the same clause
-after `TYPE WEBSOCKETS`.
+A `WEBSOCKETS CLIENT` can declare `WITH SIGNALING PROTOCOL <name>` after its name. A server-side `WEBSOCKETS ENDPOINT` can declare the same clause
+after its `PATH`.
 
 A signaling protocol declares a wire format and expresses the whole handshake as
 [JAQ](./schemas-and-codecs.md#jaq-transformations) programs:

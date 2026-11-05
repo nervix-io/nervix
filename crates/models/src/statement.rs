@@ -2384,8 +2384,64 @@ pub struct CreateEndpoint {
     pub name: EndpointName,
     pub on_vhost: VhostName,
     pub path: String,
-    pub endpoint_type: EndpointType,
-    pub signaling_protocol: Option<SignalingProtocolName>,
+    pub kind: EndpointKind,
+}
+
+/// The endpoint head and the signaling data that head permits.
+///
+/// `Protocol` is a name in a Model, a selected reference in an editor, and the
+/// prepared protocol in an execution route. Each stage preserves the same kind.
+///
+/// ```
+/// use nervix_models::{EndpointKind, EndpointType, SignalingProtocolName};
+/// let http = EndpointKind::<SignalingProtocolName>::Http;
+/// assert_eq!(http.endpoint_type(), EndpointType::Http);
+/// let websocket = EndpointKind::Websockets {
+///     signaling_protocol: None::<SignalingProtocolName>,
+/// };
+/// assert_eq!(websocket.endpoint_type(), EndpointType::Websockets);
+/// ```
+///
+/// The HTTP kind has no signaling field:
+///
+/// ```compile_fail
+/// use nervix_models::{EndpointKind, SignalingProtocolName};
+/// let http = EndpointKind::Http {
+///     signaling_protocol: None::<SignalingProtocolName>,
+/// };
+/// ```
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum EndpointKind<Protocol = SignalingProtocolName> {
+    Http,
+    Websockets {
+        signaling_protocol: Option<Protocol>,
+    },
+}
+
+impl<Protocol> EndpointKind<Protocol> {
+    /// The discriminant that endpoint ingestor capabilities require.
+    pub const fn endpoint_type(&self) -> EndpointType {
+        match self {
+            Self::Http => EndpointType::Http,
+            Self::Websockets { .. } => EndpointType::Websockets,
+        }
+    }
+
+    /// The signaling data carried only by a WebSockets endpoint.
+    pub fn signaling_protocol(&self) -> Option<&Protocol> {
+        match self {
+            Self::Http => None,
+            Self::Websockets { signaling_protocol } => signaling_protocol.as_ref(),
+        }
+    }
+}
+
+impl<Protocol> std::fmt::Display for EndpointKind<Protocol> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{} ENDPOINT", self.endpoint_type())
+    }
 }
 
 #[derive(

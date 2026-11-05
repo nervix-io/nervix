@@ -393,6 +393,7 @@ class InventoryTests(unittest.TestCase):
             "console-pending-backups-malformed",
             "console-restore-drafts",
             "console-client-drafts",
+            "console-endpoint-drafts",
             "runtime-window-sketch-panes",
             "kafka-partition-offsets",
             "kafka-record-create-times",

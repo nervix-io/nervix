@@ -14,7 +14,7 @@ Feature: Published endpoint route lifetimes
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge shared-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_source
         FROM ingress MODE NO ACK
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
@@ -30,7 +30,7 @@ Feature: Published endpoint route lifetimes
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge shared-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_source
         FROM ingress MODE NO ACK
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
@@ -80,7 +80,7 @@ Feature: Published endpoint route lifetimes
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge lifetime-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE WEBSOCKETS;
+      CREATE WEBSOCKETS ENDPOINT ingress ON edge PATH '/events';
       CREATE WEBSOCKETS ENDPOINT INGESTOR event_source
         FROM ingress MODE NO ACK
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
@@ -141,7 +141,7 @@ Feature: Published endpoint route lifetimes
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge restart-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_source
         FROM ingress MODE NO ACK
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec

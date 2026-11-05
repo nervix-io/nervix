@@ -134,7 +134,7 @@ Feature: Iceberg emission
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge iceberg-gcs-{{test_id}}.example.com;
-      CREATE ENDPOINT notification_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT notification_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notification_input
         FROM notification_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -454,10 +454,9 @@ Feature: Iceberg emission
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge iceberg-batch-{{test_id}}.example.com;
-      CREATE ENDPOINT notification_ingress
+      CREATE HTTP ENDPOINT notification_ingress
       ON edge
-      PATH '/notifications'
-      TYPE HTTP;
+      PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notification_source
       FROM notification_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -827,10 +826,9 @@ Feature: Iceberg emission
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge iceberg-provisioning-{{test_id}}.example.com;
-      CREATE ENDPOINT notification_ingress
+      CREATE HTTP ENDPOINT notification_ingress
       ON edge
-      PATH '/notifications'
-      TYPE HTTP;
+      PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notification_source
       FROM notification_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -1534,7 +1532,7 @@ Feature: Iceberg emission
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge iceberg-memory-{{test_id}}.example.com;
-      CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -1606,7 +1604,7 @@ Feature: Iceberg emission
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge iceberg-encrypted-{{test_id}}.example.com;
-      CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -1778,7 +1776,7 @@ Feature: Iceberg emission
       CREATE CODEC large_message_codec FROM WIRE JSON SCHEMA large_message_wire TO SCHEMA large_message;
       CREATE RELAY large_messages SCHEMA large_message UNBRANCHED;
       CREATE VHOST edge iceberg-oversized-{{test_id}}.example.com;
-      CREATE ENDPOINT large_messages_endpoint ON edge PATH '/messages' TYPE HTTP;
+      CREATE HTTP ENDPOINT large_messages_endpoint ON edge PATH '/messages';
       CREATE HTTP ENDPOINT INGESTOR http_large_messages
         FROM large_messages_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 64MiB DECODE USING large_message_codec

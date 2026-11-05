@@ -88,11 +88,11 @@ impl<T> Clone for EndpointIntakeRoute<T> {
 
 impl<T> EndpointIntakeRoute<T> {
     pub(crate) fn endpoint_type(&self) -> EndpointType {
-        self.selected.endpoint_type
+        self.selected.kind.endpoint_type()
     }
 
     pub(crate) fn signaling_protocol(&self) -> Option<&Arc<CompiledSignalingProtocol>> {
-        self.selected.signaling_protocol.as_ref()
+        self.selected.kind.signaling_protocol()
     }
 
     pub(super) fn bindings(&self) -> &[EndpointBinding<T>] {
@@ -105,7 +105,7 @@ impl<T> EndpointIntakeRoute<T> {
         let selected = self
             .definitions
             .values()
-            .find(|definition| definition.endpoint_type == EndpointType::Websockets)
+            .find(|definition| definition.kind.endpoint_type() == EndpointType::Websockets)
             .or_else(|| self.definitions.values().next())
             .assured("a published endpoint route has at least one configured definition");
         self.selected = selected.clone();

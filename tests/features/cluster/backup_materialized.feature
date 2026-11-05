@@ -155,7 +155,7 @@ Feature: Materialized backup and archived lifecycle resumption
       CREATE RELAY state SCHEMA event BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY generated SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge backup-materialized-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/state' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/state';
       CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO state INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
@@ -310,7 +310,7 @@ Feature: Materialized backup and archived lifecycle resumption
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m;
       CREATE RELAY state SCHEMA event BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge backup-materialized-stop-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/state' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/state';
       CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO state INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
@@ -667,7 +667,7 @@ Feature: Materialized backup and archived lifecycle resumption
       CREATE BRANCH by_sequence SCHEMA sequence_key TTL 30m;
       CREATE RELAY state SCHEMA event BRANCHED BY by_sequence WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge backup-paced-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec TIMESTAMP AT occurred_at
         TO state INHERIT ALL BRANCHED BY by_sequence SET sequence = message.sequence
@@ -736,7 +736,7 @@ Feature: Materialized backup and archived lifecycle resumption
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY state SCHEMA event UNBRANCHED WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge backup-ipc-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/state' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/state';
       CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO state INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG

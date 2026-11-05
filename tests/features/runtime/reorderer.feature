@@ -23,10 +23,9 @@ Feature: Reorderer
         CREATE RELAY ordered_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE RELAY filtered_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress
+        CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -111,10 +110,9 @@ Feature: Reorderer
         CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE RELAY ordered_notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress
+        CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -239,10 +237,9 @@ Feature: Reorderer
         CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_reorder_default;
         CREATE RELAY ordered_notifications SCHEMA notification BRANCHED BY by_reorder_default;
         CREATE VHOST edge http-reorder-default-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress
+        CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/reorder-default'
-        TYPE HTTP;
+        PATH '/reorder-default';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec

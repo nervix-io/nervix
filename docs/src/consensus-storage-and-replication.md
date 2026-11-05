@@ -480,8 +480,8 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The dedicated database owns exactly four current keyspaces: `raft_wire_alter_logs`,
-`raft_wire_alter_meta`, `raft_wire_alter_state`, and `raft_wire_alter_snapshots`. Opening it
+The dedicated database owns exactly four current keyspaces: `raft_endpoint_logs`,
+`raft_endpoint_meta`, `raft_endpoint_state`, and `raft_endpoint_snapshots`. Opening it
 validates the complete keyspace namespace before reading any records. This namespace identifies the
 current Model shape, including the separate JSON and CBOR wire type enums, AVRO representation
 types, explicit `BASE64` codec encoding, and a Pulsar subscription's required type, an owned Pulsar
@@ -491,7 +491,8 @@ QUEUE emitter's `SEND` request shape, the receive count an SQS QUEUE ingestor's 
 declares, the session and quality of service an MQTT TOPIC ingestor writes beside its delivery
 mode, the quality of service an MQTT TOPIC emitter writes beside its publishing mode, a
 `REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription, and whether a polled HTTP request's
-header holds a literal or names a client secret. It identifies the current statement shape as well,
+header holds a literal or names a client secret, and the endpoint's kind with optional signaling
+data only on its WebSockets variant. It identifies the current statement shape as well,
 which the statements a transaction keeps are stored in: an `ALTER INGESTOR` or `ALTER EMITTER`
 operation that changes one part of its entity's body, an envelope clause or the properties, or one
 part of a construction where it stands. Its state metadata requires the current `ClusterState`

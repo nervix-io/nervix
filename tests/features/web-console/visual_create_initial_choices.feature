@@ -7,7 +7,7 @@ Feature: Web console visual creation with a delayed initial domain publication
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE VHOST initial_host initial-{{test_id}}.example.com;
-      CREATE ENDPOINT initial_endpoint ON initial_host PATH '/initial' TYPE HTTP;
+      CREATE HTTP ENDPOINT initial_endpoint ON initial_host PATH '/initial';
       """
     And the web console is opened on the leader node with its initial session frames held
     Then selector ".domain-select" contains "loading domains"

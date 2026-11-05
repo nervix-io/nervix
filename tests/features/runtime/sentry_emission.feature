@@ -12,7 +12,7 @@ Feature: Sentry emission
         WITH JAQ TRANSFORMATIONS ON INGESTION '.' ON EMITTING '.';
       CREATE RELAY errors SCHEMA declared_event UNBRANCHED;
       CREATE VHOST edge sentry-{{test_id}}.example.com;
-      CREATE ENDPOINT error_ingress ON edge PATH '/errors' TYPE HTTP;
+      CREATE HTTP ENDPOINT error_ingress ON edge PATH '/errors';
       CREATE HTTP ENDPOINT INGESTOR error_source
         FROM error_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING declared_codec
@@ -125,10 +125,9 @@ Feature: Sentry emission
       TO SCHEMA error_event;
       CREATE RELAY errors SCHEMA error_event UNBRANCHED;
       CREATE VHOST edge sentry-{{test_id}}.example.com;
-      CREATE ENDPOINT error_ingress
+      CREATE HTTP ENDPOINT error_ingress
       ON edge
-      PATH '/errors'
-      TYPE HTTP;
+      PATH '/errors';
       CREATE HTTP ENDPOINT INGESTOR error_source
       FROM error_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING error_event_codec
@@ -196,7 +195,7 @@ Feature: Sentry emission
         WITH JAQ TRANSFORMATIONS ON EMITTING '.' ON EMITTING BATCH '.[0]';
       CREATE RELAY errors SCHEMA retry_event UNBRANCHED;
       CREATE VHOST edge sentry-{{test_id}}.example.com;
-      CREATE ENDPOINT error_ingress ON edge PATH '/errors' TYPE HTTP;
+      CREATE HTTP ENDPOINT error_ingress ON edge PATH '/errors';
       CREATE HTTP ENDPOINT INGESTOR error_source
         FROM error_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retry_ingest
@@ -263,7 +262,7 @@ Feature: Sentry emission
         WITH JAQ TRANSFORMATIONS ON EMITTING '.' ON EMITTING BATCH '.[0]';
       CREATE RELAY errors SCHEMA retry_event UNBRANCHED;
       CREATE VHOST edge sentry-{{test_id}}.example.com;
-      CREATE ENDPOINT error_ingress ON edge PATH '/errors' TYPE HTTP;
+      CREATE HTTP ENDPOINT error_ingress ON edge PATH '/errors';
       CREATE HTTP ENDPOINT INGESTOR error_source
         FROM error_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retry_ingest

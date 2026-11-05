@@ -6,7 +6,7 @@ use std::num::NonZeroUsize;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     BranchEviction, CreateBranch, CreateEndpoint, CreateLookup, CreatePlacement, CreateRelay,
-    CreateSignalingProtocol, CreateVhost, EndpointType, MaterializedRelayState, ModelName,
+    CreateSignalingProtocol, CreateVhost, EndpointKind, MaterializedRelayState, ModelName,
     PlacementPolicy, RelayBranching, RequestedResourceVersion, SignalingProtobufConfig,
     SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
     VhostTlsResource,
@@ -130,26 +130,26 @@ impl Arbitrary<'_> {
         hostname
     }
 
-    /// An endpoint on a virtual host, of either type, optionally speaking a signaling protocol.
+    /// An endpoint kind with signaling data only on its WebSockets variant.
     pub fn create_endpoint(&mut self) -> CreateEndpoint {
         let name = self.name();
         let on_vhost = self.name();
         let path = format!("/{}", self.string());
-        let endpoint_type = self
-            .entropy
-            .pick([EndpointType::Websockets, EndpointType::Http]);
-        let signaling_protocol = if endpoint_type == EndpointType::Websockets && self.entropy.flag()
-        {
-            Some(self.name())
+        let kind = if self.entropy.flag() {
+            EndpointKind::Http
         } else {
-            None
+            let signaling_protocol = if self.entropy.flag() {
+                Some(self.name())
+            } else {
+                None
+            };
+            EndpointKind::Websockets { signaling_protocol }
         };
         CreateEndpoint {
             name,
             on_vhost,
             path,
-            endpoint_type,
-            signaling_protocol,
+            kind,
         }
     }
 

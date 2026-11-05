@@ -12,7 +12,7 @@ Feature: A backup cut reaches every scheduled state owner
       CREATE RELAY payments SCHEMA payment BRANCHED BY by_tenant;
       CREATE RELAY unique_payments SCHEMA payment BRANCHED BY by_tenant;
       CREATE VHOST edge backup-owners-{{test_id}}.example.com;
-      CREATE ENDPOINT payment_ingress ON edge PATH '/payments' TYPE HTTP;
+      CREATE HTTP ENDPOINT payment_ingress ON edge PATH '/payments';
       CREATE HTTP ENDPOINT INGESTOR payment_source FROM payment_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING payment_codec
         TO payments INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant

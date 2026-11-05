@@ -542,7 +542,7 @@ Feature: Placement policies
       CREATE RELAY placement_stage SCHEMA placement_event UNBRANCHED;
       CREATE RELAY placement_output SCHEMA placement_event UNBRANCHED;
       CREATE VHOST edge placement-{{test_id}}.example.com;
-      CREATE ENDPOINT placement_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT placement_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR endpoint_source
         FROM placement_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING placement_event_codec
@@ -792,7 +792,7 @@ Feature: Placement policies
       CREATE RELAY placement_timeout_input SCHEMA placement_timeout_event UNBRANCHED;
       CREATE RELAY placement_timeout_output SCHEMA placement_timeout_event UNBRANCHED CAPACITY 1;
       CREATE VHOST edge placement-timeout-{{test_id}}.example.com;
-      CREATE ENDPOINT placement_timeout_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT placement_timeout_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR placement_timeout_source
         FROM placement_timeout_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING placement_timeout_codec

@@ -27,8 +27,8 @@ Feature: Emitter payload assembly across Arrow carriers
       CREATE RELAY source_a_events SCHEMA event BRANCHED BY by_source_a;
       CREATE RELAY source_b_events SCHEMA event BRANCHED BY by_source_b;
       CREATE VHOST edge assembled-{{test_id}}.example.com;
-      CREATE ENDPOINT source_a_ingress ON edge PATH '/a' TYPE HTTP;
-      CREATE ENDPOINT source_b_ingress ON edge PATH '/b' TYPE HTTP;
+      CREATE HTTP ENDPOINT source_a_ingress ON edge PATH '/a';
+      CREATE HTTP ENDPOINT source_b_ingress ON edge PATH '/b';
       CREATE HTTP ENDPOINT INGESTOR source_a
         FROM source_a_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec

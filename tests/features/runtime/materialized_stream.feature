@@ -27,10 +27,9 @@ Feature: Materialized relay state
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
 
       CREATE VHOST edge root-state-{{test_id}}.example.com;
-      CREATE ENDPOINT root_state_ingress
+      CREATE HTTP ENDPOINT root_state_ingress
         ON edge
-        PATH '/state'
-        TYPE HTTP;
+        PATH '/state';
 
       CREATE HTTP ENDPOINT INGESTOR root_state_source
         FROM root_state_ingress MODE NO ACK
@@ -78,7 +77,7 @@ Feature: Materialized relay state
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_reading_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge readings-{{test_id}}.example.com;
-      CREATE ENDPOINT readings_ingress ON edge PATH '/readings' TYPE HTTP;
+      CREATE HTTP ENDPOINT readings_ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_source
         FROM readings_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
@@ -150,14 +149,12 @@ Feature: Materialized relay state
         CREATE RELAY incoming_notifications SCHEMA notification BRANCHED BY by_state_notifications;
         CREATE RELAY enriched_notifications SCHEMA notification BRANCHED BY by_state_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT state_ingress
+        CREATE HTTP ENDPOINT state_ingress
         ON edge
-        PATH '/state'
-        TYPE HTTP;
-        CREATE ENDPOINT ingress
+        PATH '/state';
+        CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR state_notifications
         FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -283,9 +280,9 @@ Feature: Materialized relay state
         SCHEMA dependency_event
         BRANCHED BY by_dependency_tenant;
       CREATE VHOST edge http-materialized-order-{{test_id}}.example.com;
-      CREATE ENDPOINT first_state_ingress ON edge PATH '/first-state' TYPE HTTP;
-      CREATE ENDPOINT second_state_ingress ON edge PATH '/second-state' TYPE HTTP;
-      CREATE ENDPOINT dependency_ingress ON edge PATH '/dependency-input' TYPE HTTP;
+      CREATE HTTP ENDPOINT first_state_ingress ON edge PATH '/first-state';
+      CREATE HTTP ENDPOINT second_state_ingress ON edge PATH '/second-state';
+      CREATE HTTP ENDPOINT dependency_ingress ON edge PATH '/dependency-input';
       CREATE HTTP ENDPOINT INGESTOR first_state_source
         FROM first_state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING dependency_event_codec
@@ -426,10 +423,9 @@ Feature: Materialized relay state
         SCHEMA notification BRANCHED BY by_http_notifications
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT http_notifications_endpoint
+        CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -503,10 +499,9 @@ Feature: Materialized relay state
         SCHEMA notification BRANCHED BY by_http_notifications
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT http_notifications_endpoint
+        CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -572,10 +567,9 @@ Feature: Materialized relay state
         SCHEMA notification BRANCHED BY by_http_notifications
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT http_notifications_endpoint
+        CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -654,10 +648,9 @@ Feature: Materialized relay state
         BRANCHED BY by_tenant_notifications
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT state_ingress
+        CREATE HTTP ENDPOINT state_ingress
         ON edge
-        PATH '/state'
-        TYPE HTTP;
+        PATH '/state';
         CREATE HTTP ENDPOINT INGESTOR state_notifications
         FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 32MiB DECODE USING notification_codec

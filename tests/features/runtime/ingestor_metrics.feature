@@ -22,7 +22,7 @@ Feature: Ingestor metrics
         CREATE IF NOT EXISTS BRANCH by_ingestor_metrics_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ingestor_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingestor_metrics_ingress ON edge PATH '/ingestor-metrics' TYPE HTTP;
+        CREATE HTTP ENDPOINT ingestor_metrics_ingress ON edge PATH '/ingestor-metrics';
         CREATE HTTP ENDPOINT INGESTOR ingestor_metrics_source
         FROM ingestor_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -168,7 +168,7 @@ Feature: Ingestor metrics
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge payload-size-{{test_id}}.example.com;
-      CREATE ENDPOINT payload_size_ingress ON edge PATH '/payload-size' TYPE HTTP;
+      CREATE HTTP ENDPOINT payload_size_ingress ON edge PATH '/payload-size';
       CREATE HTTP ENDPOINT INGESTOR payload_size_source
         FROM payload_size_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -367,7 +367,7 @@ Feature: Ingestor metrics
         CREATE IF NOT EXISTS BRANCH by_ingestor_metrics_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ingestor_metrics_source;
         CREATE VHOST edge http-{{test_id}}-ingestor-restart.example.com;
-        CREATE ENDPOINT ingestor_metrics_restart_ingress ON edge PATH '/ingestor-metrics-restart' TYPE HTTP;
+        CREATE HTTP ENDPOINT ingestor_metrics_restart_ingress ON edge PATH '/ingestor-metrics-restart';
         CREATE HTTP ENDPOINT INGESTOR ingestor_metrics_source
         FROM ingestor_metrics_restart_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -483,7 +483,7 @@ Feature: Ingestor metrics
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT unfolded_metrics_ingress ON edge PATH '/unfolded-metrics' TYPE HTTP;
+      CREATE HTTP ENDPOINT unfolded_metrics_ingress ON edge PATH '/unfolded-metrics';
       CREATE HTTP ENDPOINT INGESTOR unfolded_metrics_source
         FROM unfolded_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_batch_codec

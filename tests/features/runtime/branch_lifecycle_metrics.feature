@@ -36,10 +36,9 @@ Feature: Branch lifecycle metrics
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT branch_metrics_ingress
+      CREATE HTTP ENDPOINT branch_metrics_ingress
         ON edge
-        PATH '/branch-metrics'
-        TYPE HTTP;
+        PATH '/branch-metrics';
 
       CREATE HTTP ENDPOINT INGESTOR branch_metrics_source
         FROM branch_metrics_ingress MODE NO ACK
@@ -134,10 +133,9 @@ Feature: Branch lifecycle metrics
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT branch_metrics_ingress
+      CREATE HTTP ENDPOINT branch_metrics_ingress
         ON edge
-        PATH '/branch-metrics'
-        TYPE HTTP;
+        PATH '/branch-metrics';
 
       CREATE HTTP ENDPOINT INGESTOR branch_metrics_source
         FROM branch_metrics_ingress MODE NO ACK

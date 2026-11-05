@@ -25,10 +25,9 @@ Feature: Runtime node input collection
       CREATE RELAY incoming SCHEMA notification BRANCHED BY by_tenant;
       CREATE RELAY collected SCHEMA notification BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT input_collection_ingress
+      CREATE HTTP ENDPOINT input_collection_ingress
       ON edge
-      PATH '/input-collection'
-      TYPE HTTP;
+      PATH '/input-collection';
       CREATE HTTP ENDPOINT INGESTOR input_collection_source
       FROM input_collection_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -110,10 +109,9 @@ Feature: Runtime node input collection
       CREATE RELAY incoming SCHEMA notification UNBRANCHED;
       CREATE RELAY collected SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT input_collection_ingress
+      CREATE HTTP ENDPOINT input_collection_ingress
       ON edge
-      PATH '/input-collection'
-      TYPE HTTP;
+      PATH '/input-collection';
       CREATE HTTP ENDPOINT INGESTOR input_collection_source
       FROM input_collection_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec

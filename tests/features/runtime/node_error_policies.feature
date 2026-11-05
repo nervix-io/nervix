@@ -93,10 +93,9 @@ Feature: Runtime node error policies
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE RELAY error_stream SCHEMA error_record BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT http_notifications_endpoint
+        CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -177,7 +176,7 @@ Feature: Runtime node error policies
       CREATE RELAY accepted_calculations SCHEMA calculation UNBRANCHED;
       CREATE RELAY calculation_errors SCHEMA calculation_error UNBRANCHED;
       CREATE VHOST edge filter-operation-{{test_id}}.example.com;
-      CREATE ENDPOINT calculation_ingress ON edge PATH '/calculations' TYPE HTTP;
+      CREATE HTTP ENDPOINT calculation_ingress ON edge PATH '/calculations';
       CREATE HTTP ENDPOINT INGESTOR calculation_source
         FROM calculation_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec

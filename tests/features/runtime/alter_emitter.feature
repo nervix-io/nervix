@@ -67,7 +67,7 @@ Feature: Altering emitters
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-emitter-flush.example.com;
-      CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_source
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -123,7 +123,7 @@ Feature: Altering emitters
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-emitter-swap.example.com;
-      CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_source
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -191,7 +191,7 @@ Feature: Altering emitters
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE RELAY replacement SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-emitter-swap.example.com;
-      CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_source
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec

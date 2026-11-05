@@ -31,10 +31,9 @@ Feature: Deduplicator state replication
         CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress
+        CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/dedup'
-        TYPE HTTP;
+        PATH '/dedup';
         CREATE HTTP ENDPOINT INGESTOR source_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec

@@ -23,7 +23,7 @@ Feature: Interconnect relay admission
         'bind' = 'false'
       };
       CREATE VHOST edge blocked-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR source
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -48,7 +48,7 @@ Feature: Interconnect relay admission
         'bind' = 'false'
       };
       CREATE VHOST edge runnable-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR source
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -117,8 +117,8 @@ Feature: Interconnect relay admission
         'bind' = 'false'
       };
       CREATE VHOST edge branches-{{test_id}}.example.com;
-      CREATE ENDPOINT blocked_ingress ON edge PATH '/blocked' TYPE HTTP;
-      CREATE ENDPOINT runnable_ingress ON edge PATH '/runnable' TYPE HTTP;
+      CREATE HTTP ENDPOINT blocked_ingress ON edge PATH '/blocked';
+      CREATE HTTP ENDPOINT runnable_ingress ON edge PATH '/runnable';
       CREATE HTTP ENDPOINT INGESTOR blocked_source
         FROM blocked_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -195,7 +195,7 @@ Feature: Interconnect relay admission
         'bind' = 'false'
       };
       CREATE VHOST edge cancellation-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR source
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -273,8 +273,8 @@ Feature: Interconnect relay admission
         'bind' = 'false'
       };
       CREATE VHOST edge expiry-{{test_id}}.example.com;
-      CREATE ENDPOINT active_ingress ON edge PATH '/active' TYPE HTTP;
-      CREATE ENDPOINT idle_ingress ON edge PATH '/idle' TYPE HTTP;
+      CREATE HTTP ENDPOINT active_ingress ON edge PATH '/active';
+      CREATE HTTP ENDPOINT idle_ingress ON edge PATH '/idle';
       CREATE HTTP ENDPOINT INGESTOR active_source
         FROM active_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -370,7 +370,7 @@ Feature: Interconnect relay admission
         'bind' = 'false'
       };
       CREATE VHOST edge turnover-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR source
         FROM ingress MODE ACK MAX 1 ACK TIMEOUT 30s
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec

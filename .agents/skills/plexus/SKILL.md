@@ -675,8 +675,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - Name the connector and entity in every ingestor head, such as `CREATE KAFKA TOPIC INGESTOR`,
   `CREATE HTTP ENDPOINT INGESTOR`, or `CREATE SYSLOG LISTENER INGESTOR`, and write the body after
   `FROM` without a connector keyword. Reference a client of the head's connector, and pair
-  `HTTP ENDPOINT` with a `TYPE HTTP` endpoint and `WEBSOCKETS ENDPOINT` with a `TYPE WEBSOCKETS`
-  endpoint. Write every source's `MODE`, using `MODE NO ACK` where nothing waits on an
+  `HTTP ENDPOINT` with an `HTTP ENDPOINT` declaration and `WEBSOCKETS ENDPOINT` with a
+  `WEBSOCKETS ENDPOINT` declaration. The endpoint head selects its fields; see `Ingestors` →
+  `HTTP ENDPOINT And WEBSOCKETS ENDPOINT` for the declarations and optional signaling clause. Write every source's `MODE`, using `MODE NO ACK` where nothing waits on an
   acknowledgement and only the modes `Ingestors` → `Delivery Modes` lists for that entity.
 - Write external names as string literals spelled exactly as the external system names them:
   topics, consumer groups, subscriptions, queues, channels, subjects, queue groups, and MQTT topic

@@ -428,7 +428,7 @@ Feature: Session protocol
         TO SCHEMA held_event;
       CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
       CREATE VHOST held_edge http-{{test_id}}-held.example.com;
-      CREATE ENDPOINT held_ingress ON held_edge PATH '/held' TYPE HTTP;
+      CREATE HTTP ENDPOINT held_ingress ON held_edge PATH '/held';
       CREATE HTTP ENDPOINT INGESTOR held_source
         FROM held_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec

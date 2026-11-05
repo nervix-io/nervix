@@ -15,7 +15,7 @@ Feature: Integrated client wire qualification
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY wire_records SCHEMA wire_record BRANCHED BY by_tenant;
       CREATE VHOST edge qualified-{{test_id}}.example.com;
-      CREATE ENDPOINT wire_ingress ON edge PATH '/records' TYPE HTTP;
+      CREATE HTTP ENDPOINT wire_ingress ON edge PATH '/records';
       CREATE HTTP ENDPOINT INGESTOR wire_source
         FROM wire_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec

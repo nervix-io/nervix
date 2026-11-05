@@ -238,8 +238,7 @@ impl DomainExecution {
                         path: route.path.clone(),
                     },
                     RoutedEndpoint {
-                        endpoint_type: route.endpoint_type,
-                        signaling_protocol: route.signaling_protocol.clone(),
+                        kind: route.kind.clone(),
                     },
                 )
             })
@@ -950,10 +949,10 @@ mod tests {
         CreateBranch, CreateCodec, CreateEndpoint, CreateGenerator, CreateLookup, CreateReingestor,
         CreateRelay, CreateSchema, CreateSignalingProtocol, CreateVhost, CreateWireSchema,
         DomainClockState, DomainConfig, DomainPace, DomainState, DomainStatus, DomainTick,
-        DomainTimeRate, EndpointType, FlushPolicy, JsonType, MaterializedRelayState,
-        MessageErrorPolicy, Model, OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput,
-        ProcessorOutputs, RelayBranching, SchemaField, SchemaFingerprint,
-        SignalingProtocolOnConnect, SignalingWireFormat, Timestamp, WireSchemaField,
+        DomainTimeRate, FlushPolicy, JsonType, MaterializedRelayState, MessageErrorPolicy, Model,
+        OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+        RelayBranching, SchemaField, SchemaFingerprint, SignalingProtocolOnConnect,
+        SignalingWireFormat, Timestamp, WireSchemaField,
     };
     use nonzero_ext::nonzero;
 
@@ -1405,8 +1404,9 @@ mod tests {
                     name: named("receive"),
                     on_vhost: named("edge"),
                     path: "/ingest".to_string(),
-                    endpoint_type: EndpointType::Websockets,
-                    signaling_protocol: Some(named("handshake")),
+                    kind: nervix_models::EndpointKind::Websockets {
+                        signaling_protocol: Some(named("handshake")),
+                    },
                 })),
             ],
             Vec::new(),

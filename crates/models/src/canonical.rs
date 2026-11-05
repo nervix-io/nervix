@@ -1580,12 +1580,12 @@ impl<Version: Display> CreateVhost<Version> {
 impl CreateEndpoint {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         Ok(format!(
-            "CREATE ENDPOINT {} ON {} PATH {} TYPE {}{};",
+            "CREATE {} {} ON {} PATH {}{};",
+            self.kind,
             self.name.as_str(),
             self.on_vhost.as_str(),
             string_literal(&self.path),
-            self.endpoint_type.as_ref(),
-            signaling_protocol_clause(self.signaling_protocol.as_ref())
+            signaling_protocol_clause(self.kind.signaling_protocol())
         ))
     }
 }
@@ -3447,7 +3447,7 @@ mod tests {
         CreateEndpoint, CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor,
         CreateRelay, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
         CreateWindowProcessor, CreateWireSchema, EmitterBody, EmitterEntity, EndpointIngestMode,
-        EndpointType, ErrorPolicies, Expression, FieldScope, FlushPolicy, GeneralErrorPolicy,
+        EndpointKind, ErrorPolicies, Expression, FieldScope, FlushPolicy, GeneralErrorPolicy,
         HttpConfigEntry, HttpEndpointIngestor, HttpRequestIngestMode, HttpRequestIngestor,
         IngestorEntity, JsonType, KafkaConfigEntry, KafkaEmitter, KafkaIngestMode, KafkaOffsetMode,
         KafkaTopicEmitter, KafkaTopicIngestor, Literal, MessageErrorPolicy, Model,
@@ -3975,26 +3975,26 @@ mod tests {
             name: named("orders_http"),
             on_vhost: named("public"),
             path: "/orders".to_string(),
-            endpoint_type: EndpointType::Http,
-            signaling_protocol: None,
+            kind: EndpointKind::Http,
         };
         assert_eq!(
             endpoint.to_canonical_plexus().expect("must render"),
-            "CREATE ENDPOINT orders_http ON public PATH '/orders' TYPE HTTP;"
+            "CREATE HTTP ENDPOINT orders_http ON public PATH '/orders';"
         );
         let websocket_endpoint = CreateEndpoint {
             name: named("orders_ws"),
             on_vhost: named("public"),
             path: "/ws".to_string(),
-            endpoint_type: EndpointType::Websockets,
-            signaling_protocol: Some(named("binance_ws")),
+            kind: EndpointKind::Websockets {
+                signaling_protocol: Some(named("binance_ws")),
+            },
         };
         assert_eq!(
             websocket_endpoint
                 .to_canonical_plexus()
                 .expect("must render"),
-            "CREATE ENDPOINT orders_ws ON public PATH '/ws' TYPE WEBSOCKETS WITH SIGNALING \
-             PROTOCOL binance_ws;"
+            "CREATE WEBSOCKETS ENDPOINT orders_ws ON public PATH '/ws' WITH SIGNALING PROTOCOL \
+             binance_ws;"
         );
 
         let signaling_protocol: CreateSignalingProtocol = CreateSignalingProtocol {

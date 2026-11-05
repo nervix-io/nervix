@@ -28,7 +28,7 @@ Feature: HTTP REQUEST emitter transport failures and TLS identity
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_source
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -90,7 +90,7 @@ Feature: HTTP REQUEST emitter transport failures and TLS identity
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_source
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -149,7 +149,7 @@ Feature: HTTP REQUEST emitter transport failures and TLS identity
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_source
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -204,7 +204,7 @@ Feature: HTTP REQUEST emitter transport failures and TLS identity
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_source
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -265,8 +265,8 @@ Feature: HTTP REQUEST emitter transport failures and TLS identity
       CREATE RELAY source_a SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY source_b SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress_a ON edge PATH '/a' TYPE HTTP;
-      CREATE ENDPOINT ingress_b ON edge PATH '/b' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress_a ON edge PATH '/a';
+      CREATE HTTP ENDPOINT ingress_b ON edge PATH '/b';
       CREATE HTTP ENDPOINT INGESTOR from_a FROM ingress_a MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO source_a INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
@@ -329,7 +329,7 @@ Feature: HTTP REQUEST emitter transport failures and TLS identity
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_source
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -392,7 +392,7 @@ Feature: HTTP REQUEST emitter transport failures and TLS identity
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_source
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -453,7 +453,7 @@ Feature: HTTP REQUEST emitter transport failures and TLS identity
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_source
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -528,7 +528,7 @@ Feature: HTTP REQUEST emitter transport failures and TLS identity
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_source
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec

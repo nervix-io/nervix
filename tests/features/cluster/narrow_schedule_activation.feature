@@ -50,10 +50,9 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/narrow'
-        TYPE HTTP;
+        PATH '/narrow';
 
       CREATE HTTP ENDPOINT INGESTOR source_txns
         FROM ingress MODE NO ACK
@@ -231,10 +230,9 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/gauge'
-        TYPE HTTP;
+        PATH '/gauge';
 
       CREATE HTTP ENDPOINT INGESTOR source_txns
         FROM ingress MODE NO ACK
@@ -374,15 +372,13 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT state_ingress
+      CREATE HTTP ENDPOINT state_ingress
         ON edge
-        PATH '/wait-state'
-        TYPE HTTP;
+        PATH '/wait-state';
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/wait-ingest'
-        TYPE HTTP;
+        PATH '/wait-ingest';
 
       CREATE HTTP ENDPOINT INGESTOR state_source
         FROM state_ingress MODE NO ACK
@@ -554,10 +550,9 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/window'
-        TYPE HTTP;
+        PATH '/window';
 
       CREATE HTTP ENDPOINT INGESTOR metric_source
         FROM ingress MODE NO ACK
@@ -693,10 +688,9 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/group'
-        TYPE HTTP;
+        PATH '/group';
 
       CREATE HTTP ENDPOINT INGESTOR source_txns
         FROM ingress MODE NO ACK
@@ -887,15 +881,13 @@ Feature: Narrow schedule activation on ownership change
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT state_ingress
+      CREATE HTTP ENDPOINT state_ingress
         ON edge
-        PATH '/move-state'
-        TYPE HTTP;
+        PATH '/move-state';
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/move-ingest'
-        TYPE HTTP;
+        PATH '/move-ingest';
 
       CREATE HTTP ENDPOINT INGESTOR state_source
         FROM state_ingress MODE NO ACK

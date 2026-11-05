@@ -69,7 +69,7 @@ Feature: Cross-language client conformance
       CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY typed_rows SCHEMA typed_row BRANCHED BY by_tenant;
       CREATE VHOST edge conformance-{{test_id}}.example.com;
-      CREATE ENDPOINT typed_ingress ON edge PATH '/typed' TYPE HTTP;
+      CREATE HTTP ENDPOINT typed_ingress ON edge PATH '/typed';
       CREATE HTTP ENDPOINT INGESTOR typed_source
         FROM typed_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING typed_row_codec

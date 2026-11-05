@@ -67,7 +67,7 @@ Feature: Cluster scheduling
       CREATE RELAY stage_11 SCHEMA event BRANCHED BY by_event;
       CREATE RELAY stage_12 SCHEMA event BRANCHED BY by_event;
       CREATE VHOST edge random-scheduler-{{test_id}}.example.com;
-      CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT event_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM event_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec TO stage_0 INHERIT ALL BRANCHED BY by_event SET id = message.id FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR hop_1 FROM stage_0 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_1 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE DEDUPLICATOR hop_2 FROM stage_1 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_2 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
@@ -261,10 +261,9 @@ Feature: Cluster scheduling
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT http_notifications_endpoint
+        CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -557,10 +556,9 @@ Feature: Cluster scheduling
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT http_notifications_endpoint
+        CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec

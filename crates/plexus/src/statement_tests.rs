@@ -197,7 +197,7 @@ fn show_transactions_completion_stays_in_its_statement_branch() {
 /// A slot with a real constraint should say what it wants.
 #[test]
 fn constrained_slots_do_not_hide_behind_a_generic_literal_label() {
-    let input = "CREATE ENDPOINT e ON v PATH ";
+    let input = "CREATE HTTP ENDPOINT e ON v PATH ";
     let suggestions = suggest_statement(input, input.len());
     assert!(suggestions.contains(&"endpoint_path".to_string()));
     assert!(!suggestions.contains(&"string_literal".to_string()));
@@ -1469,20 +1469,18 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
     )]
 #[case::endpoint(
         r#"
-            CREATE ENDPOINT my_ws_endpoint
+            CREATE WEBSOCKETS ENDPOINT my_ws_endpoint
                 ON edge
-                PATH '/ws'
-                TYPE WEBSOCKETS;
+                PATH '/ws';
         "#,
         None,
         &[]
     )]
 #[case::http_endpoint(
         r#"
-            CREATE ENDPOINT my_http_endpoint
+            CREATE HTTP ENDPOINT my_http_endpoint
                 ON edge
-                PATH '/ingest'
-                TYPE HTTP;
+                PATH '/ingest';
         "#,
         None,
         &[]

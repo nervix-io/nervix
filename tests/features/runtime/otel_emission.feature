@@ -38,10 +38,9 @@ Feature: OTEL emission
       ENCODE event_ts AS RFC3339;
       CREATE RELAY audit_events SCHEMA audit_event UNBRANCHED;
       CREATE VHOST edge otel-{{test_id}}.example.com;
-      CREATE ENDPOINT audit_ingress
+      CREATE HTTP ENDPOINT audit_ingress
       ON edge
-      PATH '/audit'
-      TYPE HTTP;
+      PATH '/audit';
       CREATE HTTP ENDPOINT INGESTOR audit_source
       FROM audit_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING audit_event_codec
@@ -183,10 +182,9 @@ Feature: OTEL emission
              window_end AS RFC3339;
       CREATE RELAY request_counts SCHEMA request_count UNBRANCHED;
       CREATE VHOST edge otel-metric-{{test_id}}.example.com;
-      CREATE ENDPOINT metric_ingress
+      CREATE HTTP ENDPOINT metric_ingress
       ON edge
-      PATH '/metric'
-      TYPE HTTP;
+      PATH '/metric';
       CREATE HTTP ENDPOINT INGESTOR metric_source
       FROM metric_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING request_count_codec
@@ -310,10 +308,9 @@ Feature: OTEL emission
       ENCODE observed_at AS RFC3339;
       CREATE RELAY latency_points SCHEMA latency_point UNBRANCHED;
       CREATE VHOST edge otel-points-{{test_id}}.example.com;
-      CREATE ENDPOINT point_ingress
+      CREATE HTTP ENDPOINT point_ingress
       ON edge
-      PATH '/points'
-      TYPE HTTP;
+      PATH '/points';
       CREATE HTTP ENDPOINT INGESTOR point_source
       FROM point_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING latency_point_codec

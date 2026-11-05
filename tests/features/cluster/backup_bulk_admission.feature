@@ -17,7 +17,7 @@ Feature: Materialized capture under bulk memory contention
       CREATE RELAY state SCHEMA event BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY generated SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge backup-bulk-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/state' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/state';
       CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO state INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant

@@ -25,10 +25,9 @@ Feature: Junction metrics
       CREATE RELAY incoming SCHEMA notification BRANCHED BY by_junction_metrics;
       CREATE RELAY routed SCHEMA notification BRANCHED BY by_junction_metrics;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT junction_metrics_ingress
+      CREATE HTTP ENDPOINT junction_metrics_ingress
       ON edge
-      PATH '/junction-metrics'
-      TYPE HTTP;
+      PATH '/junction-metrics';
       CREATE HTTP ENDPOINT INGESTOR junction_metrics_source
       FROM junction_metrics_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec

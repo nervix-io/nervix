@@ -81,7 +81,7 @@ Feature: Bounded execution and transient memory
         WITH JAQ TRANSFORMATIONS ON EMITTING '{payload: .}';
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge transformed-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/notifications' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notification_source
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_in
@@ -135,7 +135,7 @@ Feature: Bounded execution and transient memory
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE RELAY retained_events SCHEMA retained_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-retained-unfolding.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR retained_source
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retained_codec

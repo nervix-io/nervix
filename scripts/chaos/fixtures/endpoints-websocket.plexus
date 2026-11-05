@@ -1,6 +1,6 @@
 BEGIN;
 
-CREATE ENDPOINT chaos_edge_stream ON chaos_edge PATH '/stream' TYPE WEBSOCKETS;
+CREATE WEBSOCKETS ENDPOINT chaos_edge_stream ON chaos_edge PATH '/stream';
 
 CREATE RELAY chaos_edge_frames SCHEMA chaos_edge_record UNBRANCHED CAPACITY 1;
 

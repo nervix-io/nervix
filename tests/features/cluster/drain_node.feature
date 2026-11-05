@@ -113,7 +113,7 @@ Feature: Drain node
       CREATE RELAY control_input SCHEMA drain_event UNBRANCHED;
       CREATE RELAY control_output SCHEMA drain_event UNBRANCHED;
       CREATE VHOST edge drain-{{test_id}}.example.com;
-      CREATE ENDPOINT drain_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT drain_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR drain_source
         FROM drain_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING drain_event_codec
@@ -219,10 +219,9 @@ Feature: Drain node
 
       CREATE VHOST edge http-{{test_id}}.example.com;
 
-      CREATE ENDPOINT ingress
+      CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/dedup'
-        TYPE HTTP;
+        PATH '/dedup';
 
       CREATE HTTP ENDPOINT INGESTOR source_txns
         FROM ingress MODE NO ACK

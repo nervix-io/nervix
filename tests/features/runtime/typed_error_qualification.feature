@@ -251,7 +251,7 @@ Feature: Typed error qualification through public streams
       CREATE RELAY calculation_results SCHEMA calculation_result BRANCHED BY by_tenant;
       CREATE RELAY calculation_errors SCHEMA calculation_error BRANCHED BY by_tenant;
       CREATE VHOST edge typed-errors-{{test_id}}.example.com;
-      CREATE ENDPOINT calculation_ingress ON edge PATH '/calculations' TYPE HTTP;
+      CREATE HTTP ENDPOINT calculation_ingress ON edge PATH '/calculations';
       CREATE HTTP ENDPOINT INGESTOR calculation_source
         FROM calculation_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec

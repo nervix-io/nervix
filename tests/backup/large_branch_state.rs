@@ -82,8 +82,8 @@ async fn when_large_branch_state_workload_is_created(world: &mut ScenarioWorld) 
          CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant;
          CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_tenant;
          CREATE VHOST edge {host};
-         CREATE ENDPOINT payment_ingress ON edge PATH '/payments' TYPE HTTP;
-         CREATE ENDPOINT metric_ingress ON edge PATH '/metrics' TYPE HTTP;
+         CREATE HTTP ENDPOINT payment_ingress ON edge PATH '/payments';
+         CREATE HTTP ENDPOINT metric_ingress ON edge PATH '/metrics';
          CREATE HTTP ENDPOINT INGESTOR payment_source FROM payment_ingress MODE ACK MAX 8 ACK \
          TIMEOUT 60s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING payment_codec TO payments \
          INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE \

@@ -2441,8 +2441,8 @@ fn an_endpoint_ingestor_rejects_an_endpoint_of_the_other_type() {
     );
     assert_eq!(
         error.current_context().to_string(),
-        "HTTP ENDPOINT ingestor 'web_in' in domain 'default' requires a TYPE HTTP endpoint, but \
-         endpoint 'stream' is TYPE WEBSOCKETS"
+        "HTTP ENDPOINT ingestor 'web_in' in domain 'default' requires a HTTP ENDPOINT, but \
+         endpoint 'stream' is WEBSOCKETS ENDPOINT"
     );
 
     let _ = fs::remove_dir_all(path);

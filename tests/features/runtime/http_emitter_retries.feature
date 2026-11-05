@@ -31,8 +31,8 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
       CREATE RELAY first_events SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY later_events SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT first_ingress ON edge PATH '/first' TYPE HTTP;
-      CREATE ENDPOINT later_ingress ON edge PATH '/later' TYPE HTTP;
+      CREATE HTTP ENDPOINT first_ingress ON edge PATH '/first';
+      CREATE HTTP ENDPOINT later_ingress ON edge PATH '/later';
       CREATE HTTP ENDPOINT INGESTOR first_source
         FROM first_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -125,7 +125,7 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_source
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -188,7 +188,7 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_source
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -256,7 +256,7 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_source
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -414,8 +414,8 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT routes_ingress ON edge PATH '/routes' TYPE HTTP;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT routes_ingress ON edge PATH '/routes';
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR routes_source
         FROM routes_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routes_codec
@@ -519,7 +519,7 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
       CREATE RELAY outgoing SCHEMA outbound_event BRANCHED BY by_tenant;
       CREATE RELAY rejected_requests SCHEMA rejected_request BRANCHED BY by_tenant;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_source
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -606,7 +606,7 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_source
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
@@ -672,7 +672,7 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
       CREATE CODEC event_body_codec FROM WIRE JSON SCHEMA event_body_wire TO SCHEMA outbound_event;
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
-      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_source
         FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec

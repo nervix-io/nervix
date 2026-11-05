@@ -20,7 +20,7 @@ Feature: Window processor runtime behavior
       CREATE RELAY window_inputs SCHEMA window_input BRANCHED BY by_tenant;
       CREATE RELAY window_outputs SCHEMA window_output BRANCHED BY by_tenant;
       CREATE VHOST edge window-drain-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR window_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING window_codec
@@ -97,7 +97,7 @@ Feature: Window processor runtime behavior
       CREATE RELAY window_inputs SCHEMA window_input BRANCHED BY by_tenant;
       CREATE RELAY window_outputs SCHEMA window_output BRANCHED BY by_tenant;
       CREATE VHOST edge window-move-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR window_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING window_codec
@@ -186,7 +186,7 @@ Feature: Window processor runtime behavior
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries_copy SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
         CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -292,7 +292,7 @@ Feature: Window processor runtime behavior
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
         CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -393,7 +393,7 @@ Feature: Window processor runtime behavior
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
         CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -487,7 +487,7 @@ Feature: Window processor runtime behavior
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
         CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -622,7 +622,7 @@ Feature: Window processor runtime behavior
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
         CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -735,7 +735,7 @@ Feature: Window processor runtime behavior
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
         CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -812,7 +812,7 @@ Feature: Window processor runtime behavior
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
         CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -889,7 +889,7 @@ Feature: Window processor runtime behavior
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
         CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -957,7 +957,7 @@ Feature: Window processor runtime behavior
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
         CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -1048,7 +1048,7 @@ Feature: Window processor runtime behavior
         CREATE RELAY low_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE RELAY chain_summaries SCHEMA chain_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
         CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
@@ -1156,7 +1156,7 @@ Feature: Window processor runtime behavior
         CREATE RELAY metric_totals SCHEMA metric_total BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_extremes SCHEMA metric_extreme BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+        CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
         CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec

@@ -249,7 +249,7 @@ Feature: Web console backup and restore
       CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_tenant;
       CREATE VHOST edge console-restore-warnings-{{test_id}}.example.com;
-      CREATE ENDPOINT metric_ingress ON edge PATH '/metrics' TYPE HTTP;
+      CREATE HTTP ENDPOINT metric_ingress ON edge PATH '/metrics';
       CREATE HTTP ENDPOINT INGESTOR metric_source FROM metric_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant

@@ -32,7 +32,7 @@ Feature: Route-local value construction
       CREATE RELAY source_events SCHEMA source_event UNBRANCHED;
       CREATE RELAY projected_events SCHEMA projected_event UNBRANCHED;
       CREATE VHOST edge value-construction-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_source
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_event_codec
@@ -110,7 +110,7 @@ Feature: Route-local value construction
       CREATE RELAY header_calculation_results SCHEMA header_calculation_result UNBRANCHED;
       CREATE RELAY header_calculation_errors SCHEMA header_calculation_error UNBRANCHED;
       CREATE VHOST edge header-error-{{test_id}}.example.com;
-      CREATE ENDPOINT header_calculation_ingress ON edge PATH '/calculations' TYPE HTTP;
+      CREATE HTTP ENDPOINT header_calculation_ingress ON edge PATH '/calculations';
       CREATE HTTP ENDPOINT INGESTOR header_calculation_source
         FROM header_calculation_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING header_calculation_codec
@@ -185,7 +185,7 @@ Feature: Route-local value construction
       CREATE RELAY calculation_results SCHEMA calculation_result UNBRANCHED;
       CREATE RELAY calculation_errors SCHEMA calculation_error UNBRANCHED;
       CREATE VHOST edge error-construction-{{test_id}}.example.com;
-      CREATE ENDPOINT calculation_ingress ON edge PATH '/calculations' TYPE HTTP;
+      CREATE HTTP ENDPOINT calculation_ingress ON edge PATH '/calculations';
       CREATE HTTP ENDPOINT INGESTOR calculation_source
         FROM calculation_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec

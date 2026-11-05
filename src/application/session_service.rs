@@ -2440,8 +2440,8 @@ mod tests {
         assert!(!response.succeeded());
         assert_eq!(
             response.message,
-            "HTTP ENDPOINT ingestor 'logs' in domain 'default' requires a TYPE HTTP endpoint, but \
-             endpoint 'socket' is TYPE WEBSOCKETS"
+            "HTTP ENDPOINT ingestor 'logs' in domain 'default' requires a HTTP ENDPOINT, but \
+             endpoint 'socket' is WEBSOCKETS ENDPOINT"
         );
         assert_eq!(response.diagnostics.len(), 1);
         assert_eq!(response.diagnostics[0].span, Some(40..46));

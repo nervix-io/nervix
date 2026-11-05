@@ -572,8 +572,8 @@ async fn configure_graph(process: &ServerProcess, domain: &str, host: &str) -> R
         CREATE RELAY client_wire_records
           SCHEMA client_wire_record BRANCHED BY client_wire_by_tenant;
         CREATE VHOST client_wire_edge {host};
-        CREATE ENDPOINT client_wire_ingress
-          ON client_wire_edge PATH '/records' TYPE HTTP;
+        CREATE HTTP ENDPOINT client_wire_ingress
+          ON client_wire_edge PATH '/records';
         CREATE HTTP ENDPOINT INGESTOR client_wire_source
           FROM client_wire_ingress MODE NO ACK
           ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING client_wire_codec

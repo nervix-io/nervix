@@ -253,10 +253,9 @@ pub(in crate::application) fn format_endpoint_describe_output(
 ) -> String {
     [
         format!("endpoint: {}", name.as_str()),
-        "kind: ENDPOINT".to_string(),
+        format!("kind: {}", endpoint.kind),
         format!("vhost: {}", endpoint.on_vhost.as_str()),
         format!("path: {}", endpoint.path),
-        format!("type: {}", endpoint.endpoint_type.as_ref()),
     ]
     .join("\n")
 }

@@ -26,10 +26,9 @@ Feature: Reingestor repartitioning
         CREATE IF NOT EXISTS BRANCH by_tenant_partition SCHEMA tenant_branch TTL 5m;
         CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_tenant_partition;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT http_notifications_endpoint
+        CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -104,7 +103,7 @@ Feature: Reingestor repartitioning
       CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_tenant_partition;
 
       CREATE VHOST edge http-{{test_id}}-fan-in.example.com;
-      CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP; CREATE HTTP ENDPOINT INGESTOR http_notifications
+      CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest'; CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
@@ -194,7 +193,7 @@ Feature: Reingestor repartitioning
       CREATE RELAY copied_notifications SCHEMA notification UNBRANCHED;
 
       CREATE VHOST edge http-{{test_id}}-direct-fanout.example.com;
-      CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
@@ -433,10 +432,9 @@ Feature: Reingestor repartitioning
         CREATE IF NOT EXISTS BRANCH by_reingest_default_out SCHEMA tenant_branch TTL 5m;
         CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_reingest_default_out;
         CREATE VHOST edge http-reingest-default-{{test_id}}.example.com;
-        CREATE ENDPOINT http_notifications_endpoint
+        CREATE HTTP ENDPOINT http_notifications_endpoint
         ON edge
-        PATH '/reingest-default'
-        TYPE HTTP;
+        PATH '/reingest-default';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -493,7 +491,7 @@ Feature: Reingestor repartitioning
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_reading_tenant;
       CREATE RELAY sensor_readings SCHEMA reading BRANCHED BY by_reading_sensor;
       CREATE VHOST edge http-{{test_id}}-reingestor-filters.example.com;
-      CREATE ENDPOINT reading_ingress ON edge PATH '/readings' TYPE HTTP;
+      CREATE HTTP ENDPOINT reading_ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_source
         FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec

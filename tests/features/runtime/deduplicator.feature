@@ -24,10 +24,9 @@ Feature: Relay deduplication
         CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress
+        CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/dedup'
-        TYPE HTTP;
+        PATH '/dedup';
         CREATE HTTP ENDPOINT INGESTOR source_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
@@ -97,7 +96,7 @@ Feature: Relay deduplication
         CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress ON edge PATH '/dedup-expire' TYPE HTTP;
+        CREATE HTTP ENDPOINT ingress ON edge PATH '/dedup-expire';
         CREATE HTTP ENDPOINT INGESTOR source_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
@@ -180,10 +179,9 @@ Feature: Relay deduplication
         CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress
+        CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/dedup-functions'
-        TYPE HTTP;
+        PATH '/dedup-functions';
         CREATE HTTP ENDPOINT INGESTOR source_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
@@ -261,7 +259,7 @@ Feature: Relay deduplication
         CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress ON edge PATH '/dedup-describe' TYPE HTTP;
+        CREATE HTTP ENDPOINT ingress ON edge PATH '/dedup-describe';
         CREATE HTTP ENDPOINT INGESTOR source_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
@@ -347,14 +345,12 @@ Feature: Relay deduplication
         CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_source_txns;
         CREATE VHOST edge http-{{test_id}}.example.com;
-        CREATE ENDPOINT state_ingress
+        CREATE HTTP ENDPOINT state_ingress
         ON edge
-        PATH '/state'
-        TYPE HTTP;
-        CREATE ENDPOINT ingress
+        PATH '/state';
+        CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/dedup'
-        TYPE HTTP;
+        PATH '/dedup';
         CREATE HTTP ENDPOINT INGESTOR state_txns_ingestor
         FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
@@ -481,10 +477,9 @@ Feature: Relay deduplication
         CREATE RELAY ss1 SCHEMA transaction BRANCHED BY by_dedup_default;
         CREATE RELAY ss2 SCHEMA transaction BRANCHED BY by_dedup_default;
         CREATE VHOST edge http-dedup-default-{{test_id}}.example.com;
-        CREATE ENDPOINT ingress
+        CREATE HTTP ENDPOINT ingress
         ON edge
-        PATH '/dedup-default'
-        TYPE HTTP;
+        PATH '/dedup-default';
         CREATE HTTP ENDPOINT INGESTOR source_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec

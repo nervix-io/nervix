@@ -189,10 +189,9 @@ Feature: Iceberg declarations
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge iceberg-namespace-{{test_id}}.example.com;
-      CREATE ENDPOINT notification_ingress
+      CREATE HTTP ENDPOINT notification_ingress
       ON edge
-      PATH '/notifications'
-      TYPE HTTP;
+      PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notification_source
       FROM notification_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
@@ -287,10 +286,9 @@ Feature: Iceberg declarations
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge iceberg-alteration-{{test_id}}.example.com;
-      CREATE ENDPOINT notification_ingress
+      CREATE HTTP ENDPOINT notification_ingress
       ON edge
-      PATH '/notifications'
-      TYPE HTTP;
+      PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notification_source
       FROM notification_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec

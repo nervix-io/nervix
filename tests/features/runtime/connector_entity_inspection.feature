@@ -14,8 +14,8 @@ Feature: Every connector entity uses the shared inspection rows
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-kinded-ingestors.example.com;
-      CREATE ENDPOINT http_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE ENDPOINT ws_ingress ON edge PATH '/stream' TYPE WEBSOCKETS;
+      CREATE HTTP ENDPOINT http_ingress ON edge PATH '/events';
+      CREATE WEBSOCKETS ENDPOINT ws_ingress ON edge PATH '/stream';
       CREATE HTTP CLIENT http_main CONFIG {
         'endpoint' = 'http://127.0.0.1:9',
         'timeout_ms' = 5000
@@ -184,8 +184,8 @@ Feature: Every connector entity uses the shared inspection rows
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-kinded-ingestors.example.com;
-      CREATE ENDPOINT http_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE ENDPOINT ws_ingress ON edge PATH '/stream' TYPE WEBSOCKETS;
+      CREATE HTTP ENDPOINT http_ingress ON edge PATH '/events';
+      CREATE WEBSOCKETS ENDPOINT ws_ingress ON edge PATH '/stream';
       CREATE HTTP CLIENT http_main CONFIG {
         'endpoint' = 'http://127.0.0.1:9',
         'timeout_ms' = 5000

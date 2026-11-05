@@ -12,7 +12,7 @@ Feature: Acknowledged endpoint intake
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge ack-{{test_id}}.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       """
     When these Plexus statements are executed
       """
@@ -54,7 +54,7 @@ Feature: Acknowledged endpoint intake
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge ack-{{test_id}}.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR acknowledged
         FROM intake MODE ACK MAX 1 ACK TIMEOUT 30s
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
@@ -108,7 +108,7 @@ Feature: Acknowledged endpoint intake
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge ack-{{test_id}}.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR acknowledged
         FROM intake MODE ACK MAX 8 ACK TIMEOUT 30s
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
@@ -143,7 +143,7 @@ Feature: Acknowledged endpoint intake
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge ack-{{test_id}}.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR acknowledged
         FROM intake MODE ACK MAX 1 ACK TIMEOUT <ack_timeout>
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
@@ -188,8 +188,7 @@ Feature: Acknowledged endpoint intake
       CREATE VHOST edge ack-{{test_id}}.example.com;
       CREATE SIGNALING PROTOCOL ack_frames FORMAT JSON
         ON CONNECT ACCEPT DATA SEND JAQ '{"ready":true}' WAIT JAQ '.ready == true' TIMEOUT 30s;
-      CREATE ENDPOINT intake ON edge PATH '/events'
-        TYPE WEBSOCKETS WITH SIGNALING PROTOCOL ack_frames;
+      CREATE WEBSOCKETS ENDPOINT intake ON edge PATH '/events' WITH SIGNALING PROTOCOL ack_frames;
       CREATE WEBSOCKETS ENDPOINT INGESTOR acknowledged
         FROM intake MODE ACK MAX 8 ACK TIMEOUT 5s
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
@@ -240,7 +239,7 @@ Feature: Acknowledged endpoint intake
       CREATE RELAY first_events SCHEMA event UNBRANCHED;
       CREATE RELAY second_events SCHEMA event UNBRANCHED;
       CREATE VHOST edge fanout-{{test_id}}.example.com;
-      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR first_source
         FROM intake MODE ACK MAX 1 ACK TIMEOUT 30s
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec

@@ -39,10 +39,9 @@ Feature: Branched session subscriptions
         BRANCHED BY by_sensitive_tenant;
 
       CREATE VHOST edge sensitive-branch-{{test_id}}.example.com;
-      CREATE ENDPOINT sensitive_branch_ingress
+      CREATE HTTP ENDPOINT sensitive_branch_ingress
         ON edge
-        PATH '/ingest'
-        TYPE HTTP;
+        PATH '/ingest';
 
       CREATE HTTP ENDPOINT INGESTOR sensitive_branch_source
         FROM sensitive_branch_ingress MODE NO ACK

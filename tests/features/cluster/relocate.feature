@@ -22,7 +22,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE RELAY moving_state SCHEMA state_event BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge state-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/state' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/state';
       CREATE HTTP ENDPOINT INGESTOR state_source
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING state_event_codec
@@ -73,7 +73,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE RELAY moving_state SCHEMA state_event BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge state-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/state' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/state';
       CREATE HTTP ENDPOINT INGESTOR state_source
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING state_event_codec
@@ -127,7 +127,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
       CREATE VHOST edge stopped-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/stopped' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/stopped';
       CREATE HTTP ENDPOINT INGESTOR source_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
@@ -214,7 +214,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
       CREATE VHOST edge empty-stopped-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/empty-stopped' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/empty-stopped';
       CREATE HTTP ENDPOINT INGESTOR source_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
@@ -278,7 +278,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE RELAY raw_events SCHEMA event UNBRANCHED;
       CREATE RELAY restored_events SCHEMA event UNBRANCHED;
       CREATE VHOST edge rejecting-wasm-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/rejecting-wasm' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/rejecting-wasm';
       CREATE HTTP ENDPOINT INGESTOR event_source
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -553,7 +553,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE RELAY moving_state SCHEMA state_event BRANCHED BY by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge forced-state-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/forced-state' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/forced-state';
       CREATE HTTP ENDPOINT INGESTOR state_source
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING state_event_codec
@@ -658,7 +658,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT ingress ON edge PATH '/relocate' TYPE HTTP;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/relocate';
       CREATE HTTP ENDPOINT INGESTOR source_txns
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
@@ -1204,7 +1204,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE RELAY reject_input SCHEMA reject_event UNBRANCHED;
       CREATE RELAY reject_output SCHEMA reject_event UNBRANCHED;
       CREATE VHOST edge reject-{{test_id}}.example.com;
-      CREATE ENDPOINT reject_ingress ON edge PATH '/reject' TYPE HTTP;
+      CREATE HTTP ENDPOINT reject_ingress ON edge PATH '/reject';
       CREATE HTTP ENDPOINT INGESTOR listener_source
         FROM reject_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reject_event_codec
@@ -1292,7 +1292,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE RELAY failover_input SCHEMA failover_event UNBRANCHED;
       CREATE RELAY failover_output SCHEMA failover_event UNBRANCHED;
       CREATE VHOST edge failover-{{test_id}}.example.com;
-      CREATE ENDPOINT failover_ingress ON edge PATH '/failover' TYPE HTTP;
+      CREATE HTTP ENDPOINT failover_ingress ON edge PATH '/failover';
       CREATE HTTP ENDPOINT INGESTOR failover_source
         FROM failover_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING failover_event_codec
@@ -1542,7 +1542,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       CREATE RELAY abort_input SCHEMA abort_event UNBRANCHED;
       CREATE RELAY abort_staged SCHEMA abort_event UNBRANCHED CAPACITY 1;
       CREATE VHOST edge abort-{{test_id}}.example.com;
-      CREATE ENDPOINT abort_ingress ON edge PATH '/abort' TYPE HTTP;
+      CREATE HTTP ENDPOINT abort_ingress ON edge PATH '/abort';
       CREATE HTTP ENDPOINT INGESTOR abort_source
         FROM abort_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING abort_event_codec

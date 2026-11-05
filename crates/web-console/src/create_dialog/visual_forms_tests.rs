@@ -968,9 +968,7 @@ fn client_vhost_and_endpoint_forms_render_every_transport_and_typed_reference_co
         assert!(vhost.contains("create-vhost-version"));
 
         signals.open(CreateKind::Endpoint, Some(scope), "global-create-button");
-        signals
-            .endpoint
-            .update(|draft| draft.select_type(nervix_models::EndpointType::Websockets));
+        signals.endpoint.update(|draft| draft.select_websockets());
         let endpoint = render();
         assert!(endpoint.contains("create-endpoint-vhost"));
         assert!(endpoint.contains("create-endpoint-signaling"));
@@ -1030,13 +1028,13 @@ fn client_vhost_and_endpoint_submissions_use_current_models_and_mask_secrets() {
             draft.name = "external_path".to_string();
             draft.select_vhost(&node(ModelKind::Vhost, "external_edge"));
             draft.path = "/external".to_string();
-            draft.select_type(nervix_models::EndpointType::Http);
+            draft.select_http();
         });
         let endpoint = signals.submission().assured("endpoint draft is complete");
         assert!(
-            endpoint.presentation.contains(
-                "CREATE ENDPOINT external_path ON external_edge PATH '/external' TYPE HTTP"
-            )
+            endpoint
+                .presentation
+                .contains("CREATE HTTP ENDPOINT external_path ON external_edge PATH '/external'")
         );
     });
 }
@@ -1176,7 +1174,7 @@ fn client_vhost_and_endpoint_choices_keep_their_typed_dependencies() {
             "global-create-button",
         );
         signals.endpoint.update(|draft| {
-            draft.select_type(nervix_models::EndpointType::Websockets);
+            draft.select_websockets();
         });
         select_choice(signals, ChoiceControl::EndpointVhost, vhost.clone());
         select_choice(signals, ChoiceControl::EndpointSignaling, protocol.clone());

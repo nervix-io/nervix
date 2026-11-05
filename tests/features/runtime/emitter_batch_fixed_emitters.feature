@@ -24,7 +24,7 @@ Feature: Fixed-format emitter batch envelopes
           ON EMITTING BATCH '{message: "batched errors", environment: .[0].environment, extra: {records: .}}';
       CREATE RELAY errors SCHEMA error_event UNBRANCHED;
       CREATE VHOST edge sentry-{{test_id}}.example.com;
-      CREATE ENDPOINT errors_endpoint ON edge PATH '/errors' TYPE HTTP;
+      CREATE HTTP ENDPOINT errors_endpoint ON edge PATH '/errors';
       CREATE HTTP ENDPOINT INGESTOR http_errors
         FROM errors_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -87,7 +87,7 @@ Feature: Fixed-format emitter batch envelopes
       CREATE RELAY errors SCHEMA error_event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge sentry-{{test_id}}.example.com;
-      CREATE ENDPOINT errors_endpoint ON edge PATH '/errors' TYPE HTTP;
+      CREATE HTTP ENDPOINT errors_endpoint ON edge PATH '/errors';
       CREATE HTTP ENDPOINT INGESTOR http_errors
         FROM errors_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -142,7 +142,7 @@ Feature: Fixed-format emitter batch envelopes
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
       CREATE RELAY events SCHEMA syslog_event UNBRANCHED;
       CREATE VHOST edge syslog-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -206,7 +206,7 @@ Feature: Fixed-format emitter batch envelopes
       CREATE RELAY events SCHEMA syslog_event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge syslog-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -261,7 +261,7 @@ Feature: Fixed-format emitter batch envelopes
       CREATE RELAY events SCHEMA syslog_event UNBRANCHED;
       CREATE RELAY received_events SCHEMA syslog_event UNBRANCHED;
       CREATE VHOST edge syslog-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -337,7 +337,7 @@ Feature: Fixed-format emitter batch envelopes
       CREATE RELAY events SCHEMA syslog_event UNBRANCHED;
       CREATE RELAY received_events SCHEMA syslog_event UNBRANCHED;
       CREATE VHOST edge syslog-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
@@ -409,7 +409,7 @@ Feature: Fixed-format emitter batch envelopes
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge otel-{{test_id}}.example.com;
-      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec

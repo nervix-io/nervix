@@ -100,19 +100,27 @@ impl Runtime {
 
         let mut endpoint_routes = HashMap::new();
         for endpoint in plan.endpoints.values() {
-            let signaling_protocol = endpoint.signaling_protocol.as_ref().map(|name| {
-                signaling_protocols
-                    .get(name)
-                    .cloned()
-                    .assured("the domain plan resolved each endpoint signaling protocol")
-            });
+            let kind = match &endpoint.kind {
+                nervix_models::EndpointKind::Http => nervix_models::EndpointKind::Http,
+                nervix_models::EndpointKind::Websockets { signaling_protocol } => {
+                    let signaling_protocol = match signaling_protocol {
+                        None => None,
+                        Some(name) => {
+                            let compiled = signaling_protocols.get(name).assured(
+                                "the domain plan resolved each endpoint signaling protocol",
+                            );
+                            Some(compiled.clone())
+                        }
+                    };
+                    nervix_models::EndpointKind::Websockets { signaling_protocol }
+                }
+            };
             endpoint_routes.insert(
                 endpoint.name.clone(),
                 EndpointRoute {
                     path: endpoint.path.clone(),
                     hostnames: endpoint.hostnames.clone(),
-                    endpoint_type: endpoint.endpoint_type,
-                    signaling_protocol,
+                    kind,
                 },
             );
         }

@@ -17,7 +17,7 @@ Feature: Archived branch keys checked against the restored branch declarations
       CREATE RELAY orders SCHEMA order_event BRANCHED BY by_tenant_shard WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY unique_orders SCHEMA order_event BRANCHED BY by_tenant_shard;
       CREATE VHOST edge backup-branch-keys-{{test_id}}.example.com;
-      CREATE ENDPOINT order_ingress ON edge PATH '/orders' TYPE HTTP;
+      CREATE HTTP ENDPOINT order_ingress ON edge PATH '/orders';
       CREATE HTTP ENDPOINT INGESTOR order_source FROM order_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_codec
         TO orders INHERIT ALL BRANCHED BY by_tenant_shard SET tenant = message.tenant, shard = message.shard

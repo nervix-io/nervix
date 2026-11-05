@@ -16,8 +16,8 @@ use ahash::{HashMap, HashMapExt};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt, ResultExt};
 use nervix_models::{
-    CreateEndpoint, DomainName, EndpointType, IngestorInput, IngestorReference, Model, ModelIndex,
-    ModelKind, NodeRef, PrometheusApiRoot, RelayName, WebsocketsClientConfig, parse_duration_text,
+    CreateEndpoint, DomainName, IngestorInput, IngestorReference, Model, ModelIndex, ModelKind,
+    NodeRef, PrometheusApiRoot, RelayName, WebsocketsClientConfig, parse_duration_text,
 };
 use nervix_primitives::sync::Arc;
 use petgraph::graph::DiGraph;
@@ -665,7 +665,8 @@ impl DomainState {
                                             "expect_kind above resolved this endpoint reference \
                                              against the same model set",
                                         )
-                                        .endpoint_type;
+                                        .kind
+                                        .endpoint_type();
                                     if let Some(required) =
                                         kind.capabilities().reference.endpoint_type()
                                         && found != required
@@ -895,15 +896,7 @@ impl DomainState {
                         ModelKind::Vhost,
                     )?;
                     graph.add_edge(vhost, source, EdgeKind::RequiredBy);
-                    if let Some(signaling_protocol) = endpoint.signaling_protocol.as_ref() {
-                        if endpoint.endpoint_type != EndpointType::Websockets {
-                            return Err(Report::new(RegistryError::InvalidModel {
-                                domain: domain.as_str().to_string(),
-                                identifier: identifier.as_str().to_string(),
-                                reason: "SIGNALING PROTOCOL is only valid for WEBSOCKETS endpoints"
-                                    .to_string(),
-                            }));
-                        }
+                    if let Some(signaling_protocol) = endpoint.kind.signaling_protocol() {
                         let signaling_protocol = expect_kind(
                             domain,
                             identifier,

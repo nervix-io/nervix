@@ -16,7 +16,7 @@ Feature: Altering reingestors and generators
       CREATE RELAY incoming SCHEMA event UNBRANCHED;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-reingestor.example.com;
-      CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_source
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
@@ -97,7 +97,7 @@ Feature: Altering reingestors and generators
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY generated SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-generator.example.com;
-      CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_source
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
