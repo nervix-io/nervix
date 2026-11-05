@@ -344,7 +344,7 @@ Every container, network and volume a run owns carries `io.nervix.chaos.run=<run
 | `just chaos run SCENARIO --image IMAGE [OPTIONS]` | Runs one scenario. `--help` after the scenario prints its options |
 | `just chaos replay RUN_DIRECTORY [--artifacts DIR] [--run-id ID] [--timeout SECONDS] [--verifier-self-check RECORD] [--keep]` | Replays a recorded mixed-instability run |
 | `just chaos suite list` | Lists the suites, their shards, and each entry's command and budget |
-| `just chaos suite smoke\|soak --image IMAGE [--image-kind KIND] [--image-revision REVISION] [--shard N] [--entry ID]... [--artifacts DIR] [--suite-id ID]` | Runs a suite, one shard of it, or named entries |
+| `just chaos suite SUITE --image IMAGE [--image-kind KIND] [--image-revision REVISION] [--shard N] [--entry ID]... [--artifacts DIR] [--suite-id ID]` | Runs a catalogued suite, one shard of it, or named entries |
 | `just chaos suite shards SUITE` | Prints the suite's CI matrix as JSON: each shard's entries with its execution, preparation, step and job budgets |
 | `just chaos suite cleanup [--wait SECONDS] SUITE_DIRECTORY` | Ends what a suite left behind |
 | `just chaos suite report [--expect-shards N] SUITE_JSON...` | Renders one summary of several shards' records, and fails unless every one passed |
@@ -2598,6 +2598,17 @@ The `smoke` suite runs in three shards:
 | 2 | `endpoints-1` | `endpoints --nodes 1` | 10 |
 | 2 | `endpoints-3-owner-crash` | `endpoints --nodes 3 --fault owner-crash` | 12 |
 | 3 | `lifetimes-3-owner-crash` | `lifetimes --nodes 3 --fault owner-crash` | 25 |
+
+The `intake-recovery` suite selects two existing recovery entries on one shard. It checks spread
+ingestor ownership after a node crash and persisted state after a single-node cluster restart.
+It keeps each scenario's assertions and budget and runs the same controller and verifier checks
+as the larger suites. Select `intake-recovery` in a manual Chaos workflow run, or run
+`just chaos suite intake-recovery --image REPOSITORY@sha256:DIGEST`.
+
+| Shard | Entry | Command | Budget (min) |
+| ---: | --- | --- | ---: |
+| 1 | `ingestor-instances-owner-crash` | `ingestor-instances-owner-crash` | 7 |
+| 1 | `stateful-1-cluster-restart` | `stateful --nodes 1 --fault cluster-restart` | 22 |
 
 The `soak` suite runs every delivered scenario, topology, case, profile and fault, in fourteen shards:
 

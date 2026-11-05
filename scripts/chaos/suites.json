@@ -42,6 +42,23 @@
         }
       ]
     },
+    "intake-recovery": {
+      "description": "Spread ingestor instances through an owner crash and recover stateful intake after a single-node cluster restart",
+      "entries": [
+        {
+          "id": "ingestor-instances-owner-crash",
+          "shard": 1,
+          "budget_minutes": 7,
+          "run": ["ingestor-instances-owner-crash"]
+        },
+        {
+          "id": "stateful-1-cluster-restart",
+          "shard": 1,
+          "budget_minutes": 22,
+          "run": ["stateful", "--nodes", "1", "--fault", "cluster-restart"]
+        }
+      ]
+    },
     "soak": {
       "description": "Every delivered scenario, topology, case, profile and fault, with fixed and rotating mixed-instability seeds",
       "entries": [
