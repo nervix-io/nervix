@@ -12,8 +12,8 @@ use std::{num::NonZeroU64, time::Duration};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     ClientFrame, ClientMessage, ClientRequest, DomainClockAttachDisposition,
-    DomainClockAttachOutcome, DomainClockDetachDisposition, DomainClockDetachOutcome,
-    DomainClockTicked, EncodedFrame, ReplyBody, RequestId, ServerFrame,
+    DomainClockAttachOutcome, DomainClockAttachRefusal, DomainClockDetachDisposition,
+    DomainClockDetachOutcome, DomainClockTicked, EncodedFrame, ReplyBody, RequestId, ServerFrame,
 };
 use nervix_models::{
     DomainClockObservation, DomainClockObservedState, DomainClockPeriod, DomainClockSkew,
@@ -23,7 +23,8 @@ use nervix_primitives::sync::{Arc, blocking::Mutex, mpsc};
 
 use super::{DEADLINE, client_on, detached_exchange, domain, reply_frame, verified};
 use crate::{
-    Client, ClientError, DomainClockEvent, DomainClockInterruption, DomainClockRestorationFailure,
+    Client, ClientError, DomainClockEvent, DomainClockInterruption, DomainClockRestorationCause,
+    DomainClockRestorationFailure,
     exchange::{Exchange, ExchangeReader, PendingReplies, ReaderFlow, SESSION_LIMITS},
 };
 
@@ -160,9 +161,10 @@ fn attached(clock: DomainClockObservation) -> ReplyBody {
     })
 }
 
+/// The reply of a session that holds a transaction to an attach.
 fn refused_attach(message: &str) -> ReplyBody {
     ReplyBody::DomainClockAttach(DomainClockAttachOutcome {
-        disposition: DomainClockAttachDisposition::Failed,
+        disposition: DomainClockAttachDisposition::Refused(DomainClockAttachRefusal::InTransaction),
         message: message.to_string(),
     })
 }
@@ -292,6 +294,7 @@ async fn a_detach_sent_while_a_refused_restoration_waits_releases_the_clock_for_
         next_event(&client).await,
         DomainClockEvent::RestorationFailed(DomainClockRestorationFailure {
             domain: domain("tenant"),
+            cause: DomainClockRestorationCause::InTransaction,
             message: "the session holds a transaction".to_string(),
             retry_after: Duration::from_secs(1),
         })

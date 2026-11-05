@@ -294,3 +294,24 @@ Feature: CLI public session dispatch
     And within "20s" the CLI clock output has a tick for generation 1 after its state of domain "{{domain}}"
     When the CLI clock process receives Ctrl-C
     Then the CLI clock process exits successfully
+
+  Scenario: The CLI reports the end of a subscription whose relay was dropped while it reconnected
+    Given a 1 node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA watched_record ( value STRING );
+      CREATE RELAY watched SCHEMA watched_record UNBRANCHED;
+      START;
+      """
+    Given the CLI subscription connection to node "node-1" is forwarded
+    When the CLI subscribes to relay "watched" through its TCP forwarder
+    Then the CLI subscription output eventually contains "listening for events from relay 'watched'"
+    When the TCP forwarder at "127.0.0.1" stops
+    Then the CLI subscription output eventually contains "[events] subscription [watch] notice: delivery was interrupted"
+    When these Plexus commands are executed on the leader node
+      """
+      DROP RELAY watched;
+      """
+    And the TCP forwarder at "127.0.0.1" restarts
+    Then the CLI subscription output eventually contains "[events] subscription [watch] notice: the subscription ended because its relay no longer exists: stream 'watched' does not exist in domain '{{domain}}'"

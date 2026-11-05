@@ -39,7 +39,7 @@ use error_stack::{Report as StackReport, ResultExt as _};
 use nervix_client_core::{
     AutocompleteOutcome, AutocompleteSuggestion, Client, ClientError as CoreClientError,
     CommandDisposition, CommandExecutionReference, CommandOutcome, ConnectDns, ConnectOptions,
-    Diagnostic, DomainClockAttachDisposition, DomainClockAttachOutcome,
+    Diagnostic, DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockAttachRefusal,
     DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockEvent, DomainName,
     LeaderRedirect, NoticeLevel, ServerEvent, SourceSpan, StatementDisposition, StatementOutcome,
     SubscriptionDeliveryBehavior, SubscriptionEvent, SubscriptionRequest,
@@ -294,8 +294,8 @@ enum ClientError {
     ClockDomainNotFound { domain: DomainName },
     #[error("the session already follows the clock of domain '{domain}'")]
     ClockAlreadyAttached { domain: DomainName },
-    #[error("domain clock attachment was refused")]
-    ClockAttachRefused,
+    #[error("domain clock attachment was refused because {refusal}")]
+    ClockAttachRefused { refusal: DomainClockAttachRefusal },
     #[error("domain clock detachment was refused")]
     ClockDetachRefused,
     #[error("failed to attach to the domain clock")]
@@ -1069,9 +1069,10 @@ fn clock_attach_message(
                 domain,
             }))
         }
-        DomainClockAttachDisposition::Failed => {
-            Err(StackReport::new(ClientError::ClockAttachRefused).attach_printable(outcome.message))
-        }
+        DomainClockAttachDisposition::Refused(refusal) => Err(StackReport::new(
+            ClientError::ClockAttachRefused { refusal },
+        )
+        .attach_printable(outcome.message)),
     }
 }
 
@@ -1611,17 +1612,17 @@ fn format_subscription_event(event: &SubscriptionEvent) -> Vec<String> {
             skipped.skipped_rows, skipped.cause, skipped.message
         )],
         SubscriptionEvent::Ended(ended) => vec![format!(
-            "[events] subscription [{subscription}] notice: the subscription ended: {}",
-            ended.message
+            "[events] subscription [{subscription}] notice: the subscription ended because {}: {}",
+            ended.reason, ended.message
         )],
         SubscriptionEvent::Interrupted(_) => vec![format!(
             "[events] subscription [{subscription}] notice: delivery was interrupted; rows may be \
              missing before restoration"
         )],
         SubscriptionEvent::RestorationFailed(failure) => vec![format!(
-            "[events] subscription [{subscription}] notice: opening the subscription again \
-             failed: {}; the next attempt follows in {:?}",
-            failure.message, failure.retry_after
+            "[events] subscription [{subscription}] notice: opening the subscription again failed \
+             because {}: {}; the next attempt follows in {:?}",
+            failure.cause, failure.message, failure.retry_after
         )],
         SubscriptionEvent::ConsumerOverflow(_) => vec![format!(
             "[events] subscription [{subscription}] notice: the client event buffer filled; \
@@ -1657,9 +1658,9 @@ fn format_domain_clock_event(event: &DomainClockEvent) -> String {
             interrupted.domain
         ),
         DomainClockEvent::RestorationFailed(failure) => format!(
-            "[events] domain clock [{}] notice: attaching the clock again failed: {}; the next \
-             attempt follows in {:?}",
-            failure.domain, failure.message, failure.retry_after
+            "[events] domain clock [{}] notice: attaching the clock again failed because {}: {}; \
+             the next attempt follows in {:?}",
+            failure.domain, failure.cause, failure.message, failure.retry_after
         ),
     }
 }
@@ -1994,17 +1995,26 @@ mod tests {
         ));
 
         let refused = DomainClockAttachOutcome {
-            disposition: DomainClockAttachDisposition::Failed,
-            message: "the server refused the attachment".to_string(),
+            disposition: DomainClockAttachDisposition::Refused(
+                DomainClockAttachRefusal::InTransaction,
+            ),
+            message: "session-scoped and client-local statements cannot be queued in a transaction"
+                .to_string(),
         };
         let Err(error) = clock_attach_message(refused) else {
             panic!("a refused clock attachment must fail");
         };
         assert!(matches!(
             error.current_context(),
-            ClientError::ClockAttachRefused
+            ClientError::ClockAttachRefused {
+                refusal: DomainClockAttachRefusal::InTransaction
+            }
         ));
-        assert!(format!("{error:?}").contains("the server refused the attachment"));
+        assert_eq!(
+            error.current_context().to_string(),
+            "domain clock attachment was refused because the session holds a transaction"
+        );
+        assert!(format!("{error:?}").contains("cannot be queued in a transaction"));
     }
 
     #[test]
@@ -2810,8 +2820,8 @@ mod tests {
         assert_eq!(
             format_subscription_event(&ended),
             [
-                "[events] subscription [live] notice: the subscription ended: relay 'orders' was \
-                 redefined"
+                "[events] subscription [live] notice: the subscription ended because its relay \
+                 was redefined: relay 'orders' was redefined"
             ]
         );
 
@@ -2830,15 +2840,17 @@ mod tests {
         let refused = SubscriptionEvent::RestorationFailed(
             nervix_client_core::SubscriptionRestorationFailure {
                 subscription: live_subscription(),
-                message: "stream 'orders' does not exist in domain 'tenant'".to_string(),
+                cause: nervix_client_core::SubscriptionRestorationCause::Unavailable,
+                message: "the serving node is catching up with committed domain state".to_string(),
                 retry_after: std::time::Duration::from_secs(2),
             },
         );
         assert_eq!(
             format_subscription_event(&refused),
             [
-                "[events] subscription [live] notice: opening the subscription again failed: \
-                 stream 'orders' does not exist in domain 'tenant'; the next attempt follows in 2s"
+                "[events] subscription [live] notice: opening the subscription again failed \
+                 because the serving node could not open it now: the serving node is catching up \
+                 with committed domain state; the next attempt follows in 2s"
             ]
         );
     }
@@ -2930,14 +2942,16 @@ mod tests {
         let refused = DomainClockEvent::RestorationFailed(
             nervix_client_core::DomainClockRestorationFailure {
                 domain: domain.clone(),
-                message: "the session holds a transaction".to_string(),
+                cause: nervix_client_core::DomainClockRestorationCause::InTransaction,
+                message: "client-local statements cannot be queued in a transaction".to_string(),
                 retry_after: std::time::Duration::from_secs(4),
             },
         );
         assert_eq!(
             format_domain_clock_event(&refused),
-            "[events] domain clock [sim] notice: attaching the clock again failed: the session \
-             holds a transaction; the next attempt follows in 4s"
+            "[events] domain clock [sim] notice: attaching the clock again failed because the \
+             session holds a transaction: client-local statements cannot be queued in a \
+             transaction; the next attempt follows in 4s"
         );
         let interrupted =
             DomainClockEvent::Interrupted(nervix_client_core::DomainClockInterruption { domain });

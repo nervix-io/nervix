@@ -99,6 +99,12 @@ subscription belongs to the session that created it and moves through one lifecy
   subscription can still be deleted by name, and its name can be used again once its end has been
   sent; because replies travel ahead of queued subscription frames, that end can reach the client
   after the reply that opens the new generation.
+- **Ended on restoration.** A client that opens a subscription again on a new session names the
+  schema its earlier generation announced. The server refuses that opening as `RelayChanged` when
+  the relay now announces another schema, and as `RelayNotFound` or `DomainNotFound` when the relay
+  or its domain no longer exists. The Rust client, the CLI and every host of the shared C binding
+  then end the subscription with reason `RelayChanged` or `RelayRemoved`, exactly as if the server
+  had ended it while a session held it, and never open it again on their own.
 - **Deleted.** `DELETE SUBSCRIPTION`, or the end of the session, stops the subscription at once
   even while its client reads nothing, and discards the frames it still has queued. Nothing about
   that generation follows the reply that deleted it.

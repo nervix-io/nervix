@@ -1011,18 +1011,23 @@ The requests of steps 2 and 4 are sent before step 5 begins, not merely started,
 can never overtake them on the ordered lane. Only then does the client repeat outstanding commands,
 each under its original execution reference and, for an append, its original expected position.
 
-The new session can still refuse a restoration: a relay may no longer exist or not be running yet,
-the session may already hold as many requests as it admits, or a transaction a caller attached
-meanwhile may have made it refuse session-local requests. The client then reports a restoration
-failure for that subscription or clock, carrying the server's message and the wait before the next
-attempt, and sends the request again on the same session. A restoration the session leaves
-unanswered past the request timeout ends that session instead, as any request that outlives the
-timeout does, and the next session restores it again. The wait starts at one
-second and doubles after each refusal up to thirty seconds. It keeps trying for as long as the
-session stays open and the client still wants the subscription or follows the clock; the next
-session starts again from one second. An attach answered `DomainClockAlreadyAttached` means the
-session already holds the attachment, so the client follows the clock on that session and reads its
-frames from then on.
+The new session can still refuse a restoration, and the typed refusal says whether another attempt
+could succeed. A refusal that says the subscription or clock can never be restored as it was ends it
+instead: a subscription refused as `RelayNotFound` or `DomainNotFound` ends as `RelayRemoved`, one
+refused as `RelayChanged` ends as `RelayChanged`, and a clock attach answered `DomainNotFound` ends
+the attachment as `DomainRemoved`. The client reports that end exactly as it reports the same end
+from the server, and never restores it again. Any other refusal leaves it interrupted: a relay the
+serving node cannot open now, a session that already holds as many requests as it admits, or a
+transaction a caller attached meanwhile, which makes the session refuse session-local requests. The
+client then reports a restoration failure for that subscription or clock, carrying its typed cause,
+the server's message and the wait before the next attempt, and sends the request again on the same
+session. A restoration the session leaves unanswered past the request timeout ends that session
+instead, as any request that outlives the timeout does, and the next session restores it again. The
+wait starts at one second and doubles after each refusal up to thirty seconds. It keeps trying for
+as long as the session stays open and the client still wants the subscription or follows the clock;
+the next session starts again from one second. An attach answered `DomainClockAlreadyAttached` means
+the session already holds the attachment, so the client follows the clock on that session and reads
+its frames from then on.
 
 The client's event streams outlive the session. A caller reading subscription events, clock events,
 or notices keeps reading across the replacement: the interruptions mark the gap, and events of the
@@ -1091,6 +1096,12 @@ predicate Model directly. The type is required, and `Row`, the only type, must b
 that omits it is refused rather than defaulted, and a value the server does not support is refused
 as `UnsupportedValue` rather than replaced by another encoding. A subscription's type never changes.
 
+A request that restores a subscription on a new session also carries `expected_schema`, the schema
+the generation it replaces announced. The server opens it only when the relay's current definition
+announces exactly that schema, and refuses it as `RelayChanged` otherwise, so a restored
+subscription never delivers rows under a schema its client did not hold. A first subscribe carries
+none and opens under the relay's current definition.
+
 Opening runs on the session's ordered lane:
 
 ```mermaid
@@ -1111,9 +1122,28 @@ sequenceDiagram
     S-->>C: SubscriptionRows(name, generation, frames)
 ```
 
-A refusal at any step releases everything taken before it, and the name stays free. The generation
-is a per-session counter that starts at 1, so a handle, the name together with its generation, is
-unique within its session only; a generation taken by a request that then failed is simply skipped.
+A refusal at any step releases everything taken before it, and the name stays free. The reply is
+`SubscriptionRefused`, whose typed refusal says why, beside the server's message and diagnostics:
+
+| Refusal | Meaning | Sending the request again |
+| --- | --- | --- |
+| `InTransaction` | The session holds a transaction, which refuses every session-local request. | Can open it once the transaction ends. |
+| `InvalidStatement` | The request does not carry exactly one valid `CREATE SUBSCRIPTION` statement. | Is refused the same way. |
+| `NameInUse` | The session already holds a subscription of that name. | Can open it once the name is free. |
+| `DomainNotFound` | The committed state the serving node installed holds no such domain. | Is refused the same way while the domain is absent. |
+| `RelayNotFound` | The committed state the serving node installed holds no such relay in the domain. | Is refused the same way while the relay is absent. |
+| `RelayChanged` | The relay's current definition announces another schema than the request's `expected_schema`. | Is refused the same way; a subscribe without an expected schema opens it under the current definition. |
+| `InvalidFilter` | The `WHERE` predicate does not compile against the relay's definition. | Is refused the same way while the definition and the domain's functions stay. |
+| `Unavailable` | The serving node could not open it now: it has not yet proved it caught up with the committed state, it could not apply the current runtime revision, a live node did not confirm the interest, or the relay was redefined while it opened. | Can open it. |
+
+`DomainNotFound`, `RelayNotFound` and `RelayChanged` describe the committed state the serving node
+applied, and a client restoring the subscription ends it on any of them. A node that has not yet
+proved, since it started, that it caught up with the committed state cannot tell what the cluster
+lacks from what it has not applied, so it refuses such a request as `Unavailable` instead, as it
+refuses a producer or consumer open as `EndpointUnavailable`; a subscription the node holds the
+domain and relay for opens as usual meanwhile. The generation is a per-session counter that starts
+at 1, so a handle, the name together with its generation, is unique within its session only; a
+generation taken by a request that then failed is simply skipped.
 The visibility wait is what makes the reply meaningful: by the time a client reads
 `SubscriptionOpened`, every live node already routes the relay's batches to the subscriber's node,
 and an advertisement left over from before an earlier withdrawal cannot satisfy it. When a live node
@@ -1226,7 +1256,7 @@ protocol reports the losses the server knows of and states which ones it cannot 
 | Batches published while the subscription was opening | Not reported; they precede the subscription |
 | Batches lost in transit while relay ownership moves or a node-to-node delivery fails | Not reported; the nodes log them |
 | The session itself | Not reported by the server, whose session is gone; the Rust client reports an interruption of each subscription the server had not ended |
-| A restoration the new session refused | Not a server event; the Rust client reports each refused attempt, and the gap lasts until an attempt succeeds |
+| A restoration the new session refused | Not a server event; the Rust client reports each refused attempt with its typed cause, and the gap lasts until an attempt succeeds. A refusal that says the relay was removed or redefined ends the subscription instead, reported as the server's `SubscriptionEnded` would be |
 
 ### Restoration And Bounded Consumers
 
@@ -1235,23 +1265,29 @@ it again on the next session, which is a new generation with a new schema announ
 treat the time between as a gap. The Rust client does this for every subscription it holds that the
 server acknowledged and did not end, and fences its restoration by generation: a late reply for an
 attempt the caller has since cancelled is followed by a deletion before the name can be reused, and
-rows of a generation the client no longer holds are ignored. A restoration the new session refuses
-is reported as a restoration failure and sent again on that session after a growing wait, as
-[Reconnecting A Session](#reconnecting-a-session) describes. Each interruption and refused attempt
-reaches the caller's next read as soon as the client records it, without waiting for another change
-to the subscriptions it holds.
+rows of a generation the client no longer holds are ignored. Every restoration carries the schema
+of the generation it replaces as its `expected_schema`. A restoration the new session refuses as
+`RelayNotFound` or `DomainNotFound` ends the subscription as `RelayRemoved`, and one it refuses as
+`RelayChanged` ends it as `RelayChanged`: the client reports `Ended` with that reason and the
+server's message, exactly once, and the subscription reads `Ended` as if the server had ended its
+generation. Any other refusal is reported as a restoration failure with its typed cause and sent
+again on that session after a growing wait, as [Reconnecting A Session](#reconnecting-a-session)
+describes. Each interruption, refused attempt and ended restoration reaches the caller's next read
+as soon as the client records it, without waiting for another change to the subscriptions it holds.
 
 A generation the server ended is never restored, because a new session would not change why it
 ended: its relay was redefined, so the announced schema no longer describes its rows, or the relay
-no longer exists. The Rust client applies `SubscriptionEnded` as the frame arrives, before it queues
-the end for its caller, so the subscription reads `Ended` from then on, even to a caller that has
-not read the end yet. It stays `Ended` across later sessions until its caller subscribes again under
-the same name, which opens a new generation that announces the relay's current definition, or
-deletes it. The end reaches the caller exactly once, after the generation's other events: when the
-session ends before the caller reads it, the client discards that session's unread events as it
-does for every subscription, reports no interruption, and reports the end itself. The one exception
-is a subscription whose events overflowed the client's queue, for which the consumer overflow stays
-the last event of its generation.
+no longer exists. A restoration the server refused for one of those reasons ends the same way, so a
+relay removed or redefined while the client had no session ends its subscriptions just as it ends
+them while a session holds them. The Rust client applies `SubscriptionEnded` as the frame arrives,
+before it queues the end for its caller, so the subscription reads `Ended` from then on, even to a
+caller that has not read the end yet. It stays `Ended` across later sessions until its caller
+subscribes again under the same name, which opens a new generation that announces the relay's
+current definition, or deletes it. The end reaches the caller exactly once, after the generation's
+other events: when the session ends before the caller reads it, the client discards that session's
+unread events as it does for every subscription, reports no interruption, and reports the end
+itself. The one exception is a subscription whose events overflowed the client's queue, for which
+the consumer overflow stays the last event of its generation.
 
 A deletion asks the server only while an open session may hold the subscription. A subscription
 whose session ended, including one whose delivery had already failed, is deleted without a request,
@@ -1274,7 +1310,8 @@ stateDiagram-v2
     Active --> Interrupted: session lost
     Interrupted --> Restoring: next session
     Restoring --> Active: opening reply for a new generation
-    Restoring --> Interrupted: refused; reported, then retried on the same session
+    Restoring --> Interrupted: refused for now; reported, then retried on the same session
+    Restoring --> Ended: refused as removed or changed; reported as its end
     Restoring --> Interrupted: session lost; retried on the next session
     Active --> DeliveryFailed: the client's event queue overflowed
     Active --> Ended: SubscriptionEnded
@@ -1366,8 +1403,9 @@ Every node serves attachments from its own installation, which it derives from t
 revision as every other node, and from progress it already accepted, so an attachment adds no
 interconnect traffic and survives nothing: it ends silently with its session. The Rust client
 reports the gap as an interruption when the session ends, clears its previous tick, and attaches
-every clock it followed again on its next session. An attach that session refuses is reported as a
-restoration failure and sent again on the same session after a growing wait; an attach it leaves
+every clock it followed again on its next session. An attach that session refuses as
+`DomainClockAttachRefused`, or rejects without serving it, is reported as a restoration failure with
+its typed cause and sent again on the same session after a growing wait; an attach it leaves
 unanswered past the request timeout ends that session instead, and the next session attaches the
 clock again, which a caller already waiting for clock events opens at once. A reply that the
 session already follows the clock moves the attachment to that session: the caller keeps the clock
@@ -1393,7 +1431,9 @@ it on reconnect before it attaches its transaction again; its REPL sends the sam
 explicit attach and detach statements.
 These requests enter the console's bounded session hand-off; a local refusal is shown to the
 operator and sends no request. Both requests are refused while the session holds a transaction,
-like every other session-local request.
+like every other session-local request: an attach as `DomainClockAttachRefused` with the refusal
+`InTransaction`, which a later attempt can overcome once the transaction ends, and a detach as
+`RequestFailed`.
 
 A node answers an attach only once it has installed the cluster's committed domains since it
 started. Before that it holds no domain, so it cannot tell one the cluster lacks from one it has not
@@ -2152,8 +2192,10 @@ It does not provide:
 - **Durable subscription replay.** Subscriptions keep no offsets and are not persisted. A restored
   subscription starts with the rows that arrive after it opens again.
 - **Guaranteed restoration.** The Rust client opens a subscription or endpoint again, or attaches a
-  clock again, only when the serving exchange accepts it. A subscription whose relay no longer
-  exists stays interrupted until its caller deletes it. A producer or consumer whose endpoint
+  clock again, only when the serving exchange accepts it. A subscription whose relay was removed or
+  redefined ends instead, and its caller subscribes again to read the relay's current definition. A
+  subscription refused for another reason, such as a filter that no longer compiles, stays
+  interrupted and is tried again until its caller deletes it. A producer or consumer whose endpoint
   contract or domain generation changed requires a fresh application open. There is no durable
   consumer cursor.
 - **A required Arrow client library.** Rows arrive as typed FlatBuffers cells; a client needs only
@@ -2187,8 +2229,9 @@ The protocol makes a client's view of its own work explicit rather than inferred
   Impact Inspection](./transaction-quiescence.md#observing-a-transaction).
 - **Subscriptions.** A client learns of its own losses from `SubscriptionDeliveryLost`,
   `SubscriptionRowsSkipped`, and `SubscriptionEnded`, and the Rust client reports a lost session as
-  an interruption of each clock and of each subscription the server had not ended, and each refused
-  attempt to restore one as a restoration failure with the server's message.
+  an interruption of each clock and of each subscription the server had not ended, each refused
+  attempt to restore one as a restoration failure with its typed cause and the server's message,
+  and each restoration refused for good as the end the server would have sent.
   `Client::subscription_lifecycle` reads each subscription's state, including `Ended` for one the
   server ended. The web console shows each tab's state on the tab: pending, active, interrupted,
   restoring, ended, resubscribing, or closing. Each node exports `nervix_session_subscriptions`, the

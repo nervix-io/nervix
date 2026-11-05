@@ -1144,6 +1144,13 @@ test-websockets *args:
 test-websockets-shuttle check:
     SHUTTLE_TRACE_DIR={{ quote(cargo_target_dir + "/shuttle-failures/nervix-connector-websockets/" + check) }} cargo test --package nervix-connector-websockets --features shuttle --lib {{ quote(check) }} -- --exact --nocapture --test-threads=1
 
+# Diagnose one native client owner check with its replayable schedule, then under the
+# nondeterminism detector as `test-shuttle` runs it. `test-shuttle` remains the inventory,
+# completion and nondeterminism gate for qualification.
+test-client-core-shuttle check:
+    SHUTTLE_TRACE_DIR={{ quote(cargo_target_dir + "/shuttle-failures/nervix-client-core/" + check) }} cargo test --package nervix-client-core --features shuttle --lib {{ quote(check) }} -- --exact --nocapture --test-threads=1
+    SHUTTLE_CHECK_NONDETERMINISM=1 SHUTTLE_TRACE_DIR={{ quote(cargo_target_dir + "/shuttle-failures/nervix-client-core/" + check) }} cargo test --package nervix-client-core --features shuttle --lib {{ quote(check) }} -- --exact --nocapture --test-threads=1
+
 # Run the session wire codec tests and the gRPC and WebSocket sessions that carry its frames.
 test-client-wire *args:
     cargo test --package nervix-client-wire --all-features --all-targets -- {{ args }}
@@ -1151,6 +1158,15 @@ test-client-wire *args:
 # Run native client session unit tests without enabling the modeled Shuttle build.
 test-client-core *args:
     cargo test --package nervix-client-core --features arrow,autocomplete --lib -- {{ args }}
+
+# Run the C ABI's unit tests, which read every accessor as a host does through the header's types.
+test-client-ffi *args:
+    cargo test --package nervix-client-ffi --lib -- {{ args }}
+
+# Run the CLI's unit tests: argument parsing, statement dispatch and how it renders outcomes and
+# session events. Its public session behavior is covered by the `tools/` scenarios.
+test-nervix-cli *args:
+    cargo test --package nervix-cli --all-targets -- {{ args }}
 
 # Rewrite the client wire conformance corpus from the encoder's current output. Review the
 # regenerated `corpus.report` before committing it: every client implementation is held to it.

@@ -199,12 +199,14 @@ and that decoding them prints exactly the report; `just update-client-wire-corpu
 for review. The corpus covers what the live relay does not: fixed and variable lists, nested lists,
 a NaN with a payload, infinity, a nullable and a sensitive branch key field, command outcomes with
 diagnostics, a leader redirect with and without a known leader, an unknown outcome, a rejection, a
-subscription ending, and client requests with a present-zero and an absent optional position, a
-preview fingerprint, and the largest request identity. It also covers the domain clock attachment:
-the attach and detach requests, a paced clock attached at the largest generation with the extreme
-signed timestamps and a time rate read by its bits, clock frames in the stopped, uninstalled and
-unpaced states, every refusal of an attach, a detach of a clock the session does not follow, and
-the end of an attachment with its typed reason.
+subscription refused with its typed refusal and diagnostic, a subscription ending, and client
+requests with a present-zero and an absent optional position, a preview fingerprint, a subscribe
+that restores a subscription under the branched schema it expects, and the largest request identity.
+It also covers the domain clock attachment: the attach and detach requests, a paced clock attached
+at the largest generation with the extreme signed timestamps and a time rate read by its bits, clock
+frames in the stopped, uninstalled and unpaced states, every refusal of an attach with its typed
+refusal, a detach of a clock the session does not follow, and the end of an attachment with its
+typed reason.
 A tick frame carries its generation, id, boundary, authority UTC observation, and
 serving node logical reading through the Rust, Go, and TypeScript readers. Producers are covered by
 the open, submit, and close requests with a batch carried as opaque bytes, an opened producer with
@@ -265,7 +267,8 @@ for the outstanding-outcome deadline or a producer close that cannot drain that 
   binding host inherits the Rust client's recovery.
 - An attach refusal reaches a binding host as a failed disposition and the server's message, not
   as a typed refusal; `nx_session_domain_clock` tells whether the session follows the clock after
-  it.
+  it. A refused restoration of a subscription or a clock reaches it with the typed cause
+  `nx_event_restoration_cause` or `nx_clock_event_restoration_cause` reads.
 - The Go and TypeScript clients read the attach reply and the clock frames only from the corpus;
   no live probe of theirs follows a domain clock.
 

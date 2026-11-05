@@ -435,6 +435,7 @@ impl WebConsoleSignals {
                             domain: tab.domain.clone(),
                             statement: tab.subscribe_command.clone(),
                             subscription_type: SubscriptionType::Row,
+                            expected_schema: None,
                         },
                         origin: SubscriptionOrigin::Restoration,
                     });
@@ -462,6 +463,7 @@ impl WebConsoleSignals {
                 domain: tab.domain.clone(),
                 statement: tab.subscribe_command.clone(),
                 subscription_type: SubscriptionType::Row,
+                expected_schema: None,
             });
         });
         request
@@ -1538,6 +1540,7 @@ fn App() -> impl IntoView {
             domain,
             statement,
             subscription_type: SubscriptionType::Row,
+            expected_schema: None,
         };
         send_subscription_start(signals, subscription_request_tx, tab_id, request, origin);
     };
@@ -3305,7 +3308,7 @@ fn apply_subscribe_outcome(
                 signals.create.completed(attempt, draft_revision);
             }
         }
-        SubscribeDisposition::Failed => {
+        SubscribeDisposition::Refused(_) => {
             let reason = message.clone();
             let lines = failed_lines(message, diagnostics, statement);
             fail_subscription_start(signals, tab_id, lines);
@@ -7873,7 +7876,7 @@ mod tests {
     use nervix_client_wire::{
         DomainClockAttachmentEndReason, DomainClockAttachmentEnded, DomainClockObserved,
         DomainClockTicked, DomainList, DomainsObserved, OutcomeOrigin, Reply, ReplyDelivery,
-        SessionLimitSettings, SourceSpan, SubscriptionEndReason,
+        SessionLimitSettings, SourceSpan, SubscriptionEndReason, SubscriptionRefusal,
     };
     use nervix_dataflow_graph::{
         DataflowBranchStatistics, DataflowEdge, DataflowNode, DataflowProcessorKind,
@@ -8518,6 +8521,7 @@ mod tests {
                     domain: domain_name("tenant"),
                     statement: "CREATE SUBSCRIPTION other TO orders;".to_string(),
                     subscription_type: SubscriptionType::Row,
+                    expected_schema: None,
                 },
                 origin: SubscriptionOrigin::Console,
             });
@@ -9244,7 +9248,7 @@ mod tests {
                 &mut requests,
                 console_start(1),
                 SubscribeOutcome {
-                    disposition: SubscribeDisposition::Failed,
+                    disposition: SubscribeDisposition::Refused(SubscriptionRefusal::Unavailable),
                     message: "relay is unavailable".to_string(),
                     diagnostics: Vec::new(),
                 },
@@ -9270,7 +9274,7 @@ mod tests {
                 &mut requests,
                 console_start(1),
                 SubscribeOutcome {
-                    disposition: SubscribeDisposition::Failed,
+                    disposition: SubscribeDisposition::Refused(SubscriptionRefusal::Unavailable),
                     message: "leader is changing".to_string(),
                     diagnostics: Vec::new(),
                 },
@@ -9348,6 +9352,7 @@ mod tests {
                     domain: domain.clone(),
                     statement: "CREATE SUBSCRIPTION live TO orders;".to_string(),
                     subscription_type: SubscriptionType::Row,
+                    expected_schema: None,
                 },
                 origin: SubscriptionOrigin::Console,
             });
@@ -9452,6 +9457,7 @@ mod tests {
                         domain: DomainName::parse("tenant").assured("the test domain is valid"),
                         statement: "CREATE SUBSCRIPTION live TO orders;".to_string(),
                         subscription_type: SubscriptionType::Row,
+                        expected_schema: None,
                     },
                     origin: SubscriptionOrigin::Console,
                 });
@@ -9661,7 +9667,7 @@ mod tests {
                 &mut requests,
                 console_start(1),
                 SubscribeOutcome {
-                    disposition: SubscribeDisposition::Failed,
+                    disposition: SubscribeDisposition::Refused(SubscriptionRefusal::RelayNotFound),
                     message: "stream 'orders' does not exist in domain 'tenant'".to_string(),
                     diagnostics: Vec::new(),
                 },
@@ -9799,6 +9805,7 @@ mod tests {
                 domain: domain_name("tenant"),
                 statement: "CREATE SUBSCRIPTION live TO orders;".to_string(),
                 subscription_type: SubscriptionType::Row,
+                expected_schema: None,
             };
             let (sender, mut receiver) = request_handoff();
             send_subscription_start(
@@ -9989,6 +9996,7 @@ mod tests {
                         domain: domain_name("tenant"),
                         statement: "CREATE SUBSCRIPTION live TO orders;".to_string(),
                         subscription_type: SubscriptionType::Row,
+                        expected_schema: None,
                     },
                     origin: SubscriptionOrigin::Console,
                 });

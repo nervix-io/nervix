@@ -85,6 +85,7 @@ mod restore_staging_tests;
 mod runtime_installation;
 mod shutdown_handoff;
 mod standalone_transaction;
+mod subscription_opening;
 #[cfg(test)]
 mod syslog_tests;
 mod transaction_cleanup;
@@ -178,6 +179,9 @@ struct FaultInjectionState {
     /// One-shot, node-local refusals of the next subscription interest visibility check a node
     /// answers, each keeping whether it was delivered so a scenario proves the refusal happened.
     refused_interest_visibility: DashMap<ClusterNodeName, InterestVisibilityRefusal, RandomState>,
+    /// One-shot, node-local refusals of the next subscription a node is asked to open, each removed
+    /// when its node delivers it.
+    refused_subscription_openings: DashMap<ClusterNodeName, (), RandomState>,
     wasm_reset_publication_authority_losses:
         DashMap<DomainName, WasmResetPublicationAuthorityLoss, RandomState>,
     failed_wasm_reset_publications: DashMap<DomainName, WasmResetPublicationFailure, RandomState>,
@@ -537,6 +541,7 @@ impl Default for FaultInjection {
                 failed_schedule_publications: DashMap::default(),
                 refused_runtime_installations: DashMap::default(),
                 refused_interest_visibility: DashMap::default(),
+                refused_subscription_openings: DashMap::default(),
                 wasm_reset_publication_authority_losses: DashMap::default(),
                 failed_wasm_reset_publications: DashMap::default(),
                 failed_entity_gate_engagements: DashMap::default(),

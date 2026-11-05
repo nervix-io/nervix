@@ -84,9 +84,9 @@ pub use domain::{
     DomainsObserved,
 };
 pub use domain_clock::{
-    DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockAttachmentEndReason,
-    DomainClockAttachmentEnded, DomainClockDetachDisposition, DomainClockDetachOutcome,
-    DomainClockObserved, DomainClockTicked,
+    DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockAttachRefusal,
+    DomainClockAttachmentEndReason, DomainClockAttachmentEnded, DomainClockDetachDisposition,
+    DomainClockDetachOutcome, DomainClockObserved, DomainClockTicked,
 };
 pub use event::{
     Leadership, LeadershipObserved, NoticeLevel, ServerNotice, SessionEndReason, SessionEnding,
@@ -105,8 +105,8 @@ pub use producer::{
 pub use reply::{
     CancelOutcome, CancelState, CancellationStage, InspectionOutcome, RequestCancelled,
     RequestRejected, RequestRejection, SubscribeDisposition, SubscribeOutcome, SubscriptionOpened,
-    SuggestOutcome, Suggestion, SuggestionKind, SuggestionStatus, TextEdit, UnsubscribeDisposition,
-    UnsubscribeOutcome,
+    SubscriptionRefusal, SuggestOutcome, Suggestion, SuggestionKind, SuggestionStatus, TextEdit,
+    UnsubscribeDisposition, UnsubscribeOutcome,
 };
 pub use request::{
     AttachDomainClockRequest, AttachTransactionRequest, CancelRequest, ClientMessage,

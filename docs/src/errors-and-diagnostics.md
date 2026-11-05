@@ -2528,7 +2528,12 @@ transport status, which the next frame shows. The CLI adds the operation it ran 
 report, `failed to connect to the server` or `the request to the server failed`; its text and JSON
 failure reports, its JSON inspection errors and its event-stream notices render the whole chain. A
 restoration failure the client reports as a subscription or domain clock event carries the whole
-chain as its message. The shared C binding classifies a failure from the current context, a failed
+chain as its message, and a typed cause the client decides from: the server's typed refusal of the
+subscribe or attach, the session's typed rejection of the request, or a failure of the attempt in
+the client. A subscribe refusal that says the relay or its domain no longer exists, or that the
+relay announces another schema than the restoration expected, is not reported as a failure at all:
+the client ends the subscription with the end reason it establishes, read from the typed refusal and
+never from the message. The shared C binding classifies a failure from the current context, a failed
 backup download from the `BackupDownloadError` beneath it, and returns the whole chain as the
 error's message.
 
@@ -2572,6 +2577,10 @@ domain from that node's stale local snapshot as a terminal application error. Th
 the endpoint follows the same rule after the serving node's checks passed: an endpoint it has not
 installed is `EndpointUnavailable`, so a node that restarted after the serving node never turns a
 restored producer's open into a terminal missing-domain or removed-endpoint refusal.
+A subscribe follows the same rule. Such a node refuses one whose domain or relay it lacks, or whose
+restoration expects another schema than the relay it holds announces, as `Unavailable` rather than
+as `DomainNotFound`, `RelayNotFound` or `RelayChanged`, the refusals a client ends a restoration
+on, so a stale local snapshot never ends a subscription the cluster still serves.
 
 The shared C binding converts a clock-event wait's `error_stack::Report<ClientError>` at its
 reporting boundary. It classifies the typed current context as an `NX_ERROR_*` kind and retains
@@ -2584,7 +2593,9 @@ way: a stopped or uninstalled clock is `NX_ERROR_TYPE`, because it holds no logi
 and arithmetic outside the timestamp range is `NX_ERROR_INVALID_ARGUMENT`, because the instant the
 host passed is out of range for that clock. An attach refusal is not an error of the call: it
 completes with `NX_DISPOSITION_FAILED` and the server's message, and `nx_session_domain_clock`
-reports whether the session follows the clock afterwards.
+reports whether the session follows the clock afterwards. The restoration-cause and end-reason
+accessors of subscription and clock events follow the same rule: `NX_ERROR_TYPE` for an event of
+another kind, with outputs left untouched, and a non-null output pointer required.
 
 ### Producers And Consumers
 

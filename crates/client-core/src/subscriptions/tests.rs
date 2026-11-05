@@ -19,6 +19,25 @@ fn handle(value: &str, generation: u64) -> SubscriptionHandle {
     }
 }
 
+/// The schema the test relay announces.
+fn schema() -> Arc<RowSchema> {
+    Arc::new(RowSchema {
+        fields: Vec::new(),
+        branch: None,
+    })
+}
+
+/// The reply that opened `handle`, announcing the test relay's schema.
+fn announced(handle: &SubscriptionHandle) -> SubscriptionOpened {
+    SubscriptionOpened {
+        subscription: handle.clone(),
+        domain: DomainName::parse("tenant").assured("the test domain satisfies the name grammar"),
+        relay: RelayName::parse("events").assured("the test relay name is valid"),
+        subscription_type: SubscriptionType::Row,
+        schema: RowSchema::clone(&schema()),
+    }
+}
+
 fn contract(value: &str, domain: &str) -> SubscriptionContract {
     SubscriptionContract {
         domain: DomainName::parse(domain).assured("test domains satisfy the name grammar"),
@@ -89,7 +108,7 @@ fn opened(generation: &Arc<()>) -> DesiredSubscriptions {
     let pending = desired
         .begin(contract("watch", "tenant"), generation.clone())
         .verified("the registry starts empty");
-    desired.created(&pending, Some(&handle("watch", 1)));
+    desired.created(&pending, Some(&announced(&handle("watch", 1))));
     desired
 }
 
@@ -116,7 +135,7 @@ fn acknowledged_contract_restores_after_repeated_loss_and_keeps_its_options() {
         .begin(contract("watch", "tenant"), first_generation.clone())
         .verified("the registry starts empty");
     let first = handle("watch", 1);
-    desired.created(&pending, Some(&first));
+    desired.created(&pending, Some(&announced(&first)));
     assert_eq!(
         desired.lifecycle(&name("watch")),
         Some(SubscriptionLifecycle::Active(first.clone()))
@@ -162,7 +181,7 @@ fn acknowledged_contract_restores_after_repeated_loss_and_keeps_its_options() {
         .retry(&name("watch"), &third_generation)
         .verified("a failed restore on the live exchange can be retried");
     let reopened = handle("watch", 2);
-    desired.created(&retry, Some(&reopened));
+    desired.created(&retry, Some(&announced(&reopened)));
     assert!(desired.admit(&rows_lost(&reopened), &third_generation));
     assert!(!desired.admit(&rows_lost(&first), &third_generation));
 }
@@ -195,7 +214,7 @@ fn cancellation_fences_a_late_restore_and_name_reuse() {
             .is_none()
     );
     let late = handle("watch", 2);
-    desired.created(&retry, Some(&late));
+    desired.created(&retry, Some(&announced(&late)));
     assert!(!desired.deletion_waits(&deletion));
     assert!(
         matches!(desired.deletion_target(&deletion), DeletionTarget::Server),
@@ -207,12 +226,12 @@ fn cancellation_fences_a_late_restore_and_name_reuse() {
     let next = desired
         .begin(contract("watch", "other"), second_generation.clone())
         .verified("successful cleanup releases the name");
-    desired.created(&retry, Some(&late));
+    desired.created(&retry, Some(&announced(&late)));
     assert_eq!(
         desired.lifecycle(&name("watch")),
         Some(SubscriptionLifecycle::Creating)
     );
-    desired.created(&next, Some(&handle("watch", 3)));
+    desired.created(&next, Some(&announced(&handle("watch", 3))));
     assert_eq!(
         desired.lifecycle(&name("watch")),
         Some(SubscriptionLifecycle::Active(handle("watch", 3)))
@@ -269,7 +288,7 @@ fn deletion_of_an_untracked_name_fences_creation_and_ignores_late_results() {
         desired.lifecycle(&name("watch")),
         Some(SubscriptionLifecycle::Creating)
     );
-    desired.created(&next, Some(&handle("watch", 2)));
+    desired.created(&next, Some(&announced(&handle("watch", 2))));
     assert!(desired.admit(&rows_lost(&handle("watch", 2)), &second_generation));
 }
 
@@ -299,9 +318,9 @@ fn consumer_overflow_is_terminal_for_that_delivery_generation() {
         .begin(contract("watch", "tenant"), generation.clone())
         .verified("the registry starts empty");
     let active = handle("watch", 1);
-    desired.acknowledge(&active, &generation);
+    desired.acknowledge(&active, &schema(), &generation);
     desired.overflow(&active, &generation);
-    desired.created(&pending, Some(&active));
+    desired.created(&pending, Some(&announced(&active)));
     assert_eq!(
         desired.lifecycle(&name("watch")),
         Some(SubscriptionLifecycle::DeliveryFailed(active.clone()))
@@ -428,6 +447,7 @@ fn failed_restorations_follow_the_gap_and_keep_only_the_newest_unread_one() {
     desired.created(&first_retry, None);
     assert!(desired.restoration_failed(
         &first_retry,
+        SubscriptionRestorationCause::Unavailable,
         "relay 'events' is starting".to_string(),
         Duration::from_secs(1)
     ));
@@ -435,13 +455,19 @@ fn failed_restorations_follow_the_gap_and_keep_only_the_newest_unread_one() {
         .retry(&name("watch"), &second_generation)
         .verified("a refused restoration is retried on its exchange");
     assert!(
-        !desired.restoration_failed(&first_retry, "stale".to_string(), Duration::from_secs(1)),
+        !desired.restoration_failed(
+            &first_retry,
+            SubscriptionRestorationCause::Unavailable,
+            "stale".to_string(),
+            Duration::from_secs(1)
+        ),
         "an attempt that was retried reports nothing more"
     );
     desired.created(&second_retry, None);
     assert!(desired.restoration_failed(
         &second_retry,
-        "relay 'events' does not exist".to_string(),
+        SubscriptionRestorationCause::InTransaction,
+        "the session holds a transaction".to_string(),
         Duration::from_secs(2)
     ));
 
@@ -451,7 +477,8 @@ fn failed_restorations_follow_the_gap_and_keep_only_the_newest_unread_one() {
         Some(Reported::RestorationFailed(
             SubscriptionRestorationFailure {
                 subscription: handle("watch", 1),
-                message: "relay 'events' does not exist".to_string(),
+                cause: SubscriptionRestorationCause::InTransaction,
+                message: "the session holds a transaction".to_string(),
                 retry_after: Duration::from_secs(2),
             }
         ))
@@ -462,6 +489,7 @@ fn failed_restorations_follow_the_gap_and_keep_only_the_newest_unread_one() {
     assert!(
         !desired.restoration_failed(
             &second_retry,
+            SubscriptionRestorationCause::Unavailable,
             "too late".to_string(),
             Duration::from_secs(4)
         ),
@@ -486,7 +514,7 @@ fn repeated_exchange_losses_keep_one_pending_gap_per_subscription() {
         .pop()
         .verified("the first acknowledgement is restorable");
     let second = handle("watch", 2);
-    desired.created(&second_attempt, Some(&second));
+    desired.created(&second_attempt, Some(&announced(&second)));
     desired.ended(&second_generation);
 
     assert_eq!(next_reported(&desired), Some(interrupted("watch", 2)));
@@ -617,8 +645,8 @@ fn subscribing_under_an_ended_name_opens_a_new_generation() {
         "the replaced generation's unread end no longer reaches the caller"
     );
     let second = handle("watch", 2);
-    desired.acknowledge(&second, &generation);
-    desired.created(&reopening, Some(&second));
+    desired.acknowledge(&second, &schema(), &generation);
+    desired.created(&reopening, Some(&announced(&second)));
     assert_eq!(
         desired.lifecycle(&name("watch")),
         Some(SubscriptionLifecycle::Active(second.clone()))
@@ -661,9 +689,9 @@ fn a_late_opening_reply_does_not_reopen_an_ended_generation() {
         .begin(contract("watch", "tenant"), first_generation.clone())
         .verified("the registry starts empty");
     let first = handle("watch", 1);
-    desired.acknowledge(&first, &first_generation);
+    desired.acknowledge(&first, &schema(), &first_generation);
     desired.end(&relay_changed(&first), &first_generation);
-    desired.created(&pending, Some(&first));
+    desired.created(&pending, Some(&announced(&first)));
     assert_eq!(
         desired.lifecycle(&name("watch")),
         Some(SubscriptionLifecycle::Ended(first))
@@ -673,7 +701,7 @@ fn a_late_opening_reply_does_not_reopen_an_ended_generation() {
     let reopening = desired
         .begin(contract("watch", "tenant"), second_generation.clone())
         .verified("the name of an ended generation is free to subscribe again");
-    desired.created(&reopening, Some(&handle("watch", 2)));
+    desired.created(&reopening, Some(&announced(&handle("watch", 2))));
     desired.ended(&second_generation);
     let third_generation = Arc::new(());
     let restoring = desired
@@ -681,9 +709,9 @@ fn a_late_opening_reply_does_not_reopen_an_ended_generation() {
         .pop()
         .verified("the acknowledged subscription is restored");
     let third = handle("watch", 3);
-    desired.acknowledge(&third, &third_generation);
+    desired.acknowledge(&third, &schema(), &third_generation);
     desired.end(&relay_changed(&third), &third_generation);
-    desired.created(&restoring, Some(&third));
+    desired.created(&restoring, Some(&announced(&third)));
     assert_eq!(
         desired.lifecycle(&name("watch")),
         Some(SubscriptionLifecycle::Ended(third))
@@ -766,5 +794,113 @@ fn an_end_of_another_generation_or_exchange_changes_nothing() {
     assert_eq!(
         desired.lifecycle(&name("watch")),
         Some(SubscriptionLifecycle::Interrupted(first))
+    );
+}
+
+#[test]
+fn a_restore_attempt_requests_the_schema_its_replaced_generation_announced() {
+    let generation = Arc::new(());
+    let desired = DesiredSubscriptions::new();
+    let first = desired
+        .begin(contract("watch", "tenant"), generation.clone())
+        .verified("the registry starts empty");
+    assert_eq!(
+        first.request().expected_schema,
+        None,
+        "a first subscribe expects no schema"
+    );
+    desired.created(&first, Some(&announced(&handle("watch", 1))));
+    desired.ended(&generation);
+    let restoring = desired
+        .restore(Arc::new(()))
+        .pop()
+        .verified("the acknowledged subscription is restored");
+    assert_eq!(
+        restoring.request().expected_schema,
+        Some(RowSchema::clone(&schema())),
+        "a restoration expects the schema its replaced generation announced"
+    );
+}
+
+#[test]
+fn a_restoration_refused_for_good_ends_the_subscription_once_after_its_gap() {
+    let first_generation = Arc::new(());
+    let desired = opened(&first_generation);
+    desired.ended(&first_generation);
+    let second_generation = Arc::new(());
+    let restoring = desired
+        .restore(second_generation.clone())
+        .pop()
+        .verified("the acknowledged subscription is restored");
+    desired.created(&restoring, None);
+    desired.restoration_ended(
+        &restoring,
+        SubscriptionEndReason::RelayRemoved,
+        "stream 'events' does not exist in domain 'tenant'".to_string(),
+    );
+    assert_eq!(
+        desired.lifecycle(&name("watch")),
+        Some(SubscriptionLifecycle::Ended(handle("watch", 1)))
+    );
+    assert_eq!(next_reported(&desired), Some(interrupted("watch", 1)));
+    assert_eq!(
+        next_reported(&desired),
+        Some(Reported::Ended(SubscriptionEnded {
+            subscription: handle("watch", 1),
+            reason: SubscriptionEndReason::RelayRemoved,
+            message: "stream 'events' does not exist in domain 'tenant'".to_string(),
+        }))
+    );
+    assert_eq!(next_reported(&desired), None);
+
+    assert!(
+        desired.retry(&name("watch"), &second_generation).is_none(),
+        "an ended subscription is not tried again on its exchange"
+    );
+    desired.ended(&second_generation);
+    assert!(
+        desired.restore(Arc::new(())).is_empty(),
+        "an ended subscription is not restored on a later exchange"
+    );
+    assert_eq!(next_reported(&desired), None);
+    assert!(matches!(
+        desired.cancel(&name("watch"), Arc::new(())),
+        Cancellation::Ended
+    ));
+    assert_eq!(desired.lifecycle(&name("watch")), None);
+}
+
+#[test]
+fn a_restoration_its_caller_deleted_ends_nothing() {
+    let first_generation = Arc::new(());
+    let desired = opened(&first_generation);
+    desired.ended(&first_generation);
+    let second_generation = Arc::new(());
+    let restoring = desired
+        .restore(second_generation.clone())
+        .pop()
+        .verified("the acknowledged subscription is restored");
+    let deleting = deletion(desired.cancel(&name("watch"), second_generation.clone()));
+    desired.created(&restoring, None);
+    desired.restoration_ended(
+        &restoring,
+        SubscriptionEndReason::RelayChanged,
+        "relay 'events' was redefined".to_string(),
+    );
+    assert!(matches!(
+        desired.deletion_target(&deleting),
+        DeletionTarget::NotOpened
+    ));
+    assert_eq!(desired.lifecycle(&name("watch")), None);
+    assert_eq!(
+        next_reported(&desired),
+        None,
+        "a deleted subscription reports neither its gap nor an end"
+    );
+    assert!(
+        desired
+            .begin(contract("watch", "tenant"), second_generation)
+            .is_some(),
+        "the name is free once the deletion completed"
     );
 }

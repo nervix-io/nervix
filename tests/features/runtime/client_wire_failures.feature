@@ -1080,7 +1080,7 @@ Feature: Client wire failure regressions
       | 3            |
 
   @client_wire_subscription_restore
-  Scenario Outline: A native client reports a refused subscription restoration and deletes the subscription without the server
+  Scenario Outline: A native client ends the restoration of a subscription whose relay was <change> while it was disconnected
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these Plexus commands
@@ -1088,6 +1088,9 @@ Feature: Client wire failure regressions
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA watched_record (
         value STRING
+      );
+      CREATE SCHEMA masked_watched_record (
+        value STRING SENSITIVE
       );
       CREATE RELAY watched SCHEMA watched_record UNBRANCHED;
       START;
@@ -1103,22 +1106,88 @@ Feature: Client wire failure regressions
     Then within "30s" client "subscriber" observes subscription "watching" interrupted
     When these Plexus commands are executed on the leader node
       """
-      DROP RELAY watched;
+      <statement>
       """
     And client "subscriber" executes these Plexus commands
       """
       DESCRIBE DOMAIN;
       """
-    Then within "30s" client "subscriber" observes a failed restoration of subscription "watching"
-      """
-      stream 'watched' does not exist in domain '{{domain}}'
-      """
-    And client "subscriber" subscription "watching" is interrupted
+    Then within "30s" client "subscriber" observes subscription "watching" ended with reason "<reason>"
+    And client "subscriber" subscription "watching" is ended
+    And client "subscriber" reports no event of subscription "watching" within "5s"
     When client "subscriber" executes these Plexus commands
       """
       DELETE SUBSCRIPTION watching;
       """
-    Then client "subscriber" no longer holds subscription "watching"
+    Then the last command output contains
+      """
+      subscription 'watching' deleted; the server had already ended it
+      """
+    And client "subscriber" no longer holds subscription "watching"
+
+    @client_wire_restoration_end @deloxide_stress
+    Examples:
+      | cluster_size | change  | statement           | reason       |
+      | 1            | dropped | DROP RELAY watched; | RelayRemoved |
+      | 3            | dropped | DROP RELAY watched; | RelayRemoved |
+
+    Examples:
+      | cluster_size | change    | statement                                             | reason       |
+      | 1            | redefined | ALTER RELAY watched SET SCHEMA masked_watched_record; | RelayChanged |
+      | 3            | redefined | ALTER RELAY watched SET SCHEMA masked_watched_record; | RelayChanged |
+
+  @client_wire_subscription_restore
+  Scenario Outline: A native client opens again a subscription whose restoration the server refused for now
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA wire_record (
+        tenant STRING,
+        sequence I64
+      );
+      CREATE WIRE JSON SCHEMA wire_record_json MODE STRICT (
+        tenant string,
+        sequence integer
+      );
+      CREATE CODEC wire_record_codec
+        FROM WIRE JSON SCHEMA wire_record_json
+        TO SCHEMA wire_record;
+      CREATE RELAY wire_records SCHEMA wire_record UNBRANCHED;
+      CREATE VHOST edge client-wire-{{test_id}}.example.com;
+      CREATE ENDPOINT wire_ingress ON edge PATH '/records' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR wire_source
+        FROM wire_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
+        TO wire_records INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the gRPC endpoint of node "{{leader}}" is forwarded from fixture address "127.0.0.1"
+    And client "subscriber" is connected to "{{forwarded_grpc}}" with cluster seeds
+    When client "subscriber" executes these Plexus commands
+      """
+      CREATE SUBSCRIPTION wire_seen TO wire_records;
+      """
+    And every node refuses the next subscription it is asked to open as unavailable
+    And the TCP forwarder at "127.0.0.1" stops
+    Then within "30s" client "subscriber" observes subscription "wire_seen" interrupted
+    When client "subscriber" executes these Plexus commands
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then within "30s" client "subscriber" observes a restoration of subscription "wire_seen" refused as "Unavailable"
+    When within "30s" client "subscriber" receives a subscription payload from repeated http posts to node "{{leader}}" with host "client-wire-{{test_id}}.example.com" path "/records"
+      """
+      {"tenant":"acme","sequence":1}
+      """
+    Then the last relay subscription payload contains
+      """
+      {"sequence":1,"tenant":"acme"}
+      """
+    And client "subscriber" subscription "wire_seen" is active
 
     Examples:
       | cluster_size |

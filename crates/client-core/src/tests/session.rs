@@ -2847,7 +2847,9 @@ async fn deleting_an_unknown_subscription_on_a_closed_session_asks_a_new_session
         .reply(
             request.request_id,
             ReplyBody::Subscribe(SubscribeOutcome {
-                disposition: SubscribeDisposition::Failed,
+                disposition: SubscribeDisposition::Refused(
+                    crate::SubscriptionRefusal::RelayNotFound,
+                ),
                 message: "relay 'orders' does not exist".to_string(),
                 diagnostics: Vec::new(),
             }),
@@ -3124,7 +3126,9 @@ async fn a_refused_clock_restoration_is_repeated_on_the_same_session() {
         .reply(
             request.request_id,
             ReplyBody::DomainClockAttach(crate::DomainClockAttachOutcome {
-                disposition: crate::DomainClockAttachDisposition::Failed,
+                disposition: crate::DomainClockAttachDisposition::Refused(
+                    crate::DomainClockAttachRefusal::InTransaction,
+                ),
                 message: "the session holds a transaction".to_string(),
             }),
             &limits(),
@@ -3137,6 +3141,7 @@ async fn a_refused_clock_restoration_is_repeated_on_the_same_session() {
             .assured("the refusal is reported"),
         crate::DomainClockEvent::RestorationFailed(crate::DomainClockRestorationFailure {
             domain: domain("tenant"),
+            cause: crate::DomainClockRestorationCause::InTransaction,
             message: "the session holds a transaction".to_string(),
             retry_after: Duration::from_secs(1),
         })
@@ -3164,10 +3169,15 @@ async fn a_refused_clock_restoration_is_repeated_on_the_same_session() {
         panic!("a rejected restoration is reported as a failed restoration: {rejected:?}");
     };
     assert_eq!(rejected.retry_after, Duration::from_secs(2));
-    assert!(
-        rejected.message.contains("TooManyRequestsInFlight"),
-        "{}",
-        rejected.message
+    assert_eq!(
+        rejected.cause,
+        crate::DomainClockRestorationCause::Rejected(
+            crate::wire::RequestRejection::TooManyRequestsInFlight
+        )
+    );
+    assert_eq!(
+        rejected.message,
+        "the session already has 64 requests in flight"
     );
     let request = restored.next_request().await;
     assert!(

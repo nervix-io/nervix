@@ -53,8 +53,9 @@ pub use batch_builder::{
 pub use cancel::{nx_cancel_free, nx_cancel_new, nx_cancel_trigger, nx_cancel_with_deadline};
 pub use clock_event::{
     nx_clock_event_domain, nx_clock_event_end_reason, nx_clock_event_generation,
-    nx_clock_event_kind_of, nx_clock_event_paced, nx_clock_event_release, nx_clock_event_retain,
-    nx_clock_event_state, nx_clock_event_tick,
+    nx_clock_event_kind_of, nx_clock_event_paced, nx_clock_event_release,
+    nx_clock_event_restoration_cause, nx_clock_event_retain, nx_clock_event_state,
+    nx_clock_event_tick,
 };
 pub use consumer::{
     nx_consumer_close, nx_consumer_contract, nx_consumer_free, nx_consumer_generation,
@@ -75,8 +76,9 @@ pub use domain_clock::{
 };
 pub use event::{
     nx_event_cell_varlen, nx_event_column_fixed, nx_event_column_states, nx_event_column_varlen,
-    nx_event_frame, nx_event_kind_of, nx_event_release, nx_event_retain, nx_event_row_count,
-    nx_event_schema, nx_event_subscription,
+    nx_event_end_reason, nx_event_frame, nx_event_kind_of, nx_event_release,
+    nx_event_restoration_cause, nx_event_retain, nx_event_row_count, nx_event_schema,
+    nx_event_subscription,
 };
 pub use failure::{
     nx_error_execution_reference, nx_error_free, nx_error_kind_of, nx_error_message,
@@ -86,10 +88,10 @@ pub use fields::{nx_fields_add, nx_fields_element, nx_fields_free, nx_fields_new
 pub use nervix_client_host::{
     Admission, Batch, BatchBuilder, BatchDefect, Cancel, CellState, ClockEndReason, ClockEvent,
     ClockEventKind, ClockState, CompletionKind, CompletionStatus, Consumer, Delivery, Disposition,
-    DomainClock, EndpointState, Event, EventKind, Execution, Failure, FailureKind, FieldType,
-    Fields, OpenRefusal, Outcome, Part, ProcessingFailure, Producer, Reopen, ReopenReason, Schema,
-    Session, Settlement, SubmissionOutcome, SubmissionRefusal, SubmissionResult, Suggestions,
-    Uncertainty, Window, WindowKind,
+    DomainClock, EndReason, EndpointState, Event, EventKind, Execution, Failure, FailureKind,
+    FieldType, Fields, OpenRefusal, Outcome, Part, ProcessingFailure, Producer, Reopen,
+    ReopenReason, RestorationCause, Schema, Session, Settlement, SubmissionOutcome,
+    SubmissionRefusal, SubmissionResult, Suggestions, Uncertainty, Window, WindowKind,
 };
 pub use outcome::{
     nx_outcome_backup, nx_outcome_diagnostic, nx_outcome_diagnostic_count, nx_outcome_disposition,
