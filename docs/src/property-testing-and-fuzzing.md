@@ -77,6 +77,8 @@ records their scope without treating a passing qualification as a completed camp
 | `client-ffi-field-descriptors-malformed` | `nervix-client-ffi` invalid-argument refusal that leaves the field list as the accepted calls built it | unknown types, lengths on scalar and `LIST` levels, empty and oversized `FIXED_LIST` levels, a 33rd list, refused names, elements without an open field, fields before the open one's element, an open last field, and reads past a field's last level or past the last field, v3 | 256 | 4096 bytes |
 | `client-host-arrow-columns` | `nervix-client-host` complete batch equality, down to the canonical Arrow IPC stream, after the batch exports its row schema, its rows as one struct array and a stream of itself through the Arrow C data interface and imports back through the array and through the stream | up to six rows of one to four nullable or required, sensitive or not columns of every scalar inside up to two `LIST` and `FIXED_LIST` levels of one to three elements, every fixed-width bit pattern, UTF-8 text with NUL and arbitrary bytes, v1 | 256 | 512 bytes |
 | `client-host-typed-field-descriptors` | `nervix-client-host` typed field description equality: a binding's level-by-level description of `FieldType` levels becomes the complete original field, and every scalar level names its scalar back through its type's kind | every scalar inside 0 to 32 `LIST` and `FIXED_LIST` levels of 1 to `INT32_MAX` elements, either nullability and sensitivity, names from the whole name rule, v1 | 256 | 2048 bytes |
+| `client-jvm-columns` | `nervix-client-jvm` complete Java builder/reader and IPC equality through the current JNI implementations registered in an embedded JVM, including derived direct-buffer ownership | all scalar widths and float bit patterns, UTF-8/NUL and byte columns, nullable/sensitive fields, up to six rows and list/fixed-list columns, v1 | 256 | 1024 bytes |
+| `client-jvm-fields` | `nervix-client-jvm` complete Java field descriptions and the snapshot leased by endpoint opens | one to four fields, every scalar inside up to four list/fixed-list levels of one to four elements, both nullability and sensitivity, v1 | 256 | 256 bytes |
 | `client-processor-choice-request` | `nervix-client-wire` processor choice request round-trip equality | current targets with relay context, search, page and identity, v1 | 128 | 32 bytes |
 | `plexus-expression` | `nervix-plexus` expression render and reparse equality through a statement and the standalone expression, expression-list and route-construction readers | Plexus expressions of every form, v8 | 256 | 512 bytes |
 | `connector-entity-presentation` | `nervix-plexus` declared phrases and ordered inspection rows, canonical reparsing to the complete configured Model | every current ingestor and emitter entity, options, modes, headers, mappings and error policies, v25 | 128 | 2048 bytes |
@@ -890,3 +892,10 @@ is added only when the task requires the ordinary randomized run as well. A new 
 whose sanitizer build exceeds a campaign's build deadline joins `prepared_targets`. A public product
 bug found this way first gets a failing focused reproducer and affected public Cucumber scenario
 before its fix.
+
+The JVM targets require JDK 21 or later. Their runner first builds the production jar and Java
+fixtures with `just build-client-jvm-tests`. Each process embeds one JVM and registers that
+harness's checked native method table before making Java calls, so sanitizer and ordinary tests
+exercise the current JNI implementation rather than the jar's separately compiled library.
+The Java properties keep complete field/type/flag/order and column-byte oracles; no invalid-input
+filtering supplies a passing case. JNI artifact paths stay below `target/client-conformance/java`.
