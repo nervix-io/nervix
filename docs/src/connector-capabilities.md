@@ -114,7 +114,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | MQTT TOPIC | Compare `MQTT TOPIC`: locator, options, modes, ingest metadata. Consumption declares its session, inbound QoS and topic filter, and reads the delivered packet's metadata and ordered, repeated user properties. Publication declares its outbound QoS and completion mode, RETAIN, exact MQTT 5 publish properties and ordered, repeated user properties. Both directions keep the written case of topic names. |
+| Entity | MQTT TOPIC | Compare `MQTT TOPIC`: locator, options, modes, ingest metadata. Both directions declare QOS 0, 1 or 2 independently of MODE. Consumption alone declares SESSION: NO ACK accepts every session/QoS pairing, while ACK SEQUENTIAL, ACK PARALLEL and SUSPEND require SESSION PERSISTENT with QOS 1 or 2. Every ingestor joins a Nervix-managed shared subscription, so its broker must support shared subscriptions. Publication pairs QOS 0 with NO ACK and QOS 1 or 2 with an ACK mode; its clean or persistent session follows QoS without a SESSION clause. Consumption reads the delivered packet's metadata and ordered, repeated user properties; publication writes RETAIN, exact MQTT 5 publish properties and ordered, repeated user properties. Both directions keep the written case of topic names. |
 | Reference | MQTT client |  |
 | Locator and validation rule | TOPIC 'devices/+/orders' (mqtt_topic_filter) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2)<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2) |  |
@@ -134,14 +134,14 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | NATS SUBJECT | Compare `NATS SUBJECT`, `NATS STREAM`: locator, options, modes. Subject consumption can join a queue group; Core publication completes after its flush. Both directions use quoted, case-preserving subjects; publication subjects exclude subscription wildcards. |
+| Entity | NATS SUBJECT | Compare `NATS SUBJECT`, `NATS STREAM`: locator, options, modes, ingest metadata. Subject consumption can join a queue group; Core publication completes after its flush. Both directions use quoted, case-preserving subjects; publication subjects exclude subscription wildcards. |
 | Reference | NATS client |  |
 | Locator and validation rule | SUBJECT 'orders.created' (nats_subject) |  |
 | Modes (complete bodies after MODE) | NO ACK |  |
 | Options in statement order | `QUEUE GROUP 'workers'` (string literal checked by nats_queue_group); required<br>`INSTANCES 2` (positive count); required |  |
-| Headers | `read_header`, `read_headers`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |  |
+| Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
-| Metadata | Not offered: The current subject declaration exposes message headers but no typed subject or JetStream metadata namespace. |  |
+| Metadata | metadata.subject: STRING OPTIONAL<br>metadata.reply: STRING OPTIONAL |  |
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
@@ -154,14 +154,14 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | NATS STREAM | Compare `NATS SUBJECT`, `NATS STREAM`: locator, options, modes. A durable pull consumer an operator provisioned acknowledges or negatively acknowledges each delivery on its own subject. A stream emitter names a provisioned stream, sends its expected-stream header with each message and waits for PubAck. |
+| Entity | NATS STREAM | Compare `NATS SUBJECT`, `NATS STREAM`: locator, options, modes, ingest metadata. A durable pull consumer an operator provisioned acknowledges or negatively acknowledges each delivery on its own subject. A stream emitter names a provisioned stream, sends its expected-stream header with each message and waits for PubAck. |
 | Reference | NATS client |  |
 | Locator and validation rule | STREAM 'orders' (nats_stream) |  |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | `CONSUMER 'nervix'` (string literal checked by nats_consumer); required |  |
-| Headers | `read_header`, `read_headers`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |  |
+| Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
-| Metadata | Not offered: The current stream declaration exposes message headers but no typed stream, consumer, sequence, timestamp or delivery-count metadata namespace. |  |
+| Metadata | metadata.subject: STRING OPTIONAL<br>metadata.reply: STRING OPTIONAL<br>metadata.stream: STRING OPTIONAL<br>metadata.consumer: STRING OPTIONAL<br>metadata.sequence: U64 OPTIONAL<br>metadata.timestamp: DATETIME OPTIONAL<br>metadata.delivered: U64 OPTIONAL |  |
 | Every live node | no; scheduled owner |  |
 | Position class | broker_redelivered |  |
 | Acknowledgement confirmation | answered |  |
@@ -483,7 +483,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | MQTT TOPIC | Compare `MQTT TOPIC`: locator, options, modes, emit envelope/properties. Consumption declares its session, inbound QoS and topic filter, and reads the delivered packet's metadata and ordered, repeated user properties. Publication declares its outbound QoS and completion mode, RETAIN, exact MQTT 5 publish properties and ordered, repeated user properties. Both directions keep the written case of topic names. |
+| Entity | MQTT TOPIC | Compare `MQTT TOPIC`: locator, options, modes, emit envelope/properties. Both directions declare QOS 0, 1 or 2 independently of MODE. Consumption alone declares SESSION: NO ACK accepts every session/QoS pairing, while ACK SEQUENTIAL, ACK PARALLEL and SUSPEND require SESSION PERSISTENT with QOS 1 or 2. Every ingestor joins a Nervix-managed shared subscription, so its broker must support shared subscriptions. Publication pairs QOS 0 with NO ACK and QOS 1 or 2 with an ACK mode; its clean or persistent session follows QoS without a SESSION clause. Consumption reads the delivered packet's metadata and ordered, repeated user properties; publication writes RETAIN, exact MQTT 5 publish properties and ordered, repeated user properties. Both directions keep the written case of topic names. |
 | Reference | MQTT client |  |
 | Locator and validation rule | TOPIC 'devices/Orders' (mqtt_topic) |  |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 0)<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 1 or 2) |  |
@@ -504,17 +504,17 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | NATS SUBJECT | Compare `NATS SUBJECT`, `NATS STREAM`: locator, options, modes. Subject consumption can join a queue group; Core publication completes after its flush. Both directions use quoted, case-preserving subjects; publication subjects exclude subscription wildcards. |
+| Entity | NATS SUBJECT | Compare `NATS SUBJECT`, `NATS STREAM`: locator, options, modes, emit envelope/properties. Subject consumption can join a queue group; Core publication completes after its flush. Both directions use quoted, case-preserving subjects; publication subjects exclude subscription wildcards. |
 | Reference | NATS client |  |
 | Locator and validation rule | SUBJECT 'orders.Created' (nats_publish_subject) |  |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | No entity-specific options. |  |
-| Headers | `write_header`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |  |
+| Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
 | BATCH | optional |  |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |  |
 | Batch transformation required | no |  |
-| Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |  |
+| Envelope | REPLY TO reply_queue |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | commands queued for the connection: driver default, 2048 commands; when full, holds back what fills it |  |
 | Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>a core publish and its flush to the client's socket, not a server round trip: `timeout_ms`; unbounded when omitted |  |
@@ -530,7 +530,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Locator and validation rule | STREAM 'orders' (nats_stream) |  |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | `SUBJECT 'orders.created'` (string literal checked by nats_publish_subject); required |  |
-| Headers | `write_header`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |  |
+| Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
 | BATCH | optional |  |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |  |
