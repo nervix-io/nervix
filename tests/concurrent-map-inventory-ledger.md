@@ -381,7 +381,7 @@ awaiting replicas offers its revision through the offset state it retains and re
 | `FaultInjectionState::refused_resource_publications` | Armed for one node before an upload; a testing build checks the entry before each installing upload's version publication and when reconciliation takes an applying upload up. The refusal's watch holds the original reply until recovery takes it up; explicit scenario observations read that retained state. The entry remains until that world's injector is dropped; absent from product builds | test-only resource publication refusal in `fault_injection/resource_publication.rs` |
 | `FaultInjectionState::lost_resource_upload_replies` | Armed for one node before an upload; a testing build's gRPC upload transport looks the node up once per upload call whose reply reports that it installed a version, after the installation completed, and records the delivery there; explicit scenario observations read that retained state. The entry remains until that world's injector is dropped; absent from product builds | test-only installed upload reply loss in `fault_injection/resource_upload_reply.rs` |
 | `FaultInjectionState::refused_resource_upload_starts` | Armed for one node before an upload; a testing build looks the node up once per upload installation that reaches its upload start, before the start is proposed, and records the delivery there; explicit scenario observations read that retained state. The entry remains until that world's injector is dropped; absent from product builds | test-only resource upload start refusal in `fault_injection/resource_upload_start.rs` |
-| `FaultInjectionState::command_reply_scripts` | Armed for one domain and exact query; testing session commands read that domain once after execution, substitute three bounded uncertainty causes and retain at most four execution references. Scenario observations read those references; the world's injector drop disposes the entry. Absent from ordinary builds | test-only command reply script in `fault_injection/command_reply.rs` |
+| `FaultInjectionState::command_reply_scripts` | Armed for one domain and exact query; testing session commands read that domain once after execution and either substitute three bounded uncertainty causes, retaining at most four execution references, or answer once with another execution's failure, retaining at most two. Scenario observations read those references; arming the domain again replaces its script, and the world's injector drop disposes the entry. Absent from ordinary builds | test-only command reply script in `fault_injection/command_reply.rs` |
 | Other `src/fault_injection.rs` maps, consensus `append_stream_counts`, the test DNS authority | test-only; the consensus probe counts each setup attempt and successful open and reads only for explicit harness observations. A failed-append fixture clones its consensus probe once when arming and once per explicit failure observation, releasing the registry guard before awaiting; submissions retain their scoped control and reach no map | test-only |
 
 A leader's transaction reconciliation takes one replicated snapshot for cleanup eligibility in
@@ -390,11 +390,13 @@ snapshot clone and before the pure eligibility decision. Replicated removal rech
 references when it applies. The pass reaches `transaction_bindings` only to remove the binding of
 a transaction it expires, a control-plane write. It no longer sweeps finished transactions: a
 finished transaction's binding stays with the session that holds it until that session's next
-request for the transaction is answered from the recorded outcome and releases it, that session
-attaches the transaction and finds it finished, the session closes, or leadership changes. An attach
+request for the transaction is answered from the recorded outcome and releases it, a COMMIT or
+REVERT finds its tombstone removed and releases it, that session attaches the transaction and finds
+it finished or unknown and releases it, the session closes, or leadership changes. An attach
 whose own touch finds the transaction finished, as when an overdue transaction expires at attach,
-removes the binding too. A session holds at most one binding, so the map stays bounded by live
-sessions. Retaining a tombstone does not retain a session binding.
+removes the binding too. Binding removal compares the bound session atomically with removal, so an
+earlier session cannot withdraw a later session's takeover. A session holds at most one binding,
+so the map stays bounded by live sessions. Retaining a tombstone does not retain a session binding.
 
 ### Rust client attachment recovery
 
