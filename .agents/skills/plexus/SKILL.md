@@ -229,6 +229,12 @@ flows retain command execution references, upload identities, transaction append
 commit identity through redirects or reconnects. Do not manufacture a new identity for an
 uncertain admitted operation.
 
+If a session's COMMIT, REVERT, or attach reports that its transaction is unknown after the retained
+tombstone is removed, that session can begin another transaction. Keep the original execution
+reference for any earlier command whose outcome is uncertain; the new failure does not identify
+that earlier outcome. Follow [Exact Recovery](https://docs.nervix.io/client-session-protocol.html#exact-recovery)
+for its recovery window and expiry.
+
 For storage failures or uncertain administrative outcomes, consult `Control Plane` → `Durability
 and recovery` before suggesting a retry, and
 [Exact Recovery](https://docs.nervix.io/client-session-protocol.html#exact-recovery) for how a retry

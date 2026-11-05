@@ -35,7 +35,7 @@ connected to leader 'node-2'
 ```
 
 The console reports the leader each time its session connects, so the notice appears again when
-the session reconnects: after a lost connection, after a command whose outcome is not yet known, or
+the session reconnects: after a lost connection, after a reply that breaks the session contract, or
 after a leader change. A reconnect keeps the session's place: the console connects again where the
 redirect took it, selects its domain, attaches its clock, restores its subscription tabs and
 attaches its transaction again, and then sends its pending commands under their execution
@@ -471,7 +471,12 @@ follows leadership. When its outcome is not known yet, the console repeats it on
 after a wait that starts at 250 milliseconds and doubles to at most five seconds. The command keeps
 its position ahead of later held commands, while session messages continue to arrive. The selected
 domain, clock and relay tabs keep their existing attachments. A redirect or an ended connection
-triggers recovery; an uncertain reply alone leaves the connection open. The transaction id and
+triggers recovery; an uncertain reply alone leaves the connection open. A reply whose outcome names
+another execution reference than its command's is a protocol violation: the console reports it with
+both references, takes nothing from that reply, neither its result nor its redirect, transaction or
+retry, and stops reading the connection. It reconnects as after a lost connection and sends the
+command again in its place under its own reference, so the leader answers with the command's own
+outcome; a Create form shows **Queued until reconnect** until then. The transaction id and
 status are replicated. If the WebSocket closes
 unexpectedly or leadership changes, the console reconnects and attaches that id before resuming a
 pending command. Each append is matched by its reference and expected position, and an outstanding
