@@ -1573,6 +1573,12 @@ again on that policy.
 
 ### RabbitMQ
 
+Choose `RABBITMQ QUEUE` to address a queue through the default exchange, or `RABBITMQ EXCHANGE`
+to let a named exchange route each message by its record's computed key. Provision the queue,
+exchange and bindings outside Nervix. Both entities share the client, publishing modes and envelope
+below; the [queue ingestor](ingestors.md#rabbitmq) consumes a bound queue and has its own
+consumer acknowledgement policy.
+
 <!-- connector-matrix:emit-rabbitmq-queue:start -->
 ```plexus,ignore
 CREATE RABBITMQ QUEUE EMITTER <name>
@@ -1656,6 +1662,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [RABBITMQ EXCHANGE capability and mirror reference](connector-capabilities.md#rabbitmq-exchange-emit).
 <!-- connector-matrix:emit-rabbitmq-exchange:end -->
 
+#### Destinations and routing
+
 `RABBITMQ QUEUE` is the default-exchange shorthand: `QUEUE` names an existing queue, and the
 emitter publishes each message to the broker's default exchange with the queue's name as its
 routing key, which routes it to that queue. The same case-preserving queue-name type is used for
@@ -1679,6 +1687,8 @@ the queues whose binding pattern matches it, and a fanout exchange to every boun
 the key. Records whose keys differ never share a [batch payload](#batch-payloads), so a batch
 message carries the one key its members share. `SHOW CREATE EMITTER` retains the exchange's name
 and the routing key's expression.
+
+#### Persistence, timestamp, properties and headers
 
 Both RabbitMQ entities accept `PERSISTENT`, then `MANDATORY`, then `TIMESTAMP <expression>`
 and `PROPERTIES { … }`, after `ENCODE USING` and before construction. `PERSISTENT` writes AMQP
@@ -1709,12 +1719,19 @@ printing its value. The registry checks exact types, nullability and sensitivity
 carries the original evaluated properties and timestamp. `write_header` remains separate: writing
 a header named `content_type` sets an AMQP table entry, not the basic `content_type` property.
 
+The header model is `sorted_by_name` with exact names, shared with the queue ingestor. Write each
+literal header name once: `CREATE` and `ALTER` refuse repeated names, and the AMQP table carries
+one value per exact name in ascending byte order. Header insertion order is not a transport
+contract. Neither a header nor a property reaches an output automatically; set every value the
+emitter should send explicitly.
+
 ```plexus,ignore
 CREATE RABBITMQ QUEUE EMITTER notifications FROM events
   TO broker QUEUE 'notifications'
   MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s
   ENCODE USING event_codec
   PERSISTENT
+  MANDATORY
   TIMESTAMP input.occurred_at
   PROPERTIES { 'content_type' = 'application/json', 'message_id' = input.id,
                'priority' = 5 AS U8 }
@@ -1727,6 +1744,8 @@ CREATE RABBITMQ QUEUE EMITTER notifications FROM events
 replaces the whole property set and `DROP PROPERTIES` clears it. Each operation preserves the other
 envelope fields. The same operations apply to an `EXCHANGE` emitter. `SHOW CREATE EMITTER` and
 `DESCRIBE EMITTER` show the configured envelope.
+
+#### Unroutable messages and publishing outcomes
 
 Nervix never declares an exchange or a binding. When an exchange emitter opens, it checks that its
 exchange exists with a passive declaration; while it is missing, the emitter stays unavailable with
@@ -1768,11 +1787,23 @@ fails the write, reported naming the key and its bound, and leaves the write's m
 retry, which reopens the emitter's connection first. Without `timeout_ms` the round trip waits as
 long as the connection lives.
 
+Publisher confirms establish the broker's acceptance, not that any consumer processed the
+message. `MANDATORY` checks routing, and `PERSISTENT` requests persistence; neither replaces
+publisher confirms or a durable destination. A transient message can be routed and confirmed
+without surviving a broker restart. A lost confirm or round-trip answer can cause a retry to
+repeat a message the broker already accepted, so consumers must tolerate duplicates.
+
 The broker's `max_message_size`, 16 MiB by default in RabbitMQ 4.x, bounds each message body;
 headers do not count. The broker closes the channel a larger body arrives on, and the emitter
 rejects that message through `ON MESSAGE ERROR` in either mode, instead of retrying it or
 acknowledging it, then keeps publishing on a new channel of the same connection; see
 [Broker and message emitters](#broker-and-message-emitters).
+
+#### Client connections and deadlines
+
+See the shared [RabbitMQ client contract](ingestors.md#rabbitmq-client) and
+[generated CONFIG key reference](connector-capabilities.md#rabbitmq-client) for address validation,
+mounted certificate files and mTLS. Both emitter entities use those same keys.
 
 The emitter resolves the host of the client's `addr` through the node's configured DNS resolver
 when it opens and whenever it reopens after a failed publish, so a changed DNS answer takes effect

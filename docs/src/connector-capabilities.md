@@ -154,7 +154,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | RABBITMQ QUEUE | Compare `RABBITMQ QUEUE`, `RABBITMQ EXCHANGE`: locator, options, modes, ingest metadata. A queue consumer acknowledges delivery tags on its channel; publishing waits for a channel answer or publisher confirmation. Both directions use the same quoted, case-preserving RabbitMQ queue names. |
+| Entity | RABBITMQ QUEUE | Compare `RABBITMQ QUEUE`, `RABBITMQ EXCHANGE`: locator, options, modes, ingest metadata. Consumption chooses automatic NO ACK or per-delivery acknowledgement with prefetch one under ACK SEQUENTIAL and MAX under ACK PARALLEL; prefetch is ingest-only and scoped to each instance. Queue publication uses the default exchange with the queue name as its routing key, and waits for a channel round trip under NO ACK or publisher confirms under ACK. PERSISTENT, MANDATORY, TIMESTAMP and PROPERTIES are emit-only; consumption reads the delivered envelope and properties through metadata. Both directions preserve quoted queue names and use sorted_by_name headers with exact names. |
 | Reference | RABBITMQ client |  |
 | Locator and validation rule | QUEUE 'orders' (rabbitmq_queue) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -400,7 +400,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | RABBITMQ QUEUE | Compare `RABBITMQ QUEUE`: options, modes, emit envelope/properties. A queue consumer acknowledges delivery tags on its channel; publishing waits for a channel answer or publisher confirmation. Both directions use the same quoted, case-preserving RabbitMQ queue names. |
+| Entity | RABBITMQ QUEUE | Compare `RABBITMQ QUEUE`: options, modes, emit envelope/properties. Consumption chooses automatic NO ACK or per-delivery acknowledgement with prefetch one under ACK SEQUENTIAL and MAX under ACK PARALLEL; prefetch is ingest-only and scoped to each instance. Queue publication uses the default exchange with the queue name as its routing key, and waits for a channel round trip under NO ACK or publisher confirms under ACK. PERSISTENT, MANDATORY, TIMESTAMP and PROPERTIES are emit-only; consumption reads the delivered envelope and properties through metadata. Both directions preserve quoted queue names and use sorted_by_name headers with exact names. |
 | Reference | RABBITMQ client |  |
 | Locator and validation rule | QUEUE 'orders' (rabbitmq_queue) |  |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -421,7 +421,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | RABBITMQ EXCHANGE | Compare `RABBITMQ QUEUE`: locator, options, modes, emit envelope/properties. No ingestor consumes an exchange: the exchange routes each message by the key its record computes to the queues bound to it, and a RABBITMQ QUEUE ingestor consumes one of those queues. Publishing waits for a channel answer or publisher confirmation, as it does for a queue. |
+| Entity | RABBITMQ EXCHANGE | Compare `RABBITMQ QUEUE`: locator, options, modes, emit envelope/properties. No ingestor consumes an exchange: provision its bindings and consume a bound queue with RABBITMQ QUEUE. ROUTING KEY and MANDATORY are emit-only: each record computes its routing key, and MANDATORY rejects an unroutable message instead of letting the broker drop it. Publication shares the queue emitter's modes, persistence, timestamp, properties and sorted_by_name headers with exact names; consumer prefetch belongs only to the queue ingestor. |
 | Reference | RABBITMQ client |  |
 | Locator and validation rule | EXCHANGE 'events' (rabbitmq_exchange) |  |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |

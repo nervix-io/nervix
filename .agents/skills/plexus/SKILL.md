@@ -43,15 +43,13 @@ For Pulsar source identity, keys, redelivery and event-time windows, read
 `TIMESTAMP AT metadata.event_time` or `TIMESTAMP AT metadata.publish_time` deliberately: an absent
 event time stays null, while an explicit epoch time is preserved.
 
-For RabbitMQ consumption choose `MODE NO ACK`, `MODE ACK SEQUENTIAL`, or
-`MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
-Parallel `MAX` is 1 through 65,535 and is the broker prefetch per instance. Each delivery settles
-on its own graph outcome. Automatic consumption has no prefetch or transport acknowledgement;
-work already accepted by the broker can be lost before the graph completes. Read the RabbitMQ
-Ingestors section for the exact clause order, host admission and recovery limits.
+For RabbitMQ consumption, read [Ingestors → RabbitMQ](../../../docs/src/ingestors.md#rabbitmq)
+before choosing a mode: consumer prefetch and per-delivery settlement differ from publisher
+confirms. Follow its metadata, sorted-header, recovery and shared client sections.
 For RabbitMQ publication, read [Emitters → RabbitMQ](../../../docs/src/emitters.md#rabbitmq) for
-`PERSISTENT`, `TIMESTAMP`, exact AMQP `PROPERTIES` types, targeted envelope alterations and the
-durable-queue requirement; property writes and `write_header` have different contracts.
+the queue/default-exchange and named-exchange choices, `MANDATORY`, persistence, exact AMQP
+`PROPERTIES` types and envelope alterations. Do not promise consumer completion from a publisher
+confirm or message durability from routing alone.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
