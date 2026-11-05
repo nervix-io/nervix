@@ -80,7 +80,11 @@ impl StateStore for RelativeStore<'_> {
                 .verified("DirectCell always supplies its current horizon")
                 .as_u64();
             // A horizon before now is fully replenished, so its relative debt is clamped to zero.
-            let relative = stored.saturating_sub(self.now);
+            let relative = nervix_primitives::expect_lint!(
+                nervix::clamped_arithmetic,
+                "a horizon at or before this admission has zero remaining allowance debt",
+                stored.saturating_sub(self.now)
+            );
             let (result, next) = f(Some(relative.into()))?;
             let absolute = self
                 .now

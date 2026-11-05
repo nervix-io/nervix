@@ -361,7 +361,9 @@ impl Limiter {
                 Store::Direct(cell) => {
                     let horizon = Duration::from_nanos(cell.horizon());
                     let remaining = if horizon > offset {
-                        Some(horizon.saturating_sub(offset))
+                        Some(horizon.checked_sub(offset).verified(
+                            "the retained horizon is later than this generation's offset",
+                        ))
                     } else {
                         None
                     };

@@ -86,7 +86,10 @@ impl KeyedStore {
 
     fn expire(&self, shard: &mut Shard, now: Duration) {
         while let Some((_, entry)) = shard.oldest() {
-            if now.saturating_sub(entry.last_seen) < self.options.ttl {
+            let age = now
+                .checked_sub(entry.last_seen)
+                .verified("the unit supplies nondecreasing offsets after restoring retained ages");
+            if age < self.options.ttl {
                 break;
             }
             shard
@@ -186,12 +189,16 @@ impl KeyedStore {
         let mut keys = Vec::new();
         for shard in &shards {
             for (key, entry) in shard.iter() {
-                let age = now.saturating_sub(entry.last_seen);
+                let age = now.checked_sub(entry.last_seen).verified(
+                    "the unit supplies nondecreasing offsets after restoring retained ages",
+                );
                 let horizon = Duration::from_nanos(entry.cell.horizon());
                 if age < self.options.ttl && horizon > now {
                     keys.push(crate::generation::KeyGeneration {
                         key: *key,
-                        remaining: horizon.saturating_sub(now),
+                        remaining: horizon
+                            .checked_sub(now)
+                            .verified("the retained horizon is later than this generation's now"),
                         age,
                         ordinal: entry.ordinal,
                     });
