@@ -810,6 +810,14 @@ fn ingestor_editor_shows_source_specific_fields_and_route_construction_sections(
                 "create-ingestor-queue-group",
             ),
             (
+                IngestorEntityKind::Nats(NatsIngestorEntity::Stream),
+                "create-ingestor-stream",
+            ),
+            (
+                IngestorEntityKind::Nats(NatsIngestorEntity::Stream),
+                "create-ingestor-consumer",
+            ),
+            (
                 IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue),
                 "create-ingestor-queue",
             ),

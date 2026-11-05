@@ -11,7 +11,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{CommandDisposition, CommandOutcome, OutcomeOrigin, UnknownOutcomeCause};
 use nervix_models::{ClusterNodeName, CommandExecutionReference, DomainName};
 use nervix_primitives::sync::oneshot;
-use nervix_server::{DomainResumeBoundary, FaultInjection};
+use nervix_server::{DomainResumeBoundary, FaultInjection, StandaloneTransactionBoundary};
 
 use super::command_probe::{
     CommandPause, CommandProbe, CommandProbes, CommandRefusalPhase, ProbeReply,
@@ -373,7 +373,13 @@ async fn released_pauses_do_not_become_later_commands_boundaries() {
         CommandPause::Finalization,
         CommandPause::ResponseDelivery,
         CommandPause::DomainResume(domain.clone(), DomainResumeBoundary::Proposal),
-        CommandPause::DomainResume(domain, DomainResumeBoundary::Failure),
+        CommandPause::DomainResume(domain.clone(), DomainResumeBoundary::Failure),
+        CommandPause::StandaloneTransaction(domain.clone(), StandaloneTransactionBoundary::Lookup),
+        CommandPause::StandaloneTransaction(
+            domain.clone(),
+            StandaloneTransactionBoundary::Preflight,
+        ),
+        CommandPause::StandaloneTransaction(domain, StandaloneTransactionBoundary::CommitFailure),
     ];
     for point in points {
         match &point {
@@ -390,6 +396,9 @@ async fn released_pauses_do_not_become_later_commands_boundaries() {
             }
             CommandPause::DomainResume(domain, boundary) => {
                 faults.pause_domain_resume(node.clone(), domain.clone(), *boundary);
+            }
+            CommandPause::StandaloneTransaction(domain, boundary) => {
+                faults.pause_standalone_transaction(node.clone(), domain.clone(), *boundary);
             }
         }
         probes.arm_pause(node.clone(), point.clone());

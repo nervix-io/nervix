@@ -17,7 +17,7 @@ use futures_util::{FutureExt as _, future::BoxFuture};
 use meticulous::OptionExt as _;
 use nervix_client_wire::{CommandDisposition, CommandOutcome, UnknownOutcomeCause};
 use nervix_models::{ClusterNodeName, CommandExecutionReference, DomainName};
-use nervix_server::{DomainResumeBoundary, FaultInjection};
+use nervix_server::{DomainResumeBoundary, FaultInjection, StandaloneTransactionBoundary};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum CommandRefusalPhase {
@@ -63,13 +63,17 @@ pub(crate) enum CommandPause {
     Finalization,
     ResponseDelivery,
     DomainResume(DomainName, DomainResumeBoundary),
+    StandaloneTransaction(DomainName, StandaloneTransactionBoundary),
 }
 
 impl CommandPause {
     fn observes(&self, outcome: &CommandOutcome) -> bool {
         let admitted = match self {
             Self::Admission | Self::ReferenceLookup | Self::ResponseDelivery => false,
-            Self::DurableAdmission | Self::Finalization | Self::DomainResume(_, _) => true,
+            Self::DurableAdmission
+            | Self::Finalization
+            | Self::DomainResume(_, _)
+            | Self::StandaloneTransaction(_, _) => true,
         };
         let unadmitted = matches!(
             outcome.disposition,
@@ -110,6 +114,11 @@ impl ArmedPause {
             CommandPause::DomainResume(domain, boundary) => {
                 faults
                     .wait_for_domain_resume_pause(&self.node, domain, *boundary)
+                    .await;
+            }
+            CommandPause::StandaloneTransaction(domain, boundary) => {
+                faults
+                    .wait_for_standalone_transaction_pause(&self.node, domain, *boundary)
                     .await;
             }
         }

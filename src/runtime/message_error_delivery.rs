@@ -698,19 +698,23 @@ mod tests {
                     0,
                     Vec::new(),
                     None,
-                    Arc::new(BranchPresence::new()),
+                    RelayBranchPresences::single(Arc::new(BranchPresence::new())),
                     nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
                 )),
             },
             flush_policy,
             pending: HashMap::default(),
         };
-        let owner_task = task.runtime.spawn_relay_owner_task(
-            &task.route.domain,
-            &task.route.error_relay,
-            task.target.services.clone(),
-            RelayRetention::default(),
-        );
+        let owner_task = task
+            .runtime
+            .spawn_relay_owner_task(
+                &task.route.domain,
+                &task.route.error_relay,
+                Unit::Single,
+                task.target.services.clone(),
+                RelayRetention::default(),
+            )
+            .expect("a whole relay schedules its single unit");
         (task, owner_task)
     }
 
@@ -897,16 +901,19 @@ mod tests {
                 0,
                 Vec::new(),
                 None,
-                Arc::new(BranchPresence::new()),
+                RelayBranchPresences::single(Arc::new(BranchPresence::new())),
                 nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
             )),
         };
-        let owner_task = runtime.spawn_relay_owner_task(
-            &domain,
-            &route.error_relay,
-            target.services.clone(),
-            RelayRetention::default(),
-        );
+        let owner_task = runtime
+            .spawn_relay_owner_task(
+                &domain,
+                &route.error_relay,
+                Unit::Single,
+                target.services.clone(),
+                RelayRetention::default(),
+            )
+            .expect("a whole relay schedules its single unit");
         let plan = test_plan(
             route,
             target,
@@ -961,16 +968,19 @@ mod tests {
                 0,
                 Vec::new(),
                 None,
-                Arc::new(BranchPresence::new()),
+                RelayBranchPresences::single(Arc::new(BranchPresence::new())),
                 nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
             )),
         };
-        let owner_task = runtime.spawn_relay_owner_task(
-            &domain,
-            &route.error_relay,
-            target.services.clone(),
-            RelayRetention::default(),
-        );
+        let owner_task = runtime
+            .spawn_relay_owner_task(
+                &domain,
+                &route.error_relay,
+                Unit::Single,
+                target.services.clone(),
+                RelayRetention::default(),
+            )
+            .expect("a whole relay schedules its single unit");
         let mut previous = test_plan(
             route.clone(),
             target.clone(),
@@ -1100,7 +1110,7 @@ mod tests {
                 0,
                 Vec::new(),
                 None,
-                Arc::new(BranchPresence::new()),
+                RelayBranchPresences::single(Arc::new(BranchPresence::new())),
                 nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
             )),
         };

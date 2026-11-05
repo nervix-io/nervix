@@ -71,6 +71,7 @@ mod materialized_reads;
 mod model_publication;
 mod pause;
 mod relay_memory;
+mod relay_partition_fanout;
 mod relocation_commit;
 mod resource_discovery;
 mod resource_publication;
@@ -100,6 +101,7 @@ pub use backup_cut::BackupCutBoundary;
 use backup_cut::{BackupCutGate, BackupCutGateKey};
 use command_pause_point::CommandPausePoint;
 use command_reply::CommandReplyScript;
+pub use command_reply::ForeignExecutionObservation;
 use domain_clock::DomainClockProgressPausePoint;
 pub use domain_resume::DomainResumeBoundary;
 use entity_drain::ForcedEntityDrainTimeout;
@@ -318,6 +320,13 @@ struct FaultInjectionState {
     relay_memory_owners: DashMap<ClusterNodeName, Executor, RandomState>,
     /// The owner pauses one buffered batch before it acquires a dispatch permit and loads routes.
     owner_relay_fanout_pauses: DashMap<String, Arc<TestPause>, RandomState>,
+    /// The owner of one partition of one relay pauses its first buffered batch the same way, while
+    /// the owners of the relay's other partitions fan out as usual.
+    owner_relay_partition_fanout_pauses: DashMap<
+        relay_partition_fanout::OwnerRelayPartitionFanoutPauseKey,
+        Arc<TestPause>,
+        RandomState,
+    >,
     /// The owner waits this long before it fans out each buffered batch of a domain's relays, so
     /// the rows its sources admitted reach their consumers slowly, as on a loaded node.
     owner_relay_fanout_delays: DashMap<String, Duration, RandomState>,
@@ -558,6 +567,7 @@ impl Default for FaultInjection {
                 relay_memory_fills: DashMap::default(),
                 relay_memory_owners: DashMap::default(),
                 owner_relay_fanout_pauses: DashMap::default(),
+                owner_relay_partition_fanout_pauses: DashMap::default(),
                 owner_relay_fanout_delays: DashMap::default(),
                 emitter_swap_after_detach_pauses: DashMap::default(),
                 ingestor_dispatch_pauses: DashMap::default(),

@@ -21,7 +21,7 @@ use nervix_models::{
     QuiescenceOutcome, RebuildImpact, RebuildReason, RelayName, RequestedResourceVersion,
     ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact, ResourceName, StatePurge,
     StateResetImpact, TransactionImpactReport, TransactionOperation, TransactionOperationNumber,
-    TransactionOperationRange, TransactionPosition,
+    TransactionOperationRange, TransactionPosition, Unit,
 };
 
 use crate::{
@@ -158,6 +158,7 @@ wire_enum!(ALL_MODEL_CHANGE_ASPECTS: ModelChangeAspect => wire::ModelChangeAspec
     EntityReplaced,
     EntityCreated,
     EntityDropped,
+    BranchPartitions,
 });
 
 /// Encodes a complete transaction impact report.
@@ -876,6 +877,7 @@ fn encode_ownership_move<'fbb>(
     encoder: &mut Encoder<'fbb>,
 ) -> Result<WIPOffset<wire::OwnershipMoveImpact<'fbb>>, Report<WireEncodeError>> {
     let node = encode_node_coverage(encoder, &impact.node)?;
+    let unit = encode_placement_unit(encoder, impact.unit);
     let source = encoder.text("OwnershipMoveImpact.source", impact.source.as_str())?;
     let destination = encoder.text(
         "OwnershipMoveImpact.destination",
@@ -890,6 +892,8 @@ fn encode_ownership_move<'fbb>(
         encoder.fbb(),
         &wire::OwnershipMoveImpactArgs {
             node: Some(node),
+            unit_type: unit.discriminant,
+            unit: Some(unit.value),
             source: Some(source),
             destination: Some(destination),
             operations: Some(operations),
@@ -902,6 +906,20 @@ fn decode_ownership_move(
     impact: wire::OwnershipMoveImpact<'_>,
 ) -> Result<OwnershipMoveImpact, Report<WireDecodeError>> {
     let node = decode_node_coverage(decoder, impact.node())?;
+    let unit = match impact.unit_type() {
+        wire::PlacementUnit::SingleUnit => Unit::Single,
+        wire::PlacementUnit::PartitionUnit => {
+            let partition = union_member(impact.unit_as_partition_unit());
+            Unit::Partition(partition.partition())
+        }
+        wire::PlacementUnit::InstanceUnit => {
+            let instance = union_member(impact.unit_as_instance_unit());
+            Unit::Instance(instance.instance())
+        }
+        undeclared => {
+            return Err(decoder.unknown_union("OwnershipMoveImpact.unit", undeclared.0));
+        }
+    };
     let source: ClusterNodeName = decoder.name("OwnershipMoveImpact.source", impact.source())?;
     let destination: ClusterNodeName =
         decoder.name("OwnershipMoveImpact.destination", impact.destination())?;
@@ -912,10 +930,32 @@ fn decode_ownership_move(
     )?;
     Ok(OwnershipMoveImpact {
         node,
+        unit,
         source,
         destination,
         attribution,
     })
+}
+
+/// The placement unit of a moved node, as the schema's union spells it.
+fn encode_placement_unit<'fbb>(
+    encoder: &mut Encoder<'fbb>,
+    unit: Unit,
+) -> EncodedUnion<wire::PlacementUnit> {
+    match unit {
+        Unit::Single => EncodedUnion::new(
+            wire::PlacementUnit::SingleUnit,
+            wire::SingleUnit::create(encoder.fbb(), &wire::SingleUnitArgs {}),
+        ),
+        Unit::Partition(partition) => EncodedUnion::new(
+            wire::PlacementUnit::PartitionUnit,
+            wire::PartitionUnit::create(encoder.fbb(), &wire::PartitionUnitArgs { partition }),
+        ),
+        Unit::Instance(instance) => EncodedUnion::new(
+            wire::PlacementUnit::InstanceUnit,
+            wire::InstanceUnit::create(encoder.fbb(), &wire::InstanceUnitArgs { instance }),
+        ),
+    }
 }
 
 fn encode_lifecycle_impact<'fbb>(

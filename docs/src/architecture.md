@@ -65,6 +65,13 @@ states the finite compiler rules and their supported effects.
 
 This graph configuration is persisted with strong control-plane consistency. It is separate from runtime execution state and from the hot-path records moving through the graph.
 
+The engines layer also contains `nervix-rate-limit`, a unit-owned allowance engine. It consumes
+validated quotas, per-payload costs and key fingerprints, and returns admission outcomes and
+clock-independent generations. It knows no Model, Plexus syntax, connector, graph or persistence
+policy. Governor owns GCRA arithmetic; the engine owns bounded stores, whole-payload refund and
+injected-time conversion. [Unit Allowance Transactions](./data-plane-concurrency.md#unit-allowance-transactions)
+defines its ownership and synchronization boundary.
+
 Before a transaction changes that graph, the control plane plans its ordered execution steps and
 their before/after affected topology. Its typed report separates required pause scopes from actual
 gate engagement and remains inspectable through commit and retention. [Transaction Quiescence And
