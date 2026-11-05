@@ -150,7 +150,7 @@ pub enum ClientError {
     #[error("session retry deadline expired")]
     RetryDeadline,
     /// The last server answer that still required repeating a command. It stays beneath the
-    /// uncertain command and above the deadline or failure that ended its retry.
+    /// uncertain command and above the retry deadline that ended its retry.
     #[error("last unresolved command answer was {disposition:?}: {message}")]
     LastUnresolvedAnswer {
         disposition: CommandDisposition,

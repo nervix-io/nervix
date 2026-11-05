@@ -639,8 +639,12 @@ impl Client {
                     && report.current_context().can_hide_admitted_work() =>
             {
                 let report = match last_unresolved_answer {
-                    Some(answer) => report.change_context(answer),
-                    None => report,
+                    Some(answer)
+                        if matches!(report.current_context(), ClientError::RetryDeadline) =>
+                    {
+                        report.change_context(answer)
+                    }
+                    _ => report,
                 };
                 return Err(report.change_context(ClientError::UncertainCommand {
                     reference: execution.reference.clone(),

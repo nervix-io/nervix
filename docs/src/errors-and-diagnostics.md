@@ -2560,7 +2560,7 @@ and the `BackupDownloadError` beneath `BackupDownload`. A failure that may hide 
 or an installed upload is `UncertainCommand` or `UncertainUpload` above the failure that left the
 outcome unknown. If the server answered a command with a disposition that required another attempt,
 `LastUnresolvedAnswer` holds the last such typed disposition and its public message between
-`UncertainCommand` and the deadline or failure that ended retrying. It does not replace the outer
+`UncertainCommand` and the retry deadline that ended retrying. It does not replace the outer
 uncertainty or turn the intermediate answer into a terminal outcome. A call its caller cancels
 through `execute_prepared_with_cancellation` ends with
 the server's `RequestCancelled` at `BeforeAdmission` for a command that never ran,
