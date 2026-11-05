@@ -69,6 +69,38 @@ pub(super) fn stream_body<'src>(
     )
 }
 
+/// One alteration to a NATS SUBJECT emitter's destination body.
+pub(super) fn subject_change<'src>()
+-> impl Parser<'src, &'src [Token], NatsSubjectEmitterChange, extra::Err<ParseError<'src>>> + Clone
+{
+    let subject = kw(Identifier::Subject)
+        .ignore_then(external_name::<NatsPublishSubjectName>())
+        .map(NatsSubjectEmitterChange::Subject);
+    let publishing = kw(Identifier::Mode)
+        .ignore_then(subject_mode())
+        .map(NatsSubjectEmitterChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((subject, publishing)))
+        .boxed()
+}
+
+/// One alteration to a NATS STREAM emitter's destination body.
+pub(super) fn stream_change<'src>()
+-> impl Parser<'src, &'src [Token], NatsStreamEmitterChange, extra::Err<ParseError<'src>>> + Clone {
+    let stream = kw(Identifier::Stream)
+        .ignore_then(external_name::<NatsStreamName>())
+        .map(NatsStreamEmitterChange::Stream);
+    let subject = kw(Identifier::Subject)
+        .ignore_then(external_name::<NatsPublishSubjectName>())
+        .map(NatsStreamEmitterChange::Subject);
+    let publishing = kw(Identifier::Mode)
+        .ignore_then(stream_mode())
+        .map(NatsStreamEmitterChange::Mode);
+    kw(Identifier::Set)
+        .ignore_then(choice((stream, subject, publishing)))
+        .boxed()
+}
+
 #[cfg(test)]
 mod tests {
     use nervix_models::{
@@ -77,7 +109,10 @@ mod tests {
     };
     use rstest::rstest;
 
-    use crate::conformance_support::{assert_offers_exactly, created_model, refused};
+    use crate::{
+        conformance_support::{assert_offers_exactly, created_model, refused},
+        emitter::parse_alter_emitter,
+    };
 
     const NO_ACK: &str = "NO ACK RETRY POLICY BACKOFF 250ms MAX 30s";
     const STREAM_ACK: &str = "ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s";
@@ -139,6 +174,22 @@ mod tests {
         let NatsStreamPublishingMode::Ack { ack_timeout, .. } = &stream.mode;
         assert_eq!(stream.stream.as_str(), "orders");
         assert_eq!(ack_timeout, "5s");
+    }
+
+    #[test]
+    fn stream_destination_changes_round_trip() {
+        let source = "ALTER NATS STREAM EMITTER publishing SET STREAM 'more', SET SUBJECT \
+                      'orders.more', SET MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF \
+                      250ms MAX 30s;";
+        let parsed = parse_alter_emitter(source).expect("stream destination changes should parse");
+        assert_eq!(parsed.operations.len(), 3);
+        let canonical = parsed
+            .to_canonical_plexus()
+            .expect("stream destination changes should render");
+        assert_eq!(
+            parse_alter_emitter(&canonical).expect("canonical stream changes should parse"),
+            parsed
+        );
     }
 
     #[test]

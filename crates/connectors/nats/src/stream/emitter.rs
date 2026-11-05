@@ -70,10 +70,14 @@ impl NatsStreamEmitter {
 
     pub async fn new(
         config: NatsStreamEmitterConfig,
-        _host: EmitterHost,
+        host: EmitterHost,
     ) -> EmitterStartResult<Self> {
-        let client =
-            NatsSubjectEmitter::client_from_config(&config.config, config.retry_policy).await?;
+        let client = NatsSubjectEmitter::client_from_config(
+            &host.executor(),
+            &config.config,
+            config.retry_policy,
+        )
+        .await?;
         let context = Self::context(&client, config.confirmation);
         if let Err(error) = context.get_stream(config.stream.as_str()).await {
             let kind = error.kind();
@@ -233,9 +237,13 @@ mod tests {
             key: "addr".to_owned(),
             value: addr.to_owned(),
         }];
-        let client = NatsSubjectEmitter::client_from_config(&config, policy)
-            .await
-            .expect("the emitter connects to the scripted server");
+        let client = NatsSubjectEmitter::client_from_config(
+            &nervix_execution::Executor::default(),
+            &config,
+            policy,
+        )
+        .await
+        .expect("the emitter connects to the scripted server");
         let confirmation = AckConfirmation {
             max_in_flight: NonZeroUsize::new(max_in_flight).expect("the window holds a record"),
             timeout: Duration::from_secs(5),

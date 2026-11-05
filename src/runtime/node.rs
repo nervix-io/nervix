@@ -210,10 +210,10 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) state_store: Option<Arc<RuntimeStateStore>>,
     /// The bounded disk incoming sealed snapshots land on before they are verified and opened.
     pub(in crate::runtime) snapshot_staging: SnapshotStaging,
-    pub(in crate::runtime) state_snapshot_interval: Duration,
+    pub(in crate::runtime) construction_parameters:
+        nervix_primitives::sync::blocking::OnceLock<nervix_models::ClusterParameterRecord>,
+    pub(in crate::runtime) cluster_parameters: ArcSwap<nervix_models::ClusterParameterValues>,
     pub(in crate::runtime) state_replication_poll_interval: Duration,
-    pub(in crate::runtime) domain_drain_timeout: Duration,
-    pub(in crate::runtime) entity_gate_deadline: Duration,
     pub(in crate::runtime) temp_dir: PathBuf,
     /// The node's bounded execution and transient-memory admission. Every variable-size encode,
     /// decode, validation and hash the runtime performs is submitted through it, so none of them

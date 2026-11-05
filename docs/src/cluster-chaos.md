@@ -1857,7 +1857,9 @@ paths, each with its own attached Kafka emitter and output topic:
 - **The junction `chaos_life_enrich`.** It reads the branch's row of the materialized relay
   `chaos_life_profiles` with `REQUIRED WAIT`. A profile ingestor fills that relay from
   `chaos_life_profile_input` with `TIMESTAMP AT updated_at`, so the run chooses each row's
-  timestamp, and `LAST BY TIMESTAMP` keeps a branch's row only for a strictly newer one.
+  timestamp, and `LAST BY TIMESTAMP` keeps a branch's row only for a strictly newer one. The
+  JSON wire schema declares `updated_at string`; its codec declares
+  `ENCODE updated_at AS RFC3339` to bind that text to the internal `DATETIME` field.
 - **The generator `chaos_life_generator`.** It emits each branch's materialized row every second.
 - **The detached window `chaos_life_window`.** It aggregates each branch's records in tumbling
   six-second windows: their count, bounds and sum, an `APPROX_COUNT_DISTINCT` of the index modulo 3,
@@ -3088,3 +3090,26 @@ stopped scheduling runs on 29 October 2026:
   `e69c0801`. Twelve combined runs lost 20.2% of 4,800 packets, at least 64 of 400 against the
   floor of 20, and four random-loss runs lost 30.3% of 1,600, at least 99 against 30. All 16 runs
   passed, and each sample took 5.0 seconds, against 4.9 for 40 lossy packets.
+
+
+### Committed Parameter Policy In The Harness
+
+The baseline and fresh-restore Compose projects launch every node with local prerequisites and
+capabilities. After the cluster is ready, the controller applies its requested replica count,
+snapshot interval, node-unavailability timeout and command retry validity through one Plexus
+`ALTER CLUSTER SET` command and retains its transcript. Before graph installation, the controller
+waits for a public `DESCRIBE CLUSTER` observation in which every expected node has installed the
+complete committed record at the same positive revision. It keeps the description and its checked
+projection as `public/cluster-parameters.txt` and `public/cluster-parameters.json`; the fresh cluster
+has its own capture. The projection preserves revision identities as decimal strings and retains
+every parameter value, including compound duration text. An incomplete, repeated or inconsistent
+publication fails the observation.
+
+Each pause round captures that policy before selecting its fault target. The pause verifier checks
+the selected node's installed unavailability timeout against the experiment and checks its local
+heartbeat in the Docker inspection. Domain-time and whole-cluster restart reports capture the
+installed policy after recovery. A mixed run records requested cluster parameters separately from
+node-local Raft prerequisites in its replay deployment. Restarts and later joins retain the
+committed record and pass no parameter seeds. Stateful checkpoint observations use the installed
+snapshot interval. [Node Settings](node-settings.md#committed-parameter-changes) owns the seed and
+parameter-change contract.

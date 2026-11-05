@@ -437,7 +437,7 @@ class InventoryTests(unittest.TestCase):
         for index, group in enumerate(identities):
             for other in identities[index + 1:]:
                 self.assertTrue(group.isdisjoint(other))
-        self.assertEqual([sum(scenario.runs for scenario in group) for group in groups], [242, 10, 6])
+        self.assertEqual([sum(scenario.runs for scenario in group) for group in groups], [258, 10, 6])
         for invocation, group in zip(phases, groups, strict=True):
             registered = inventory.workloads_of(invocation.id, "deloxide-stress")
             self.assertEqual(deloxide_lane.scenario_problems(invocation, registered, group), [])
@@ -468,8 +468,8 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(len(order_only), 9)
         self.assertEqual(
             list(inventory.invocations),
-            ["probes", "primitive-conformance", "owner-tests", "scenarios", "paced-simulation",
-             "stress-transaction-retention", "stress-scenarios", "stress-endpoint-acknowledgement", "stress-paced-simulation", "stress-restore-scenarios"],
+            ["rate-limit-store", "probes", "primitive-conformance", "owner-tests", "scenarios", "paced-simulation",
+             "stress-transaction-retention", "stress-scenarios", "stress-endpoint-acknowledgement", "stress-paced-simulation", "stress-restore-scenarios", "cluster-parameters"],
         )
         for name in ("scenarios", "paced-simulation"):
             self.assertEqual(inventory.invocations[name].selections, {"deloxide", "deloxide-order"})
@@ -577,7 +577,7 @@ class InventoryTests(unittest.TestCase):
                     self.assertEqual(counterpart.invariant, workload.invariant)
                     self.assertTrue(counterpart.coverage.startswith("Under scheduling stress: "))
         self.assertEqual(set(stressed), expected)
-        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-scenarios", "deloxide-stress")), 242)
+        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-scenarios", "deloxide-stress")), 258)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-transaction-retention", "deloxide-stress")), 6)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-endpoint-acknowledgement", "deloxide-stress")), 10)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-paced-simulation", "deloxide-stress")), 36)
@@ -1167,7 +1167,7 @@ class LaneTests(unittest.TestCase):
         self.assertEqual([(stage["name"], stage["duration_seconds"]) for stage in stages], [("build", 630.0), ("workloads", 0.0)])
         self.assertTrue(all(stage["verdict"] == "complete" for stage in stages))
 
-    def test_the_paced_driver_build_uses_the_build_stage_and_keeps_its_binding_path(self) -> None:
+    def test_the_paced_driver_build_uses_the_build_stage_and_keeps_its_python_interpreter(self) -> None:
         fixture = Fixture(self, INVENTORY.replace('tags = ["@lane"]', 'tags = ["@lane"]\ndriver = "nervix-paced-simulation"'))
         processes = ScriptedProcesses(fixture.root)
         lane = fixture.lane(processes)
@@ -1176,7 +1176,7 @@ class LaneTests(unittest.TestCase):
         self.assertLess(names.index("nervix-paced-simulation-build"), names.index("probes"))
         scenario = processes.launches[-1]
         self.assertEqual(scenario.environment["NERVIX_PACED_SIMULATION_PATH"], str(processes.executable("driver")))
-        self.assertEqual(scenario.environment["NERVIX_CLIENT_LIBRARY"], str(fixture.target / "debug/libnervix_client_ffi.so"))
+        self.assertEqual(scenario.environment["NERVIX_PACED_SIMULATION_PYTHON"], str(fixture.target / "paced-simulation/python/bin/python"))
 
     def test_a_build_measurement_runs_no_workload_and_cannot_qualify_as_one(self) -> None:
         processes = ScriptedProcesses(self.fixture.root)

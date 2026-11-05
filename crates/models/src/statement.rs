@@ -12,12 +12,12 @@
 )]
 
 use std::{
-    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     ops::{Deref, DerefMut},
 };
 
-use error_stack::Report;
-use meticulous::OptionExt as _;
+use error_stack::{Report, ResultExt as _};
+use meticulous::{OptionExt as _, ResultExt as _};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumIter, EnumProperty, EnumString, IntoEnumIterator, IntoStaticStr};
@@ -41,13 +41,14 @@ use crate::{
     ProcessorOutput, ProcessorOutputs, RebindResource, ReingestorName, RelayName, ReordererName,
     RequestedResourceVersion, ResetWasmState, ResourceName, Restore, SchemaName,
     SignalingProtocolName, SubscriptionName, Timestamp, TransactionInspectionRequest, UdfName,
-    UserName, VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
+    Unit, UserName, VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
 };
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum Statement {
+    AlterCluster(crate::AlterCluster),
     CreateDomain(CreateStatement<CreateDomain>),
     AlterDomain(AlterDomain),
     CreateUser(CreateStatement<CreateUser>),
@@ -108,6 +109,7 @@ pub enum Statement {
     DescribeTransaction(DescribeTransaction),
     DescribeCluster(DescribeCluster),
     DescribeClient(DescribeClient),
+    AlterBranch(AlterBranch),
 }
 
 impl Statement {
@@ -141,9 +143,11 @@ impl Statement {
             | Self::AlterReingestor(_)
             | Self::AlterGenerator(_)
             | Self::AlterPlacement(_)
+            | Self::AlterBranch(_)
             | Self::RebindResource(_)
             | Self::Drop(_) => true,
-            Self::CreateDomain(_)
+            Self::AlterCluster(_)
+            | Self::CreateDomain(_)
             | Self::AlterDomain(_)
             | Self::CreateUser(_)
             | Self::CreateResource(_)
@@ -1732,9 +1736,13 @@ pub struct CodecEncodingRule {
     Archive,
     RkyvSerialize,
     RkyvDeserialize,
+    AsRefStr,
+    EnumIter,
 )]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum CodecEncoding {
     Rfc3339,
+    Base64,
 }
 
 #[derive(
@@ -1900,8 +1908,42 @@ pub struct CreateBranch {
     pub eviction: Option<BranchEviction>,
 }
 
-/// The positive number of independently placed parts of a branch. Current Plexus constructs one
-/// direct part; the language does not yet accept a partition clause.
+impl CreateBranch {
+    pub fn apply_alter(
+        &mut self,
+        alter: &AlterBranch,
+    ) -> error_stack::Result<(), AlterBranchError> {
+        if self.name != alter.branch {
+            return Err(Report::new(AlterBranchError::BranchNameMismatch {
+                stored: self.name.clone(),
+                requested: alter.branch.clone(),
+            }));
+        }
+
+        let mut candidate = self.clone();
+        for operation in &alter.operations {
+            candidate.apply_alter_operation(operation);
+        }
+        *self = candidate;
+        Ok(())
+    }
+
+    fn apply_alter_operation(&mut self, operation: &AlterBranchOperation) {
+        match operation {
+            AlterBranchOperation::SetPartitions { partitions } => {
+                self.partitions = *partitions;
+            }
+        }
+    }
+}
+
+/// The positive number of independently placed parts of a branch: `PARTITIONS n` on its
+/// declaration, and one when the declaration writes no count.
+///
+/// A concrete key lands in partition `seed mod n` of its branch, where the seed is read from the
+/// key's fingerprint, so every node places a key in the same partition without coordinating. Every
+/// relay the branch branches has one placement unit per partition, which the scheduler places and
+/// every node addresses, so the count is a 16-bit value: a branch has at most 65,535 partitions.
 #[derive(
     Debug,
     Clone,
@@ -1915,11 +1957,105 @@ pub struct CreateBranch {
     RkyvDeserialize,
 )]
 pub enum BranchPartitions {
-    Direct(NonZeroU32),
+    Direct(NonZeroU16),
 }
 
 impl BranchPartitions {
-    pub const ONE: Self = Self::Direct(NonZeroU32::MIN);
+    pub const ONE: Self = Self::Direct(NonZeroU16::MIN);
+
+    /// The declared number of partitions.
+    pub const fn count(self) -> NonZeroU16 {
+        match self {
+            Self::Direct(count) => count,
+        }
+    }
+
+    /// Whether the branch is divided into several partitions.
+    pub const fn is_partitioned(self) -> bool {
+        self.count().get() > 1
+    }
+
+    /// The units a relay of this branch is scheduled as: the one `Single` unit every graph without
+    /// partitions has for a branch of one partition, and one `Partition` unit per partition
+    /// otherwise, in partition order.
+    pub fn units(self) -> Vec<Unit> {
+        if !self.is_partitioned() {
+            return vec![Unit::Single];
+        }
+        let count = self.count().get();
+        (0..count)
+            .map(|partition| Unit::Partition(u32::from(partition)))
+            .collect()
+    }
+
+    /// The unit that owns a key whose seed is `seed`: the `Single` unit of a branch of one
+    /// partition, and `Partition(seed mod n)` of a branch of n partitions.
+    pub fn unit_of(self, seed: PartitionSeed) -> Unit {
+        if !self.is_partitioned() {
+            return Unit::Single;
+        }
+        let count = u64::from(self.count().get());
+        let partition = seed.get() % count;
+        Unit::Partition(
+            u32::try_from(partition)
+                .assured("a remainder modulo a 16-bit count is below that count"),
+        )
+    }
+}
+
+/// The 64-bit seed a concrete branch key is partitioned by: the first eight bytes of the key's
+/// fingerprint, read little-endian.
+///
+/// It depends on the key's fields alone, never on the branch, relay or domain a key appears in, so
+/// every node reads the same seed for the same key and a key lands in the same partition of every
+/// relay its branch branches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PartitionSeed(u64);
+
+impl PartitionSeed {
+    pub const fn from_le_bytes(bytes: [u8; 8]) -> Self {
+        Self(u64::from_le_bytes(bytes))
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// `ALTER BRANCH <name> <operation>, …`: changes the declaration of an existing branch.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct AlterBranch {
+    pub branch: BranchName,
+    pub operations: Vec<AlterBranchOperation>,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum AlterBranchOperation {
+    /// `SET PARTITIONS n`. The registry accepts it only while the branch's domain is stopped.
+    SetPartitions { partitions: BranchPartitions },
+}
+
+impl AlterBranch {
+    /// Whether this alteration changes the branch's partition count, which only a stopped domain
+    /// accepts.
+    pub fn sets_partitions(&self) -> bool {
+        self.operations
+            .iter()
+            .any(|operation| matches!(operation, AlterBranchOperation::SetPartitions { .. }))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AlterBranchError {
+    #[error("ALTER targets branch `{requested}`, but the stored branch is `{stored}`")]
+    BranchNameMismatch {
+        stored: BranchName,
+        requested: BranchName,
+    },
 }
 
 #[derive(
@@ -1990,6 +2126,7 @@ pub enum ResolvedBranching {
     Branched {
         branch: BranchName,
         schema: CreateSchema,
+        partitions: BranchPartitions,
     },
 }
 
@@ -1998,14 +2135,40 @@ impl ResolvedBranching {
         Self::Unbranched
     }
 
-    pub fn branched(branch: BranchName, schema: CreateSchema) -> Self {
-        Self::Branched { branch, schema }
+    pub fn branched(
+        branch: BranchName,
+        schema: CreateSchema,
+        partitions: BranchPartitions,
+    ) -> Self {
+        Self::Branched {
+            branch,
+            schema,
+            partitions,
+        }
     }
 
     pub fn branch(&self) -> Option<&BranchName> {
         match self {
             Self::Unbranched => None,
             Self::Branched { branch, .. } => Some(branch),
+        }
+    }
+
+    /// The partitions of the branch, when the declaration is branched.
+    pub fn partitions(&self) -> Option<BranchPartitions> {
+        match self {
+            Self::Unbranched => None,
+            Self::Branched { partitions, .. } => Some(*partitions),
+        }
+    }
+
+    /// The units a relay of this declaration is scheduled as: one `Single` unit when it is
+    /// unbranched or its branch has one partition, and one `Partition` unit per partition
+    /// otherwise.
+    pub fn units(&self) -> Vec<Unit> {
+        match self {
+            Self::Unbranched => vec![Unit::Single],
+            Self::Branched { partitions, .. } => partitions.units(),
         }
     }
 
@@ -2075,15 +2238,26 @@ impl CreateIngestor {
     }
 
     /// Applies the operations of an alteration of a transport's pair in order.
-    pub(crate) fn apply_transport_operations<Operation>(
+    pub(crate) fn apply_transport_operations<Source>(
         &mut self,
-        operations: &[Operation],
+        operations: &[AlterTransportIngestorOperation<Source>],
     ) -> error_stack::Result<(), AlterIngestorError>
     where
-        Operation: crate::connector::TransportIngestorOperation,
+        Source: crate::connector::AlteredIngestorEntity,
     {
         for operation in operations {
-            operation.apply_to(self)?;
+            match operation {
+                AlterTransportIngestorOperation::Ingestor(operation) => {
+                    self.apply_operation(operation)?;
+                }
+                AlterTransportIngestorOperation::SetDecodeUsing { codec } => {
+                    let held = self
+                        .input
+                        .codec_mut()
+                        .verified(crate::connector::ALTERED_PAIR_CHECKED);
+                    *held = codec.clone();
+                }
+            }
         }
         Ok(())
     }
@@ -2113,6 +2287,20 @@ impl CreateIngestor {
             AlterIngestorOperation::SetSource { source } => {
                 source.set_into(&mut self.input);
             }
+            AlterIngestorOperation::Change { change } => {
+                crate::IngestorEntityChange::apply_to(
+                    change,
+                    Source::entity_of_mut(&mut self.input),
+                )?;
+            }
+            AlterIngestorOperation::SetClient { client } => {
+                let Some(held) = Source::client_of_mut(&mut self.input) else {
+                    return Err(Report::new(AlterIngestorError::ClientUnsupported {
+                        kind: Source::KIND,
+                    }));
+                };
+                *held = client.clone();
+            }
             AlterIngestorOperation::SetQuiesce { quiesce } => {
                 Source::set_quiesce_of(&mut self.input, quiesce.clone())?;
             }
@@ -2141,6 +2329,15 @@ impl CreateIngestor {
             AlterIngestorOperation::ReplaceRoute { route } => {
                 let index = self.unique_route_index(&route.relay)?;
                 self.output_routes.routes[index] = route.clone();
+            }
+            AlterIngestorOperation::AlterRoute { relay, alteration } => {
+                let index = self.unique_route_index(relay)?;
+                self.output_routes.routes[index]
+                    .construction
+                    .apply_alteration(alteration)
+                    .change_context(AlterIngestorError::RouteConstruction {
+                        relay: relay.clone(),
+                    })?;
             }
             AlterIngestorOperation::SetGeneralError { policy } => {
                 self.general_error_policy = policy.clone();
@@ -2191,21 +2388,52 @@ impl AlterIngestor {
 }
 
 /// One operation every ingestor accepts, whose `SET FROM` states a source of the entity
-/// `Source`.
+/// `Source` and whose changes are that entity's own.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub enum AlterIngestorOperation<Source> {
-    SetSource { source: Source },
-    SetQuiesce { quiesce: IngestQuiesceMode },
-    SetTimestamp { source: IngestTimestampSource },
+pub enum AlterIngestorOperation<Source: crate::IngestorEntityModel> {
+    SetSource {
+        source: Source,
+    },
+    /// `SET MODE`, `SET <locator>`, `SET <option>` or `DROP <option>`, as the entity's own grammar
+    /// writes it, changing that part of the body and leaving the rest as it was.
+    Change {
+        change: Source::Change,
+    },
+    /// `SET CLIENT <client>`: the client the source reads through.
+    SetClient {
+        client: ClientName,
+    },
+    SetQuiesce {
+        quiesce: IngestQuiesceMode,
+    },
+    SetTimestamp {
+        source: IngestTimestampSource,
+    },
     DropTimestamp,
-    SetFilterWhere { where_clause: crate::Expression },
+    SetFilterWhere {
+        where_clause: crate::Expression,
+    },
     DropFilterWhere,
-    AddRoute { route: ProcessorOutput },
-    DropRoute { relay: RelayName },
-    ReplaceRoute { route: ProcessorOutput },
-    SetGeneralError { policy: GeneralErrorPolicy },
+    AddRoute {
+        route: ProcessorOutput,
+    },
+    DropRoute {
+        relay: RelayName,
+    },
+    ReplaceRoute {
+        route: ProcessorOutput,
+    },
+    /// `ALTER ROUTE TO <relay> <alteration>`: changes the construction of the one route to `relay`
+    /// where it stands.
+    AlterRoute {
+        relay: RelayName,
+        alteration: crate::ConstructionAlteration,
+    },
+    SetGeneralError {
+        policy: GeneralErrorPolicy,
+    },
 }
 
 /// One operation of an ingestor that reads a transport: an operation every ingestor accepts, or
@@ -2213,7 +2441,7 @@ pub enum AlterIngestorOperation<Source> {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub enum AlterTransportIngestorOperation<Source> {
+pub enum AlterTransportIngestorOperation<Source: crate::IngestorEntityModel> {
     /// Boxed because a shared operation can carry a whole route, which would otherwise size every
     /// codec operation like one.
     Ingestor(Box<AlterIngestorOperation<Source>>),
@@ -2222,41 +2450,11 @@ pub enum AlterTransportIngestorOperation<Source> {
     },
 }
 
-impl<Source> From<AlterIngestorOperation<Source>> for AlterTransportIngestorOperation<Source> {
+impl<Source: crate::IngestorEntityModel> From<AlterIngestorOperation<Source>>
+    for AlterTransportIngestorOperation<Source>
+{
     fn from(operation: AlterIngestorOperation<Source>) -> Self {
         Self::Ingestor(Box::new(operation))
-    }
-}
-
-impl<Source> crate::connector::TransportIngestorOperation
-    for AlterTransportIngestorOperation<Source>
-where
-    Source: crate::connector::AlteredIngestorEntity + crate::canonical::IngestorBodyPlexus,
-{
-    fn apply_to(
-        &self,
-        ingestor: &mut CreateIngestor,
-    ) -> error_stack::Result<(), AlterIngestorError> {
-        match self {
-            Self::Ingestor(operation) => ingestor.apply_operation(operation)?,
-            Self::SetDecodeUsing { codec } => {
-                let held = ingestor
-                    .input
-                    .codec_mut()
-                    .verified(crate::connector::ALTERED_PAIR_CHECKED);
-                *held = codec.clone();
-            }
-        }
-        Ok(())
-    }
-
-    fn to_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
-        match self {
-            Self::Ingestor(operation) => {
-                crate::canonical::alter_ingestor_operation_to_plexus(operation)
-            }
-            Self::SetDecodeUsing { codec } => Ok(format!("SET DECODE USING {}", codec.as_str())),
-        }
     }
 }
 
@@ -2295,6 +2493,15 @@ pub enum AlterIngestorError {
         kind: crate::IngestorEntityKind,
         mode: &'static str,
     },
+    #[error("{kind} ingestors read through no client, so SET CLIENT has none to change")]
+    ClientUnsupported { kind: crate::IngestorEntityKind },
+    #[error("the stored {kind} ingestor writes no {option}, so there is no {option} to drop")]
+    OptionNotWritten {
+        kind: crate::IngestorEntityKind,
+        option: &'static str,
+    },
+    #[error("ALTER ROUTE TO `{relay}` cannot change that route's construction")]
+    RouteConstruction { relay: RelayName },
 }
 
 #[derive(

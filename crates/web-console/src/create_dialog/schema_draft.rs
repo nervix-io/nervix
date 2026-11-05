@@ -13,7 +13,7 @@
 
 use std::{
     collections::BTreeSet,
-    num::{NonZeroU32, NonZeroU64},
+    num::{NonZeroU16, NonZeroU32, NonZeroU64},
 };
 
 use error_stack::Report;
@@ -191,7 +191,34 @@ impl SchemaDraft {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum WireFieldType {
     Json(JsonType),
+    Cbor(CborType),
     Avro(AvroType),
+}
+
+impl WireFieldType {
+    fn json(self) -> Option<JsonType> {
+        if let Self::Json(ty) = self {
+            Some(ty)
+        } else {
+            None
+        }
+    }
+
+    fn cbor(self) -> Option<CborType> {
+        if let Self::Cbor(ty) = self {
+            Some(ty)
+        } else {
+            None
+        }
+    }
+
+    fn avro(self) -> Option<AvroType> {
+        if let Self::Avro(ty) = self {
+            Some(ty)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -276,68 +303,51 @@ impl WireSchemaDraft {
         if self.fields.is_empty() {
             return Err(Report::new(SchemaDraftError::FieldsRequired));
         }
-        let mut names = BTreeSet::new();
         match format {
-            WireFormat::Json | WireFormat::Cbor => {
-                let mut fields = Vec::<WireSchemaField<CborType>>::with_capacity(self.fields.len());
-                for (index, draft) in self.fields.iter().enumerate() {
-                    let field = index + 1;
-                    let field_name = FieldName::parse(draft.name.trim()).map_err(|cause| {
-                        cause.change_context(SchemaDraftError::FieldName { field })
-                    })?;
-                    if !names.insert(field_name.clone()) {
-                        return Err(Report::new(SchemaDraftError::DuplicateField {
-                            name: field_name,
-                        }));
-                    }
-                    let Some(WireFieldType::Json(ty)) = draft.ty else {
-                        return Err(Report::new(SchemaDraftError::FieldTypeRequired { field }));
-                    };
-                    fields.push(WireSchemaField {
-                        name: field_name,
-                        ty,
-                        optional: draft.optional,
-                    });
-                }
-                let schema = CreateWireSchema {
-                    name,
-                    strictness,
-                    fields,
-                };
-                if format == WireFormat::Json {
-                    Ok(Model::WireJsonSchema(schema))
-                } else {
-                    Ok(Model::WireCborSchema(schema))
-                }
-            }
-            WireFormat::Avro => {
-                let mut fields = Vec::with_capacity(self.fields.len());
-                for (index, draft) in self.fields.iter().enumerate() {
-                    let field = index + 1;
-                    let field_name = FieldName::parse(draft.name.trim()).map_err(|cause| {
-                        cause.change_context(SchemaDraftError::FieldName { field })
-                    })?;
-                    if !names.insert(field_name.clone()) {
-                        return Err(Report::new(SchemaDraftError::DuplicateField {
-                            name: field_name,
-                        }));
-                    }
-                    let Some(WireFieldType::Avro(ty)) = draft.ty else {
-                        return Err(Report::new(SchemaDraftError::FieldTypeRequired { field }));
-                    };
-                    fields.push(WireSchemaField {
-                        name: field_name,
-                        ty,
-                        optional: draft.optional,
-                    });
-                }
-                Ok(Model::WireAvroSchema(CreateWireSchema {
-                    name,
-                    strictness,
-                    fields,
-                }))
-            }
+            WireFormat::Json => Ok(Model::WireJsonSchema(CreateWireSchema {
+                name,
+                strictness,
+                fields: self.build_fields(WireFieldType::json)?,
+            })),
+            WireFormat::Cbor => Ok(Model::WireCborSchema(CreateWireSchema {
+                name,
+                strictness,
+                fields: self.build_fields(WireFieldType::cbor)?,
+            })),
+            WireFormat::Avro => Ok(Model::WireAvroSchema(CreateWireSchema {
+                name,
+                strictness,
+                fields: self.build_fields(WireFieldType::avro)?,
+            })),
         }
+    }
+
+    fn build_fields<T>(
+        &self,
+        extract: impl Fn(WireFieldType) -> Option<T>,
+    ) -> error_stack::Result<Vec<WireSchemaField<T>>, SchemaDraftError> {
+        let mut names = BTreeSet::new();
+        let mut fields = Vec::with_capacity(self.fields.len());
+        for (index, draft) in self.fields.iter().enumerate() {
+            let field = index + 1;
+            let name = FieldName::parse(draft.name.trim())
+                .map_err(|cause| cause.change_context(SchemaDraftError::FieldName { field }))?;
+            if !names.insert(name.clone()) {
+                return Err(Report::new(SchemaDraftError::DuplicateField { name }));
+            }
+            let Some(written) = draft.ty else {
+                return Err(Report::new(SchemaDraftError::FieldTypeRequired { field }));
+            };
+            let Some(ty) = extract(written) else {
+                return Err(Report::new(SchemaDraftError::FieldTypeRequired { field }));
+            };
+            fields.push(WireSchemaField {
+                name,
+                ty,
+                optional: draft.optional,
+            });
+        }
+        Ok(fields)
     }
 }
 
@@ -361,15 +371,32 @@ fn remove_item<T>(items: &mut Vec<T>, index: usize) {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct BranchDraft {
     pub(super) name: String,
     pub(super) if_not_exists: bool,
     /// A changed domain keeps the prior reference visible until it is reselected.
     pub(super) schema: Option<SelectedReference<SchemaName>>,
     pub(super) ttl: String,
+    /// The partition count as typed; a new draft starts at the single partition every branch
+    /// has when its declaration writes no count.
+    pub(super) partitions: String,
     pub(super) limit_instances: bool,
     pub(super) max_instances: String,
+}
+
+impl Default for BranchDraft {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            if_not_exists: false,
+            schema: None,
+            ttl: String::new(),
+            partitions: nervix_models::BranchPartitions::ONE.count().to_string(),
+            limit_instances: false,
+            max_instances: String::new(),
+        }
+    }
 }
 
 impl BranchDraft {
@@ -409,6 +436,11 @@ impl BranchDraft {
         if ttl.is_empty() {
             return Err(Report::new(SchemaDraftError::TtlRequired));
         }
+        let partitions = self
+            .partitions
+            .trim()
+            .parse::<NonZeroU16>()
+            .map_err(|cause| Report::new(cause).change_context(SchemaDraftError::Partitions))?;
         let eviction = if self.limit_instances {
             let max_instances =
                 self.max_instances
@@ -425,7 +457,7 @@ impl BranchDraft {
             name,
             schema: schema.clone(),
             ttl: ttl.to_string(),
-            partitions: nervix_models::BranchPartitions::ONE,
+            partitions: nervix_models::BranchPartitions::Direct(partitions),
             eviction,
         })
     }
@@ -457,6 +489,8 @@ pub(super) enum SchemaDraftError {
     SchemaReferenceChanged,
     #[error("Branch TTL is required")]
     TtlRequired,
+    #[error("Partitions must be a whole number from 1 through 65535")]
+    Partitions,
     #[error("Maximum instances must be a positive integer")]
     MaxInstances,
 }
@@ -562,8 +596,11 @@ mod tests {
     fn each_wire_format_builds_its_own_model_with_every_type() {
         for format in [WireFormat::Json, WireFormat::Cbor, WireFormat::Avro] {
             let types = match format {
-                WireFormat::Json | WireFormat::Cbor => JsonType::iter()
+                WireFormat::Json => JsonType::iter()
                     .map(WireFieldType::Json)
+                    .collect::<Vec<_>>(),
+                WireFormat::Cbor => CborType::iter()
+                    .map(WireFieldType::Cbor)
                     .collect::<Vec<_>>(),
                 WireFormat::Avro => AvroType::iter()
                     .map(WireFieldType::Avro)
@@ -593,7 +630,7 @@ mod tests {
                     assert_eq!(schema.fields.len(), JsonType::iter().count())
                 }
                 (WireFormat::Cbor, Model::WireCborSchema(schema)) => {
-                    assert_eq!(schema.fields.len(), JsonType::iter().count())
+                    assert_eq!(schema.fields.len(), CborType::iter().count())
                 }
                 (WireFormat::Avro, Model::WireAvroSchema(schema)) => {
                     assert_eq!(schema.fields.len(), AvroType::iter().count())
@@ -636,6 +673,36 @@ mod tests {
         assert_canonical_round_trip(Model::Branch(model), false);
         branch.max_instances = "0".to_string();
         assert_eq!(draft_error(branch.build()), SchemaDraftError::MaxInstances);
+    }
+
+    #[test]
+    fn branch_partitions_default_to_one_and_keep_the_typed_count() {
+        let schema = SchemaName::parse("branch_key").assured("the test name is valid");
+        let mut branch = BranchDraft {
+            name: "by_key".to_string(),
+            schema: Some(SelectedReference::chosen(schema)),
+            ttl: "5m".to_string(),
+            ..BranchDraft::default()
+        };
+        assert_eq!(branch.partitions, "1");
+        let model = branch
+            .build()
+            .assured("a new draft declares the default single partition");
+        assert_eq!(model.partitions, nervix_models::BranchPartitions::ONE);
+
+        branch.partitions = " 4 ".to_string();
+        let model = branch.build().assured("four partitions are a valid count");
+        assert_eq!(model.partitions.count().get(), 4);
+        assert_canonical_round_trip(Model::Branch(model), false);
+
+        for invalid in ["0", "65536", "", "four", "-1"] {
+            branch.partitions = invalid.to_string();
+            assert_eq!(
+                draft_error(branch.build()),
+                SchemaDraftError::Partitions,
+                "{invalid:?} is not a partition count"
+            );
+        }
     }
 
     #[test]

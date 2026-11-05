@@ -4,8 +4,9 @@
 //!
 //! - **Owns.** The NATS client Model, the subject and stream source and emitter Models with their delivery
 //!   mode, the subject and queue group names a source subscribes with and the rules NATS holds
-//!   them to, the stream source Model with the stream and durable consumer names it reads and the
-//!   rules JetStream holds them to, and what each entity declares.
+//!   them to, the stream source Model with the stream and durable consumer names it reads and
+//!   Nervix's one implementation of nats-server 2.11's rule for a JetStream stream or consumer
+//!   name, and what each entity declares.
 //!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared source and emitter declarations and the names a body references.
 //! - **Must not know.** The NATS driver, or how a subject is subscribed or
@@ -45,18 +46,24 @@ configured_client!(Nats: unpooled, config CLIENT_CONFIG, CreateClientNats => Nat
 
 /// The current keys this connector reads, shared by validation, completion and inspection.
 const CLIENT_CONFIG: crate::ClientConfigSchema = {
-    use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    use crate::{
+        ClientConfigFile as F, ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V,
+    };
     ClientConfigSchema::new(
         &[
             K::required("addr", V::DriverAddress),
+            K::optional("credentials_file", V::File(F::MountedFile)).secret(),
+            K::optional("nkey_seed", V::String).secret(),
             K::TIMEOUT,
             K::TLS_CA,
             K::TLS_CERT,
             K::TLS_KEY,
+            K::optional("token", V::String).secret(),
         ],
         &[],
         &[],
     )
+    .with_mutually_exclusive(&["credentials_file", "nkey_seed", "token"])
 };
 
 /// The longest subject Nervix subscribes to, in bytes.
@@ -132,9 +139,15 @@ fn nats_queue_group_rule(text: &str) -> Result<(), ExternalNameError> {
     refuse_whitespace(text)
 }
 
-/// The rule a JetStream server holds a stream or consumer name to: it names a subject token of the
-/// JetStream API and a directory of the server's store, so it holds no subject separator or
-/// wildcard and no path separator.
+/// The rule nats-server 2.11 holds a JetStream stream or consumer name to: 1 to 255 bytes, its
+/// `JSMaxNameLen`, with no subject separator or wildcard, because the name is a subject token of
+/// the JetStream API, and no path separator, because it names a directory of the server's store.
+/// Like every NATS name here, it also holds no whitespace or control character, which the server
+/// refuses only in part. Each refusal is a typed [`ExternalNameError`].
+///
+/// This is Nervix's one implementation of that rule: the vocabulary cannot depend on the NATS
+/// client, whose own check refuses only part of it, and the connector's tests hold this rule to
+/// that check.
 fn nats_jetstream_name_rule(text: &str) -> Result<(), ExternalNameError> {
     require_length(text, NATS_JETSTREAM_NAME_MAX)?;
     refuse_whitespace(text)?;
@@ -301,6 +314,10 @@ impl IngestorEntityBody for NatsSubjectIngestor {
         IngestorReference::Client(&self.client)
     }
 
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
+    }
+
     fn quiesce(&self) -> &IngestQuiesceMode {
         &self.quiesce
     }
@@ -326,6 +343,50 @@ impl NatsIngestMode {
         match self {
             Self::NoAck => IngestAcknowledgement::Unacknowledged,
         }
+    }
+}
+
+/// One change an `ALTER NATS SUBJECT INGESTOR` writes to the body of the ingestor it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum NatsSubjectIngestorChange {
+    /// `SET SUBJECT '<subject>'`.
+    Subject(NatsSubjectName),
+    /// `SET QUEUE GROUP '<group>'`.
+    QueueGroup(NatsQueueGroupName),
+    /// `SET MODE <mode>`.
+    Mode(NatsIngestMode),
+}
+
+impl crate::IngestorEntityChange for NatsSubjectIngestorChange {
+    type Entity = NatsSubjectIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut NatsSubjectIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Subject(subject) => entity.subject = subject.clone(),
+            Self::QueueGroup(group) => entity.queue_group = group.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Subject(subject) => {
+                format!("SET SUBJECT {}", crate::string_literal(subject.as_str()))
+            }
+            Self::QueueGroup(group) => {
+                format!("SET QUEUE GROUP {}", crate::string_literal(group.as_str()))
+            }
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
     }
 }
 
@@ -432,6 +493,10 @@ impl IngestorEntityBody for NatsStreamIngestor {
         IngestorReference::Client(&self.client)
     }
 
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
+    }
+
     fn quiesce(&self) -> &IngestQuiesceMode {
         &self.quiesce
     }
@@ -487,6 +552,50 @@ impl NatsStreamIngestMode {
     }
 }
 
+/// One change an `ALTER NATS STREAM INGESTOR` writes to the body of the ingestor it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum NatsStreamIngestorChange {
+    /// `SET STREAM '<stream>'`.
+    Stream(NatsStreamName),
+    /// `SET CONSUMER '<consumer>'`.
+    Consumer(NatsConsumerName),
+    /// `SET MODE <mode>`.
+    Mode(NatsStreamIngestMode),
+}
+
+impl crate::IngestorEntityChange for NatsStreamIngestorChange {
+    type Entity = NatsStreamIngestor;
+
+    fn apply_to(
+        &self,
+        entity: &mut NatsStreamIngestor,
+    ) -> error_stack::Result<(), crate::AlterIngestorError> {
+        match self {
+            Self::Stream(stream) => entity.stream = stream.clone(),
+            Self::Consumer(consumer) => entity.consumer = consumer.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Stream(stream) => {
+                format!("SET STREAM {}", crate::string_literal(stream.as_str()))
+            }
+            Self::Consumer(consumer) => {
+                format!("SET CONSUMER {}", crate::string_literal(consumer.as_str()))
+            }
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
+    }
+}
+
 connector_ingestors! {
     connector Nats = "NATS";
     /// What a NATS source reads.
@@ -495,8 +604,8 @@ connector_ingestors! {
     pub enum NatsSubjectIngestorAlteration;
     /// The entities a NATS source reads.
     pub enum NatsIngestorEntity {
-        Subject(NatsSubjectIngestor) = "SUBJECT", "NATS";
-        Stream(NatsStreamIngestor) = "STREAM", "NATS JetStream";
+        Subject(NatsSubjectIngestor => NatsSubjectIngestorChange) = "SUBJECT", "NATS";
+        Stream(NatsStreamIngestor => NatsStreamIngestorChange) = "STREAM", "NATS JetStream";
     }
 }
 
@@ -595,16 +704,90 @@ impl EmitterEntityBody for NatsSubjectEmitter {
     }
 }
 
+/// One change an `ALTER NATS SUBJECT EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum NatsSubjectEmitterChange {
+    /// `SET SUBJECT '<name>'`.
+    Subject(NatsPublishSubjectName),
+    /// `SET MODE <mode>`.
+    Mode(NatsSubjectPublishingMode),
+}
+
+impl crate::EmitterEntityChange for NatsSubjectEmitterChange {
+    type Entity = NatsSubjectEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut NatsSubjectEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Subject(name) => entity.subject = name.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Subject(name) => format!("SET SUBJECT {}", crate::string_literal(name.as_str())),
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
+/// One change an `ALTER NATS STREAM EMITTER` writes to its destination body.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum NatsStreamEmitterChange {
+    /// `SET STREAM '<name>'`.
+    Stream(NatsStreamName),
+    /// `SET SUBJECT '<name>'`.
+    Subject(NatsPublishSubjectName),
+    /// `SET MODE <mode>`.
+    Mode(NatsStreamPublishingMode),
+}
+
+impl crate::EmitterEntityChange for NatsStreamEmitterChange {
+    type Entity = NatsStreamEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut NatsStreamEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Stream(name) => entity.stream = name.clone(),
+            Self::Subject(name) => entity.subject = name.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Stream(name) => format!("SET STREAM {}", crate::string_literal(name.as_str())),
+            Self::Subject(name) => format!("SET SUBJECT {}", crate::string_literal(name.as_str())),
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector Nats = "NATS";
     /// What a NATS emitter writes.
     pub enum NatsEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum NatsEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum NatsEmitterChange;
     /// The entities a NATS emitter writes.
     pub enum NatsEmitterEntity {
-        Subject(NatsSubjectEmitter, NatsSubjectPublishingMode) = "SUBJECT";
-        Stream(NatsStreamEmitter, NatsStreamPublishingMode) = "STREAM";
+        Subject(NatsSubjectEmitter, NatsSubjectPublishingMode, NatsSubjectEmitterChange) = "SUBJECT";
+        Stream(NatsStreamEmitter, NatsStreamPublishingMode, NatsStreamEmitterChange) = "STREAM";
     }
 }
 

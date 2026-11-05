@@ -202,6 +202,29 @@ fn http_alter_emitter_roundtrips_both_explicit_body_selections() {
 }
 
 #[test]
+fn an_http_emitter_moves_to_without_body_and_drops_its_inheritance_in_one_alter() {
+    let mut emitter = parse_create_emitter(
+        "CREATE HTTP REQUEST EMITTER send FROM source TO api METHOD 'POST' PATH '/events' MODE \
+         ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING body_codec INHERIT ALL FLUSH \
+         IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+    )
+    .expect("an encoded HTTP request emitter parses")
+    .body;
+    let alter = parse_alter_emitter(
+        "ALTER HTTP REQUEST EMITTER send SET TO api METHOD 'POST' PATH '/events' MODE ACK RETRY \
+         POLICY BACKOFF 250ms MAX 30s WITHOUT BODY, DROP INHERIT;",
+    )
+    .expect("a bodyless replacement followed by a construction change parses");
+
+    emitter
+        .apply_alter(&alter)
+        .expect("both operations apply to the stored emitter");
+
+    assert_eq!(emitter.body, EmitterBody::WithoutBody);
+    assert_eq!(emitter.construction.inherit, None);
+}
+
+#[test]
 fn http_request_expressions_keep_clause_words_inside_qualified_fields_and_groups() {
     let source = "CREATE HTTP REQUEST EMITTER send FROM source TO api METHOD input.path PATH \
                   coalesce(input.mode, 'MODE ACK') MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s \
@@ -456,9 +479,12 @@ fn parses_alter_emitter_direct_emitter_values_and_iceberg_commit_policy() {
     .expect("Iceberg commit policy should parse");
     assert_eq!(
         iceberg.operations,
-        vec![AlterEmitterOperation::SetCommit {
-            commit_each: "30s".to_string(),
-            max_commit_size: "64MiB".parse().expect("valid commit size"),
+        vec![AlterEmitterOperation::Change {
+            change: IcebergTableEmitterChange::CommitEach {
+                commit_each: "30s".to_string(),
+                max_commit_size: "64MiB".parse().expect("valid commit size"),
+            }
+            .into(),
         }]
     );
 
@@ -813,10 +839,10 @@ fn parses_alter_emitter_publishing_and_attachment_modes() {
 
     assert!(matches!(
         parsed.operations[0],
-        AlterEmitterOperation::SetPublishingMode {
-            mode: EmitterModeChange::Kafka(KafkaTopicEmitterMode::Topic(
+        AlterEmitterOperation::Change {
+            change: EmitterChange::Kafka(KafkaEmitterChange::Topic(KafkaTopicEmitterChange::Mode(
                 KafkaTopicPublishingMode::Ack { .. }
-            ))
+            )))
         }
     ));
     assert!(matches!(
@@ -840,9 +866,9 @@ fn parses_alter_emitter_publishing_and_attachment_modes() {
     .expect("request/response ACK mode should parse without a confirmation window");
     assert!(matches!(
         request_ack.operations.as_slice(),
-        [AlterEmitterOperation::SetPublishingMode {
-            mode: EmitterModeChange::Postgres(PostgresTableEmitterMode::Table(
-                PostgresTablePublishingMode::Ack { .. }
+        [AlterEmitterOperation::Change {
+            change: EmitterChange::Postgres(PostgresEmitterChange::Table(
+                PostgresTableEmitterChange::Mode(PostgresTablePublishingMode::Ack { .. })
             ))
         }]
     ));
@@ -1658,11 +1684,7 @@ fn rejects_batch_limits_outside_their_range() {
     for (clause, diagnostic) in [
         (
             "BATCH MAX MESSAGES 0 MAX SIZE 1MiB",
-            "BATCH MAX MESSAGES must be between 1 and 65536, found 0",
-        ),
-        (
-            "BATCH MAX MESSAGES 65537 MAX SIZE 1MiB",
-            "BATCH MAX MESSAGES must be between 1 and 65536, found 65537",
+            "BATCH MAX MESSAGES must be between 1 and 4294967295, found 0",
         ),
         (
             "BATCH MAX MESSAGES 10 MAX SIZE 0B",

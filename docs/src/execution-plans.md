@@ -48,8 +48,8 @@ apply anything. The revision holds:
 Each scheduled node owns a map of `Unit::Single`, `Unit::Partition(p)`, or `Unit::Instance(i)`
 placements. The unit carries its primary, assigned nodes, ownership transition, and WASM guest
 generations. The revision and planned resource assignments preserve those unit keys, and schedule
-reassignments name the node and unit together. Current graphs emit one `Single` unit for each node;
-the branch Model records one direct partition while the language has no partition syntax.
+reassignments name the node and unit together. A relay branched by a branch of several partitions
+emits one `Partition` unit per partition, and every other node emits one `Single` unit.
 
 The source digest identifies which schedule produced the installed revision. A planned change
 also carries its predecessor digest, so an incremental application is attempted only when the
@@ -69,6 +69,9 @@ The WebSockets connection plan carries a validated `WebsocketsUpgradeHeaders` co
 its resolved client and signaling reference. Validation and planning both preserve a typed refusal
 if literal fields violate HTTP bounds or protocol-owned names. Runtime composition passes the
 validated collection directly to the connector; it does not read or reinterpret the source Model.
+Registry admission and parameter transitions check the canonical collection against committed
+header caps. Plan conversion retains physical representation bounds without imposing fixed
+defaults on an already admitted model.
 
 Process startup has an earlier registry path: `RuntimeChanges` carries each recovered active graph
 inside the registry and application boundary. Before runtime application, it projects that graph
@@ -101,6 +104,11 @@ without normalization. Iceberg resolves its configured storage
 client into the S3, GCS or Azure Blob backend while constructing this plan; the runtime receives
 that resolved backend and never infers it from the statement or location.
 
+NATS ingestor composition binds the node executor into its connector plan, and its emitter uses
+the executor supplied by the emitter host. Both authenticate through the same options owner;
+mounted credentials reads take filesystem worker admission and charge their temporary bytes
+before allocation. A connector creates no independent executor at startup or reconnect.
+
 The registry establishes batching legality and direct-mapping key and type contracts from each
 entity's vocabulary declaration before planning. A emitter that requires `BATCH` therefore receives
 the already-validated batch configuration; planning does not maintain another required-batching
@@ -117,11 +125,13 @@ configuration. HTTP and WebSockets endpoint plans remain distinct entities while
 host's intake lifetime mechanism. Labels are derived from declarations and retained at plan/start
 time, without an allocation per published batch.
 
-An HTTP polling leaf carries the statement's validated method, its headers, each a literal or a
-client secret reference, and its effective response size limit together with its cadence and client
-reference. Runtime composition resolves the client's mount and node DNS handle once, then passes
-those typed values to the connector, which reads each referenced secret from the client's resolved
-configuration when it opens.
+An HTTP polling leaf carries the validated method, header declarations with literal values or
+client-secret keys, and effective response size limit together with its cadence and client reference.
+Runtime composition resolves the client's mount and node DNS handle once and captures the current
+HTTP header caps. When it opens, the connector reads each referenced secret from the client's
+resolved configuration and checks the complete resolved headers against those caps before opening
+a request, retaining sensitivity on secret values. Polling never reads a configuration Model to
+recover the method or the policy.
 
 An Iceberg plan carries the statement's validated catalog namespace with its table identity.
 Local opening uses exactly those namespace levels, independently of the Nervix domain name.
@@ -175,8 +185,9 @@ it reports the complete error chain and retries on the admission loop's half-sec
 when neither committed value changes. A new schedule or domain update wakes it sooner. Each attempt
 reads the current coherent state through the same admission and installation sequence; it does not
 replay a captured failed revision or issue another configuration command. Successful installation
-waits for the next committed update without periodic application. Shutdown ends a pending retry
-wait.
+waits for the next committed update without periodic application. The callback retains its local
+parameter-notice observation across awaits and announces each installed revision once, after
+successful application. Shutdown ends a pending retry wait.
 
 Forced-recovery preparation subscribes to domain installation before checking for its execution,
 and takes the runtime's application sequence while selecting that execution. This waits for a
@@ -275,6 +286,9 @@ The swap sequence fences delivery before stopping an owner, prepares new local p
 programs, replaces relay owner and remote-consumer edges, and publishes the routing snapshot
 before waking materialized-state waiters. An owner that still executes locally across a placement
 change keeps its task; a moved owner rebinds only its affected runtime and state placement. A
+partition a node keeps owning keeps its owner task, while its relay-state task restarts around the
+rebinding with the originator the new assignment issued, as
+[Materialized relay entries](data-plane-concurrency.md#materialized-relay-entries) describes. A
 reassignment rebinds the replicated state of every node it names, so a Kafka ingestor kept this way
 takes the originator its domain offsets' new binding issued: a change that only replaces a replica
 of those offsets never refuses the ingestor's commits. An ingestor instance the schedule stopped
@@ -477,3 +491,11 @@ branch eviction and unit, entity or domain teardown retire those
 routes before removing registry entries. Frame handlers read the immutable route publication;
 announcers and entity catch-up tasks retain their route or lifecycle and never revisit execution
 or identity registries. See [Data-Plane Concurrency](./data-plane-concurrency.md#checkpoint-replication).
+
+## Parameter Revisions
+
+A coherent consensus runtime snapshot carries its committed parameter record alongside schedules
+and domains. A node installs that policy before constructing its execution revision and reporting
+prepared/ready. A returning node fences this step with the live revision used at construction and
+verifies equal values as it catches up. It does not activate a locally stored graph before that
+boundary. Policy installation changes no placement identity, stored state generation or ACK owner.

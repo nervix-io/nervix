@@ -117,8 +117,14 @@ impl ProbeRuntime {
             Self::Java => {
                 let mut command = Command::new("java");
                 command
-                    .arg("--enable-native-access=ALL-UNNAMED")
-                    .arg(sources.join("java/Probe.java"));
+                    .arg("-Xcheck:jni")
+                    .arg("-cp")
+                    .arg(format!(
+                        "{}:{}",
+                        Self::artifacts()?.join("java/nervix-client.jar").display(),
+                        Self::artifacts()?.join("java/probe").display()
+                    ))
+                    .arg("Probe");
                 command
             }
             Self::Ruby => {
@@ -174,13 +180,15 @@ impl ProbeRuntime {
     /// Whether the probe loads the C ABI of the shared Rust binding, which it is told the path of.
     fn loads_binding(self) -> bool {
         match self {
-            Self::C | Self::Cpp | Self::Java | Self::Ruby => true,
-            Self::CAbiInProcess | Self::Python | Self::Go | Self::Node | Self::Bun => false,
+            Self::C | Self::Cpp | Self::Ruby => true,
+            Self::CAbiInProcess | Self::Python | Self::Java | Self::Go | Self::Node | Self::Bun => {
+                false
+            }
         }
     }
 
     /// Whether the probe drives the Rust client through the shared binding, in process, through
-    /// its C ABI or through the Python package, and so reaches the domain clock events and the
+    /// its C ABI or through the Python or JNI package, and so reaches the domain clock events and the
     /// producer and consumer handles the binding exposes.
     fn drives_binding(self) -> bool {
         match self {

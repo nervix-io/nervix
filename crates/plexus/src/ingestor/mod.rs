@@ -36,18 +36,19 @@ use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
     AlterIngestor, AlterIngestorOperation, AlterTransportIngestorOperation, ClientProducerIngestor,
-    CreateIngestor, CreateStatement, GeneralErrorPolicy, IngestTimestampSource, IngestorAlteration,
-    IngestorEntity, IngestorEntityKind, IngestorEntityModel, IngestorInput, IngestorName,
+    CreateIngestor, CreateStatement, IngestTimestampSource, IngestorAlteration, IngestorEntity,
+    IngestorEntityKind, IngestorEntityModel, IngestorInput, IngestorName, IngestorReferenceKind,
     ShowIngestors, TransportIngestorInput,
 };
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, alter_ingestor_route_body,
-        alter_op_separator, boxed_choice, codec_ref, field_ref, filter_where_clause,
-        flushed_ingestor_outputs, general_error_policy, if_not_exists_clause, ingestor_name,
-        into_parse_error, kw, kw_phrase2, lex_input, relay_ref, suggest_from, tok,
+        ConstructionChanges, LexedInput, ParseError, ParseFromSourceError,
+        alter_ingestor_route_body, alter_op_separator, boxed_choice, client_ref, codec_ref,
+        construction_alteration, field_ref, filter_where_clause, flushed_ingestor_outputs,
+        general_error_policy, if_not_exists_clause, ingestor_name, into_parse_error, kw,
+        kw_phrase2, lex_input, relay_ref, set_general_error_policy, suggest_from, tok,
         where_expression,
     },
 };
@@ -203,15 +204,17 @@ pub fn create_ingestor_parser<'src>()
         .boxed()
 }
 
-/// The operations every ingestor accepts whatever it reads.
+/// The operations every ingestor accepts whatever it reads: a quiesce mode its entity declares, the
+/// client where it reads through one, its timestamp, filter, routes and general error policy.
 fn shared_operation<'src, S>()
 -> impl Parser<'src, &'src [Token], AlterIngestorOperation<S>, extra::Err<ParseError<'src>>> + Clone
 where
-    S: Clone + 'src,
+    S: IngestorEntityModel + Clone + 'src,
 {
+    let capabilities = S::KIND.capabilities();
     let set_quiesce = kw(Identifier::Set)
         .ignore_then(kw(Identifier::Quiesce))
-        .ignore_then(delivery::alter_quiesce_body())
+        .ignore_then(delivery::declared_quiesce_body(capabilities.quiesce))
         .map(|quiesce| AlterIngestorOperation::SetQuiesce { quiesce });
     let set_timestamp = kw(Identifier::Set)
         .ignore_then(timestamp_source())
@@ -240,27 +243,35 @@ where
         .ignore_then(kw(Identifier::Route))
         .ignore_then(alter_ingestor_route_body())
         .map(|route| AlterIngestorOperation::ReplaceRoute { route });
-    let set_general_error = kw(Identifier::Set)
-        .ignore_then(kw(Identifier::General))
-        .then_ignore(kw(Identifier::Error))
-        .ignore_then(choice((
-            kw(Identifier::Ignore).to(GeneralErrorPolicy::Ignore),
-            kw(Identifier::Log).to(GeneralErrorPolicy::Log),
-        )))
-        .map(|policy| AlterIngestorOperation::SetGeneralError { policy });
+    let alter_route = kw_phrase2(Identifier::Alter, Identifier::Route)
+        .ignore_then(kw(Identifier::To))
+        .ignore_then(relay_ref())
+        .then(construction_alteration(ConstructionChanges::Every))
+        .map(|(relay, alteration)| AlterIngestorOperation::AlterRoute { relay, alteration });
+    let set_general_error =
+        set_general_error_policy().map(|policy| AlterIngestorOperation::SetGeneralError { policy });
 
-    choice((
-        set_quiesce,
-        set_timestamp,
-        drop_timestamp,
-        set_filter,
-        drop_filter,
-        add_route,
-        drop_route,
-        replace_route,
-        set_general_error,
-    ))
-    .boxed()
+    let mut operations = vec![
+        set_quiesce.boxed(),
+        set_timestamp.boxed(),
+        drop_timestamp.boxed(),
+        set_filter.boxed(),
+        drop_filter.boxed(),
+        add_route.boxed(),
+        drop_route.boxed(),
+        replace_route.boxed(),
+        alter_route.boxed(),
+        set_general_error.boxed(),
+    ];
+    if let IngestorReferenceKind::Client(_) = capabilities.reference {
+        operations.push(
+            kw_phrase2(Identifier::Set, Identifier::Client)
+                .ignore_then(client_ref())
+                .map(|client| AlterIngestorOperation::SetClient { client })
+                .boxed(),
+        );
+    }
+    choice(operations).boxed()
 }
 
 /// `SET FROM <body>`, which reads only the body of the pair the head names.
@@ -268,7 +279,7 @@ fn set_source<'src, S, P>(
     body: P,
 ) -> impl Parser<'src, &'src [Token], AlterIngestorOperation<S>, extra::Err<ParseError<'src>>> + Clone
 where
-    S: Clone + 'src,
+    S: IngestorEntityModel + Clone + 'src,
     P: Parser<'src, &'src [Token], S, extra::Err<ParseError<'src>>> + Clone + 'src,
 {
     kw(Identifier::Set)
@@ -278,12 +289,25 @@ where
         .boxed()
 }
 
+/// One change the pair's own grammar writes: `SET MODE`, a locator, or an option it declares.
+fn entity_change<'src, S, C>(
+    change: C,
+) -> impl Parser<'src, &'src [Token], AlterIngestorOperation<S>, extra::Err<ParseError<'src>>> + Clone
+where
+    S: IngestorEntityModel + Clone + 'src,
+    C: Parser<'src, &'src [Token], S::Change, extra::Err<ParseError<'src>>> + Clone + 'src,
+{
+    change
+        .map(|change| AlterIngestorOperation::Change { change })
+        .boxed()
+}
+
 /// `SET DECODE USING <codec>`, which only a transport's ingestor has.
 fn set_decode<'src, S>()
 -> impl Parser<'src, &'src [Token], AlterTransportIngestorOperation<S>, extra::Err<ParseError<'src>>>
 + Clone
 where
-    S: Clone + 'src,
+    S: IngestorEntityModel + Clone + 'src,
 {
     kw(Identifier::Set)
         .ignore_then(kw_phrase2(Identifier::Decode, Identifier::Using))
@@ -318,38 +342,35 @@ where
         .boxed()
 }
 
-/// The alteration of a transport's ingestor, whose `SET FROM` reads `body`.
-fn transport_alteration<'src, S, P>(
+/// The alteration of a transport's ingestor, whose `SET FROM` reads `body` and whose own changes
+/// `change` reads.
+fn transport_alteration<'src, S, P, C>(
     body: P,
+    change: C,
 ) -> impl Parser<'src, &'src [Token], AlterIngestor, extra::Err<ParseError<'src>>> + Clone
 where
     S: IngestorEntityModel + Clone + 'src,
     Vec<AlterTransportIngestorOperation<S>>: Into<IngestorAlteration>,
     P: Parser<'src, &'src [Token], S, extra::Err<ParseError<'src>>> + Clone + 'src,
+    C: Parser<'src, &'src [Token], S::Change, extra::Err<ParseError<'src>>> + Clone + 'src,
 {
-    alteration::<S, _, _>(transport_operation(body))
-}
-
-/// The shared operations of a transport ingestor; an entity may compose typed options with them.
-fn transport_operation<'src, S, P>(
-    body: P,
-) -> impl Parser<'src, &'src [Token], AlterTransportIngestorOperation<S>, extra::Err<ParseError<'src>>>
-+ Clone
-where
-    S: IngestorEntityModel + Clone + 'src,
-    P: Parser<'src, &'src [Token], S, extra::Err<ParseError<'src>>> + Clone + 'src,
-{
-    choice((
+    let operation = choice((
         set_source(body).map(AlterTransportIngestorOperation::from),
         set_decode(),
+        entity_change(change).map(AlterTransportIngestorOperation::from),
         shared_operation().map(AlterTransportIngestorOperation::from),
-    ))
+    ));
+    alteration::<S, _, _>(operation)
 }
 
 /// The alteration of a client ingestor, which decodes nothing and so has no codec to set.
 fn client_alteration<'src>()
 -> impl Parser<'src, &'src [Token], AlterIngestor, extra::Err<ParseError<'src>>> + Clone {
-    let operation = choice((set_source(client::producer_body()), shared_operation()));
+    let operation = choice((
+        set_source(client::producer_body()),
+        entity_change(client::change()),
+        shared_operation(),
+    ));
     alteration::<ClientProducerIngestor, _, _>(operation)
 }
 
@@ -357,21 +378,24 @@ pub fn alter_ingestor_parser<'src>()
 -> impl Parser<'src, &'src [Token], AlterIngestor, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Alter)
         .ignore_then(boxed_choice!(
-            transport_alteration(http::request_body()),
-            transport_alteration(http::endpoint_body()),
-            kafka::alteration(),
-            pulsar::alteration(),
-            transport_alteration(mqtt::topic_body()),
-            transport_alteration(nats::subject_body()),
-            transport_alteration(nats::stream_body()),
-            transport_alteration(rabbitmq::queue_body()),
-            transport_alteration(redis::pubsub_body()),
-            transport_alteration(prometheus::query_body()),
-            transport_alteration(zeromq::pull_body()),
-            transport_alteration(sqs::queue_body()),
-            transport_alteration(websockets::connection_body()),
-            transport_alteration(websockets::endpoint_body()),
-            transport_alteration(syslog::listener_body()),
+            transport_alteration(http::request_body(), http::request_change()),
+            transport_alteration(http::endpoint_body(), http::endpoint_change()),
+            transport_alteration(kafka::topic_body(), kafka::change()),
+            transport_alteration(pulsar::topic_body(), pulsar::change()),
+            transport_alteration(mqtt::topic_body(), mqtt::change()),
+            transport_alteration(nats::subject_body(), nats::subject_change()),
+            transport_alteration(nats::stream_body(), nats::stream_change()),
+            transport_alteration(rabbitmq::queue_body(), rabbitmq::change()),
+            transport_alteration(redis::pubsub_body(), redis::change()),
+            transport_alteration(prometheus::query_body(), prometheus::change()),
+            transport_alteration(zeromq::pull_body(), zeromq::change()),
+            transport_alteration(sqs::queue_body(), sqs::change()),
+            transport_alteration(
+                websockets::connection_body(),
+                websockets::connection_change()
+            ),
+            transport_alteration(websockets::endpoint_body(), websockets::endpoint_change()),
+            transport_alteration(syslog::listener_body(), syslog::change()),
             client_alteration(),
         ))
         .then_ignore(tok(Token::Semicolon).or_not())
@@ -444,11 +468,11 @@ mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{
         ClientIngestMode, ClientIngestorAlteration, ClientProducerIngestor, CodecName,
-        EndpointIngestMode, FlushPolicy, HttpEndpointIngestor, HttpIngestor, HttpRequestIngestMode,
-        HttpRequestIngestor, HttpRequestIngestorAlteration, IngestQuiesceMode,
-        IngestQuiesceOverflow, IngestStartPosition, KafkaIngestMode, KafkaIngestor,
-        KafkaOffsetMode, KafkaTopicIngestor, MqttIngestMode, MqttIngestor, MqttQos, MqttSession,
-        MqttTopicIngestor, MqttTopicIngestorAlteration, NatsIngestMode, NatsIngestor,
+        EndpointIngestMode, FlushPolicy, GeneralErrorPolicy, HttpEndpointIngestor, HttpIngestor,
+        HttpRequestIngestMode, HttpRequestIngestor, HttpRequestIngestorAlteration,
+        IngestQuiesceMode, IngestQuiesceOverflow, IngestStartPosition, KafkaIngestMode,
+        KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, MqttIngestMode, MqttIngestor, MqttQos,
+        MqttSession, MqttTopicIngestor, MqttTopicIngestorAlteration, NatsIngestMode, NatsIngestor,
         NatsSubjectIngestor, PrometheusIngestMode, PrometheusIngestor, PrometheusQueryIngestor,
         PulsarIngestMode, PulsarIngestor, PulsarSubscription, PulsarSubscriptionOwnership,
         PulsarTopicIngestor, RabbitMqIngestMode, RabbitMqIngestor, RabbitMqQueueIngestor,

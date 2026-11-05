@@ -107,7 +107,8 @@ that domain as its selected domain. An unclean transport loss or leadership chan
 transaction available for attach. Binding is leader-local soft state, so a leader that does not
 hold it reports the session as detached; clients treat that as a routing condition, attach the
 transaction again, and replay the command. A session that its client closes cleanly, with no
-request in flight, reverts the open transaction bound to it on the leader.
+request in flight, reverts the open transaction bound to it on the leader; a revert the leader
+cannot record leaves the transaction open until it expires.
 
 Only the bound domain's replicated configuration effects may be queued:
 
@@ -457,8 +458,9 @@ operator `PAUSE` or `RESUME` statement.
   also purge the old keyspace before the replacement starts; reorderer ordering changes flush the
   old ordering buffers before swapping. Relay materialized-state changes update membership in
   place. Emitter source-predicate, emitter, publishing-mode (including any confirmation window,
-  timeout, or retry-policy variable), client, codec, input-collection, and attachment changes
-  drain and replace only the affected emitter task. Every ingestor alteration quiesces and drains
+  timeout, or retry-policy variable), client, codec, envelope, construction, input-collection,
+  attachment and general error policy changes drain and replace only the affected emitter task,
+  whether `SET TO` restates the destination or an operation changes one part of it in place. Every ingestor alteration quiesces and drains
   only the affected ingestor instances under their declared source mode, then starts their desired
   source configuration from the published schedule. A `SET QUIESCE` operation still uses this
   level; the mode active when the hold began governs that hold. A client ingestor suspends
@@ -648,9 +650,12 @@ recorded stay applied.
 
 Node drain, the ownership move of a graceful-shutdown drain, placement consolidation, and `RELOCATE`
 are planned ownership handoffs.
-The schedule names each moved execution by its logical node and `Unit`; current graphs use one
-`Single` unit per node. Capture, preparation, activation, freeze and forced-recovery records carry
-that unit, so a sibling unit's checkpoint or prepared transition cannot satisfy the move.
+The schedule names each moved execution by its logical node and `Unit`: one `Partition` unit per
+partition for a relay of a partitioned branch, each moving on its own, and one `Single` unit for
+every other node. Capture, preparation, activation, freeze and forced-recovery records carry that
+unit, so a sibling unit's checkpoint or prepared transition cannot satisfy the move. A gate freezes
+every unit of the entities it holds, and a handoff that checks its gate reads the freeze of the unit
+it moves.
 Nervix computes the complete target schedule before it engages a hold. It then fences dispatch at
 the affected subgraph boundary on every live node that runs part of it, stops new intake for each
 moved ingestor, and drains work already admitted to the moved unit. Ownership-handoff intake does
@@ -888,3 +893,17 @@ one Raft operation. The leader rolls back an unpublished local registry candidat
 every node synchronizes its registry cache from the committed schedule across leadership changes.
 
 What it does not do is provide transactional semantics for the actual records flowing through the graph. Message batches and ACK state are data-plane hot-path state and are never persisted by the control plane.
+
+## Cluster Policy Administration
+
+`ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;`
+changes Nervix cluster policy without a selected domain. It runs outside domain transactions.
+Assignments are structured Plexus Models, validated together against the current parameter record,
+every committed model and completed resource metadata. Publication compares those captured inputs
+again in the replicated apply step. Domain plans carry their parameter record and obtain their
+Models from that same consensus snapshot, so a concurrent cap change invalidates their basis.
+
+The command's authoritative effect and applied parameter revision are recorded atomically.
+Recovery of an earlier execution observes that progress and never reapplies its values over a
+later command. Success waits for the existing runtime readiness barrier.
+[Node Settings](node-settings.md#committed-parameter-changes) owns the values and bootstrap contract.

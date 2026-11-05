@@ -29,6 +29,12 @@ The current top-level surface includes:
 - session subscription statements
 - explicit transaction controls: `BEGIN`, `COMMIT`, and `REVERT`
 - describe and show commands
+- cluster administration with `ALTER CLUSTER SET`
+
+`ALTER CLUSTER SET` changes one or more committed cluster parameters atomically, without a node
+restart. It runs outside domain transactions and needs no selected domain. See
+[Node Settings](node-settings.md#committed-parameter-changes) for the parameter names, value types,
+transition checks and bootstrap seed rules.
 
 Core create statements:
 
@@ -43,7 +49,7 @@ CREATE [IF NOT EXISTS] WIRE AVRO SCHEMA <name> MODE STRICT|LOOSE (<field> <avro_
 CREATE [IF NOT EXISTS] CODEC <name>
   FROM WIRE JSON SCHEMA <wire_schema>
   TO SCHEMA <schema>
-  [ENCODE <field> AS RFC3339, ...];
+  [ENCODE <field> AS RFC3339|BASE64, ...];
 
 CREATE [IF NOT EXISTS] CODEC <name>
   FROM WIRE CBOR SCHEMA <wire_schema>
@@ -53,7 +59,7 @@ CREATE [IF NOT EXISTS] CODEC <name>
 CREATE [IF NOT EXISTS] CODEC <name>
   FROM WIRE AVRO SCHEMA <wire_schema>
   TO SCHEMA <schema>
-  [ENCODE <field> AS RFC3339, ...];
+  [ENCODE <field> AS RFC3339|BASE64, ...];
 
 CREATE [IF NOT EXISTS] CODEC <name>
   FROM JSON|YAML|TOML|XML|CBOR
@@ -77,6 +83,10 @@ CREATE [IF NOT EXISTS] CODEC <name>
   FROM SYSLOG
   TO SCHEMA <schema>;
 
+CREATE [IF NOT EXISTS] BRANCH <name> SCHEMA <schema> TTL <duration>
+  [PARTITIONS <n>]
+  [MAX INSTANCES <n> EVICT LRU];
+
 CREATE [IF NOT EXISTS] RELAY <name> SCHEMA <schema> [CAPACITY <n>]
   [WITH MATERIALIZED STATE LAST BY TIMESTAMP];
 
@@ -95,6 +105,9 @@ Core alter statements:
 ```plexus,ignore
 ALTER DOMAIN SET PLACEMENT
   REQUIRE COLOCATION|PREFER COLOCATION|NEUTRAL|SUGGEST SEPARATION;
+
+ALTER BRANCH <name>
+  SET PARTITIONS <n>;
 
 ALTER RELAY <name>
   SET CAPACITY <n> |
@@ -150,23 +163,35 @@ ALTER <CONNECTOR> <ENTITY> EMITTER <name>
   ALTER FROM <relay> SET WHERE <expr> |
   ALTER FROM <relay> DROP WHERE |
   SET TO <complete entity body including MODE and payload> |
-  SET MODE <transport-specific publishing mode body> |
   SET CLIENT <client> |
+  SET <locator> | SET <option> | DROP <option> |
+  SET MODE <declared publishing mode> |
   SET ENCODE USING <codec> | DROP ENCODE |
+  SET <envelope clause> | DROP <envelope clause> |
+  SET PROPERTIES { ... } | DROP PROPERTIES |
+  SET INHERIT ... | DROP INHERIT |
+  ADD SET <field> = <expr> | DROP SET <field> |
+  ADD INVOKE <call> | DROP INVOKE <n> |
+  SET WHERE <expr> | DROP WHERE |
   SET COLLECT FOR <duration> [MAX BATCH SIZE <bytes>] | DROP COLLECT |
   SET ATTACHED | SET DETACHED |
   SET BATCH MAX MESSAGES <n> MAX SIZE <bytes> | DROP BATCH |
   SET FLUSH EACH <duration> MAX BATCH SIZE <bytes> | SET FLUSH IMMEDIATE |
-  SET COMMIT EACH <duration> MAX SIZE <bytes>
+  SET GENERAL ERROR IGNORE|LOG
   [, ...];
 
 ALTER <CONNECTOR> <ENTITY> INGESTOR <name>
   SET FROM <body> |
-  SET QUIESCE <quiesce body> |
+  SET CLIENT <client> |
+  SET <locator> | SET <option> | DROP <option> |
+  SET MODE <declared delivery mode> |
+  SET START AT EARLIEST|LATEST |
+  SET QUIESCE <declared quiesce body> |
   SET DECODE USING <codec> |
   SET TIMESTAMP NOW | SET TIMESTAMP AT <field> | DROP TIMESTAMP |
   SET FILTER WHERE <expr> | DROP FILTER WHERE |
   ADD|DROP|REPLACE ROUTE ... |
+  ALTER ROUTE TO <relay> <construction change> |
   SET GENERAL ERROR IGNORE|LOG
   [, ...];
 
@@ -216,7 +241,9 @@ Operations in one `ALTER RELAY`, `ALTER JUNCTION`, `ALTER DEDUPLICATOR`, `ALTER 
 `ALTER PLACEMENT` execute in written order. An ingestor or emitter `ALTER` repeats its stored
 connector and entity, such as `ALTER KAFKA TOPIC INGESTOR` or `ALTER OTEL METRICS EMITTER`, and
 preserves that pair. Its replacement body uses the same entity's grammar. See
-[Streams And State](relay.md#altering-relays) for relay operations,
+[Streams And State](relay.md#altering-relays) for relay operations and
+[Relay Partitions](relay.md#relay-partitions) for `ALTER BRANCH ... SET PARTITIONS`, which a domain
+accepts only while it is stopped,
 [Processors](processors.md) for the full processor operation shapes, and
 [Emitters](emitters.md#altering-emitters) and
 [Ingestors](ingestors.md#altering-ingestors) for boundary-node operations. See
@@ -918,12 +945,14 @@ General notes:
   clock for the session alone and are not persisted either; see
   [Domain Clock Attachment](sessions.md#domain-clock-attachment)
 - session subscription names are unique within a connected session; one session may subscribe to relays from multiple domains, and `DELETE SUBSCRIPTION` uses the name rather than repeating subscription parameters
-- every `RELAY` is scheduled with one owner; only that owner instantiates its buffer, concrete
-  branch presence, fan-out, subscriptions, and metrics
-- relay `CAPACITY` bounds the single owner buffer cluster-wide; each producer node and remote
-  consumer node adds one fixed in-flight dispatch slot, independent of branch count
+- every `RELAY` is scheduled with one owner, or with one owner per partition when its branch
+  declares `PARTITIONS <n>` of more than one; only an owner instantiates its buffer, concrete
+  branch presence, fan-out, subscriptions, and metrics for the keys it owns
+- relay `CAPACITY` bounds the owner buffer cluster-wide, once per partition of a partitioned
+  relay; each producer node and remote consumer node adds one fixed in-flight dispatch slot,
+  independent of branch count
 - materialized state adds scheduler-selected state replicas to the relay rather than a separate
   runtime-node kind; ordinary relays report no replicas
 - ingestors and reingestors construct branch identities, and a relay owner applies branch TTL and
-  `MAX INSTANCES` across all producers for that relay
+  `MAX INSTANCES` across all producers for that relay, each partition owner on its own keys
 - `DESCRIBE INGESTOR` exposes runtime-facing ingestor state, including memory-backpressure state and committed Kafka `OFFSET BY DOMAIN` partition assignment

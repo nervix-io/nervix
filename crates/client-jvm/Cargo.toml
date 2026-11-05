@@ -1,0 +1,29 @@
+[package]
+description = "The Java 21 Nervix client binding on JNI and the shared host runtime"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-client-jvm"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+jvm-tests = ["jni/invocation"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bytes = { workspace = true }
+jni = { workspace = true }
+meticulous = { workspace = true }
+nervix-client-core = { workspace = true, features = ["arrow", "autocomplete"] }
+nervix-client-host = { workspace = true }
+nervix-models = { workspace = true, features = ["arrow"] }
+nervix-primitives = { workspace = true, features = ["native"] }
+thiserror = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+bolero = { workspace = true }

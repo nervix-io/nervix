@@ -9,9 +9,10 @@ delivery attempt. An attached client-to-client path completes its input only aft
 ACK. Endpoint configuration survives a restart. Payloads, attachments, delivery attempts and ACK
 state are volatile, so applications own replayable input and idempotent effects.
 
-The native endpoints, automatic restoration, shared C binding, and Rust/Python paced drivers are
-implemented. This chapter connects their delivered contracts. The following chapters remain the
-owners of their respective rules:
+The native endpoints, automatic restoration, shared C binding, native Python package, and
+Rust/Python paced drivers are implemented. This chapter connects their delivered contracts. The
+Python paced driver uses the package's typed endpoint, batch, cancellation and clock objects;
+Python owns their lifetimes. The following chapters remain the owners of their respective rules:
 
 | Contract | Authoritative documentation |
 | --- | --- |
@@ -261,7 +262,7 @@ restart from the first declaration after a wait. They never scan other branches.
 eviction ends its suspended work. [Runtime Nodes](./processors.md#materialized-relay-state) and
 [Relay](./relay.md#materialized-state) own the complete state contract.
 
-Every client emitter requires both `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` and an explicit
+Every client emitter requires both `BATCH MAX MESSAGES <n> MAX SIZE <bytes>` (within the committed batch-count cap) and an explicit
 `FLUSH`. `BATCH` bounds the encoded IPC stream; `FLUSH ... MAX BATCH SIZE` bounds logical Arrow
 value, offset and validity bytes, excluding spare buffer capacity. `FLUSH EACH` is branch-local
 domain time. `FLUSH IMMEDIATE` is the physical 100 microsecond minimum batching window, with the
@@ -334,9 +335,10 @@ the supported signatures, errors and examples.
 
 ### Shared C Binding And Buffer Lifetimes
 
-C, C++, Java and Ruby hosts use the existing Rust binding through
+C, C++ and Ruby hosts use the existing Rust binding through
 [`nervix_client.h`](https://github.com/nervix-io/nervix/blob/main/crates/client-ffi/include/nervix_client.h),
-and CPython hosts through its Python package, `nervix_client`. Both forward through the host session
+CPython hosts through its Python package, `nervix_client`, and JVM hosts through the Java 21 JNI
+classes in `crates/client-jvm`. All forward through the host session
 runtime to the same Rust handles and recovery owner. Its blocking calls belong on application
 threads, never a thread driving a Tokio runtime. Native data access is bulk column access or
 canonical IPC, without per-value language callbacks or row-map payloads.
@@ -354,6 +356,15 @@ canonical IPC, without per-value language callbacks or row-map payloads.
 | `nx_delivery_ack` / `retry` / `reject` | Settle through the delivering attachment and await the server's settlement result |
 | Delivery/batch retain and release | Keep borrowed views alive; releasing storage never settles a delivery |
 | `nx_producer_close`, `nx_consumer_close`, handle free | End attachments and fence late restoration; an abandoned close continues cleanup |
+
+The JNI edge leases every input before a blocking host call, then releases the Java handle's
+monitor. Cleaner cleanup and explicit `close()` release each allocation once, after any admitted
+short call returns; reentrant close ends new admission immediately, and nested access is refused.
+Retained leases keep
+an in-flight call valid. Java arrays copy whole column levels. A read-only direct buffer holds a
+native owner lease through its root; slices and duplicates retain that root, so closing a Java
+handle cannot invalidate a buffer. Field snapshots preserve order, all type levels, nullability and
+sensitivity. No Java thread implements endpoint recovery, and native runtime threads never call Java.
 
 A field list or builder is used from one thread at a time. Producers, consumers, deliveries and
 batches support the header's concurrent-use contract; delivery and batch references may be released
@@ -444,14 +455,14 @@ Producer and consumer reservations are separate and cannot borrow from each othe
 | --- | --- |
 | Attachments | 32 producers and independently 32 consumers per session |
 | Requested outstanding batch count | 1 through 1,024 per handle |
-| Session credit bytes | 32 MiB for producers and independently 32 MiB for consumers; 64 MiB total reserved credit |
+| Session credit bytes | Committed producer and consumer caps, independently 32 MiB by default; node credit remains a separate bound |
 | Node credit bytes | 128 MiB for each direction; 256 MiB total reserved credit, charged at every serving/owning node retaining forwarded work |
 | Retained emitter IPC | A separate 128 MiB node work budget, including output waiting for a consumer |
-| Native batch rows | At most 65,536; emitter `BATCH` may set a smaller count |
+| Native batch rows | The producer grant captures the committed client-row cap (65,536 by default); emitter `BATCH` has its own committed count cap |
 | Session frame | 4 MiB by default, including the complete FlatBuffers envelope |
 | Reassembled reply | 64 MiB by default, with each transfer part fitting the frame limit |
 | Producer IPC submission | One frame; the grant's `max_batch_bytes` is the smaller of byte credit and frame payload allowance |
-| Emitter IPC batch | Its declared `BATCH MAX SIZE`, at most 32 MiB, and within the consumer's grant; replies above one frame use bounded transfer parts |
+| Emitter IPC batch | Its declared `BATCH MAX SIZE`, within the committed consumer cap and the consumer's grant; replies above one frame use bounded transfer parts |
 
 These are scoped credit and retained-IPC budgets, not a bound on whole-process memory. Relay,
 processor, Arrow construction, executor and transport allocations have their own bounds. Forwarded

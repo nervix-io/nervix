@@ -31,7 +31,6 @@ use super::{
     *,
 };
 
-pub(super) const DEFAULT_STATE_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
 pub(super) const DEFAULT_STATE_REPLICATION_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const STATE_CHECKPOINT_ANNOUNCEMENT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 /// How many changes one page of an owner's branch checkpoint catalog lists. A change is a branch key
@@ -1060,6 +1059,7 @@ impl Runtime {
             .is_some_and(|state| state.is_frozen())
     }
 
+    #[cfg(test)]
     pub(crate) fn ownership_handoff_entity_is_frozen_by(
         &self,
         entity: &DomainNodeRef,
@@ -1327,10 +1327,11 @@ impl Runtime {
         } = request;
         let domain = &domain;
         let entity = &entity;
-        if !self.entity_gate_operation_owns_entity(
+        if !self.entity_gate_operation_owns_unit(
             &coordination,
             domain,
             entity,
+            unit,
             EntityGatePurpose::OwnershipHandoff,
         ) {
             return Err(OwnershipHandoffError::participant(format!(
@@ -1462,10 +1463,11 @@ impl Runtime {
                     return Ok(());
                 }
 
-                let existing_gate_is_held = self.entity_gate_operation_owns_entity(
+                let existing_gate_is_held = self.entity_gate_operation_owns_unit(
                     &existing.coordination,
                     domain,
                     entity,
+                    existing.unit,
                     EntityGatePurpose::OwnershipHandoff,
                 );
                 if existing_gate_is_held {
@@ -1901,10 +1903,11 @@ impl Runtime {
         &self,
         transition: OwnershipHandoffTransitionRef<'_>,
     ) -> OwnershipHandoffResult<()> {
-        if !self.entity_gate_operation_owns_entity(
+        if !self.entity_gate_operation_owns_unit(
             transition.coordination,
             transition.domain,
             transition.entity,
+            transition.unit,
             EntityGatePurpose::OwnershipHandoff,
         ) {
             return Err(OwnershipHandoffError::participant(format!(
@@ -2120,7 +2123,7 @@ impl Runtime {
     }
 
     pub(crate) fn state_snapshot_interval(&self) -> Duration {
-        self.inner.state_snapshot_interval
+        self.cluster_parameters().state_snapshot_interval()
     }
 
     /// The checkpoint of `placement` this node holds when it is newer than `after_lsm`, as a

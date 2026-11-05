@@ -41,6 +41,7 @@ ROOT = shards.ROOT
 MESSAGES = Path("target/unit-tests/cargo-messages.jsonl")
 PROGRAMS = Path("target/unit-tests/programs.json")
 MANIFEST = Path("target/unit-tests/manifest.json")
+JVM_ARTIFACTS = Path("target/client-conformance/java")
 
 
 @dataclass(frozen=True)
@@ -93,16 +94,34 @@ def read_programs(root: Path) -> list[TestProgram]:
     return [TestProgram(entry["executable"], entry["directory"]) for entry in document]
 
 
+def jvm_inputs(root: Path, programs: Sequence[TestProgram]) -> list[Path]:
+    """Carry the packaged JNI library and every Java fixture the embedded JVM can load."""
+    if not any(program.directory == "crates/client-jvm" for program in programs):
+        return []
+    jar = JVM_ARTIFACTS / "nervix-client.jar"
+    classes = JVM_ARTIFACTS / "tests"
+    required = [jar, *(classes / "io/nervix/client" / name for name in (
+        "Properties.class", "BoundaryTests.class",
+    ))]
+    for path in required:
+        if not (root / path).is_file():
+            raise shards.ShardError(f"{path} is missing; run `just build-client-jvm-tests` before packing JVM tests")
+    return [jar, *(path.relative_to(root) for path in sorted((root / classes).rglob("*.class")))]
+
+
 def pack(root: Path, archive: Path) -> shards.Manifest:
     """Write the archive of the unit tests' build and the generated inputs they read."""
     objects = shards.coverage_objects(root, shards.object_pattern(shards.workspace_targets(root)))
     suite = shards.scenario_executable(objects)
     kept = [path for path in objects if path != suite]
     held = {path.as_posix() for path in kept}
-    for program in read_programs(root):
+    programs = read_programs(root)
+    for program in programs:
         if program.executable not in held:
             raise shards.ShardError(f"the build left no {program.executable}")
-    return shards.write_archive(root, archive, MANIFEST, [*kept, *shards.generated_inputs(root), PROGRAMS])
+    return shards.write_archive(
+        root, archive, MANIFEST, [*kept, *shards.generated_inputs(root), *jvm_inputs(root, programs), PROGRAMS],
+    )
 
 
 def library_path(root: Path) -> str:

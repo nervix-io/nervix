@@ -241,7 +241,10 @@ impl DomainState {
                     graph.add_edge(branch_schema, source, EdgeKind::RequiredBy);
                     validate_branch_model(domain, identifier, models, branch)?;
                 }
-                Model::WireJsonSchema(schema) | Model::WireCborSchema(schema) => {
+                Model::WireJsonSchema(schema) => {
+                    ensure_wire_schema_has_fields(domain, identifier, schema)?;
+                }
+                Model::WireCborSchema(schema) => {
                     ensure_wire_schema_has_fields(domain, identifier, schema)?;
                 }
                 Model::WireAvroSchema(schema) => {
@@ -281,13 +284,6 @@ impl DomainState {
                             domain: domain.as_str().to_string(),
                             identifier: identifier.as_str().to_string(),
                             reason: "UDF arity must be between 1 and 8".to_string(),
-                        }));
-                    }
-                    if udf.code.len() > 64 * 1024 {
-                        return Err(Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: identifier.as_str().to_string(),
-                            reason: "UDF code exceeds the 64 KiB limit".to_string(),
                         }));
                     }
                 }

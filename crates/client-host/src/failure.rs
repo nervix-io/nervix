@@ -147,7 +147,8 @@ impl Failure {
             ClientError::RequestDeadline { .. } | ClientError::RetryDeadline => {
                 FailureKind::Deadline
             }
-            ClientError::UncertainCommand { .. }
+            ClientError::LastUnresolvedAnswer { .. }
+            | ClientError::UncertainCommand { .. }
             | ClientError::UncertainUpload { .. }
             | ClientError::SettlementUnknown { .. } => FailureKind::Uncertain,
             ClientError::EventOverflow { .. } => FailureKind::Overflow,
@@ -156,7 +157,9 @@ impl Failure {
             | ClientError::ProducerRefused { .. }
             | ClientError::ConsumerRefused { .. }
             | ClientError::DeliveryReferenceExpired { .. } => FailureKind::Rejected,
-            ClientError::RequestCancelled { .. } => FailureKind::Cancelled,
+            ClientError::RequestCancelled { .. } | ClientError::CallCancelled => {
+                FailureKind::Cancelled
+            }
             ClientError::UnexpectedReply { .. }
             | ClientError::InvalidUploadReply
             | ClientError::InvalidRestoreReply
@@ -300,5 +303,74 @@ mod endpoint_recovery_tests {
             assert_eq!(failure.kind(), expected);
             assert!(!failure.message().is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod call_cancellation_tests {
+    use meticulous::ResultExt as _;
+    use nervix_client_core::{
+        CommandDisposition, RequestKind,
+        wire::{CancellationStage, UnknownOutcomeCause},
+    };
+
+    use super::*;
+
+    #[test]
+    fn a_cancelled_call_is_cancelled_unless_it_may_have_taken_effect() {
+        let refused = Failure::from(ClientError::RequestCancelled {
+            request: RequestKind::Command,
+            stage: CancellationStage::BeforeAdmission,
+        });
+        assert_eq!(refused.kind(), FailureKind::Cancelled);
+        assert_eq!(refused.execution_reference(), None);
+
+        let stopped = Failure::from(ClientError::CallCancelled);
+        assert_eq!(stopped.kind(), FailureKind::Cancelled);
+        assert_eq!(stopped.execution_reference(), None);
+
+        let reference = CommandExecutionReference::parse("command-1")
+            .assured("the test execution reference is valid");
+        let admitted = Failure::from(Report::new(ClientError::CallCancelled).change_context(
+            ClientError::UncertainCommand {
+                reference: reference.clone(),
+            },
+        ));
+        assert_eq!(admitted.kind(), FailureKind::Uncertain);
+        assert_eq!(admitted.execution_reference(), Some(&reference));
+        assert!(
+            admitted
+                .message()
+                .contains("the call was cancelled before its outcome arrived"),
+            "the cancellation stays in the reported chain: {}",
+            admitted.message()
+        );
+    }
+
+    #[test]
+    fn an_unresolved_answer_stays_beneath_an_uncertain_host_failure() {
+        let reference = CommandExecutionReference::parse("command-1")
+            .assured("the test execution reference is valid");
+        let report = Report::new(ClientError::RetryDeadline)
+            .change_context(ClientError::LastUnresolvedAnswer {
+                disposition: CommandDisposition::OutcomeUnknown(
+                    UnknownOutcomeCause::LeadershipLost,
+                ),
+                message: "the lease could not be confirmed".to_string(),
+            })
+            .change_context(ClientError::UncertainCommand {
+                reference: reference.clone(),
+            });
+        let failure = Failure::from(report);
+
+        assert_eq!(failure.kind(), FailureKind::Uncertain);
+        assert_eq!(failure.execution_reference(), Some(&reference));
+        assert!(failure.message().contains("OutcomeUnknown(LeadershipLost)"));
+        assert!(
+            failure
+                .message()
+                .contains("the lease could not be confirmed")
+        );
+        assert!(failure.message().contains("session retry deadline expired"));
     }
 }

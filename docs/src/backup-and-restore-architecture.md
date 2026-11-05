@@ -86,6 +86,11 @@ tree would duplicate the whole vocabulary, and the stored representation would c
 to it. A backup renders each domain's models, parses the rendered text back, and refuses the archive
 unless it yields exactly the committed models.
 
+Wire schemas in those records use each format's current Plexus vocabulary, and codec text carries
+its explicit `RFC3339` or `BASE64` rules. Restore parses and validates that text through the current
+language and registry boundaries. A vocabulary change needs no archive-owned Model encoding or
+format change; text that cannot form a current Model fails restore preparation.
+
 Every record section opens with a twelve-byte header: the magic `NVXBKREC`, then the record kind
 and its format version as little-endian 16-bit integers. A reader checks the magic, then the kind,
 then the version for exact equality, copies the payload into an aligned buffer and validates it with
@@ -591,6 +596,15 @@ a step recorded with a different effect. A recorded step is never applied twice:
 | Create domain | One command creates the stopped domain with its declared resources and their next version numbers, closes its installation gate, and records the step. Every live node then applies the stopped domain. |
 | Import resource versions | Each version is installed from its archive section on the leader and published under its archived number through one command per version, keyed by the restore so that a repeat finds it imported, and the restore waits until every live node installed it, exactly as an upload completes. One more command records the step. |
 | Apply models | The models are applied as one batch under the restore's lease, with full graph validation and the leader's content checks, unbounded by a transaction's statement and source-byte limits; an attempt that finds exactly these models already applied skips the batch, and any other models fail the step. State installation follows, and one command records the step together with the installed generation, which opens the installation gate, and, with `RESUME`, the activation. |
+
+At the model step, one consensus snapshot supplies the target's Models, completed resource versions
+and committed parameter record. Resource pinning and graph validation use that snapshot's values;
+binding and content preparation retain its publication inputs through their waits. Schedule
+preparation consumes those inputs, and both application preflight and replicated apply compare
+the complete parameter record and revision before publication. A limit changed since archive
+preparation can therefore refuse this model step before any of its Models become committed. The
+restore's domain lease excludes competing domain mutations; global parameter publications remain
+independent and are fenced by that captured record.
 
 A step that fails ends the restore. The steps recorded before it stay applied, and a domain the
 restore created stays stopped with what it committed; when the domain was created but did not become

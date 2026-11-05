@@ -19,6 +19,20 @@
 # thread count, work and lifetime bound here.
 
 [[permission]]
+bound = "Three modeled contenders per Shuttle execution, each completing two synchronous keyed transactions and joined before the execution ends."
+items = ["thread::spawn"]
+owner = "The rate-limit key-store production-owner check."
+path = "crates/rate-limit/src/shuttle_tests.rs"
+reason = "The contenders run the production store inside Shuttle, not node work admitted to the executor."
+
+[[permission]]
+bound = "Three diagnostic contenders per disposable test process, each completing two synchronous keyed transactions and joined before state restoration and test completion."
+items = ["thread::spawn"]
+owner = "The rate-limit keyed-store diagnostic workload."
+path = "crates/rate-limit/src/diagnostic_tests.rs"
+reason = "These bounded external test participants exercise tracked locks on real threads after installing the diagnostic run; they execute no node jobs."
+
+[[permission]]
 bound = "Three model threads per execution: two claim one fixed pool slot and one retires it; all are joined before the bounded Shuttle execution ends."
 items = ["thread::spawn"]
 owner = "The retained transport pool-slot lifetime model."
@@ -129,6 +143,13 @@ items = ["thread::Builder", "thread::scope"]
 owner = "The benchmark load driver summary drain and Kafka watermark queries."
 path = "crates/benchmark/src/bin/nervix-benchmark-load.rs"
 reason = "The external load harness has no node executor; broker polling and metadata queries must not block its async traffic driver."
+
+[[permission]]
+bound = "The test creates one host thread with a 512 KiB stack, blocks it on one prepared command the loopback answers, and joins it before it returns."
+items = ["thread::Builder"]
+owner = "The Rust client's host-thread stack test."
+path = "crates/client-core/src/tests/host_stack.rs"
+reason = "A host blocks on a call from a thread of its own, and only a thread with a chosen stack size shows that the call fits a host's stack; the bounded executor's workers have their own."
 
 [[permission]]
 bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."

@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 use error_stack::{Report, ResultExt as _};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{ConsensusError, DomainMutationLease, DomainPlanningInputs};
 use nervix_models::{
     ClusterNodeName, DomainName, DomainSchedule, DomainStatus, Model, NodeRef, PlacementPolicy,
@@ -58,6 +58,8 @@ enum RelocationError {
         member: NodeRef,
         owner: ClusterNodeName,
     },
+    #[error("{kind} '{name}' in domain '{domain}' is divided into partitions that each have their own owner, and RELOCATE moves a node with one owner", kind = .member.kind.as_str(), name = .member.identifier.as_str())]
+    MemberPartitioned { domain: DomainName, member: NodeRef },
 }
 
 /// One unit member with the assignment the relocation gives it.
@@ -435,7 +437,8 @@ impl SessionServiceImpl {
                 &desired,
                 &relocation.destination,
                 &moved,
-                self.inner.replica_count,
+                usize::try_from(self.cluster_parameters().replica_count())
+                    .assured("the committed count fits a supported target"),
                 &schedulable_nodes,
                 &live_nodes,
             )
@@ -553,14 +556,21 @@ impl SessionServiceImpl {
             graph.schedule_for_domain_with_mode(
                 domain,
                 &cluster_nodes,
-                self.inner.replica_count,
+                usize::try_from(self.cluster_parameters().replica_count())
+                    .assured("the committed count fits a supported target"),
                 placement,
                 self.inner.runtime.scheduler_mode(),
             )
         }
         #[cfg(not(feature = "testing"))]
         {
-            graph.schedule_for_domain(domain, &cluster_nodes, self.inner.replica_count, placement)
+            graph.schedule_for_domain(
+                domain,
+                &cluster_nodes,
+                usize::try_from(self.cluster_parameters().replica_count())
+                    .assured("the committed count fits a supported target"),
+                placement,
+            )
         }
     }
 }
@@ -599,10 +609,14 @@ fn planned_relocation_schedule(
                 .filter(|replica| live_nodes.contains(*replica))
                 .cloned(),
         );
-        if let Some(desired_node) = desired.nodes.get(member) {
+        // The graph may divide this member into partitions that its current schedule, written
+        // before a stopped domain's partition count changed, does not have yet. Such a desired
+        // entry has no single assignment to borrow replica slots from.
+        if let Some(desired_node) = desired.nodes.get(member)
+            && let Some(desired_unit) = desired_node.sole_unit()
+        {
             candidates.extend(
-                desired_node
-                    .single_unit()
+                desired_unit
                     .assigned_nodes
                     .iter()
                     .filter(|node_id| schedulable_nodes.contains(*node_id))
@@ -706,6 +720,12 @@ fn relocation_member_owner<'a>(
             member: member.clone(),
         }));
     };
+    if node.is_partitioned() {
+        return Err(Report::new(RelocationError::MemberPartitioned {
+            domain: domain.clone(),
+            member: member.clone(),
+        }));
+    }
     let Some(owner) = node.execution_node() else {
         return Err(Report::new(RelocationError::MemberWithoutOwner {
             domain: domain.clone(),

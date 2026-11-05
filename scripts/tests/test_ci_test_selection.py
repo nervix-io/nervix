@@ -223,7 +223,7 @@ class AdvancedBaseSelectionTests(unittest.TestCase):
             rerun = fixture.shallow_checkout(tested, "rerun")
             self.assertEqual(selection.TestSelection.read("pull_request", payload, tested, rerun), first)
             self.assertTrue(first.documentation_only)
-            self.assertTrue(first.bolero_required)
+            self.assertFalse(first.bolero_required)
 
     def test_stale_or_tampered_identities_fail_instead_of_excluding_tests(self) -> None:
         for shallow in (False, True):
@@ -360,7 +360,7 @@ class SourceSelectionTests(unittest.TestCase):
         for advanced in (False, True):
             for action, labels, required in (
                 ("opened", (), False), ("labeled", ("no-docker",), False),
-                ("labeled", ("fuzz",), True), ("synchronize", ("fuzz", "no-docker"), True),
+                ("labeled", ("fuzz",), False), ("synchronize", ("fuzz", "no-docker"), False),
                 ("labeled", ("bolero-random",), True), ("synchronize", ("bolero-random", "no-docker"), True),
                 ("labeled", ("bolero-random", "fuzz"), True),
                 ("unlabeled", (), False), ("reopened", (), False),
@@ -485,7 +485,7 @@ class CheckWorkflowSelectionTests(unittest.TestCase):
         self.assertIn("            target/ci-selection/python.lcov\n", upload)
 
     def test_mode_labels_remain_independent_of_ordinary_prose_exclusion(self) -> None:
-        for job, label in (("deloxide", "deloxide"), ("client-conformance", "client-conformance"),
+        for job, label in (("client-conformance", "client-conformance"),
                            ("shuttle", "shuttle"), ("loom", "loom"),
                            ("loom-qualification", "loom"), ("turmoil", "turmoil")):
             with self.subTest(job=job):

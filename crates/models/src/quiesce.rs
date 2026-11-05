@@ -277,6 +277,7 @@ declare_model_change_aspects! {
     EntityReplaced => Dynamic, None, false;
     EntityCreated => Dynamic, None, false;
     EntityDropped => Dynamic, None, false;
+    BranchPartitions => DomainPause, None, false;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -410,8 +411,10 @@ impl Model {
                     ModelChangeAspects::replaced()
                 }
             }
-            (Self::WireJsonSchema(base), Self::WireJsonSchema(candidate))
-            | (Self::WireCborSchema(base), Self::WireCborSchema(candidate)) => {
+            (Self::WireJsonSchema(base), Self::WireJsonSchema(candidate)) => {
+                wire_schema_change_aspects(base, candidate)
+            }
+            (Self::WireCborSchema(base), Self::WireCborSchema(candidate)) => {
                 wire_schema_change_aspects(base, candidate)
             }
             (Self::WireAvroSchema(base), Self::WireAvroSchema(candidate)) => {
@@ -1115,6 +1118,11 @@ fn branch_change_aspects(
         // TTL and eviction are baked into branch node specs when a branch task spawns, so they
         // only take effect once the domain rebuilds around the new models.
         changes.push(ModelChangeAspect::BranchLifecycle);
+    }
+    if base.partitions != candidate.partitions {
+        // The count decides which unit of every relay the branch branches owns each key, so it
+        // changes only on a stopped domain, whose next start schedules the new units.
+        changes.push(ModelChangeAspect::BranchPartitions);
     }
     changes
 }
@@ -2002,12 +2010,9 @@ mod tests {
                     let crate::IngestorInput::Transport(input) = &mut candidate.input else {
                         panic!("the fixture ingestor reads an endpoint");
                     };
-                    input
-                        .source
-                        .set_quiesce(crate::IngestQuiesceMode::Reject {
-                            retry_after: "7s".to_string(),
-                        })
-                        .expect("endpoint must accept REJECT quiesce mode");
+                    input.source.set_quiesce(crate::IngestQuiesceMode::Reject {
+                        retry_after: "7s".to_string(),
+                    });
                     candidate
                 },
                 ModelChangeAspect::IngestorSource,

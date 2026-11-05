@@ -293,7 +293,7 @@ jobs:
           path: ${{ runner.temp }}/go-tool-bootstrap
           if-no-files-found: ignore
 
-  # Diagnostic coverage is a distinct execution mode and never contributes to native cost counts.
+  # Ordinary report-tool coverage stays separate from the ordinary workspace report.
   diagnostic-evidence:
     name: diagnostic-evidence
     needs: [test-selection]
@@ -369,7 +369,7 @@ jobs:
           label: check-diagnostic-evidence-and-report-tool-coverage
 
       - name: Check diagnostic evidence and report tool coverage
-        run: just coverage-deadlock
+        run: just coverage-native-extras test-deadlock-report --output target/deadlock.lcov
         env:
           NERVIX_DEADLOCK_PROBE_ARTIFACTS: target/diagnostic-evidence/probes
 
@@ -424,8 +424,8 @@ jobs:
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
 
-  # The Deloxide diagnostic lane, only for a pull request labeled `deloxide`: every workload
-  # tests/deloxide-inventory.toml registers, each selection on a runner of its own in the
+  # Retained Deloxide lane configuration while the temporary CI policy disables its execution:
+  # every workload tests/deloxide-inventory.toml registers, each selection on a runner in the
   # instrumented build of the feature it compiles under the native coverage collector, then the
   # qualification of the lane's supervision on deliberately failing processes. Each selection keeps
   # its own budget, so the stressed restore scenarios, which share the stress selection's build,
@@ -433,7 +433,8 @@ jobs:
   # from ordinary coverage and its CRAP report.
   deloxide:
     name: deloxide (${{ matrix.selection }})
-    if: contains(github.event.pull_request.labels.*.name, 'deloxide')
+    # Temporary CI policy: re-enabling execution requires an explicit user decision.
+    if: ${{ false }}
     runs-on: boat-xlarge
     # Setup, then at most the lane's bound, the qualification's bound and the reserve the uploads
     # and the kache report keep after them, within the six hours a Boat CI job may run.
@@ -635,10 +636,9 @@ jobs:
   tests:
     name: tests
     needs: [scenarios-build]
-    # GitHub's hosted runner: 4 CPUs, 16 GB and a 150 GB disk with about 84 GiB free, room for the
-    # archive and its 32 GiB restored. On Boat the archive's download and restore alone outlasted
-    # this limit.
-    runs-on: ubuntu-24.04
+    # Blacksmith's 4-vCPU runner has 16 GB RAM and 80 GB advertised storage. Record the actual
+    # filesystem capacity and available bytes before the archive and restored tests share it.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     permissions:
       contents: read
@@ -680,13 +680,18 @@ jobs:
             sudo apt-get install --yes --no-install-recommends libpython3.12t64
           fi
 
+      - name: Setup Java for embedded JVM tests
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
       # The tests sync their storage below /tmp and the checkout. A single-use runner needs no crash
       # consistency, so those volumes drop their write barriers, as the build job's kache start step
       # drops them for its store.
-      # The archive restores only at the checkout path it was built in, and GitHub's hosted runner
-      # checks out at another path than Blacksmith's, so this checkout also appears at the build's
-      # path. A bind mount, unlike a symbolic link, keeps that path through `pwd -P` and the path of
-      # a running executable.
+      # The archive restores only at the checkout path it was built in. Publish this checkout at
+      # that physical path as well; a bind mount keeps it through `pwd -P` and the path of a
+      # running executable.
       - name: Mount the checkout at the build's path
         env:
           BUILD_CHECKOUT: ${{ needs.scenarios-build.outputs.checkout }}
@@ -708,6 +713,9 @@ jobs:
         uses: ./.github/actions/runner-diagnostics
         with:
           label: tests-coverage
+
+      - name: Record unit-test disk capacity
+        run: df -B1 --output=source,size,used,avail,target "${GITHUB_WORKSPACE}" "${RUNNER_TEMP}"
 
       - name: Download the unit tests
         uses: ./.github/actions/ci-artifact-download
@@ -792,7 +800,7 @@ jobs:
       contents: read
     outputs:
       shards: ${{ steps.shards.outputs.shards }}
-      # The tests job restores its archive on GitHub's hosted runner, at this path.
+      # The tests job restores its archive at this physical checkout path.
       checkout: ${{ github.workspace }}
     env:
       NO_COLOR: "1"
@@ -862,6 +870,9 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Setup uv for the Python driver wheel
+        uses: astral-sh/setup-uv@v6
+
       # The Python package's unit tests embed CPython, so the unit tests link its library.
       - name: Install apt deps
         run: |
@@ -916,6 +927,12 @@ jobs:
       # the scenario suite there.
       - name: Pack the scenario suite
         run: just test-scenarios-coverage-pack "${RUNNER_TEMP}/scenario-suite/scenario-suite.tar.zst"
+
+      - name: Setup Java for embedded JVM tests
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
 
       - name: Build the unit tests
         run: just test-coverage-binaries
@@ -1300,6 +1317,7 @@ jobs:
         env:
           EXTRA_TESTS_RESULT: ${{ needs.extra-tests.result }}
           EXTRA_COVERAGE_REQUIRED: ${{ needs.extra-tests.outputs.coverage-required }}
+          EXTRA_NATIVE_COVERAGE_REQUIRED: ${{ needs.extra-tests.outputs.native-coverage-required }}
         run: |
           # Every shard's report is an input, so a shard whose report is missing fails the merge.
           scenarios=()
@@ -1310,7 +1328,11 @@ jobs:
           extras=()
           if [[ "${EXTRA_TESTS_RESULT}" == "success" ]]; then
             if [[ "${EXTRA_COVERAGE_REQUIRED}" == "true" ]]; then
-              extras+=(coverage-inputs/coverage-native-extras)
+              if [[ "${EXTRA_NATIVE_COVERAGE_REQUIRED}" == "true" ]]; then
+                extras+=(coverage-inputs/coverage-native-extras)
+              else
+                extras+=(--python-input coverage-inputs/coverage-native-extras)
+              fi
             fi
           fi
           just coverage-merge coverage-inputs/tests "${scenarios[@]}" "${extras[@]}"
@@ -1380,9 +1402,9 @@ jobs:
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
 
-  # The workspace line-coverage union of every producer this run's event and labels select: the
-  # ordinary report, the modeled and diagnostic native collections, and the live fuzz campaigns a
-  # pull request carrying `fuzz` requests. It waits for every producer job, including a skipped or
+  # The line-coverage union of producers the event, labels and temporary CI policy permit:
+  # the ordinary report, selected modeled collections and ordinary report-tool diagnostics.
+  # Deloxide and fuzz execution stay disabled. It waits for every producer, including a skipped or
   # failed one, so a producer that did not succeed fails the union instead of hiding behind a skip.
   # It downloads the exported reports and records and rebuilds nothing. The ordinary report, its
   # CRAP report and its patch coverage stay with the coverage job.
@@ -1422,7 +1444,7 @@ jobs:
           path: coverage-full-inputs/coverage-merged
 
       - name: Download native extra coverage
-        if: needs.extra-tests.outputs.coverage-required == 'true'
+        if: needs.extra-tests.outputs.native-coverage-required == 'true'
         uses: actions/download-artifact@v8
         with:
           pattern: coverage-native-extras
@@ -1507,7 +1529,7 @@ jobs:
             target/coverage-full/summary.md
           if-no-files-found: warn
 
-  # The cross-language client probes: C, C++, Java and Ruby over the shared Rust binding's C ABI,
+  # The cross-language client probes: C, C++ and Ruby through the C ABI, Java through JNI,
   # CPython over its Python package, and independent Go and TypeScript implementations on Node.js and
   # Bun. They need toolchains the suite job does not install and run a feature of their own, so they
   # are a job of their own beside the suite rather than minutes added to its critical path. They run
@@ -1577,12 +1599,12 @@ jobs:
           sudo dpkg -i /tmp/tinygo.deb
           tinygo version
 
-      # The Foreign Function and Memory API the Java probe uses is final from Java 22.
+      # The JNI library is compiled and exercised at its Java 21 floor.
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "25"
+          java-version: "21"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -1662,6 +1684,9 @@ jobs:
       - name: Publish kache report after the build
         run: python3 scripts/publish_kache_report.py --phase build "${RUNNER_TEMP}/kache-build-report"
 
+      - name: JVM binding boundary and embedded properties
+        run: just test-client-jvm
+
       - name: Client conformance
         run: just test-client-conformance-run
 
@@ -1719,6 +1744,14 @@ jobs:
       coverage-required: >-
         ${{ contains(github.event.pull_request.labels.*.name, 'extra-runners') ||
         contains(github.event.pull_request.labels.*.name, 'extra-compiler') ||
+        contains(github.event.pull_request.labels.*.name, 'extra-bench-smoke') ||
+        contains(github.event.pull_request.labels.*.name, 'extra-primitives') ||
+        contains(github.event.pull_request.labels.*.name, 'extra-completion-walk') ||
+        contains(github.event.pull_request.labels.*.name, 'extra-connector-matrix') }}
+      # Python-only runner reports join the ordinary merge directly. Only native collections
+      # also need discovery by the full union; losing a selected Rust report must still fail.
+      native-coverage-required: >-
+        ${{ contains(github.event.pull_request.labels.*.name, 'extra-compiler') ||
         contains(github.event.pull_request.labels.*.name, 'extra-bench-smoke') ||
         contains(github.event.pull_request.labels.*.name, 'extra-primitives') ||
         contains(github.event.pull_request.labels.*.name, 'extra-completion-walk') ||
@@ -2005,7 +2038,7 @@ jobs:
 
       - name: Primitive boundary conformance
         if: contains(github.event.pull_request.labels.*.name, 'extra-primitives')
-        run: just coverage-native-extras test-primitives
+        run: just coverage-native-extras test-primitives-ordinary test-primitives-shuttle test-primitives-loom test-primitives-turmoil
 
       - name: Runner diagnostics before Primitive boundary compile and browser checks
         if: contains(github.event.pull_request.labels.*.name, 'extra-primitives')
@@ -2015,7 +2048,7 @@ jobs:
 
       - name: Primitive boundary compile and browser checks
         if: contains(github.event.pull_request.labels.*.name, 'extra-primitives')
-        run: just test-primitives-compile
+        run: just test-primitives-compile ''
 
       # The walk saturates every core, and its failures are about completion reachability rather
       # than about any one test.

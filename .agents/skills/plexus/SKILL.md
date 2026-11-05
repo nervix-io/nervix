@@ -36,6 +36,8 @@ direct-value sections. Nervix validates the entity's declared limits and exact m
 For MQTT sources, read [Ingestors → MQTT](../../../docs/src/ingestors.md#mqtt) before promising
 delivery during downstream stalls; it distinguishes QoS 0 overflow, acknowledged capacity and
 the counters that expose each outcome, and the refusal of a broker grant below the declared QoS.
+For MQTT retained publication, typed publish properties and user-property headers, read
+[Emitters → MQTT](../../../docs/src/emitters.md#mqtt) for their exact types, limits and retry contract.
 For Pulsar source identity, keys, redelivery and event-time windows, read
 [Ingestors → Pulsar](../../../docs/src/ingestors.md#pulsar) and its metadata table. Choose
 `TIMESTAMP AT metadata.event_time` or `TIMESTAMP AT metadata.publish_time` deliberately: an absent
@@ -64,6 +66,9 @@ contract. Refer users to those chapters for cursor edits, transaction-aware cand
 completion status messages. For connector expression completion, including filters, HTTP request
 expressions, ALTER constructions, metadata fields and entity-specific header functions, follow
 the CLI's Completion section.
+For secure CLI connections and console leader redirects, follow those chapters' connection
+sections and [Native session TLS](../../../docs/src/installation-cargo.md#native-session-tls).
+Listener certificates are node provisioning, configured outside Plexus statements.
 Read the Ingestors and Emitters chapters for `SHOW INGESTORS`, `SHOW EMITTERS`, and `DESCRIBE`;
 their inspection contracts distinguish effective options from canonical `SHOW CREATE` configuration.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
@@ -85,8 +90,10 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   LATEST creation position, the subscription's TYPE, endpoints, delivery/ACK expectations,
   emitter publishing mode, confirmation window and timeout where applicable, retry pacing,
   ordering, and offsets.
-- Isolation: unbranched or a concrete branch key, branch TTL, and optional instance limit. A branch
-  currently has one direct execution partition; do not write a `PARTITIONS` clause.
+- Isolation: unbranched or a concrete branch key, branch TTL, optional instance limit, and the
+  branch's partition count when one relay owner per branch would funnel too much traffic (see
+  [Relay Partitions](https://docs.nervix.io/relay.html#relay-partitions)); the count changes only
+  while the domain is stopped.
 - Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference,
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
   repartitioning.
@@ -110,6 +117,11 @@ retry boundary when explaining source recovery.
 
 Run the control plane with `nervix-server` and submit configuration through the separate
 `nervix-cli` client. Format saved `.plexus` files with `nervix-plexus-format`.
+A script driving `nervix-cli --command` branches on its exit status, never on printed text: `0`
+completed, `1` failed, `3` outcome not known, `130` cancelled before admission. After `3`, send the
+same command again with the `--execution-reference` or `--upload-identity` the CLI printed, which
+recovers the outcome; a fresh submission could apply it twice. The CLI guide's Exit Status section
+defines each status.
 For a native CLI or Rust-client session addressed by hostname, Hickory resolves the selected
 server, seeds, and redirects on connection. Keep the hostname in the `http://` or `https://` server
 URL so HTTPS verifies that name. The CLI normally reads the system resolver and hosts files; use
@@ -215,6 +227,10 @@ transaction again before retrying the commit against its reviewed basis. Do not 
 undivided request can mix
 those phases.
 
+A committed cluster parameter revision invalidates an identified transaction preview even when
+the queued Models still fit its caps or the parameter values later return to their earlier values.
+Inspect the transaction again before committing; a parameter notice does not review a new preview.
+
 Treat a successful administrative command as a completed effect. After `UPLOAD RESOURCE`, model or
 lookup creation, `START`, `STOP`, placement changes, or `COMMIT` returns `OK`, issue the dependent
 operation immediately. Do not add a readiness request, `DESCRIBE` polling loop, arbitrary delay, or
@@ -223,6 +239,12 @@ staging only; `COMMIT` supplies the full usable-effect boundary. CLI, Rust-clien
 flows retain command execution references, upload identities, transaction append positions, and
 commit identity through redirects or reconnects. Do not manufacture a new identity for an
 uncertain admitted operation.
+
+If a session's COMMIT, REVERT, or attach reports that its transaction is unknown after the retained
+tombstone is removed, that session can begin another transaction. Keep the original execution
+reference for any earlier command whose outcome is uncertain; the new failure does not identify
+that earlier outcome. Follow [Exact Recovery](https://docs.nervix.io/client-session-protocol.html#exact-recovery)
+for its recovery window and expiry.
 
 For storage failures or uncertain administrative outcomes, consult `Control Plane` → `Durability
 and recovery` before suggesting a retry, and
@@ -243,9 +265,11 @@ Deduplicator key and reorderer ordering changes also use entity pause; their `MA
 dynamic. Write an ingestor's `ALTER` under the stored ingestor's own head, such as
 `ALTER KAFKA TOPIC INGESTOR`; an alteration never changes its connector or entity, so reading
 another one takes `DROP INGESTOR` and a new `CREATE`. Use that head's complete body after
-`SET FROM`, or change only the quiesce mode with `SET QUIESCE <body>`; a client ingestor takes the
-complete `SET FROM SCHEMA ...` body under `ALTER CLIENT PRODUCER INGESTOR`, and a change to its
-endpoint contract ends its attached producers.
+`SET FROM`, or change one part in place: `SET CLIENT`, `SET <locator>`, `SET|DROP <option>`,
+`SET MODE` and `SET QUIESCE` with a mode the entity declares, and
+`ALTER ROUTE TO <relay> <construction change>`; see `Ingestors` → `Altering Ingestors`. A client
+ingestor takes the complete `SET FROM SCHEMA ...` body under `ALTER CLIENT PRODUCER INGESTOR`, and a
+change to its endpoint contract ends its attached producers.
 Buffered client routes force-flush and settle their admitted acknowledgements before an alteration
 publishes a replacement contract. Keep reading admitted outcomes while admission is suspended;
 reopen a producer after a committed contract change, and retain its attachment when an alteration
@@ -255,6 +279,17 @@ Every reingestor and generator ALTER uses entity pause; reingestor route bodies 
 per-route branch selection, while generator route bodies remain set-only.
 `ALTER DOMAIN SET PLACEMENT` is nameless, targets the active domain, and performs a normal schedule
 activation; a newly effective hard colocation requirement can relocate runtime nodes.
+
+During node startup, `SHOW CLUSTER STATUS;` and `DESCRIBE CLUSTER;` remain available while live cluster policy is discovered. Status reports `node.initialization=initializing` until initialization finishes; wait for `ready` before policy-dependent commands or transfers.
+
+Use `ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;`
+for committed Nervix cluster policy changes. Keep it outside domain transactions; it needs no
+selected domain. Read `Node Settings` for the complete parameter set, positive duration bounds,
+existing-model cap refusals, live installation and committed-versus-running inspection. Seed flags
+belong only to the first bootstrap, including when their value equals the default. Later starts,
+including the returning bootstrap node, omit them.
+`HTTP_HEADER_FIELDS` ranges from 1 to 16,384, leaving capacity for client and transport headers. Committed header byte and field caps also protect
+literal HTTP polling headers, at model creation and when a later cap is lowered.
 
 ## Preserve Plexus semantics
 
@@ -380,11 +415,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `MAX STATE SIZE` after duration `WIDTH` and `STEP`, a branched window a branch with
   `MAX INSTANCES <n> EVICT LRU`, and the precision or capacity sets both accuracy and memory.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
-  schema. Declare datetime encoding explicitly when required: a JSON or CBOR `string` wire field
-  binds a `DATETIME` field only with `ENCODE <field> AS RFC3339`, while an exact `DATETIME` wire
-  type, like the exact `U8` through `I64`, `F32` and `F64` types, binds only the internal type of
-  its own name. JSON and CBOR carry no NaN or infinity; read `Schemas And Codecs` → `Value
-  Fidelity` before relying on non-finite floats or unsigned Avro list elements.
+  schema. Read `Schemas And Codecs` → `Wire Schemas` for each format's vocabulary and exact
+  binding matrix. Declare text interchange explicitly: `ENCODE <field> AS RFC3339` for a
+  datetime in a JSON or AVRO `string`, and `ENCODE <field> AS BASE64` for bytes in one.
+  Read `Value Fidelity` before relying on non-finite floats or unsigned Avro list elements.
 - For every JAQ-backed codec, use `WITH JAQ TRANSFORMATIONS` and declare `ON INGESTION`,
   `ON EMITTING`, or both in that order. At least one direction is required.
 - An `ON INGESTION` program runs once per value a payload holds, and every object it yields becomes
@@ -419,9 +453,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - Treat JSON, CBOR, and AVRO wire schemas as distinct entity kinds. Their names may coincide, so
   every create, alter, show, drop, and codec reference must include the exact format.
 - Use `BYTES` for arbitrary octets, including `ARRAY` and `VEC` elements. Keep branch key schemas
-  free of `BYTES`. JSON and CBOR wire `BYTES` fields carry padded standard base64 text; AVRO uses
-  native bytes. A cast never converts `BYTES`; use the functions of `Expression Functions` →
-  `Bytes, Encodings And Hashes`.
+  free of `BYTES`. Check the wire representation and required encoding rule in `Schemas And
+  Codecs` → `Codecs`; an AVRO `bytes` field needs no rule. A cast never converts `BYTES`; use the
+  functions of `Expression Functions` → `Bytes, Encodings And Hashes`.
 - Declare wire-schema mode after the entity name with `CREATE WIRE <format> SCHEMA <name> MODE
   STRICT|LOOSE`. Change it with `ALTER WIRE <format> SCHEMA <wire_schema> MODE STRICT|LOOSE`;
   the same format-qualified ALTER form owns field evolution.
@@ -517,9 +551,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   Declare a `secret.<name>` key on the `HTTP` client and write
   `'authorization' = CLIENT SECRET 'secret.<name>'`; see
   [HTTP REQUEST](../../../docs/src/ingestors.md#http-polling-requests). Change `METHOD`, `HEADERS` or
-  `MAX BODY SIZE` with `ALTER HTTP REQUEST INGESTOR … SET FROM <complete body>`. A poll goes to the
-  client's `endpoint` exactly as written, path and query included, so declare one client for each
-  polled resource; a client an `HTTP REQUEST` emitter also uses must name an origin, and
+  `MAX BODY SIZE` in place with `ALTER HTTP REQUEST INGESTOR … SET METHOD …`, `SET|DROP HEADERS`
+  or `SET|DROP MAX BODY SIZE`. A poll goes to the client's `endpoint` exactly as written, path and
+  query included, so declare one client for each polled resource; a client an `HTTP REQUEST`
+  emitter also uses must name an origin, and
   [`HTTP CLIENT`](../../../docs/src/ingestors.md#http-client) lists the keys both directions share.
 - For an HTTP emitter, write `CREATE HTTP REQUEST EMITTER <name> FROM <relay> TO <client> METHOD <string_expression> PATH
   <string_expression> MODE ACK RETRY POLICY BACKOFF <duration> MAX <duration>` followed by exactly
@@ -641,7 +676,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `CATALOG` and `COMMIT EACH` before `MODE`. Put OTEL attributes, resource and scope with `VALUES`
   after `MODE`.
   Use the stored kind in every emitter ALTER head. `SET TO` requires that entity's complete body,
-  including its payload selection; changing the connector or entity requires drop and create.
+  including its payload selection; changing the connector or entity requires drop and create. Change
+  one part in place with `SET <locator>`, `SET|DROP <option>`, `SET MODE`, `SET|DROP <envelope
+  clause>`, the construction operations and `SET GENERAL ERROR`; see `Emitters` → `Altering
+  emitters`.
   External table and collection names retain case. Keep client/schema/codec references as identifiers.
 - Name the connector and entity in every ingestor head, such as `CREATE KAFKA TOPIC INGESTOR`,
   `CREATE HTTP ENDPOINT INGESTOR`, or `CREATE SYSLOG LISTENER INGESTOR`, and write the body after

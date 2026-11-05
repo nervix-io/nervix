@@ -1524,7 +1524,7 @@ mod tests {
     }
 
     fn envelope_variant(variant: u8) -> BatchEnvelope {
-        match variant % 5 {
+        match variant % 6 {
             0 => BatchEnvelope {
                 key: None,
                 headers: EmitterHeaders::Text(Vec::new()),
@@ -1557,6 +1557,40 @@ mod tests {
                 ]),
                 message_group: None,
                 clauses: None,
+            },
+            4 => BatchEnvelope {
+                key: None,
+                headers: EmitterHeaders::Text(vec![
+                    ("trace".to_owned(), "first".to_owned()),
+                    ("trace".to_owned(), "second".to_owned()),
+                ]),
+                message_group: None,
+                clauses: Some(Arc::new(nervix_connector::RecordEnvelope {
+                    retain: true,
+                    properties: vec![
+                        nervix_connector::RecordProperty {
+                            name: "content_type",
+                            value: nervix_connector::PropertyValue::String(
+                                "application/json".to_owned(),
+                            ),
+                        },
+                        nervix_connector::RecordProperty {
+                            name: "message_expiry",
+                            value: nervix_connector::PropertyValue::U32(u32::from(variant)),
+                        },
+                        nervix_connector::RecordProperty {
+                            name: "response_topic",
+                            value: nervix_connector::PropertyValue::String(format!(
+                                "responses/{variant}"
+                            )),
+                        },
+                        nervix_connector::RecordProperty {
+                            name: "correlation_data",
+                            value: nervix_connector::PropertyValue::Bytes(vec![variant, 0, 255]),
+                        },
+                    ],
+                    ..Default::default()
+                })),
             },
             _ => BatchEnvelope {
                 key: None,
@@ -1766,15 +1800,12 @@ mod tests {
                     }
                 }
                 assert_eq!(record.message_group, model.envelope.message_group);
-                assert_eq!(
-                    record.envelope,
-                    model
-                        .envelope
-                        .clauses
-                        .as_deref()
-                        .cloned()
-                        .unwrap_or_default()
-                );
+                match &model.envelope.clauses {
+                    Some(clauses) => assert_eq!(&record.envelope, clauses.as_ref()),
+                    None => {
+                        assert_eq!(record.envelope, nervix_connector::RecordEnvelope::default())
+                    }
+                }
             }
         }
 

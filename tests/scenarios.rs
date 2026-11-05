@@ -64,6 +64,7 @@ use iceberg::{
         FileIO, FileIOBuilder, S3_ACCESS_KEY_ID, S3_DISABLE_CONFIG_LOAD, S3_DISABLE_EC2_METADATA,
         S3_ENDPOINT, S3_PATH_STYLE_ACCESS, S3_REGION, S3_SECRET_ACCESS_KEY,
     },
+    transaction::{ApplyTransactionAction as _, Transaction},
 };
 use iceberg_catalog_rest::{
     REST_CATALOG_PROP_URI, REST_CATALOG_PROP_WAREHOUSE, RestCatalog, RestCatalogBuilder,
@@ -141,7 +142,9 @@ use crate::common::{
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     command_probe::{CommandPause, CommandProbe, CommandProbes, ProbeReply},
-    command_recovery::{LeaderRoutes, LearnedOutcome, NodeSession},
+    command_recovery::{
+        LEADER_POLL_INTERVAL, LeaderRoutes, LearnedOutcome, NodeSession, UNKNOWN_OUTCOME_RECOVERY,
+    },
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, CollectorSignal, CollectorWait, DependencyEndpoints,
         ICEBERG_REST_ADDR, KAFKA_ADDR, KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR,
@@ -204,9 +207,11 @@ use crate::common::{
 };
 
 mod backup;
+mod cli_outcomes;
 mod clickhouse_connections;
 mod client_consumers;
 mod client_producers;
+mod client_traffic;
 mod common;
 mod database_batches;
 #[cfg(feature = "deloxide")]
@@ -224,9 +229,11 @@ mod kafka_metadata;
 mod materialized_state_inspection;
 mod mqtt_fixtures;
 mod mqtt_properties;
+mod mqtt_publish_properties;
 mod mqtt_sessions;
 mod mqtt_subscription_refusal;
 mod mysql_isolation;
+mod nats_authentication;
 mod nats_delivery;
 mod nats_stream_consumers;
 mod paced_replication;
@@ -241,11 +248,16 @@ mod pulsar_subscription_types;
 mod pulsar_subscriptions;
 mod rabbitmq_envelope;
 mod rabbitmq_properties;
+mod relay_partitions;
 mod restarted_voter;
 mod session_protocol;
+mod session_tls;
 mod standalone_transaction;
+mod web_console_command_retry;
 mod web_console_connections;
+mod web_console_request_window;
 mod websocket_lifecycle;
+mod wide_row_intake;
 
 const SCENARIOS_PATH: &str = "tests/features";
 const TEST_LOG_DIR: &str = "tests/logs";
@@ -430,6 +442,10 @@ struct BlockedConsensusConnectivity {
 
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
+    console_before_command_retry:
+        Option<crate::common::console_connections::ConsoleSetupObservation>,
+    mqtt_envelope_observer: Option<mqtt_publish_properties::Observer>,
+    mqtt_publication_endpoint: Option<mqtt_publish_properties::Endpoint>,
     rabbitmq_envelope_broker:
         Option<nervix_test_environment::restartable_rabbitmq::RestartableRabbitMq>,
     mqtt_fixture_publication: Option<mqtt_fixtures::Publication>,
@@ -444,6 +460,7 @@ struct ScenarioWorld {
     /// Bulk-worker holds that cleanup releases even when a step fails before explicit release.
     occupied_bulk_nodes: BTreeSet<nervix_models::ClusterNodeName>,
     active_session: Option<TestSession>,
+    unread_session: Option<session_protocol::UnreadSession>,
     /// A bounded next-row reader installed before the publication whose delay it measures.
     subscription_arrival: Option<ArrivalObservation<SubscriptionReceipt>>,
     active_session_node: Option<String>,
@@ -486,7 +503,7 @@ struct ScenarioWorld {
     /// them as and then by version.
     saved_resource_details: BTreeMap<String, BTreeMap<u64, String>>,
     /// How the last restore stream a scenario shaped itself ended.
-    last_restore_end: Option<crate::common::raw_session::TestRestoreEnd>,
+    last_restore_end: Option<crate::backup::restore::RestoreStreamEnd>,
     /// A restore stream a scenario sent in the background.
     background_restore: Option<crate::backup::restore::BackgroundRestore>,
     /// Real filesystem capacity held while an accepted restore tries its client inspection.
@@ -533,6 +550,8 @@ struct ScenarioWorld {
     cli_clock_process: Option<CliClockProcess>,
     /// The interactive CLI a scenario types into through a pseudo-terminal.
     cli_terminal: Option<CliTerminal>,
+    /// A CLI command a scenario started in the background, to interrupt it or read how it ends.
+    started_cli: Option<cli_outcomes::StartedCli>,
     /// The whole outcome of the last command a named client ran, for assertions that read more
     /// than its message.
     last_client_outcome: Option<ClientCommandOutcome>,
@@ -699,6 +718,9 @@ struct ScenarioWorld {
     consumers: client_consumers::ScenarioConsumers,
     /// The distinct-tenant payloads the last generating step posted and no assertion has received.
     generated_payloads: generated_http_payloads::GeneratedPayloads,
+    /// The authentication counts one node exported before a scenario's attempts, which its
+    /// assertions compare the node's later counts with.
+    client_authentication_baseline: client_traffic::AuthenticationBaseline,
 }
 
 impl fmt::Debug for ScenarioWorld {
@@ -2361,6 +2383,29 @@ async fn then_http_receiver_request_is(
     expected.assert_matches(
         &format!("HTTP receiver '{name}' request {position}"),
         &request,
+    );
+}
+
+/// Compare a captured payload with the independent fixture encoder's complete wire datum.
+#[then(expr = "HTTP receiver {string} request {int} carries this {string} payload")]
+async fn then_http_receiver_request_carries_encoded_payload(
+    world: &mut ScenarioWorld,
+    name: String,
+    position: usize,
+    wire_format: String,
+    #[step] step: &Step,
+) {
+    let payload = expand_placeholders(world, docstring(step));
+    let expected = encode_http_payload_for_codec(
+        &wire_format,
+        &payload,
+        &world.avro_http_field_order,
+        &world.avro_http_optional_fields,
+    );
+    let request = captured_http_request(world, &name, position);
+    assert_eq!(
+        request.body, expected,
+        "HTTP receiver '{name}' request {position} must carry the complete {wire_format} payload"
     );
 }
 
@@ -7313,6 +7358,110 @@ fn given_consensus_commits_on_every_node_take(world: &mut ScenarioWorld, duratio
     }
 }
 
+/// Hold only the follower's answer, after it has accepted the heartbeat. The followers therefore
+/// keep hearing the same leader while its acknowledgements arrive later than one heartbeat period.
+#[when(expr = "follower heartbeat answers take {string} while the leader idles for {string}")]
+async fn when_follower_heartbeat_answers_are_late(
+    world: &mut ScenarioWorld,
+    delay: String,
+    idle: String,
+) {
+    let delay = parse_duration_text(&delay).expect("heartbeat answer delay must be valid");
+    let idle = parse_duration_text(&idle).expect("heartbeat idle period must be valid");
+    let timings =
+        nervix_consensus::RaftTimings::resolve(Some(world.cluster_config.raft_heartbeat_interval))
+            .expect("the configured heartbeat interval must be valid");
+    assert!(
+        delay > world.cluster_config.raft_heartbeat_interval
+            && delay < timings.election_timeout_max(),
+        "the answer must be later than a heartbeat but inside the leader lease"
+    );
+    assert!(
+        idle > timings.election_timeout_max(),
+        "the idle observation must span one leader lease"
+    );
+
+    let leader = current_leader_node(world).await;
+    let before = world
+        .cluster()
+        .current_leadership(&leader)
+        .await
+        .expect("the leader must report its term before the delay");
+    let followers = world
+        .cluster()
+        .node_ids()
+        .into_iter()
+        .filter(|node| node != &leader)
+        .collect::<Vec<_>>();
+    assert_eq!(followers.len(), 2, "this regression requires three voters");
+    let observed_after = Instant::now() + idle;
+    for follower in &followers {
+        world
+            .fault_injection
+            .set_consensus_heartbeat_response_delay(
+                &crate::common::cluster::node_name(follower),
+                delay,
+            );
+    }
+
+    nervix_primitives::time::timeout(idle + Duration::from_secs(5), async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let both_received = followers.iter().all(|follower| {
+                world.fault_injection.delayed_consensus_heartbeat_requests(
+                    &crate::common::cluster::node_name(follower),
+                ) >= 2
+            });
+            if Instant::now() >= observed_after && both_received {
+                break;
+            }
+            nervix_primitives::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("both followers must receive delayed heartbeats across one leader lease");
+    let after = world
+        .cluster()
+        .current_leadership(&leader)
+        .await
+        .expect("the leader must report its term after the delay");
+    assert_eq!(after, before, "the same node must still lead in its term");
+    for follower in &followers {
+        let received = world
+            .fault_injection
+            .delayed_consensus_heartbeat_requests(&crate::common::cluster::node_name(follower));
+        assert!(
+            received >= 2,
+            "follower '{follower}' delayed only {received} heartbeats"
+        );
+    }
+    world.placeholders.insert("lease_leader".into(), leader);
+}
+
+#[then(expr = "the delayed-heartbeat leader creates domain {string} within {string}")]
+async fn then_delayed_heartbeat_leader_creates_domain(
+    world: &mut ScenarioWorld,
+    name: String,
+    budget: String,
+) {
+    let name = expand_placeholders(world, &name);
+    let budget = parse_duration_text(&budget).expect("command budget must be valid");
+    let leader = world
+        .placeholders
+        .get("lease_leader")
+        .expect("the preceding step saved the delayed-heartbeat leader");
+    let command = format!("CREATE DOMAIN {name};");
+    nervix_primitives::time::timeout(
+        budget,
+        world.cluster().run_command(leader, &world.domain, &command),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("the still-leading node '{leader}' did not commit '{name}': {error}")
+    })
+    .unwrap_or_else(|error| panic!("the still-leading node '{leader}' refused '{name}': {error}"));
+}
+
 #[given(expr = "{int} sessions keep creating domains named {string} through the leader node")]
 async fn given_sessions_keep_creating_domains(
     world: &mut ScenarioWorld,
@@ -7427,6 +7576,106 @@ async fn given_next_start_has_an_occupied_observability_port(
         .occupy_observability_port_for_start(&node_id)
         .await
         .assured("a stopped follower's observability port can be held for its next startup");
+}
+
+#[given(expr = "node {string} will fail its next data append submission to node {string}")]
+async fn given_next_data_append_submission_fails(
+    world: &mut ScenarioWorld,
+    source: String,
+    target: String,
+) {
+    let source = expand_placeholders(world, &source);
+    let target = expand_placeholders(world, &target);
+    let source = crate::common::cluster::node_name(&source);
+    let observer = world.fault_injection.consensus_observer(&source);
+    let retention = observer.raft_log_retention();
+    // With no confirmed match, OpenRaft's midpoint is floor(end / 16) * 8. At end 528,
+    // the probe's previous index is 263, beyond the first replay batch's last index 255.
+    assert!(
+        retention.last_log_index.is_some_and(|index| index >= 527),
+        "the successor needs at least 528 retained entries: {retention:?}"
+    );
+    assert!(
+        retention.purged_index.is_none(),
+        "the regression requires the beginning of the log to remain available: {retention:?}"
+    );
+    world
+        .fault_injection
+        .fail_next_append_submission(&source, crate::common::cluster::node_name(&target))
+        .await;
+}
+
+#[then(
+    expr = "node {string} failed one append submission to node {string} above the replay batch \
+            boundary"
+)]
+async fn then_append_submission_failed_above_replay_boundary(
+    world: &mut ScenarioWorld,
+    source: String,
+    target: String,
+) {
+    let source = expand_placeholders(world, &source);
+    let target = expand_placeholders(world, &target);
+    let source = crate::common::cluster::node_name(&source);
+    let failure = nervix_primitives::time::timeout(Duration::from_secs(60), async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if let Some(failure) = world
+                .fault_injection
+                .append_submission_failure(&source)
+                .await
+            {
+                break failure;
+            }
+            nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|error| {
+        panic!("the successor did not submit data to the restored follower: {error}")
+    });
+    tracing::info!(%source, ?failure, "consensus append submission fault delivered");
+    assert_eq!(failure.target, crate::common::cluster::node_name(&target));
+    let previous = failure
+        .previous
+        .as_ref()
+        .unwrap_or_else(|| panic!("the failed initial probe has no previous entry: {failure:?}"));
+    assert!(
+        previous.index >= 256,
+        "a replay's first 256 entries must end below the probe's previous index: {failure:?}"
+    );
+    assert!(failure.last.index > previous.index);
+    assert!(failure.entries > 0);
+}
+
+#[then(expr = "node {string} confirms a linearizable read beyond its failed append submission")]
+async fn then_failed_append_leader_confirms_linearizable_read(
+    world: &mut ScenarioWorld,
+    source: String,
+) {
+    let source = expand_placeholders(world, &source);
+    let source = crate::common::cluster::node_name(&source);
+    let observer = world.fault_injection.consensus_observer(&source);
+    let failure = world
+        .fault_injection
+        .append_submission_failure(&source)
+        .await
+        .verified("the preceding step observed this node's failed append submission");
+    let answered = nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        observer.admitted_runtime_state(),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("the successor's Raft core did not answer its strict read: {error}")
+    });
+    let read = answered
+        .unwrap_or_else(|error| panic!("the successor's Raft core must still answer: {error:#}"));
+    assert!(
+        read.committed_log_index() > failure.last.index,
+        "the successor must apply the writes following its failed batch, even if leadership \
+         changed"
+    );
 }
 
 #[given(expr = "append-stream setup attempts toward node {string} are observed")]
@@ -8130,6 +8379,16 @@ async fn when_node_is_started_without_catching_up(world: &mut ScenarioWorld, nod
         .start_node_without_catching_up(&node_id)
         .await
         .expect("failed to start node");
+}
+
+#[when(expr = "node {string} is started until public observation is available")]
+async fn when_node_is_started_until_observable(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster_mut()
+        .start_node_until_observable(&node_id)
+        .await
+        .expect("failed to start observable node");
 }
 
 #[then(expr = "within {string} node {string} has interrupted a raft snapshot installation")]
@@ -12804,6 +13063,27 @@ async fn when_node_is_started(world: &mut ScenarioWorld, node_id: String) {
         .expect("failed to start node");
 }
 
+#[when(expr = "node {string} is started with live parameter discovery paused")]
+async fn when_node_is_started_with_parameter_discovery_paused(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster_mut()
+        .start_node_waiting_for_parameters(&node_id)
+        .await
+        .expect("failed to start node at live parameter discovery");
+}
+
+#[when(expr = "live parameter discovery on node {string} is released")]
+async fn when_parameter_discovery_is_released(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_initial_cluster_parameters_pause(&crate::common::cluster::node_name(&node_id));
+}
+
 /// Starts a node whose start the scenario expects may be refused, and records how it ended for a
 /// later step to assert instead of failing this one.
 #[when(expr = "node {string} attempts to start")]
@@ -13179,11 +13459,21 @@ async fn then_command_admission_pause_is_reached(world: &mut ScenarioWorld, node
             }
             return;
         }
-        // A request the active session sent under a name answers only when a later step reads
-        // it, so its pause is awaited on its own.
+        if let Some(started) = world.started_cli.as_mut() {
+            let node_name = crate::common::cluster::node_name(&node_id);
+            started
+                .keeps_running_until(
+                    fault_injection.wait_for_command_admission_pause(&node_name),
+                    "its command reached the admission pause",
+                )
+                .await;
+            return;
+        }
+        // A request the active session sent under a name, or a command typed into the CLI REPL,
+        // answers only when a later step reads it, so its pause is awaited on its own.
         assert!(
-            !world.session_requests.is_empty(),
-            "a background command request or a named session request must be active"
+            !world.session_requests.is_empty() || world.cli_terminal.is_some(),
+            "a background command request, a named session request or the CLI REPL must be active"
         );
         let node_name = crate::common::cluster::node_name(&node_id);
         fault_injection
@@ -13279,15 +13569,28 @@ async fn then_command_durable_admission_pause_is_reached(
     let node_id = expand_placeholders(world, &node_id);
     let node_name = crate::common::cluster::node_name(&node_id);
     let fault_injection = world.fault_injection.clone();
+    if let Some(started) = world.started_cli.as_mut() {
+        let reached = started.keeps_running_until(
+            fault_injection.wait_for_command_durable_admission_pause(&node_name),
+            "its command reached the durable admission pause",
+        );
+        nervix_primitives::time::timeout(Duration::from_secs(30), reached)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("durable command admission pause on '{node_id}' was not reached: {error}")
+            });
+        return;
+    }
+    let repl_waits = world.cli_terminal.is_some();
     let task = world.background_command_result.as_mut();
     assert!(
-        task.is_some() || !world.session_requests.is_empty(),
-        "a background command request or a named session request must be active"
+        task.is_some() || !world.session_requests.is_empty() || repl_waits,
+        "a background command request, a named session request or the CLI REPL must be active"
     );
     nervix_primitives::time::timeout(Duration::from_secs(30), async {
         let Some(task) = task else {
-            // A request the active session sent under a name answers only when a later step
-            // reads it, so its pause is awaited on its own.
+            // A request the active session sent under a name, or a command typed into the CLI
+            // REPL, answers only when a later step reads it, so its pause is awaited on its own.
             fault_injection
                 .wait_for_command_durable_admission_pause(&node_name)
                 .await;
@@ -13304,6 +13607,24 @@ async fn then_command_durable_admission_pause_is_reached(
     .unwrap_or_else(|error| {
         panic!("durable command admission pause on '{node_id}' was not reached: {error}")
     });
+}
+
+#[given("command execution on all nodes pauses after durable admission")]
+async fn given_command_durable_admission_pause_on_all_nodes(world: &mut ScenarioWorld) {
+    for node in world.cluster().node_ids() {
+        nervix_primitives::task::consume_budget().await;
+        given_command_durable_admission_pause(world, node).await;
+    }
+}
+
+#[when("the durable command admission pauses on all nodes are released")]
+async fn when_command_durable_admission_pauses_on_all_nodes_are_released(
+    world: &mut ScenarioWorld,
+) {
+    for node in world.cluster().node_ids() {
+        nervix_primitives::task::consume_budget().await;
+        when_command_durable_admission_pause_is_released(world, node).await;
+    }
 }
 
 #[when(expr = "the durable command admission pause on node {string} is released")]
@@ -13598,6 +13919,30 @@ async fn then_refused_resource_publication_was_taken_up(
     );
 }
 
+#[given(
+    expr = "node {string} refuses its next resource upload start as a leader that could not \
+            confirm its lease"
+)]
+async fn given_resource_upload_start_refusal(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .refuse_next_resource_upload_start_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "node {string} refused a resource upload start")]
+async fn then_resource_upload_start_was_refused(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let refused = world
+        .fault_injection
+        .refused_resource_upload_start(&crate::common::cluster::node_name(&node_id));
+    assert_eq!(
+        refused,
+        Some(true),
+        "node '{node_id}' must refuse the resource upload start armed for it"
+    );
+}
+
 #[given(expr = "node {string} loses the reply to its next installed resource upload")]
 async fn given_installed_resource_upload_reply_loss(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -13632,16 +13977,32 @@ async fn given_https_listener_installation_failure(world: &mut ScenarioWorld, no
 async fn then_resource_installation_pause_is_reached(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
     let node_name = crate::common::cluster::node_name(&node_id);
+    let fault_injection = world.fault_injection.clone();
+    if let Some(started) = world.started_cli.as_mut() {
+        let reached = started.keeps_running_until(
+            fault_injection.wait_for_resource_installation_pause(&node_name),
+            "its upload reached the resource installation pause",
+        );
+        nervix_primitives::time::timeout(Duration::from_secs(30), reached)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("resource installation pause on '{node_id}' was not reached: {error}")
+            });
+        return;
+    }
     nervix_primitives::time::timeout(
         Duration::from_secs(30),
-        world
-            .fault_injection
-            .wait_for_resource_installation_pause(&node_name),
+        fault_injection.wait_for_resource_installation_pause(&node_name),
     )
     .await
     .unwrap_or_else(|error| {
         panic!("resource installation pause on '{node_id}' was not reached: {error}")
     });
+    // An upload typed into the CLI REPL holds the REPL until it ends, so reaching the pause is
+    // all this step can observe of it.
+    if world.cli_terminal.is_some() {
+        return;
+    }
     let background = world
         .background_plexus
         .as_ref()
@@ -16434,6 +16795,48 @@ async fn when_referenced_command_request_is_executed_on_leader(
 }
 
 #[when(
+    expr = "this Plexus command request with execution reference {string} is sent once to node \
+            {string}"
+)]
+async fn when_referenced_command_is_sent_once_to_node(
+    world: &mut ScenarioWorld,
+    execution_reference: String,
+    node_id: String,
+    #[step] step: &Step,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let execution_reference = command_execution_reference(world, &execution_reference);
+    let query = expand_placeholders(world, docstring(step));
+    let mut session = world
+        .cluster()
+        .open_session(&node_id, &world.domain)
+        .await
+        .expect("failed to open the single-attempt command session");
+    let result = session
+        .run_command_result_with_reference(&query, &execution_reference)
+        .await
+        .expect("the single-attempt command transport failed");
+    world.last_command_disposition = Some(result.disposition.clone());
+    if result.succeeded() {
+        world.last_command_error = None;
+        world.last_command_output = Some(result.message);
+    } else {
+        world.last_command_output = None;
+        world.last_command_error = Some(result.message);
+    }
+}
+
+#[then("the last command request reports that its outcome is not yet authoritative")]
+fn then_last_command_outcome_is_not_yet_authoritative(world: &mut ScenarioWorld) {
+    assert_eq!(
+        world.last_command_disposition,
+        Some(nervix_client_wire::CommandDisposition::OutcomeUnknown(
+            nervix_client_wire::UnknownOutcomeCause::NotYetAuthoritative
+        ))
+    );
+}
+
+#[when(
     expr = "this Plexus command request with an execution reference created {string} before now \
             is executed on the leader node"
 )]
@@ -16448,6 +16851,22 @@ async fn when_command_request_with_reference_created_before_now_is_executed(
         .assured("the scenario reference age lies after the Unix epoch");
     let execution_reference = uuid_v7_created_at(created_at);
     execute_command_request_with_reference_on_leader(world, &execution_reference, step).await;
+}
+
+#[given(expr = "command execution reference {string} is created {string} after now")]
+fn given_command_execution_reference_is_created_after_now(
+    world: &mut ScenarioWorld,
+    reference: String,
+    lead: String,
+) {
+    let reference = expand_placeholders(world, &reference);
+    let lead = parse_duration_text(&lead).assured("the scenario reference lead is a duration");
+    let created_at = SystemTime::now()
+        .checked_add(lead)
+        .assured("the scenario reference lead stays within the system clock range");
+    world
+        .command_execution_references
+        .insert(reference, uuid_v7_created_at(created_at));
 }
 
 #[when(
@@ -17703,9 +18122,32 @@ async fn when_incomplete_resource_upload_is_sent(
     resource: String,
     identity: String,
 ) {
-    let resource = expand_placeholders(world, &resource);
-    let identity = expand_placeholders(world, &identity);
     let leader = current_leader_node(world).await;
+    send_incomplete_resource_upload(world, &resource, &identity, &leader).await;
+}
+
+#[when(
+    expr = "an incomplete upload of resource {string} with identity {string} is sent to node \
+            {string}"
+)]
+async fn when_incomplete_resource_upload_is_sent_to_node(
+    world: &mut ScenarioWorld,
+    resource: String,
+    identity: String,
+    node: String,
+) {
+    let node = expand_placeholders(world, &node);
+    send_incomplete_resource_upload(world, &resource, &identity, &node).await;
+}
+
+async fn send_incomplete_resource_upload(
+    world: &mut ScenarioWorld,
+    resource: &str,
+    identity: &str,
+    node: &str,
+) {
+    let resource = expand_placeholders(world, resource);
+    let identity = expand_placeholders(world, identity);
     // Declares two bytes and carries one, so the server must refuse it.
     let upload = TestUpload {
         domain: &world.domain,
@@ -17720,7 +18162,7 @@ async fn when_incomplete_resource_upload_is_sent(
     };
     let result = world
         .cluster()
-        .send_shaped_resource_upload(&leader, upload)
+        .send_shaped_resource_upload(node, &upload)
         .await
         .unwrap_or_else(|error| panic!("incomplete upload request failed: {error}"));
     let nervix_client_wire::UploadDisposition::Failed {
@@ -17753,7 +18195,7 @@ async fn when_malformed_resource_upload_is_sent(world: &mut ScenarioWorld, resou
     };
     let result = world
         .cluster()
-        .send_shaped_resource_upload(&leader, upload)
+        .send_shaped_resource_upload(&leader, &upload)
         .await
         .expect("the server answers the malformed archive upload");
     assert!(
@@ -18625,6 +19067,34 @@ async fn when_this_plexus_command_request_is_executed_on_leader_node(
     }
 }
 
+/// A command a new session sends again under its original execution reference and transaction
+/// position, after it attaches the transaction the original request was issued in.
+struct ReplayedCommand {
+    transaction_id: String,
+    execution_reference: String,
+    expected_transaction_position: usize,
+    query: String,
+}
+
+impl ReplayedCommand {
+    fn read(
+        world: &mut ScenarioWorld,
+        transaction_id: &str,
+        execution_reference: &str,
+        expected_transaction_position: u64,
+        step: &Step,
+    ) -> Self {
+        let expected_transaction_position = usize::try_from(expected_transaction_position)
+            .assured("a 64-bit target's usize holds every scenario transaction position");
+        Self {
+            transaction_id: expand_placeholders(world, transaction_id),
+            execution_reference: command_execution_reference(world, execution_reference),
+            expected_transaction_position,
+            query: expand_placeholders(world, docstring(step)),
+        }
+    }
+}
+
 #[when(
     expr = "a new session attaches to transaction {string} and executes this Plexus command with \
             execution reference {string} at transaction position {int}"
@@ -18636,34 +19106,127 @@ async fn when_new_session_attaches_and_executes_referenced_command(
     expected_transaction_position: u64,
     #[step] step: &Step,
 ) {
-    let transaction_id = expand_placeholders(world, &transaction_id);
-    let execution_reference = command_execution_reference(world, &execution_reference);
-    let query = expand_placeholders(world, docstring(step));
-    let leader = current_leader_node(world).await;
-    let mut session = world
-        .cluster()
-        .open_session(&leader, &world.domain)
-        .await
-        .unwrap_or_else(|error| panic!("failed to open replay session: {error}"));
-    let attached = session
-        .attach_transaction(&transaction_id)
-        .await
-        .unwrap_or_else(|error| panic!("failed to attach replay session: {error}"));
-    assert!(
-        attached.succeeded(),
-        "failed to attach replay session: {}",
-        attached.message
+    let replayed = ReplayedCommand::read(
+        world,
+        &transaction_id,
+        &execution_reference,
+        expected_transaction_position,
+        step,
     );
-    let expected_transaction_position = usize::try_from(expected_transaction_position)
-        .expect("a scenario transaction position fits in usize");
-    let result = session
-        .run_command_result_with_reference_at_position(
-            &query,
-            &execution_reference,
-            expected_transaction_position,
-        )
+    let leader = current_leader_node(world).await;
+    replay_command_from_node(world, leader, replayed).await;
+}
+
+#[when(
+    expr = "a new session on node {string} attaches to transaction {string} and executes this \
+            Plexus command with execution reference {string} at transaction position {int}"
+)]
+async fn when_new_session_on_node_attaches_and_executes_referenced_command(
+    world: &mut ScenarioWorld,
+    node: String,
+    transaction_id: String,
+    execution_reference: String,
+    expected_transaction_position: u64,
+    #[step] step: &Step,
+) {
+    let node = expand_placeholders(world, &node);
+    let replayed = ReplayedCommand::read(
+        world,
+        &transaction_id,
+        &execution_reference,
+        expected_transaction_position,
+        step,
+    );
+    replay_command_from_node(world, node, replayed).await;
+}
+
+/// Opens a session on `node` and attaches `transaction_id` to it, as a replay session must before
+/// it sends a command again.
+///
+/// An attach that a node redirects decides nothing, and neither does one that a leader refuses
+/// because it could not confirm its lease. The attach goes again, from a new session, to the node
+/// [`LeaderRoutes::after`] names, until a node attaches the transaction or refuses it
+/// definitively; the step asserts that attach. No attempt starts once
+/// [`UNKNOWN_OUTCOME_RECOVERY`] has passed, and the step then fails with the last refusal.
+async fn attach_replay_session(
+    world: &ScenarioWorld,
+    routes: &LeaderRoutes,
+    mut node: String,
+    transaction_id: &str,
+) -> NodeSession {
+    let deadline = PhaseDeadline::after(UNKNOWN_OUTCOME_RECOVERY);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let mut session = world
+            .cluster()
+            .open_session(&node, &world.domain)
+            .await
+            .unwrap_or_else(|error| panic!("failed to open replay session on '{node}': {error}"));
+        let attached = session
+            .attach_transaction(transaction_id)
+            .await
+            .unwrap_or_else(|error| panic!("failed to attach replay session on '{node}': {error}"));
+        let nervix_client_wire::AttachDisposition::NotLeader(redirect) = &attached.disposition
+        else {
+            assert!(
+                attached.succeeded(),
+                "failed to attach replay session: {}",
+                attached.message
+            );
+            return NodeSession { node, session };
+        };
+        append_cucumber_log_line(&format!(
+            "replay session attach of transaction {transaction_id} on node {node} decided \
+             nothing: {}",
+            attached.message
+        ));
+        deadline.pause(LEADER_POLL_INTERVAL).await;
+        assert!(
+            !deadline.has_passed(),
+            "no node attached transaction '{transaction_id}' to a replay session within \
+             {UNKNOWN_OUTCOME_RECOVERY:?}; node '{node}' last answered: {}",
+            attached.message
+        );
+        node = routes.after(&node, redirect.leader.as_ref()).to_string();
+    }
+}
+
+/// Opens a replay session on `node`, attaches the replayed command's transaction to it, and sends
+/// the command again under its original reference and position.
+///
+/// The attach follows its refusals as [`attach_replay_session`] describes. A replayed command that
+/// is answered before its outcome is known, by a node that no longer leads or a leader that lost
+/// its lease, learns the outcome through command recovery under the same frozen request, so the
+/// step records a definitive answer and never sends the command under another reference.
+async fn replay_command_from_node(
+    world: &mut ScenarioWorld,
+    node: String,
+    replayed: ReplayedCommand,
+) {
+    let routes = world.cluster().leader_routes();
+    let NodeSession {
+        mut node,
+        mut session,
+    } = attach_replay_session(world, &routes, node, &replayed.transaction_id).await;
+    let prepared = session.prepare_command_at_position(
+        &replayed.query,
+        &replayed.execution_reference,
+        replayed.expected_transaction_position,
+    );
+    let mut result = prepared
+        .run(&mut session)
         .await
         .unwrap_or_else(|error| panic!("replayed command request failed: {error}"));
+    if prepared.awaits_recovery(&result) {
+        let learned = learn_command_outcome(&routes, &prepared, result, None).await;
+        result = learned.outcome;
+        if let Some(answered) = learned.answered_on
+            && let Some(moved) =
+                session.retain_recovered_binding(&prepared, answered.node, answered.session)
+        {
+            node = moved;
+        }
+    }
     if result.succeeded() {
         world.last_command_error = None;
         world.last_command_output = Some(result.message);
@@ -18672,7 +19235,7 @@ async fn when_new_session_attaches_and_executes_referenced_command(
         world.last_command_error = Some(result.message);
     }
     world.active_session = Some(session);
-    world.active_session_node = Some(leader);
+    world.active_session_node = Some(node);
     world.active_session_has_subscription = false;
 }
 
@@ -21036,7 +21599,10 @@ async fn then_selector_eventually_disappears(world: &mut ScenarioWorld, selector
         .expect("a browser page must be opened before selector assertions");
     let selector = expand_placeholders(world, &selector);
     let locator = page.locator(&selector);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // The wait starts when this step does. A scenario that means a server acknowledgement first
+    // waits for that acknowledgement's own outcome.
+    let bound = Duration::from_secs(10);
+    let deadline = Instant::now() + bound;
     loop {
         nervix_primitives::task::consume_budget().await;
         let texts = locator
@@ -21048,7 +21614,7 @@ async fn then_selector_eventually_disappears(world: &mut ScenarioWorld, selector
         }
         assert!(
             Instant::now() < deadline,
-            "expected selector '{selector}' to disappear after its server acknowledgement, still \
+            "expected selector '{selector}' to disappear within {bound:?} of this step, still \
              showing {texts:?}"
         );
         nervix_primitives::time::sleep(Duration::from_millis(50)).await;
@@ -25609,6 +26175,117 @@ async fn then_node_observability_metric_with_labels_eventually_equals(
         .await;
 }
 
+#[then(expr = "cluster observability metric {string} with labels eventually totals {int}")]
+async fn then_cluster_observability_metric_eventually_totals(
+    world: &mut ScenarioWorld,
+    metric_name: String,
+    expected: i64,
+    #[step] step: &Step,
+) {
+    let labels = docstring(step)
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let expected: f64 = expected.approx_into();
+    let mut observed = BTreeMap::new();
+    let outcome =
+        nervix_primitives::time::timeout(common::status_request::STATUS_WAIT_BUDGET, async {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                observed.clear();
+                let mut total = 0.0;
+                for node in world.cluster().node_ids() {
+                    nervix_primitives::task::consume_budget().await;
+                    let value = match world
+                        .cluster()
+                        .read_observability_metric(&node, &metric_name, &labels)
+                        .await
+                    {
+                        Ok(value) => value,
+                        Err(error) => {
+                            panic!("node '{node}' did not expose '{metric_name}': {error}")
+                        }
+                    };
+                    total += value;
+                    observed.insert(node, value);
+                }
+                if total == expected {
+                    break;
+                }
+                nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+    assert!(
+        outcome.is_ok(),
+        "metric '{metric_name}' with labels {labels:?} did not total {expected}: {observed:?}"
+    );
+}
+
+#[then(expr = "node {string} observability metric {string} is saved as placeholder {string}")]
+async fn then_node_observability_metric_is_saved(
+    world: &mut ScenarioWorld,
+    node: String,
+    metric: String,
+    placeholder: String,
+) {
+    let node = expand_placeholders(world, &node);
+    let value = match world
+        .cluster()
+        .read_observability_metric(&node, &metric, &[])
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => panic!("node '{node}' did not expose '{metric}' before saving it: {error}"),
+    };
+    assert!(value.is_finite());
+    world.placeholders.insert(placeholder, value.to_string());
+}
+
+#[then(
+    expr = "node {string} observability metric {string} eventually reaches saved placeholder \
+            {string}"
+)]
+async fn then_node_observability_metric_reaches_saved_value(
+    world: &mut ScenarioWorld,
+    node: String,
+    metric: String,
+    placeholder: String,
+) {
+    let node = expand_placeholders(world, &node);
+    let expected: f64 = world
+        .placeholders
+        .get(&placeholder)
+        .verified("the preceding step saved this metric")
+        .parse()
+        .assured("saved metric values are numeric");
+    let mut observed = None;
+    let outcome =
+        nervix_primitives::time::timeout(common::status_request::STATUS_WAIT_BUDGET, async {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let value = match world
+                    .cluster()
+                    .read_observability_metric(&node, &metric, &[])
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(error) => panic!("node '{node}' did not expose '{metric}': {error}"),
+                };
+                observed = Some(value);
+                if value >= expected {
+                    break;
+                }
+                nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+    assert!(
+        outcome.is_ok(),
+        "node '{node}' metric '{metric}' did not reach {expected}: {observed:?}"
+    );
+}
+
 #[then(
     expr = "within {string} node {string} observability metric {string} with labels eventually \
             equals {int}"
@@ -26247,6 +26924,32 @@ async fn when_the_operator_provisions_iceberg_namespace(
         .ensure()
         .await
         .expect("failed to provision the Iceberg namespace");
+}
+
+#[given(expr = "Iceberg table {string} declares table property {string} as {string}")]
+async fn given_iceberg_table_declares_table_property(
+    world: &mut ScenarioWorld,
+    table: String,
+    property: String,
+    value: String,
+) {
+    let value = expand_placeholders(world, &value);
+    IcebergTablePropertyFixture::from_step(world, &table, &property)
+        .update(IcebergTablePropertyUpdate::Set(&value))
+        .await
+        .expect("failed to declare the Iceberg table property");
+}
+
+#[when(expr = "the operator removes table property {string} from Iceberg table {string}")]
+async fn when_the_operator_removes_iceberg_table_property(
+    world: &mut ScenarioWorld,
+    property: String,
+    table: String,
+) {
+    IcebergTablePropertyFixture::from_step(world, &table, &property)
+        .update(IcebergTablePropertyUpdate::Remove)
+        .await
+        .expect("failed to remove the Iceberg table property");
 }
 
 #[when(
@@ -29418,6 +30121,43 @@ async fn when_http_payload_is_posted_to_node(
 }
 
 #[when(
+    expr = "http payload is acknowledged within {string} by node {string} with host {string} path \
+            {string}"
+)]
+async fn when_http_payload_is_acknowledged(
+    world: &mut ScenarioWorld,
+    wait: String,
+    node_id: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    let wait = parse_duration_text(&wait)
+        .assured("the scenario declares a valid HTTP acknowledgement bound");
+    let node_id = expand_placeholders(world, &node_id);
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    let posted_at = Instant::now();
+    world.last_publish_at = Some(posted_at);
+    world.first_http_post_at.get_or_insert(posted_at);
+    let publisher = world
+        .cluster()
+        .acknowledged_http_publisher(&node_id, &host, &path, wait);
+    append_cucumber_log_line(&format!(
+        "http publish acknowledged: node={node_id} host={host} path={path} payload_bytes={} \
+         wait={wait:?}",
+        payload.len()
+    ));
+    crate::common::runner_observation::observe_off_the_runner(async move {
+        publisher.publish_bounded(&payload).await
+    })
+    .await
+    .unwrap_or_else(|error| panic!("HTTP payload was not acknowledged: {error}"));
+    append_cucumber_log_line("http publish completed: acknowledged");
+}
+
+#[when(
     expr = "http payload begins posting in the background to node {string} with host {string} \
             path {string}"
 )]
@@ -29632,6 +30372,11 @@ async fn then_named_client_receives_subscription_payload(
         let nervix_client_core::SubscriptionEvent::Rows(rows) = event else {
             continue;
         };
+        append_cucumber_log_line(&format!(
+            "client subscription frame: client={client_name} subscription={} frame_bytes={}",
+            rows.rows.subscription().name.as_str(),
+            rows.rows.frame().len()
+        ));
         let lines = rows
             .display_lines()
             .unwrap_or_else(|error| panic!("client '{client_name}' rows do not render: {error}"));
@@ -33985,6 +34730,61 @@ impl IcebergTableFixture {
     }
 }
 
+/// What an operator's catalog update does to one property of a table.
+#[derive(Clone, Copy)]
+enum IcebergTablePropertyUpdate<'a> {
+    Set(&'a str),
+    Remove,
+}
+
+/// One property of a table in the namespace named after the scenario's Nervix domain, which an
+/// operator updates through the catalog.
+struct IcebergTablePropertyFixture {
+    namespace: IcebergNamespaceFixture,
+    table: String,
+    property: String,
+}
+
+impl IcebergTablePropertyFixture {
+    fn from_step(world: &ScenarioWorld, table: &str, property: &str) -> Self {
+        Self {
+            namespace: IcebergNamespaceFixture::of_domain(world),
+            table: expand_placeholders(world, table),
+            property: expand_placeholders(world, property),
+        }
+    }
+
+    async fn update(&self, update: IcebergTablePropertyUpdate<'_>) -> Result<(), String> {
+        IcebergCatalogProvisioning::run("table property", || self.update_once(update)).await
+    }
+
+    async fn update_once(&self, update: IcebergTablePropertyUpdate<'_>) -> Result<(), String> {
+        let catalog = rustfs_rest_catalog(&self.namespace.dependencies).await?;
+        let namespace = NamespaceIdent::from_strs(self.namespace.namespace.split('.'))
+            .map_err(|source| format!("invalid catalog namespace: {source}"))?;
+        let table_ident = TableIdent::new(namespace, self.table.clone());
+        let table = catalog
+            .load_table(&table_ident)
+            .await
+            .map_err(|source| format!("failed to load Iceberg table {table_ident}: {source}"))?;
+        let transaction = Transaction::new(&table);
+        let properties = transaction.update_table_properties();
+        let action = match update {
+            IcebergTablePropertyUpdate::Set(value) => {
+                properties.set(self.property.clone(), value.to_string())
+            }
+            IcebergTablePropertyUpdate::Remove => properties.remove(self.property.clone()),
+        };
+        let transaction = action.apply(transaction).map_err(|source| {
+            format!("failed to update Iceberg table {table_ident} properties: {source}")
+        })?;
+        transaction.commit(&catalog).await.map_err(|source| {
+            format!("failed to commit Iceberg table {table_ident} properties: {source}")
+        })?;
+        Ok(())
+    }
+}
+
 fn iceberg_record_batch_rows(batch: &RecordBatch) -> Result<Vec<serde_json::Value>, String> {
     let schema = batch.schema();
     let mut rows = Vec::with_capacity(batch.num_rows());
@@ -35491,6 +36291,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 stop_receivers(world).await;
                 close_browser(world).await;
                 world.active_session = None;
+                world.unread_session = None;
                 world.subscription_arrival = None;
                 world.active_session_node = None;
                 world.active_session_has_subscription = false;
@@ -35541,6 +36342,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 // harness state, and they are given back once the nodes they fronted have ended.
                 world.stallable_tcp_proxies.clear();
                 world.mqtt_publish_filter = None;
+                world.mqtt_envelope_observer = None;
+                world.mqtt_publication_endpoint = None;
                 world.rabbitmq_confirm_order = None;
                 world.sqs_answer_hold = None;
                 world.iceberg_catalog_gate = None;

@@ -588,6 +588,14 @@ applied separately to incoming and outgoing work across all peers and connection
 These reservations mean that ordinary management traffic cannot consume the capacity required to
 resolve already-started relay work or determine whether a peer is healthy.
 
+Consensus heartbeats use the management pool independently of log replication. The worker waits
+for one answer from each follower up to the leader lease (the configured maximum election timeout),
+and its interconnect request uses the same full bound. An answer after one heartbeat interval
+but before that lease expires can therefore reach Raft; timeout or transport failure still ends the
+request and releases its management stream. Initial empty replication probes continue to use their
+shorter soft deadline and the same typed management response. This changes neither the wire shape
+nor pool and admission quotas.
+
 Leasing an established stream allocates nothing and acquires no shared discovery map. An immutable
 persistent target table selects the peer's fixed pool arrays. Each slot retains its cancellation
 lifetime, one atomic worker claim and an `ArcSwapOption` containing the current authenticated
@@ -782,6 +790,19 @@ A logical outgoing channel is identified by the authenticated destination node, 
 domain, destination relay, and concrete branch. Different channels may run concurrently. Within one
 channel, the sender preserves FIFO order and permits at most one batch to wait for runtime admission.
 Each sender channel has a unique incarnation and a monotonically increasing sequence number.
+
+Every relay payload names the unit of the relay its batch belongs to: the single unit of a relay
+with one owner, or the partition of a partitioned relay that owns the batch's key, as
+[Relay Partitions](relay.md#relay-partitions) describes. A producer resolves the partition once,
+when it binds the channel for a concrete branch, and the owner routes of that relay are a table of
+one owner per unit that a schedule replaces whole. A schedule that moves one partition's owner
+retires only the channels of that partition's branches; the producers of every other partition keep
+delivering on the channels they hold, and each partition has its own routing generation that a
+forced recovery fences on its own. A node admits a routed payload only for a unit it owns: the
+receiver refuses one addressed to a unit it does not own as owned elsewhere, and once it has decoded
+the key it refuses, as `RemoteRelayDecodeError::Unit`, a payload whose key lands in a partition other
+than the one the payload names. A subscription or consumer payload carries the unit of the
+partition owner that fanned it out.
 
 For fan-out, the source encodes an Arrow batch once and shares those immutable encoded bytes across
 destinations and transport retries. Delivery metadata, admission state, and attached record
@@ -1954,6 +1975,10 @@ a peer unavailable and does not extend a previous run of failures. Only continuo
 for the configured node-unavailability interval produce unavailable status; a healthy observation
 resets that run. Consensus membership continues to use the cluster topology established by gossip.
 
+The node-unavailability interval is installed live from the committed cluster parameters. A changed
+interval wakes retained health waiters, which recompute their next monotonic transition using the
+installed value. Republishing an unchanged interval does not wake those waiters.
+
 Scheduling and runtime availability retain a previously discovered incarnation that gossip stops
 listing live only while its latest application observation is younger than the node-unavailability
 interval and has not made it unavailable. A healthy, briefly failing, or capacity-refused
@@ -2114,6 +2139,11 @@ When remote ACK registration cannot reserve correlation memory, the affected rec
 acknowledgement carries the registration report chain, including its admission cause.
 An answering node sends its established remote failure class or stream rejection text over the
 wire; a local report's cause chain is not serialized into an HTTP/2 response.
+The forwarding node resumes a relay rejection's received text as `TransportError::RelayRejected`
+beneath `RemoteDispatchError::AdmissionRejected`, so alternate report display retains the reason.
+When cancellation reconciliation discovers that rejection after a failed send, the report also
+retains the original local send cause. The text remains an intentional wire projection, never an
+input to admission or retry classification.
 
 The exact source owners classify `RemoteRequestFailure`, `RemoteOperationFailure`,
 `OwnershipHandoffFailure`, gossip refusals and resource-publication answers as fixed wire outcomes
@@ -2134,6 +2164,18 @@ persisted preparation as cleaned up. Only an
 exact durable discard, activation, or schedule-based reconciliation resolves that preparation.
 
 ## Observability
+
+The consensus owner establishes a trace context containing the cluster, node and concrete local
+interconnect listener address before it starts OpenRaft. Its captured core events can therefore be
+assigned to one concrete listener when several isolated test clusters reuse the same node names. This
+is diagnostic context; traffic classes, quotas, requests and deadlines keep their own contracts.
+Trace-level contexts on unary Raft receivers carry the same endpoint into their existing API
+events, before the core processes the request.
+Vote and pre-vote client trace events also record send and completion boundaries and elapsed
+transport time, including encoding, connection admission and response decoding. The existing
+caller deadline and cancellation still own an exchange that ends before a completion event.
+[Consensus Storage And Replication](consensus-storage-and-replication.md#observability) owns the
+context and the replication signals.
 
 Backup capture and inventory remain terminal request/reply operations. Their administrative
 handlers log owner-local phase boundaries at `info`, correlated by domain, owner node and capture
@@ -2174,3 +2216,16 @@ undelivered batch and branch field values stay out of that diagnostic.
 Per-batch and payload-bearing logs use debug or trace levels and do not expose sensitive field
 values. See [Metrics And Observability](./metrics-and-observability.md) for the metric and logging
 contract.
+
+## Cluster Parameter Observations
+
+The existing authenticated gossip exchange publishes a coherent `cluster_parameters` value: the
+committed parameter record and the optional record installed by that node. Revisions are positive;
+a running revision cannot exceed its committed publication or name different values at the same
+revision. A delayed committed observation leaves a newer publication intact.
+
+A returning node obtains its construction policy from a live peer publication and gates graph
+installation until its applied Raft record reaches that revision; equal revisions must contain
+equal values. The interconnect simulation qualifies this encoding and catch-up decision under a
+partition over the real transport, without claiming whole-node Raft or Fjall crash simulation.
+[Node Settings](node-settings.md#committed-parameter-changes) owns policy application.

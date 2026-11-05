@@ -7,7 +7,7 @@
 //!   the acknowledgement and negative acknowledgement of a delivery, and returning what is in
 //!   transit when the instance lets its pull go.
 //! - **Depends on.** The connector read contract, the primitive clock and channels, and the
-//!   `async-nats` core client and pull consumer.
+//!   `async-nats` core client, pull consumer and acknowledgement encoding.
 //! - **Must not know.** Graphs, acknowledgement trees, placement, or Plexus Models.
 
 #![cfg_attr(
@@ -19,7 +19,10 @@ use std::{num::NonZeroUsize, time::Duration};
 
 use async_nats::{
     Client as NatsClient, Message as NatsMessage, StatusCode, Subject, Subscriber,
-    jetstream::consumer::{Config as ConsumerConfig, PullConsumer, pull::BatchConfig},
+    jetstream::{
+        AckKind,
+        consumer::{Config as ConsumerConfig, PullConsumer, pull::BatchConfig},
+    },
 };
 use error_stack::Report;
 use futures_util::StreamExt as _;
@@ -34,12 +37,6 @@ use super::ingestor::{
     NatsPullRefusal, NatsStreamIngestorError, NatsStreamIngestorMessage,
     NatsStreamIngestorPosition, NatsStreamIngestorResult,
 };
-
-/// What a server answers an acknowledgement with: the delivery is processed.
-const ACKNOWLEDGED: &[u8] = b"+ACK";
-/// What a server answers a negative acknowledgement with: the delivery is to be delivered again
-/// at once.
-const NOT_ACKNOWLEDGED: &[u8] = b"-NAK";
 
 /// What the consumer an instance pulls from lets one pull request ask for, as its operator
 /// configured it.
@@ -306,12 +303,17 @@ impl NatsStreamPull {
     }
 
     /// Acknowledges the delivery at `position` and returns once the server answered.
+    ///
+    /// The acknowledgement is the client's `AckKind` encoding sent as a request, which fails when
+    /// nothing answers it. The client's `double_ack` would count any reply as the answer, the
+    /// server's no-responders status included, so it could return without the confirmation the
+    /// consumer recorded the acknowledgement.
     pub(super) async fn acknowledge(
         &self,
         position: &NatsStreamIngestorPosition,
     ) -> NatsStreamIngestorResult<()> {
         self.client
-            .request(position.acknowledgement_subject(), ACKNOWLEDGED.into())
+            .request(position.acknowledgement_subject(), AckKind::Ack.into())
             .await
             .map_err(|source| {
                 Report::new(source).change_context(NatsStreamIngestorError::Acknowledge)
@@ -320,13 +322,16 @@ impl NatsStreamPull {
     }
 
     /// Negatively acknowledges the delivery at `position`, so the consumer delivers it again at
-    /// once, and returns once the server answered.
+    /// once, and returns once the server answered, as [`Self::acknowledge`] does.
     pub(super) async fn reject(
         &self,
         position: &NatsStreamIngestorPosition,
     ) -> NatsStreamIngestorResult<()> {
         self.client
-            .request(position.acknowledgement_subject(), NOT_ACKNOWLEDGED.into())
+            .request(
+                position.acknowledgement_subject(),
+                AckKind::Nak(None).into(),
+            )
             .await
             .map_err(|source| {
                 Report::new(source).change_context(NatsStreamIngestorError::NegativelyAcknowledge)
@@ -370,7 +375,7 @@ impl NatsStreamPull {
                 continue;
             };
             self.client
-                .publish(reply, NOT_ACKNOWLEDGED.into())
+                .publish(reply, AckKind::Nak(None).into())
                 .await
                 .reported("returning a received NATS JetStream delivery to its consumer");
         }

@@ -32,6 +32,17 @@ A node begins shutting down for exactly three reasons:
   [Prerequisites At Join](./node-settings.md#prerequisites-at-join) describes each. The refused
   node requests its own stop; a node that has joined never stops because of a newcomer.
 
+A public listener stops when the node closes admission or when the server serving it fails. An
+accept that fails never stops it. A connection its client reset or abandoned before the listener
+took it fails only itself, and the listener accepts the next one at once. Any other failed accept,
+such as one refused because the process ran out of file descriptors, is a fault of the node rather
+than of one connection: the listener reports the first one after it last took a connection at `warn`
+as `a public listener failed to accept a connection; it keeps accepting`, the ones repeating it at
+`debug`, and accepts again. When it takes a connection after failing it reports `a public listener
+accepts connections again` at `info` with how many accepts failed, so a node that ran out of
+descriptors keeps every listener and accepts again as soon as it has room. The native gRPC, the
+`VHOST` HTTP and HTTPS, the observability and both web console listeners follow this rule.
+
 There is no Plexus statement, API call, or cluster command that stops a node. `CORDON NODE`,
 `DRAIN NODE`, `RELOCATE`, and `DROP NODE` move work and change eligibility; none of them ends a
 process. Stopping a process is an operator or supervisor action delivered as a signal.
@@ -600,7 +611,9 @@ owns the general contract; this section states what shutdown adds.
 
 The move identifies one scheduled node and unit. The destination's prepared and activated
 checkpoints and the source's capture freeze use that same unit, so moving one unit does not
-discard a sibling unit's state. Current schedules have only `Single` units.
+discard a sibling unit's state. A relay of a partitioned branch has one `Partition` unit per
+partition, and a drain moves each partition the node owns on its own; every other node has one
+`Single` unit.
 
 The complete target schedule is computed before anything is held. The coordinator then fences
 dispatch at the affected subgraph boundary on every live node that runs part of it, stops intake for
@@ -735,7 +748,7 @@ state; see [Forced Recovery](./wasm-state.md#forced-recovery).
 | --- | --- |
 | Single node | No replacement exists. Nothing is cordoned, no ownership moves, and all admitted work drains in place before the process exits. |
 | Follower with a reachable leader | The node asks the leader, over the cluster interconnect, to drain it, then completes what remains in place. |
-| Leader | The leader drains itself in process and commits the release of its own cordon before it stops. Leadership is not transferred first; the cluster elects a new leader after it stops. |
+| Leader | The leader drains itself in process and commits the release of its own cordon before it stops. Leadership is not transferred first. Peers elect a leader when its absence outlasts their election timeout; a quickly restarted leader can instead restore leadership in its persisted term. |
 | Last schedulable node | Same as a single node: no replacement candidate exists, so everything completes in place, including source offset commits. |
 | Only peer is itself terminating | A terminating incarnation is not a placement candidate, so the node takes the no-replacement path and completes its work in place. |
 | Every node at once | Each node advertises terminating, finds no eligible destination, and drains locally within its own drain timeout. A leader that has not yet observed a peer's advertisement can still choose that peer for a move; the peer refuses the preparation as a terminating destination, and the work completes in place on its owner. A node that asked for its drain before it saw the others terminating gives the release of its cordon only the one-second grace once it sees them terminating, because only voters that are stopping too could commit it. |
@@ -743,6 +756,12 @@ state; see [Forced Recovery](./wasm-state.md#forced-recovery).
 
 The no-replacement path is explicit in the log: `no live schedulable replacement node remains;
 admitted work completes in place`.
+
+Nervix retains OpenRaft's leader restoration on restart. Restoring the persisted leader does not
+itself establish quorum confirmation: runtime admission still requires the linearizable read to
+confirm its leadership. Under contention, a node can therefore report leadership while its
+execution revision and HTTP intake remain uninstalled until that confirmation succeeds. A final
+leader snapshot alone establishes neither election progress nor runtime readiness.
 
 A follower requests its drain, and then the release of the cordon that drain set, with the
 `stopping_node_drain` request over the
@@ -1223,7 +1242,9 @@ stores as the previous run left them: the preflight creates a directory only whe
 removes the probe file it writes. A returning node that starts with peers to reach is then held to
 the cluster's prerequisites as it rejoins. When a connection it dials is refused before any has
 completed, or the clock of a peer it completed a handshake with is beyond its tolerance, it stops
-through the ordinary phases and exits with status `1`, while the incumbents keep running.
+and exits with status `1`, while the incumbents keep running. A refusal during live-policy
+discovery ends that wait at the stop request and cleans up the started subsystems before returning
+the typed join error. After startup, the ordinary shutdown phases handle the refusal.
 
 ### Whole-Cluster Restart Keeps Ownership
 
@@ -1507,3 +1528,15 @@ released claim becomes available again. Task teardown removes its confirmation/s
 and pooled emitter teardown removes its wait registration; cancellation clears a pending borrow's
 wait through its guard. Handoff watches register before reading their unit's retained freeze
 publication, and release publishes thaw before waking them.
+
+## Live Domain Policy
+
+Domain-drain and entity-gate deadlines come from the installed committed parameter record. Each
+operation captures its deadline when it begins. Node drain and shutdown deadlines remain local
+capabilities. Startup installs a live construction policy and admits the matching consensus
+revision before activating graph tasks; it does not replay an unplaced local graph first.
+
+Live-policy discovery runs after public observation starts and is cancelled by the first stop
+request. A node stopped before quorum-confirmed runtime admission has no admitted graph to
+drain; it still closes listeners, joins its supervised tasks and closes storage through the normal
+shutdown owner. A join refusal retains its typed cause through that cleanup.

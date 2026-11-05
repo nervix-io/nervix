@@ -22,16 +22,20 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ChoiceRequirement, ClickHouseEmitter, ClickHouseEmitterEntity, ClientEmitter,
-    ClientEmitterEntity, DeclaredBounds, EnvelopeClauseKind, HeaderModel, HttpEmitter,
-    HttpEmitterEntity, IcebergEmitter, IcebergEmitterEntity, KafkaEmitter, KafkaEmitterEntity,
-    LocatorDeclaration, MongoDbEmitter, MongoDbEmitterEntity, MqttEmitter, MqttEmitterEntity,
-    MySqlEmitter, MySqlEmitterEntity, NatsEmitter, NatsEmitterEntity, OptionDeclaration,
-    OtelEmitter, OtelEmitterEntity, PostgresEmitter, PostgresEmitterEntity, PropertyDeclaration,
-    PulsarEmitter, PulsarEmitterEntity, RabbitMqEmitter, RabbitMqEmitterEntity, RedisEmitter,
-    RedisEmitterEntity, RuntimeCapability, SentryEmitter, SentryEmitterEntity, SqsEmitter,
-    SqsEmitterEntity, SyslogEmitter, SyslogEmitterEntity, WrittenChoice, ZeroMqEmitter,
-    ZeroMqEmitterEntity, entity_union::emitter_destinations,
+    ChoiceRequirement, ClickHouseEmitter, ClickHouseEmitterChange, ClickHouseEmitterEntity,
+    ClientEmitter, ClientEmitterChange, ClientEmitterEntity, DeclaredBounds, EnvelopeClauseKind,
+    HeaderModel, HttpEmitter, HttpEmitterChange, HttpEmitterEntity, IcebergEmitter,
+    IcebergEmitterChange, IcebergEmitterEntity, KafkaEmitter, KafkaEmitterChange,
+    KafkaEmitterEntity, LocatorDeclaration, MongoDbEmitter, MongoDbEmitterChange,
+    MongoDbEmitterEntity, MqttEmitter, MqttEmitterChange, MqttEmitterEntity, MySqlEmitter,
+    MySqlEmitterChange, MySqlEmitterEntity, NatsEmitter, NatsEmitterChange, NatsEmitterEntity,
+    OptionDeclaration, OtelEmitter, OtelEmitterChange, OtelEmitterEntity, PostgresEmitter,
+    PostgresEmitterChange, PostgresEmitterEntity, PropertyDeclaration, PulsarEmitter,
+    PulsarEmitterChange, PulsarEmitterEntity, RabbitMqEmitter, RabbitMqEmitterChange,
+    RabbitMqEmitterEntity, RedisEmitter, RedisEmitterChange, RedisEmitterEntity, RuntimeCapability,
+    SentryEmitter, SentryEmitterChange, SentryEmitterEntity, SqsEmitter, SqsEmitterChange,
+    SqsEmitterEntity, SyslogEmitter, SyslogEmitterChange, SyslogEmitterEntity, WrittenChoice,
+    ZeroMqEmitter, ZeroMqEmitterChange, ZeroMqEmitterEntity, entity_union::emitter_destinations,
 };
 use crate::{
     AlterEmitterError, ClickHouseTableEmitterMode, ClientEmitterMode, ClientName, ConnectorKind,
@@ -486,25 +490,28 @@ emitter_destinations! {
     /// fully parsed.
     pub enum EmitterEntityKind as EmitterEntityMetadata;
     pub enum EmitterModeChange;
+    /// One change an `ALTER … EMITTER` writes to the body of an emitter's entity, nested by the
+    /// connector that serves the entity and the entity itself.
+    pub enum EmitterChange;
     models {
-        Client(ClientEmitter, ClientEmitterEntity, ClientEmitterMode),
-        Http(HttpEmitter, HttpEmitterEntity, HttpRequestEmitterMode),
-        Kafka(KafkaEmitter, KafkaEmitterEntity, KafkaTopicEmitterMode),
-        Pulsar(PulsarEmitter, PulsarEmitterEntity, PulsarTopicEmitterMode),
-        RabbitMq(RabbitMqEmitter, RabbitMqEmitterEntity, RabbitMqEmitterMode),
-        Redis(RedisEmitter, RedisEmitterEntity, RedisPubSubEmitterMode),
-        Mqtt(MqttEmitter, MqttEmitterEntity, MqttTopicEmitterMode),
-        Nats(NatsEmitter, NatsEmitterEntity, NatsEmitterMode),
-        ZeroMq(ZeroMqEmitter, ZeroMqEmitterEntity, ZeroMqPushEmitterMode),
-        Sqs(SqsEmitter, SqsEmitterEntity, SqsQueueEmitterMode),
-        Sentry(SentryEmitter, SentryEmitterEntity, SentryEventEmitterMode),
-        Syslog(SyslogEmitter, SyslogEmitterEntity, SyslogCollectorEmitterMode),
-        Otel(OtelEmitter, OtelEmitterEntity, OtelEmitterMode),
-        ClickHouse(ClickHouseEmitter, ClickHouseEmitterEntity, ClickHouseTableEmitterMode),
-        Postgres(PostgresEmitter, PostgresEmitterEntity, PostgresTableEmitterMode),
-        MySql(MySqlEmitter, MySqlEmitterEntity, MySqlTableEmitterMode),
-        MongoDb(MongoDbEmitter, MongoDbEmitterEntity, MongoDbCollectionEmitterMode),
-        Iceberg(IcebergEmitter, IcebergEmitterEntity, IcebergTableEmitterMode),
+        Client(ClientEmitter, ClientEmitterEntity, ClientEmitterMode, ClientEmitterChange),
+        Http(HttpEmitter, HttpEmitterEntity, HttpRequestEmitterMode, HttpEmitterChange),
+        Kafka(KafkaEmitter, KafkaEmitterEntity, KafkaTopicEmitterMode, KafkaEmitterChange),
+        Pulsar(PulsarEmitter, PulsarEmitterEntity, PulsarTopicEmitterMode, PulsarEmitterChange),
+        RabbitMq(RabbitMqEmitter, RabbitMqEmitterEntity, RabbitMqEmitterMode, RabbitMqEmitterChange),
+        Redis(RedisEmitter, RedisEmitterEntity, RedisPubSubEmitterMode, RedisEmitterChange),
+        Mqtt(MqttEmitter, MqttEmitterEntity, MqttTopicEmitterMode, MqttEmitterChange),
+        Nats(NatsEmitter, NatsEmitterEntity, NatsEmitterMode, NatsEmitterChange),
+        ZeroMq(ZeroMqEmitter, ZeroMqEmitterEntity, ZeroMqPushEmitterMode, ZeroMqEmitterChange),
+        Sqs(SqsEmitter, SqsEmitterEntity, SqsQueueEmitterMode, SqsEmitterChange),
+        Sentry(SentryEmitter, SentryEmitterEntity, SentryEventEmitterMode, SentryEmitterChange),
+        Syslog(SyslogEmitter, SyslogEmitterEntity, SyslogCollectorEmitterMode, SyslogEmitterChange),
+        Otel(OtelEmitter, OtelEmitterEntity, OtelEmitterMode, OtelEmitterChange),
+        ClickHouse(ClickHouseEmitter, ClickHouseEmitterEntity, ClickHouseTableEmitterMode, ClickHouseEmitterChange),
+        Postgres(PostgresEmitter, PostgresEmitterEntity, PostgresTableEmitterMode, PostgresEmitterChange),
+        MySql(MySqlEmitter, MySqlEmitterEntity, MySqlTableEmitterMode, MySqlEmitterChange),
+        MongoDb(MongoDbEmitter, MongoDbEmitterEntity, MongoDbCollectionEmitterMode, MongoDbEmitterChange),
+        Iceberg(IcebergEmitter, IcebergEmitterEntity, IcebergTableEmitterMode, IcebergEmitterChange),
     }
 }
 
@@ -572,6 +579,14 @@ impl EmitterEntity {
         mode: &EmitterModeChange,
     ) -> error_stack::Result<(), AlterEmitterError> {
         self.body_mut().replace_mode(mode)
+    }
+
+    /// Writes `change` into this emitter's body, which must be of the entity the change is of.
+    pub(crate) fn apply_change(
+        &mut self,
+        change: &EmitterChange,
+    ) -> error_stack::Result<(), AlterEmitterError> {
+        self.body_mut().apply_change(change)
     }
 
     pub fn capabilities(&self) -> EmitterEntityCapabilities {
@@ -669,6 +684,30 @@ impl EmitterEntity {
 pub trait EmitterEntityModel {
     const KIND: EmitterEntityKind;
     type PublishingMode;
+
+    /// One change an `ALTER` writes to what a body of this entity states, without restating the
+    /// rest of the body.
+    type Change: EmitterEntityChange<Entity = Self>
+        + Clone
+        + std::fmt::Debug
+        + PartialEq
+        + Eq
+        + serde::Serialize
+        + serde::de::DeserializeOwned;
+}
+
+/// One change an `ALTER` writes to what the body of an emitter's entity states: a locator, an
+/// option or the publishing mode, each as the entity's own grammar writes it.
+pub trait EmitterEntityChange {
+    /// The entity Model whose body the change writes to.
+    type Entity;
+
+    /// Writes the change into `entity`, or leaves `entity` as it was and says why the change does
+    /// not apply to it.
+    fn apply_to(&self, entity: &mut Self::Entity) -> error_stack::Result<(), AlterEmitterError>;
+
+    /// The change as the `ALTER` operation that writes it, such as `SET TOPIC 'orders'`.
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError>;
 }
 
 /// A borrowed publication policy and a typed update of that entity's policy.
@@ -678,5 +717,11 @@ pub trait EmitterPublication {
     fn replace_mode(
         &mut self,
         mode: &EmitterModeChange,
+    ) -> error_stack::Result<(), AlterEmitterError>;
+
+    /// Writes `change` into this body, or refuses a change of another entity.
+    fn apply_change(
+        &mut self,
+        change: &EmitterChange,
     ) -> error_stack::Result<(), AlterEmitterError>;
 }

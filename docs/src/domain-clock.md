@@ -138,6 +138,10 @@ the node-unavailability interval and has not marked it unavailable. If that obse
 stale, the node follows gossip's liveness verdict. Duplicate observations for one node name
 collapse to the newest incarnation.
 
+Changing the committed node-unavailability interval wakes existing authority-reconciliation and
+clock-installation waits. They reevaluate availability and their next health transition using the
+installed interval without recreating their subscription.
+
 Selection is deterministic. Candidates are ordered by node name, the domain name is hashed, and
 the hash selects one position in that ordered set. Every leader presented with the same domain and
 candidate set therefore proposes the same owner, while domains can distribute across the voter
@@ -503,6 +507,12 @@ Through `nx_session_domain_clock` a host reads the latest followed clock itself 
 `nx_domain_clock`, so a host attaching to an already paced clock reads the generation and mapping
 the attach reply carried before it uses the first tick, and projects logical time, waits and
 admission with the Rust client's arithmetic instead of reimplementing it.
+
+The native Python package exposes that same Rust client through `Session.domain_clock` and
+`Session.next_clock_event`. Its `DomainClock.logical_time_at`, `wall_duration_until`,
+`admission_window` and `admits` use the client's clock arithmetic. The published Python paced
+driver reads the attached snapshot before submitting and pauses on `ClockEventKind.INTERRUPTED`
+until a subsequent `ClockEventKind.STATE`; it never advances pacing from a tick alone.
 
 ## Execution-Time Snapshots
 

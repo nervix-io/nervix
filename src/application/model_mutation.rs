@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** The mutation batch, the statement dispatch behind it, and the command results a
 //!   session reads back.
-//! - **Depends on.** The registry to plan and validate, consensus to replicate, and the runtime to
+//! - **Depends on.** Pure statement routing, the registry to validate, consensus to replicate, and the runtime to
 //!   reconcile what a committed model changes.
 //! - **Must not know.** How a listener delivered the statement.
 
@@ -587,6 +587,20 @@ impl SessionServiceImpl {
                     });
                     mutations.push(RegistryMutation::AlterRelay(alter));
                 }
+                Statement::AlterBranch(alter) => {
+                    let model_id = alter.branch.clone();
+                    applied.push(AppliedModelMutation {
+                        index,
+                        model: ModelName::from(&model_id),
+                        message: format!(
+                            "altered branch '{}' in domain '{}'",
+                            model_id.as_str(),
+                            domain.as_str()
+                        )
+                        .into(),
+                    });
+                    mutations.push(RegistryMutation::AlterBranch(alter));
+                }
                 Statement::AlterJunction(alter) => {
                     let model_id = alter.junction.clone();
                     applied.push(AppliedModelMutation {
@@ -1022,16 +1036,25 @@ impl SessionServiceImpl {
                 (None, None) => Vec::new(),
                 _ => Vec::new(),
             };
+            let mut captured_inputs = None;
             let planned = match &transaction_decision {
                 Some(decision) => decision.planned.clone(),
                 None => {
-                    // A batch outside a transaction resolves the resource versions it wrote
-                    // against the versions completed now, when it is applied.
-                    let resources = Box::pin(self.inner.consensus.current_resources()).await;
+                    // Pin resource versions and validate Models against one authoritative view.
+                    // Keep its inputs until publication instead of recapturing after preparation.
+                    let control =
+                        Box::pin(self.inner.consensus.transaction_control_snapshot(&domain)).await;
+                    let Some(parameters) = control.planning_inputs.parameters() else {
+                        let error = Report::new(
+                            crate::registry::TransactionPlanningError::ClusterParametersUnseeded,
+                        );
+                        return command_error(transaction_planning_error_message(&error));
+                    };
                     let mut pinned_mutations = Vec::with_capacity(mutations.len());
                     for mutation in mutations.iter().cloned() {
                         let pinned = mutation.pin_resource_versions(|resource, requested| {
-                            resources
+                            control
+                                .resources
                                 .uploads
                                 .resolve_completed_version(&domain, resource, requested)
                                 .map(|id| id.version)
@@ -1041,26 +1064,38 @@ impl SessionServiceImpl {
                             Err(error) => return command_error(error.to_string()),
                         }
                     }
-                    match self
-                        .inner
-                        .registry
-                        .plan_mutations(&domain, &pinned_mutations)
-                    {
-                        Ok(planned) => planned,
-                        Err(err) => {
-                            warn!(
-                                domain = domain.as_str(),
-                                error = %format_args!("{err:#}"),
-                                "failed to plan model mutation batch"
-                            );
-                            return create_registry_error_response(
-                                query,
-                                &domain,
-                                &error_target,
-                                &err,
-                            );
-                        }
-                    }
+                    let models = match control.planning_inputs.schedule() {
+                        Some(schedule) => schedule
+                            .nodes
+                            .values()
+                            .map(|node| node.config.as_ref().clone())
+                            .collect(),
+                        None => Default::default(),
+                    };
+                    let planned =
+                        match crate::registry::Registry::plan_snapshot_mutations_with_parameters(
+                            &domain,
+                            models,
+                            &parameters.values,
+                            &pinned_mutations,
+                        ) {
+                            Ok(planned) => planned,
+                            Err(err) => {
+                                warn!(
+                                    domain = domain.as_str(),
+                                    error = %format_args!("{err:#}"),
+                                    "failed to plan model mutation batch"
+                                );
+                                return create_registry_error_response(
+                                    query,
+                                    &domain,
+                                    &error_target,
+                                    &err,
+                                );
+                            }
+                        };
+                    captured_inputs = Some(control.planning_inputs);
+                    planned
                 }
             };
             let client_admission = if domain_mutation.is_some() {
@@ -1150,8 +1185,11 @@ impl SessionServiceImpl {
                     }
                 }
             } else if !is_noop {
+                let inputs = captured_inputs
+                    .take()
+                    .verified("a direct model plan carries the inputs it validated");
                 let prepared = Box::pin(self.prepare_domain_schedule(
-                    &domain,
+                    inputs,
                     planned.candidate_graph(),
                     domain_state.config.placement,
                 ))
@@ -2213,6 +2251,7 @@ impl SessionServiceImpl {
             | Statement::AlterReingestor(_)
             | Statement::AlterGenerator(_)
             | Statement::AlterPlacement(_)
+            | Statement::AlterBranch(_)
             | Statement::RebindResource(_)
             | Statement::ResetWasmState(_)
             | Statement::Drop(_) => {
@@ -2434,7 +2473,17 @@ impl SessionServiceImpl {
                 self.show_emitters(domain).await
             }
             Statement::ShowClusterStatus(_) => {
-                command_ok(render_cluster_status(&self.inner.cluster, &self.inner.consensus).await)
+                let status =
+                    render_cluster_status(&self.inner.cluster, &self.inner.consensus).await;
+                let initialization = if self.inner.initialization.is_ready() {
+                    "ready"
+                } else {
+                    "initializing"
+                };
+                command_ok(format!("{status}\nnode.initialization={initialization}"))
+            }
+            Statement::AlterCluster(_) => {
+                command_error("ALTER CLUSTER SET requires durable command admission".to_string())
             }
             Statement::DescribeCluster(_) => {
                 command_ok(describe_cluster(&self.inner.cluster, &self.inner.consensus).await)

@@ -13,7 +13,7 @@
 )]
 
 use leptos::prelude::*;
-use nervix_models::{AvroType, JsonType, ParseAsType, WireSchemaStrictness};
+use nervix_models::{AvroType, CborType, JsonType, ParseAsType, WireSchemaStrictness};
 use strum::IntoEnumIterator as _;
 
 use super::{
@@ -272,7 +272,8 @@ pub(super) fn WireSchemaEditor(
 
 fn wire_types(format: WireFormat) -> Vec<WireFieldType> {
     match format {
-        WireFormat::Json | WireFormat::Cbor => JsonType::iter().map(WireFieldType::Json).collect(),
+        WireFormat::Json => JsonType::iter().map(WireFieldType::Json).collect(),
+        WireFormat::Cbor => CborType::iter().map(WireFieldType::Cbor).collect(),
         WireFormat::Avro => AvroType::iter().map(WireFieldType::Avro).collect(),
     }
 }
@@ -280,6 +281,7 @@ fn wire_types(format: WireFormat) -> Vec<WireFieldType> {
 fn wire_type_label(ty: WireFieldType) -> String {
     match ty {
         WireFieldType::Json(ty) => ty.as_ref().to_string(),
+        WireFieldType::Cbor(ty) => ty.as_ref().to_string(),
         WireFieldType::Avro(ty) => ty.as_ref().to_string(),
     }
 }
@@ -410,6 +412,17 @@ pub(super) fn BranchEditor(
                 on:input=move |event| {
                     let ttl = event_target_value(&event);
                     signals.structured.update(|drafts| drafts.branch.ttl = ttl);
+                    signals.edit();
+                } />
+        </label>
+        <label class="create-field">
+            <span>"Partitions"</span>
+            <input class="create-partitions" type="number" min="1" max="65535"
+                prop:value=move || signals.structured.get().branch.partitions
+                disabled=move || signals.progress.get().is_pending()
+                on:input=move |event| {
+                    let partitions = event_target_value(&event);
+                    signals.structured.update(|drafts| drafts.branch.partitions = partitions);
                     signals.edit();
                 } />
         </label>

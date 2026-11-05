@@ -55,7 +55,7 @@ contract and a violated contract require different corrections.
 | `as_casts` | Count actual Rust cast expressions, not words in imports, attributes or qualified paths. | `use Value as Alias`; `r#as`; `<Type as Trait>::item`; ordinary literals. | An expression using `as`, including a const expression nested in a qualified type. | Stable source parser; inactive cfg, raw identifiers, nested syntax, macro fragments and bounded source properties. Clippy independently denies conversions in its broader build scope. |
 | `testing_feature_struct_fields` | A product struct has one field shape rather than a shape selected by `testing`. | A test-only item, an API gate or a conditional documentation attribute. | A named or tuple struct field whose presence depends on `testing`, including a conditional `cfg` attribute. | Stable source parser; field ownership, tuple, inactive, compound-predicate and `cfg_attr` controls. Enum fields are outside this specific struct rule. |
 | `files_over_3000_lines` | Keep product and in-crate test files within a source-size bound. | At most 3,000 lines, counting a final line without a newline. | An eligible file with more than 3,000 lines. | Source discovery and physical line count; exact boundary and newly authored source tests. |
-| `non_aws_lc_crypto` | Nervix-authored cryptography comes from the AWS-LC boundary, and no change brings other cryptography into the product graph. [Cryptography](cryptography.md#the-count) owns what counts. | AWS-LC through the boundary; a classified non-security hash; a non-cryptographic checksum. | An authored use of a counted crate, `OsRng`, `getrandom` or a direct provider install, and a product dependency edge onto a crate implementing cryptography outside AWS-LC. | Stable source parser; import, rename, glob, `self`/`super`, inactive, macro, boundary and look-alike controls and the registered bounded `typed-non-aws-lc-crypto` property; the product graph through `cargo tree` for both release targets, with recorded-tree, malformed-graph and added-dependency gate tests. |
+| `non_aws_lc_crypto` | Nervix-authored cryptography comes from the AWS-LC boundary, and no change brings other cryptography into the product graph. [Cryptography](cryptography.md#the-count) owns what counts. | AWS-LC through the boundary; a classified non-security hash; a non-cryptographic checksum. | An authored use of a counted crate, `OsRng`, `getrandom` or a direct provider install, and a product dependency edge onto a crate implementing cryptography outside AWS-LC. A product graph linking a second AWS-LC module is refused outright rather than counted. | Stable source parser; import, rename, glob, `self`/`super`, inactive, macro, boundary and look-alike controls and the registered bounded `typed-non-aws-lc-crypto` property; the product graph through `cargo tree` for both release targets, with recorded-tree, malformed-graph, added-dependency and second-AWS-LC-module gate tests. |
 | `functions_over_complexity_30` | Keep each function's decisions within a cyclomatic complexity of 30. At full coverage a function's CRAP score equals its complexity, so a function above 30 exceeds a CRAP threshold of 30 at any coverage. [Function complexity](#function-complexity) owns the analyzer and its limits. | A function the pinned analyzer scores at most 30; an existing function above 30 that grows, which keeps the count. | A function newly scored above 30, including one in an inactive configuration or an in-crate test file. | Pinned cargo-crap analysis over source discovery; exact 30/31 boundary, inactive configuration, macro, trait and nesting limits, eligibility, and missing, failing, other-version, skipped-source, empty, configured, undiscovered and unreadable-file fixtures. |
 
 The Option/Result adapter catalog covers `and_then`, `filter`, `map`, `map_err`, `map_or`,
@@ -230,10 +230,8 @@ representations and every generated location in ordinary and sanitizer execution
 ## Host Memory Admission
 
 An analysis compilation needs about the memory of rustc's own check of its target, and the server
-library's dwarfs every other. It peaks at about 12.3 GiB in the ordinary configuration and between
-about 11.7 and 15.5 GiB across the ten declared configurations that compile it, highest in the
-testing configuration and the six Deloxide ones, while no other analysis compilation reaches 2 GiB.
-Its 16 GiB reservation therefore leaves about half a GiB above the largest measured peak. Every
+library's dwarfs every other. Its diagnostic analysis peaks at about 16 GiB, while no other analysis
+compilation reaches 2 GiB. Its 17 GiB reservation covers that measured peak. Every
 configuration builds in a directory of its own, and up to four configurations analyze at once, a
 bound `--jobs` or `NERVIX_TYPED_RATCHET_JOBS` sets otherwise; the evidence keeps the declared order
 whatever order they end in, and once one analysis fails no configuration starts another.
@@ -384,6 +382,13 @@ CI runs the complete gate for every pull request: the `checks` job's two shards 
 `just validate-ci 4 1/2` and `just validate-ci 4 2/2` on runners of their own, four recipes at a
 time through kache. The second lints the Shuttle and Loom modes and the compiler tooling and runs
 `just ratchet` after its lints, and the first runs every other source and lint check.
+`ValidationEntrypointTests` in `scripts/tests/test_ratchet.py`, part of `just test-ratchet-units`,
+hold the job to that split. Through just's own evaluation of the job's shard matrix, exactly one
+shard names the gate itself and runs `python3 -m scripts.ratchet`, with no argument, on the
+checked-out revision once its lints have finished, and the Validate step that runs it is neither
+skipped nor allowed to fail. Together the shards run every check `just validate` runs, with
+formatting checked instead of applied, so a shard that dropped the gate, a lane or a validation
+fails them.
 The tooling's own qualification is selected by labels in the `extra-tests` job. A pull request
 labeled `extra-compiler` runs `just coverage-native-extras test-typed-ratchet`, which runs
 `just test-typed-ratchet` with its ordinary part under native coverage and its product doctests and

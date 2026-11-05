@@ -19,7 +19,6 @@
 use std::num::NonZeroU64;
 
 use error_stack::Report;
-use meticulous::OptionExt as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
@@ -271,18 +270,6 @@ impl PulsarSubscriptionOwnership {
 }
 
 impl PulsarSubscription {
-    /// The subscription of the Pulsar topic ingestor an alteration changes.
-    fn altered_by_operation(ingestor: &mut crate::CreateIngestor) -> &mut Self {
-        let source = ingestor
-            .input
-            .transport_source_mut()
-            .verified(super::entity_union::ALTERED_PAIR_CHECKED);
-        let crate::IngestorEntity::Pulsar(PulsarIngestor::Topic(source)) = source else {
-            unreachable!("{}", super::entity_union::ALTERED_PAIR_CHECKED);
-        };
-        &mut source.subscription
-    }
-
     fn set_start_at(
         &mut self,
         position: IngestStartPosition,
@@ -301,47 +288,61 @@ impl PulsarSubscription {
     }
 }
 
-/// Operations of a Pulsar topic ingestor, retaining shared operations in their original order.
+/// One change an `ALTER PULSAR TOPIC INGESTOR` writes to the body of the ingestor it changes.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub enum PulsarTopicIngestorOperation {
-    Transport(crate::AlterTransportIngestorOperation<PulsarTopicIngestor>),
-    SetStartAt { position: IngestStartPosition },
-    SetType { kind: PulsarSubscriptionType },
+pub enum PulsarTopicIngestorChange {
+    /// `SET TOPIC '<topic>'`.
+    Topic(PulsarTopicName),
+    /// `SET SUBSCRIPTION '<name>' OWNED BY INGESTOR START AT … | PROVISIONED`: the subscription and
+    /// who owns it, the type it reads as kept.
+    Subscription {
+        name: PulsarSubscriptionName,
+        ownership: PulsarSubscriptionOwnership,
+    },
+    /// `SET START AT EARLIEST|LATEST`: where an owned subscription starts, its name kept.
+    StartAt(IngestStartPosition),
+    /// `SET TYPE SHARED|KEY_SHARED|FAILOVER|EXCLUSIVE`: the type the next join reads the
+    /// subscription as, its cursor and backlog kept.
+    Type(PulsarSubscriptionType),
+    /// `SET MODE <mode>`.
+    Mode(PulsarIngestMode),
 }
 
-impl From<crate::AlterTransportIngestorOperation<PulsarTopicIngestor>>
-    for PulsarTopicIngestorOperation
-{
-    fn from(operation: crate::AlterTransportIngestorOperation<PulsarTopicIngestor>) -> Self {
-        Self::Transport(operation)
-    }
-}
+impl crate::IngestorEntityChange for PulsarTopicIngestorChange {
+    type Entity = PulsarTopicIngestor;
 
-impl super::ingestor::TransportIngestorOperation for PulsarTopicIngestorOperation {
     fn apply_to(
         &self,
-        ingestor: &mut crate::CreateIngestor,
+        entity: &mut PulsarTopicIngestor,
     ) -> error_stack::Result<(), crate::AlterIngestorError> {
         match self {
-            Self::Transport(operation) => operation.apply_to(ingestor),
-            Self::SetStartAt { position } => {
-                PulsarSubscription::altered_by_operation(ingestor).set_start_at(*position)
+            Self::Topic(topic) => entity.topic = topic.clone(),
+            Self::Subscription { name, ownership } => {
+                entity.subscription.name = name.clone();
+                entity.subscription.ownership = *ownership;
             }
-            Self::SetType { kind } => {
-                PulsarSubscription::altered_by_operation(ingestor).kind = *kind;
-                Ok(())
-            }
+            Self::StartAt(position) => entity.subscription.set_start_at(*position)?,
+            Self::Type(kind) => entity.subscription.kind = *kind,
+            Self::Mode(mode) => entity.mode = mode.clone(),
         }
+        Ok(())
     }
 
-    fn to_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
-        match self {
-            Self::Transport(operation) => operation.to_plexus(),
-            Self::SetStartAt { position } => Ok(format!("SET START AT {position}")),
-            Self::SetType { kind } => Ok(format!("SET TYPE {kind}")),
-        }
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Topic(topic) => format!("SET TOPIC {}", crate::string_literal(topic.as_str())),
+            Self::Subscription { name, ownership } => {
+                format!("SET SUBSCRIPTION {}", ownership.subscription_clause(name))
+            }
+            Self::StartAt(position) => format!("SET START AT {position}"),
+            Self::Type(kind) => format!("SET TYPE {kind}"),
+            Self::Mode(mode) => {
+                format!("SET MODE {}", mode.acknowledgement().to_canonical_plexus())
+            }
+        };
+        Ok(text)
     }
 }
 
@@ -567,6 +568,10 @@ impl IngestorEntityBody for PulsarTopicIngestor {
         IngestorReference::Client(&self.client)
     }
 
+    fn client_mut(&mut self) -> Option<&mut ClientName> {
+        Some(&mut self.client)
+    }
+
     fn quiesce(&self) -> &IngestQuiesceMode {
         &self.quiesce
     }
@@ -588,7 +593,7 @@ connector_ingestors! {
     pub enum PulsarTopicIngestorAlteration;
     /// The entities a Pulsar source reads.
     pub enum PulsarIngestorEntity {
-        Topic(PulsarTopicIngestor => PulsarTopicIngestorOperation) = "TOPIC", "Pulsar";
+        Topic(PulsarTopicIngestor => PulsarTopicIngestorChange) = "TOPIC", "Pulsar";
     }
 }
 
@@ -642,15 +647,51 @@ impl EmitterEntityBody for PulsarTopicEmitter {
     }
 }
 
+/// One change an `ALTER PULSAR TOPIC EMITTER` writes to the body of the emitter it changes.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum PulsarTopicEmitterChange {
+    /// `SET TOPIC '<name>'`.
+    Topic(PulsarTopicName),
+    /// `SET MODE <mode>`.
+    Mode(PulsarTopicPublishingMode),
+}
+
+impl crate::EmitterEntityChange for PulsarTopicEmitterChange {
+    type Entity = PulsarTopicEmitter;
+
+    fn apply_to(
+        &self,
+        entity: &mut PulsarTopicEmitter,
+    ) -> error_stack::Result<(), crate::AlterEmitterError> {
+        match self {
+            Self::Topic(name) => entity.topic = name.clone(),
+            Self::Mode(mode) => entity.mode = mode.clone(),
+        }
+        Ok(())
+    }
+
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, crate::CanonicalPlexusError> {
+        let text = match self {
+            Self::Topic(name) => format!("SET TOPIC {}", crate::string_literal(name.as_str())),
+            Self::Mode(mode) => format!("SET MODE {}", mode.publishing().to_canonical_plexus()),
+        };
+        Ok(text)
+    }
+}
+
 connector_emitters! {
     connector Pulsar = "PULSAR";
     /// What a Pulsar emitter writes.
     pub enum PulsarEmitter;
     /// A publishing-policy change for one of this connector's emitter entities.
     pub enum PulsarTopicEmitterMode;
+    /// One change to the body of one of this connector's emitter entities.
+    pub enum PulsarEmitterChange;
     /// The entities a Pulsar emitter writes.
     pub enum PulsarEmitterEntity {
-        Topic(PulsarTopicEmitter, PulsarTopicPublishingMode) = "TOPIC";
+        Topic(PulsarTopicEmitter, PulsarTopicPublishingMode, PulsarTopicEmitterChange) = "TOPIC";
     }
 }
 

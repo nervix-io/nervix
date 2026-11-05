@@ -8,7 +8,8 @@ use std::{
     fs::OpenOptions,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    path::PathBuf,
+    path::{Path, PathBuf},
+    str::FromStr,
     time::{Duration, SystemTime},
 };
 
@@ -36,7 +37,7 @@ use lapin::{
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
 use nervix_client_core::{Client, ConnectOptions, TlsRequirement};
-use nervix_client_wire::UploadReply;
+use nervix_client_wire::{UploadDisposition, UploadReply};
 use nervix_connector_kafka::testing_rdkafka::{
     admin::{AdminClient, AdminOptions, NewPartitions, NewTopic, TopicReplication},
     client::DefaultClientContext,
@@ -81,15 +82,13 @@ use nervix_primitives::{
 use nervix_server::{
     FaultInjection, SchedulerMode,
     application::{
-        Application, CommandExecutionPolicy, InternalTransportMode, NodeIdentity, NodeSettings,
-        SchedulingSettings, SettingOverride, ShutdownCoordinator, ShutdownOutcome,
+        Application, CommandExecutionPolicy, GrpcTransport, InternalTransportMode, NodeIdentity,
+        NodeSettings, SchedulingSettings, SettingOverride, ShutdownCoordinator, ShutdownOutcome,
         ShutdownSettings, TransactionBounds, TransactionLimits, init_tracing_to_file,
     },
     cluster::{MembershipSettings, MembershipValues},
     memory_pressure::{MemoryPressureConfig, MemoryPressureSettings},
-    runtime::{
-        DEFAULT_DOMAIN_DRAIN_TIMEOUT, DEFAULT_TEMP_DIR, RuntimeSettings, branch_task_stop_timeout,
-    },
+    runtime::{DEFAULT_TEMP_DIR, RuntimeSettings, branch_task_stop_timeout},
 };
 use pulsar::{
     Authentication, ConsumerOptions as PulsarConsumerOptions, Pulsar, SubType as PulsarSubType,
@@ -114,13 +113,14 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, client_async, connect_async,
     tungstenite::{Message as WsMessage, client::IntoClientRequest, http::HeaderValue},
 };
+use tracing::Instrument as _;
 use uuid::Uuid;
 use zeromq::{PullSocket, PushSocket, Socket, SocketRecv, SocketSend};
 
 use super::{
     broker_observer::BROKER_TIMEOUT,
     cluster_teardown::{CLUSTER_TEARDOWN_BUDGET, ClusterTeardown, TeardownNode},
-    command_recovery::LeaderRoutes,
+    command_recovery::{LEADER_POLL_INTERVAL, LeaderRoutes, UNKNOWN_OUTCOME_RECOVERY},
     dependencies::{
         DependencyEndpoints, KAFKA_ADDR, MQTT_ADDR, NATS_ADDR, NATS_TLS_ADDR, PULSAR_ADDR,
         PULSAR_ADMIN_ADDR, PULSAR_AUTH_ADDR, PULSAR_AUTH_TOKEN, PULSAR_TLS_ADDR, RABBITMQ_ADDR,
@@ -174,7 +174,7 @@ pub(crate) const DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT: Duration =
 /// conflict while an ingestor's check holds a non-durable cursor of the same name.
 const PULSAR_PROVISION_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT: Duration =
-    branch_task_stop_timeout(DEFAULT_DOMAIN_DRAIN_TIMEOUT);
+    branch_task_stop_timeout(nervix_models::DomainDrainTimeout::DEFAULT);
 const DEFAULT_GRACEFUL_SHUTDOWN_PHASE_FLOOR: Duration =
     match DEFAULT_TEST_DRAIN_TIMEOUT.checked_add(DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT) {
         Some(timeout) => timeout,
@@ -185,7 +185,8 @@ const DEFAULT_GRACEFUL_SHUTDOWN_PHASE_FLOOR: Duration =
 /// policy, not an upper bound on valid shutdown. Configured bounded phases may raise its floor.
 const NODE_SHUTDOWN_LIVENESS_WATCHDOG: Duration = Duration::from_secs(5 * 60);
 const _: () = assert!(
-    DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT.as_nanos() > DEFAULT_DOMAIN_DRAIN_TIMEOUT.as_nanos(),
+    DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT.as_nanos()
+        > nervix_models::DomainDrainTimeout::DEFAULT.as_nanos(),
     "the runtime branch stop budget must include its post-drain grace"
 );
 const _: () = assert!(
@@ -232,12 +233,42 @@ pub(crate) fn test_basic_authorization_for_password(password: &str) -> String {
     format!("Basic {}", test_basic_auth_token_for_password(password))
 }
 
-pub(crate) fn test_basic_auth_token() -> String {
-    test_basic_auth_token_for_password(TEST_AUTH_PASSWORD)
-}
-
 pub(crate) fn test_basic_authorization() -> String {
     test_basic_authorization_for_password(TEST_AUTH_PASSWORD)
+}
+
+/// The `Basic` authorization a call presents as `user` with `password`, whether or not the cluster
+/// has such a user.
+pub(crate) fn basic_authorization_as(user: &str, password: &str) -> String {
+    format!(
+        "Basic {}",
+        BASE64_STANDARD.encode(format!("{user}:{password}"))
+    )
+}
+
+/// A public listener every node binds, as a scenario names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NodeListener {
+    Grpc,
+    Http,
+    Observability,
+    Console,
+}
+
+impl FromStr for NodeListener {
+    type Err = io::Error;
+
+    fn from_str(name: &str) -> io::Result<Self> {
+        match name {
+            "grpc" => Ok(Self::Grpc),
+            "http" => Ok(Self::Http),
+            "observability" => Ok(Self::Observability),
+            "console" => Ok(Self::Console),
+            other => Err(io::Error::other(format!(
+                "a node has no '{other}' public listener"
+            ))),
+        }
+    }
 }
 
 fn truncate_test_log_once() -> io::Result<()> {
@@ -1052,6 +1083,8 @@ pub(crate) struct TestClusterConfig {
     pub transaction_max_source_bytes: u64,
     pub transaction_max_open: usize,
     pub grpc_mode: InternalTransportMode,
+    /// Whether the console's reserved port serves HTTP or HTTPS in this scenario.
+    pub web_console_mode: InternalTransportMode,
     pub graceful_shutdown_drain: bool,
     pub drain_timeout: Duration,
     pub shutdown_timeout: Duration,
@@ -1085,6 +1118,7 @@ impl Default for TestClusterConfig {
             transaction_max_source_bytes: 1024 * 1024,
             transaction_max_open: 1024,
             grpc_mode: InternalTransportMode::Http,
+            web_console_mode: InternalTransportMode::Http,
             graceful_shutdown_drain: false,
             drain_timeout: DEFAULT_TEST_DRAIN_TIMEOUT,
             shutdown_timeout: DEFAULT_TEST_SHUTDOWN_TIMEOUT,
@@ -1225,7 +1259,13 @@ impl Cluster {
             address,
         } in planned
         {
-            let mut spec = NodeSpec::new(&roots.storage, &interconnect_ca, &node_id, index == 1)?;
+            let mut spec = NodeSpec::new(
+                &roots.storage,
+                &interconnect_ca,
+                &node_id,
+                index == 1,
+                config.grpc_mode,
+            )?;
             spec.set_interconnect_address(address);
             spec.dns = dns.as_ref().map(ClusterDns::configuration);
             fault_injection
@@ -1342,6 +1382,51 @@ impl Cluster {
         )
         .await
         .map_err(io::Error::other)
+    }
+
+    /// Starts a node only as far as its public status service, even when no peer is running.
+    /// Initialization and route installation remain the scenario's explicit observations.
+    pub(crate) async fn start_node_until_observable(&mut self, node_id: &str) -> io::Result<()> {
+        let handle = self
+            .nodes
+            .get_mut(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        let node = node_name(&handle.spec.node_id);
+        NodeStartup::start(
+            &node,
+            &mut ObservableNode(handle),
+            PhaseDeadline::after(ATTEMPT_READINESS_BUDGET),
+            StartupRetryPolicy::BindBeforeRuntime,
+        )
+        .await
+        .map_err(io::Error::other)
+    }
+
+    /// Starts one owned node with live-policy discovery held. Readiness must remain false,
+    /// so this fixture waits for the explicit startup boundary instead of the ready probe.
+    pub(crate) async fn start_node_waiting_for_parameters(
+        &mut self,
+        node_id: &str,
+    ) -> io::Result<()> {
+        let handle = self
+            .nodes
+            .get_mut(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        let node = node_name(&handle.spec.node_id);
+        let fault = handle.fault_injection.clone();
+        fault.pause_initial_cluster_parameters_on(node.clone());
+        let deadline = PhaseDeadline::after(NODE_STARTUP_BUDGET);
+        handle.start()?;
+        match deadline
+            .bound(fault.wait_for_initial_cluster_parameters_pause(&node))
+            .await
+        {
+            BeforeDeadline::Finished(()) => Ok(()),
+            BeforeDeadline::Passed => Err(io::Error::other(format!(
+                "node '{node_id}' did not reach initial live-policy discovery within {:?}",
+                deadline.elapsed()
+            ))),
+        }
     }
 
     /// Names a setting `node_id` starts with from its next launch on, over the cluster's own. A
@@ -1630,7 +1715,13 @@ impl Cluster {
                 .or_default()
                 .extend(pending.setting_overrides);
         }
-        let mut spec = NodeSpec::new(&self.roots.storage, &self.interconnect_ca, node_id, false)?;
+        let mut spec = NodeSpec::new(
+            &self.roots.storage,
+            &self.interconnect_ca,
+            node_id,
+            false,
+            config.grpc_mode,
+        )?;
         if let Some(cluster_id) = &pending.cluster_id {
             spec.claim_cluster(&self.interconnect_ca, cluster_id)?;
         }
@@ -2154,17 +2245,18 @@ impl Cluster {
             }
         }
         if arrangement.relayed_voter().is_some() {
-            // The relayed voter's scenario observes scheduling while the bootstrap node leads, so
-            // that node starts first. The held heartbeat can keep replication from catching the
-            // voter up, so the others start without waiting for catch-up: the scenario reaches and
-            // releases the observation barrier before it waits for that.
-            self.start_node_within(&bootstrap, construction).await?;
-            for node_id in node_ids.iter().filter(|node_id| **node_id != bootstrap) {
-                self.start_node_without_waiting_for_raft_catch_up_within(node_id, construction)
-                    .await?;
-            }
-            self.wait_for_any_leader(&bootstrap).await?;
-            return self.wait_for_leader(&bootstrap, Some(&bootstrap)).await;
+            // Returning nodes discover live policy from another process before reporting ready,
+            // so every voter starts together. The held heartbeat can prevent catch-up; the
+            // scenario releases it after observing scheduling with the bootstrap node leading.
+            self.start_restarted_nodes_together(construction, None)
+                .await?;
+            let leader = self.wait_for_leader_among_running().await?;
+            self.leadership_move(&bootstrap)
+                .complete(&leader, construction.nested(STATUS_WAIT_BUDGET))
+                .await?;
+            self.fault_injection
+                .begin_startup_voter_observation(&node_name(&bootstrap));
+            return Ok(());
         }
         self.start_restarted_nodes_together(
             construction,
@@ -2407,14 +2499,62 @@ impl Cluster {
         Ok(handle.spec.grpc_uri(handle.config.grpc_mode))
     }
 
-    /// Streams an upload whose frames a scenario shaped to `node_id` and returns its reply.
+    /// Streams an upload whose frames a scenario shaped to `node_id` and returns the reply that
+    /// decided it.
+    ///
+    /// A reply that redirects the upload, or says that no leader is known, decides nothing: the
+    /// same frames go again, under the same upload identity, to the node [`LeaderRoutes::after`]
+    /// names. No call starts once [`UNKNOWN_OUTCOME_RECOVERY`] has passed, and the reply returned
+    /// then is the last refusal, which the step's assertion reports.
     pub(crate) async fn send_shaped_resource_upload(
         &self,
         node_id: &str,
-        upload: TestUpload<'_>,
+        upload: &TestUpload<'_>,
     ) -> io::Result<UploadReply> {
-        let server = self.grpc_uri(node_id)?;
-        send_upload(&server, upload).await
+        let routes = self.leader_routes();
+        let deadline = PhaseDeadline::after(UNKNOWN_OUTCOME_RECOVERY);
+        let mut node = node_id.to_string();
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let server = self.grpc_uri(&node)?;
+            let reply = send_upload(&server, upload).await?;
+            let UploadDisposition::NotLeader(redirect) = &reply.disposition else {
+                return Ok(reply);
+            };
+            tracing::info!(
+                node,
+                identity = upload.identity,
+                message = %reply.message,
+                "a shaped upload's reply decided nothing"
+            );
+            deadline.pause(LEADER_POLL_INTERVAL).await;
+            if deadline.has_passed() {
+                return Ok(reply);
+            }
+            node = routes.after(&node, redirect.leader.as_ref()).to_string();
+        }
+    }
+
+    /// The address one node's public `listener` is bound to.
+    pub(crate) fn public_listener_addr(
+        &self,
+        node_id: &str,
+        listener: NodeListener,
+    ) -> io::Result<SocketAddr> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .ok_or_else(|| io::Error::other(format!("unknown node '{node_id}'")))?;
+        let addr = match listener {
+            NodeListener::Grpc => match handle.config.grpc_mode {
+                InternalTransportMode::Http => handle.spec.grpc_addr(),
+                InternalTransportMode::Https => handle.spec.grpc_https_addr(),
+            },
+            NodeListener::Http => handle.spec.http_addr(),
+            NodeListener::Observability => handle.spec.observability_addr(),
+            NodeListener::Console => handle.spec.web_console_addr(),
+        };
+        addr.parse().map_err(io::Error::other)
     }
 
     pub(crate) fn web_console_url(&self, node_id: &str) -> io::Result<String> {
@@ -2422,7 +2562,7 @@ impl Cluster {
             .nodes
             .get(node_id)
             .ok_or_else(|| io::Error::other(format!("unknown node '{node_id}'")))?;
-        Ok(handle.spec.web_console_url())
+        Ok(handle.spec.web_console_url(handle.config.web_console_mode))
     }
 
     pub(crate) fn http_uri(&self, node_id: &str, path: &str) -> io::Result<String> {
@@ -2442,7 +2582,9 @@ impl Cluster {
             .nodes
             .get(node_id)
             .ok_or_else(|| io::Error::other(format!("unknown node '{node_id}'")))?;
-        Ok(handle.spec.web_console_url_with_password(password))
+        Ok(handle
+            .spec
+            .web_console_url_with_password(password, handle.config.web_console_mode))
     }
 
     pub(crate) fn node_base_dir(&self, node_id: &str) -> io::Result<PathBuf> {
@@ -2451,6 +2593,20 @@ impl Cluster {
             .get(node_id)
             .ok_or_else(|| io::Error::other(format!("unknown node '{node_id}'")))?;
         Ok(handle.spec.base_dir.clone())
+    }
+
+    /// Replaces one node's provisioned files. Its running native listener retains its loaded key.
+    pub(crate) fn replace_native_tls_material(
+        &self,
+        node_id: &str,
+        certificate: &[u8],
+        private_key: &[u8],
+    ) -> io::Result<()> {
+        let directory = self.node_base_dir(node_id)?;
+        let paths = NativeSessionTlsPaths::for_node(&directory);
+        std::fs::write(paths.certificate, certificate)?;
+        std::fs::write(paths.private_key, private_key)?;
+        Ok(())
     }
 
     /// Where one node exposes its metrics, as an owned address a sampling task can keep after the
@@ -3959,6 +4115,19 @@ impl Cluster {
         Ok(status.current_leader)
     }
 
+    pub(crate) async fn current_leadership(&self, node_id: &str) -> io::Result<(String, u64)> {
+        let status = self
+            .cluster_status(node_id, PhaseDeadline::after(STATUS_REQUEST_TIMEOUT))
+            .await
+            .map_err(|error| {
+                io::Error::other(format!("node '{node_id}' status request failed: {error:#}"))
+            })?;
+        status
+            .leadership()
+            .map(|leadership| (leadership.leader, leadership.term))
+            .ok_or_else(|| io::Error::other(format!("node '{node_id}' has no reported leadership")))
+    }
+
     /// The leader every reachable node agrees on, ignoring nodes a scenario has stopped.
     pub(crate) async fn wait_for_leader_among_running(&self) -> io::Result<String> {
         let deadline = PhaseDeadline::after(STATUS_WAIT_BUDGET);
@@ -4352,25 +4521,56 @@ impl NodeHandle {
             }
             NodeTaskState::NotStarted | NodeTaskState::Terminal(_) => {}
         }
-        if self.config.grpc_mode == InternalTransportMode::Https {
-            ensure_dev_tls_assets()?;
-        }
-
         let settings = self.config.node_settings(&self.spec.node_id)?;
         let db_path = self.spec.db_path()?;
+        let grpc_transport = match self.config.grpc_mode {
+            InternalTransportMode::Http => GrpcTransport::Http,
+            InternalTransportMode::Https => {
+                let paths = NativeSessionTlsPaths::for_node(&self.spec.base_dir);
+                let listen_addr = parse_addr(&self.spec.grpc_https_addr())?;
+                GrpcTransport::Https {
+                    listen_addr,
+                    advertise_addr: listen_addr.into(),
+                    certificate: paths.certificate,
+                    private_key: paths.private_key,
+                }
+            }
+        };
+        let console_tls = matches!(self.config.web_console_mode, InternalTransportMode::Https);
+        let console_listen_addr = if console_tls {
+            SocketAddr::new(HOST, 0)
+        } else {
+            parse_addr(&self.spec.web_console_addr())?
+        };
+        let console_https_listen_addr = if console_tls {
+            Some(parse_addr(&self.spec.web_console_addr())?)
+        } else {
+            None
+        };
+        let console_certificate = if console_tls {
+            Some(self.spec.interconnect_tls_cert.clone())
+        } else {
+            None
+        };
+        let console_private_key = if console_tls {
+            Some(self.spec.interconnect_tls_key.clone())
+        } else {
+            None
+        };
         let identity = NodeIdentity::builder()
             .addr(parse_addr(&self.spec.grpc_addr())?)
-            .grpc_mode(self.config.grpc_mode)
-            .grpc_https_listen_addr(Some(parse_addr(&self.spec.grpc_https_addr())?))
+            .grpc_transport(grpc_transport)
             .http_listen_addr(parse_addr(&self.spec.http_addr())?)
             .https_listen_addr(parse_addr(&self.spec.https_addr())?)
             .observability_listen_addr(parse_addr(&self.spec.observability_addr())?)
-            .web_console_listen_addr(parse_addr(&self.spec.web_console_addr())?)
+            .web_console_listen_addr(console_listen_addr)
             .web_console_advertise_addr(Some(parse_addr(&self.spec.web_console_addr())?.into()))
+            .web_console_https_listen_addr(console_https_listen_addr)
+            .web_console_tls_cert(console_certificate)
+            .web_console_tls_key(console_private_key)
             .cluster_id(self.spec.cluster_id.clone())
             .node_id(node_name(&self.spec.node_id))
             .grpc_advertise_addr(parse_addr(&self.spec.grpc_addr())?.into())
-            .grpc_https_advertise_addr(Some(parse_addr(&self.spec.grpc_https_addr())?.into()))
             .interconnect_listen_addr(self.spec.interconnect_listen_addr())
             .interconnect_advertise_addr(
                 self.spec
@@ -4422,11 +4622,12 @@ impl NodeHandle {
         let (stop_clock, ended) = NodeStopClock::start();
         self.shutdown = Some(shutdown);
         self.stop_clock = Some(stop_clock);
+        let node_log = tracing::info_span!("scenario_node", grpc_port = self.spec.grpc_port);
         self.task = OwnedNodeTask::spawn(async move {
             let _live = live;
             // Dropped when this task ends, however it ends, which records when that was.
             let _ended = ended;
-            application.run().await
+            application.run().instrument(node_log).await
         });
         Ok(())
     }
@@ -4449,7 +4650,7 @@ impl NodeHandle {
         let domain_drain_timeout = self
             .fault_injection
             .domain_drain_timeout()
-            .unwrap_or(DEFAULT_DOMAIN_DRAIN_TIMEOUT);
+            .unwrap_or(nervix_models::DomainDrainTimeout::DEFAULT);
         let configured_phase_floor = application_drain_timeout
             .checked_add(branch_task_stop_timeout(domain_drain_timeout))
             .ok_or_else(|| {
@@ -4617,6 +4818,39 @@ impl NodeHandle {
     }
 }
 
+/// A startup whose completion boundary is public observation, before runtime initialization.
+/// It shares the ordinary node's launch, failed-attempt cleanup and listener reallocation.
+struct ObservableNode<'node>(&'node mut NodeHandle);
+
+impl StartableNode for ObservableNode<'_> {
+    fn launch(&mut self) -> io::Result<()> {
+        self.0.launch()
+    }
+
+    async fn readiness(
+        &mut self,
+        attempt: u32,
+        readiness: PhaseDeadline,
+    ) -> error_stack::Result<(), NodeStartupError> {
+        let endpoint = self.0.status_endpoint();
+        let node = node_name(&self.0.spec.node_id);
+        self.0
+            .task
+            .wait_until_ready(&node, attempt, readiness, POLL_INTERVAL, |phase| {
+                ReadinessProbeOutcome::probe_observation(&endpoint, phase)
+            })
+            .await
+    }
+
+    async fn clean_up(&mut self, cleanup: PhaseDeadline) -> AttemptCleanup {
+        self.0.clean_up(cleanup).await
+    }
+
+    fn move_to_fresh_ports(&mut self, ports: StartupPorts) -> io::Result<()> {
+        self.0.move_to_fresh_ports(ports)
+    }
+}
+
 impl StartableNode for NodeHandle {
     fn launch(&mut self) -> io::Result<()> {
         self.start()
@@ -4755,6 +4989,21 @@ enum NodeShutdownError {
     Deadline(NodeStopRecord),
 }
 
+/// Files explicitly provisioned for each HTTPS native listener when its node is first created.
+struct NativeSessionTlsPaths {
+    certificate: PathBuf,
+    private_key: PathBuf,
+}
+
+impl NativeSessionTlsPaths {
+    fn for_node(directory: &Path) -> Self {
+        Self {
+            certificate: directory.join("native-session.pem"),
+            private_key: directory.join("native-session-key.pem"),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct NodeSpec {
     node_id: String,
@@ -4815,11 +5064,24 @@ impl NodeSpec {
         interconnect_ca: &InterconnectTestCa,
         node_id: &str,
         allow_bootstrap: bool,
+        grpc_mode: InternalTransportMode,
     ) -> io::Result<Self> {
         let base_dir = root.path().join(node_id);
         std::fs::create_dir_all(&base_dir)?;
         let (interconnect_tls_cert, interconnect_tls_key) =
             interconnect_ca.issue_node(TEST_CLUSTER_ID, node_id, &base_dir)?;
+        if matches!(grpc_mode, InternalTransportMode::Https) {
+            ensure_dev_tls_assets()?;
+            let paths = NativeSessionTlsPaths::for_node(&base_dir);
+            std::fs::copy(
+                dev_tls_ca_file().with_file_name("node-2.pem"),
+                paths.certificate,
+            )?;
+            std::fs::copy(
+                dev_tls_ca_file().with_file_name("node-2-key.pem"),
+                paths.private_key,
+            )?;
+        }
         let ports = NodePorts::allocate()?;
         let syslog_ingestor_host = Self::syslog_ingestor_host(node_id)?;
 
@@ -5008,18 +5270,18 @@ impl NodeSpec {
         format!("http://{}:{}{path}", HOST, self.http_port)
     }
 
-    fn web_console_url(&self) -> String {
-        format!(
-            "http://{}:{}/console/?auth={}",
-            HOST,
-            self.web_console_port,
-            test_basic_auth_token()
-        )
+    fn web_console_url(&self, mode: InternalTransportMode) -> String {
+        self.web_console_url_with_password(TEST_AUTH_PASSWORD, mode)
     }
 
-    fn web_console_url_with_password(&self, password: &str) -> String {
+    fn web_console_url_with_password(&self, password: &str, mode: InternalTransportMode) -> String {
+        let scheme = match mode {
+            InternalTransportMode::Http => "http",
+            InternalTransportMode::Https => "https",
+        };
         format!(
-            "http://{}:{}/console/?auth={}",
+            "{}://{}:{}/console/?auth={}",
+            scheme,
             HOST,
             self.web_console_port,
             test_basic_auth_token_for_password(password)
@@ -5280,6 +5542,19 @@ pub(crate) struct AcknowledgedHttpPublisher {
 }
 
 impl AcknowledgedHttpPublisher {
+    /// Bounds the complete request and its explicit refusal retries, including a stalled request
+    /// or response body. Run this on an owned runtime task when the scenario runner can stall.
+    pub(crate) async fn publish_bounded(&self, payload: &str) -> io::Result<()> {
+        nervix_primitives::time::timeout(self.wait, self.publish(payload))
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("HTTP payload was not acknowledged within {:?}", self.wait),
+                )
+            })?
+    }
+
     /// Posts `payload` until the endpoint answers 200 with a completed outcome.
     ///
     /// The sender owns the retry of a 503: a full ACK window, a downstream refusal, an expired ACK

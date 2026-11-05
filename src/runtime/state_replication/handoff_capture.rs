@@ -31,10 +31,11 @@ impl Runtime {
         unit: nervix_models::Unit,
         base_schedule_fingerprint: [u8; 32],
     ) -> OwnershipHandoffResult<Vec<nervix_interconnect::OwnershipHandoffCheckpoint>> {
-        if !self.entity_gate_operation_owns_entity(
+        if !self.entity_gate_operation_owns_unit(
             coordination,
             domain,
             entity,
+            unit,
             EntityGatePurpose::OwnershipHandoff,
         ) {
             return Err(OwnershipHandoffError::participant(format!(

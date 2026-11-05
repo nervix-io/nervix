@@ -159,13 +159,13 @@ pub(crate) enum ServerProcessOption {
     TraceExport { endpoint: String, service: String },
     /// `--drain-timeout`.
     DrainTimeout(Duration),
-    /// `--state-snapshot-interval`.
+    /// The first bootstrap's `--state-snapshot-interval` seed.
     StateSnapshotInterval(Duration),
     /// `--shutdown-timeout`.
     ShutdownTimeout(Duration),
-    /// `--transaction-idle-timeout`.
+    /// The first bootstrap's `--transaction-idle-timeout` seed.
     TransactionIdleTimeout(Duration),
-    /// `--transaction-tombstone-retention`.
+    /// The first bootstrap's `--transaction-tombstone-retention` seed.
     TransactionTombstoneRetention(Duration),
     /// A command-line option with its value written exactly as the scenario gives it, whether or
     /// not the server can read it.
@@ -174,11 +174,20 @@ pub(crate) enum ServerProcessOption {
     /// can read it.
     Environment { variable: String, value: String },
     /// `--grpc-mode https`, with the session listener on the port a plaintext one would use. The
-    /// node presents the development certificate, which the suite's clients trust.
+    /// explicitly provisioned development certificate is trusted by the suite's clients.
     GrpcTls,
 }
 
 impl ServerProcessOption {
+    fn is_parameter_seed(&self) -> bool {
+        matches!(
+            self,
+            Self::StateSnapshotInterval(_)
+                | Self::TransactionIdleTimeout(_)
+                | Self::TransactionTombstoneRetention(_)
+        )
+    }
+
     fn apply_to(&self, command: &mut Command, node_id: &str, grpc_port: u16) {
         match self {
             Self::Dns(configuration) => {
@@ -233,13 +242,18 @@ impl ServerProcessOption {
                 command.env(variable, value);
             }
             Self::GrpcTls => {
+                let tls_directory = crate::workspace_root().join("tls/dev");
                 command
                     .arg("--grpc-mode")
                     .arg("https")
                     .arg("--grpc-https-listen-addr")
                     .arg(loopback(grpc_port))
                     .arg("--grpc-https-advertise-addr")
-                    .arg(loopback(grpc_port));
+                    .arg(loopback(grpc_port))
+                    .arg("--grpc-tls-cert")
+                    .arg(tls_directory.join("node.pem"))
+                    .arg("--grpc-tls-key")
+                    .arg(tls_directory.join("node-key.pem"));
             }
         }
     }
@@ -440,6 +454,7 @@ struct ServerProcessConfiguration {
     ports: ServerProcessPorts,
     node_id: String,
     bootstrap_host: Option<String>,
+    bootstrap_seeds: bool,
     certificate_authority: PathBuf,
     certificate: PathBuf,
     private_key: PathBuf,
@@ -509,7 +524,9 @@ impl ServerProcessConfiguration {
         command.env_remove("RUST_LOG");
         // Options go last, so a variable a scenario sets survives the removal above.
         for option in &self.options {
-            option.apply_to(&mut command, &self.node_id, self.ports.grpc);
+            if self.bootstrap_seeds || !option.is_parameter_seed() {
+                option.apply_to(&mut command, &self.node_id, self.ports.grpc);
+            }
         }
         command.spawn()
     }
@@ -724,6 +741,7 @@ impl ServerProcess {
             ports,
             node_id: node_id.to_string(),
             bootstrap_host: bootstrap_host.map(str::to_string),
+            bootstrap_seeds: bootstrap_host.is_none(),
             certificate_authority: certificate_authority.path.clone(),
             certificate,
             private_key,
@@ -853,6 +871,7 @@ impl ServerProcess {
         loop {
             nervix_primitives::task::consume_budget().await;
             let Some(ending) = self.wait_for_launch().await? else {
+                self.configuration.bootstrap_seeds = false;
                 self.report_ready();
                 return Ok(());
             };

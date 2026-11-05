@@ -239,7 +239,7 @@ class Run:
     def bolero_selection(self, labels: Sequence[str] = (), /, **changes: object) -> Path:
         """The Bolero call's record of its randomized and sanitizer outcomes."""
         randomized = "bolero-random" in labels
-        requested = "fuzz" in labels
+        requested = False
         outcome = "success" if requested else "skipped"
         content: dict[str, object] = {
             "producer": "bolero-selection", "verdict": "complete", "tested_sha": self.revision,
@@ -253,17 +253,18 @@ class Run:
         (directory / "selection.json").write_text(json.dumps(content))
         return directory
 
-    def complete(self, labels: Sequence[str] = ()) -> None:
+    def complete(self, labels: Sequence[str] = (), *, local: bool = False) -> None:
         """Every input a run with these labels publishes, and its selection."""
-        self.selection(labels)
+        selection = self.selection(labels)
         self.ordinary()
         extras = "coverage-native-extras"
         self.collection(extras, "bench-smoke", {"crates/alpha/src/lib.rs": {1: 9}})
         self.collection(extras, "test-primitives-shuttle", {"src/lib.rs": {2: 5, 3: 1}})
         self.collection(extras, "test-primitives-loom", {"src/runtime/mod.rs": {1: 1, 2: 0}})
         self.collection(extras, "test-primitives-turmoil", {"crates/alpha/src/lib.rs": {1: 1}})
-        self.collection(extras, "test-primitives-deloxide", {"crates/alpha/src/lib.rs": {1: 1}})
-        self.collection("diagnostic-evidence", "test-deadlock-evidence-order", {"src/lib.rs": {1: 1}})
+        if local:
+            self.collection(extras, "test-primitives-deloxide", {"crates/alpha/src/lib.rs": {1: 1}})
+            self.collection("diagnostic-evidence", "test-deadlock-evidence-order", {"src/lib.rs": {1: 1}})
         self.collection("diagnostic-evidence", "test-deadlock-report", {"src/lib.rs": {4: 1}})
         if "shuttle" in labels:
             self.collection("coverage-shuttle", "test-shuttle", {"src/lib.rs": {2: 1}}, prefix="")
@@ -271,12 +272,40 @@ class Run:
             self.collection("coverage-loom", "test-loom", {"src/runtime/mod.rs": {2: 3}}, prefix="")
         if "turmoil" in labels:
             self.collection("coverage-turmoil", "test-turmoil", {"crates/alpha/src/lib.rs": {2: 1}})
-        if "deloxide" in labels:
+        if local and "deloxide" in labels:
             for producer in LANE_MODES:
                 self.collection(f"deloxide-{producer.removeprefix('test-')}", producer, {"src/lib.rs": {1: 1}})
-        if "fuzz" in labels:
+        if local and "fuzz" in labels:
             self.campaign(labels=labels)
         self.bolero_selection(labels)
+        if local:
+            self.make_local(selection)
+
+    def make_local(self, selection: Selection) -> None:
+        """Publish the fixture collections as a local run, which may collect diagnostic modes."""
+        selection = Selection(**{
+            **selection.__dict__, "provider": Provider.LOCAL, "run": None, "attempt": None,
+            "jobs": {}, "bolero_required": False,
+        })
+        (self.directory / coverage_full.SELECTION).write_text(json.dumps(selection.describe()))
+        shutil.rmtree(self.inputs / "bolero-selection")
+        for path in self.inputs.rglob("completion.json"):
+            content = json.loads(path.read_text())
+            content["run"] = {"provider": "local"}
+            if content["producer"] != "bolero-fuzz":
+                content["attempt"] = "local-20261016T000000.000000Z-1"
+                path.write_text(json.dumps(content))
+                path.parent.rename(path.parent.with_name(content["attempt"]))
+            else:
+                path.write_text(json.dumps(content))
+        path = self.inputs / "coverage-merged/target/coverage-merge/record.json"
+        content = json.loads(path.read_text())
+        for source in content["inputs"]:
+            for report in source["reports"]:
+                if "producer" in report:
+                    report["run"] = {"provider": "local"}
+                    report["attempt"] = "local-20261016T000000.000000Z-1"
+        path.write_text(json.dumps(content))
 
     def union(self, *inputs: Path) -> tuple[int, dict[str, object], str, str]:
         """Run `just coverage-full` over these inputs, or over every downloaded artifact."""
@@ -316,18 +345,18 @@ class UnionTests(unittest.TestCase):
         report = run.report()
         self.assertEqual(sources(report), ["crates/alpha/src/lib.rs", "src/lib.rs", "src/runtime/mod.rs", "tests/runtime/restore.rs"])
         # Line 2 of src/lib.rs runs only under Shuttle; line 4 only in the deadlock report's own build.
-        self.assertEqual(counters(report, "src/lib.rs"), {1: 4, 2: 5, 3: 2, 4: 1})
+        self.assertEqual(counters(report, "src/lib.rs"), {1: 3, 2: 5, 3: 2, 4: 1})
         self.assertEqual(counters(report, "src/runtime/mod.rs"), {1: 1, 2: 0})
-        self.assertEqual(counters(report, "crates/alpha/src/lib.rs"), {1: 4, 2: 0})
+        self.assertEqual(counters(report, "crates/alpha/src/lib.rs"), {1: 3, 2: 0})
         self.assertNotIn("FN", report)
         # The ordinary report stays as the coverage job published it.
         self.assertEqual((run.inputs / "coverage-merged/lcov-workspace.info").read_text(), ordinary_before)
         contributions = [contribution["producer"] for contribution in record["contributions"]]
         self.assertEqual(contributions, [
             "ordinary", "test-primitives-shuttle", "test-primitives-loom", "test-primitives-turmoil",
-            "test-primitives-deloxide", "test-deadlock-evidence-order", "test-deadlock-report",
+            "test-deadlock-report",
         ])
-        self.assertEqual(record["fuzz"], {"skipped": "the pull request carries no fuzz label, so the sanitizer campaigns were deliberately skipped"})
+        self.assertEqual(record["fuzz"], {"skipped": "the temporary CI execution policy disables sanitizer campaigns"})
         self.assertIn("## Full workspace coverage", stdout)
         self.assertEqual((run.directory / coverage_full.SUMMARY).read_text() + "Union: target/coverage-full/lcov-full.info; record: target/coverage-full/record.json\n", stdout)
 
@@ -337,7 +366,7 @@ class UnionTests(unittest.TestCase):
         status, record, _, _ = run.union()
         self.assertEqual(status, 0, problems(record))
         by_producer = {contribution["producer"]: contribution["lines"] for contribution in record["contributions"]}
-        self.assertEqual(by_producer["ordinary"], {"files": 3, "executable": 6, "covered": 4, "exclusive": 1, "beyond_ordinary": 0})
+        self.assertEqual(by_producer["ordinary"], {"files": 3, "executable": 6, "covered": 4, "exclusive": 2, "beyond_ordinary": 0})
         self.assertEqual(by_producer["test-primitives-shuttle"], {"files": 1, "executable": 2, "covered": 2, "exclusive": 1, "beyond_ordinary": 1})
         self.assertEqual(record["totals"]["full"], {"files": 4, "executable": 9, "covered": 7})
         self.assertEqual(record["totals"]["beyond_ordinary"], {"files": 2, "covered": 3})
@@ -364,7 +393,7 @@ class UnionTests(unittest.TestCase):
         status, record, stdout, _ = run.union()
         self.assertEqual(status, 0, problems(record))
         report = run.report()
-        self.assertEqual(counters(report, "crates/alpha/src/lib.rs"), {1: 4, 2: 0})
+        self.assertEqual(counters(report, "crates/alpha/src/lib.rs"), {1: 3, 2: 0})
         self.assertEqual(counters(report, "src/runtime/mod.rs"), {1: 1, 2: 0})
         by_producer = {contribution["producer"]: contribution for contribution in record["contributions"]}
         self.assertEqual(by_producer["test-primitives-turmoil"]["wrapped"], [
@@ -398,11 +427,10 @@ class UnionTests(unittest.TestCase):
         status, record, _, _ = run.union()
         self.assertEqual(status, 0, problems(record))
         contributions = [contribution["producer"] for contribution in record["contributions"]]
-        for producer in ("test-shuttle", "test-loom", "test-turmoil", *LANE_MODES, "bolero-fuzz"):
+        for producer in ("test-shuttle", "test-loom", "test-turmoil"):
             self.assertIn(producer, contributions)
-        self.assertEqual(counters(run.report(), "src/runtime/mod.rs"), {1: 1, 2: 3, 3: 7})
-        self.assertEqual(record["fuzz"]["targets"], 2)
-        self.assertTrue(record["selection"]["fuzz_requested"])
+        self.assertEqual(counters(run.report(), "src/runtime/mod.rs"), {1: 1, 2: 3})
+        self.assertEqual(record["fuzz"], {"skipped": "the temporary CI execution policy disables sanitizer campaigns"})
         required = {item["producer"]: item["found"] is not None for item in record["required"]}
         self.assertTrue(all(required.values()))
         self.assertIn("bolero-selection", required)
@@ -468,14 +496,14 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("is the collection of bolero-fuzz, which this run's selection does not enable", problems(record))
 
-    def test_requested_fuzzing_requires_successful_sanitizer_campaigns(self) -> None:
+    def test_ci_records_the_policy_skip_even_when_a_fuzz_label_is_present(self) -> None:
         run = Run(self)
         run.complete(("fuzz",))
         shutil.rmtree(run.inputs / "bolero-selection")
         run.bolero_selection(("fuzz",), sanitizer="skipped", sanitizer_combined="skipped")
         status, record, _, _ = run.union()
-        self.assertEqual(status, 1)
-        self.assertIn("records the requested sanitizer campaigns as ('skipped', 'skipped')", problems(record))
+        self.assertEqual(status, 0, problems(record))
+        self.assertEqual(record["fuzz"], {"skipped": "the temporary CI execution policy disables sanitizer campaigns"})
 
     def test_an_unrequested_sanitizer_campaign_must_be_a_deliberate_skip(self) -> None:
         run = Run(self)
@@ -594,7 +622,7 @@ class SelectionTests(unittest.TestCase):
 class ValidationTests(unittest.TestCase):
     def failing(self, mutate, expected: str, labels: Sequence[str] = ()) -> None:
         run = Run(self)
-        run.complete(labels)
+        run.complete(labels, local=bool({"deloxide", "fuzz"}.intersection(labels)))
         mutate(run)
         status, record, _, _ = run.union()
         self.assertEqual(status, 1)
@@ -665,7 +693,7 @@ class ValidationTests(unittest.TestCase):
 
     def test_a_lane_collection_without_its_complete_lane_record_is_refused(self) -> None:
         self.failing(
-            lambda run: self.replace_collection(run, "deloxide-deloxide-order", "test-deloxide-order", evidence=False),
+            lambda run: next((run.inputs / "deloxide-deloxide-order").rglob("lane.json")).unlink(),
             "has no complete lane record",
             ("deloxide",),
         )
@@ -758,7 +786,7 @@ class CampaignTests(unittest.TestCase):
         run.git("add", "tests/bolero-targets.toml")
         run.git("commit", "--quiet", "-m", "test: register another property")
         run.revision = run.git("rev-parse", "HEAD").strip()
-        run.complete(("fuzz",))
+        run.complete(("fuzz",), local=True)
         path = run.inputs / "coverage-bolero-fuzz/completion.json"
         content = json.loads(path.read_text())
         content["inventory"]["sha256"] = hashlib.sha256(inventory.encode()).hexdigest()
@@ -777,9 +805,9 @@ class CampaignTests(unittest.TestCase):
 
     def failing(self, expected: str, **changes: object) -> None:
         run = Run(self)
-        run.complete(("fuzz",))
+        run.complete(("fuzz",), local=True)
         shutil.rmtree(run.inputs / "coverage-bolero-fuzz")
-        run.campaign(**changes)
+        run.campaign(**({"run": {"provider": "local"}} | changes))
         status, record, _, _ = run.union()
         self.assertEqual(status, 1)
         self.assertIn(expected, problems(record))
@@ -792,13 +820,11 @@ class CampaignTests(unittest.TestCase):
         )
         self.failing("ran another inventory than the tested revision's", inventory={"file": "tests/bolero-targets.toml", "sha256": "0" * 64})
 
-    def test_the_campaign_must_be_one_whole_combined_campaign_of_this_run(self) -> None:
+    def test_a_local_campaign_has_one_complete_source_bound_record(self) -> None:
         self.failing("is one shard's campaign; just combine-bolero-fuzz combines the shards", scope=None, shard={"number": 1, "count": 2})
         self.failing("is one target's record", scope=None, target={"id": "alpha-values"})
-        self.failing("is no combination of this run's shards", scope=None)
-        self.failing("tested", tested_sha="2" * 40)
         self.failing(f"describes {'4' * 40}, not the tested revision", revision={"commit": "4" * 40, "modified": False})
-        self.failing("comes from run 76", run={"provider": "github", "run": "76", "attempt": "1"})
+        self.failing("comes from a github run, while the selection is a local one", run={"provider": "github", "run": "76", "attempt": "1"})
         self.failing("the fuzz campaign is failed, not complete", verdict="failed")
 
 
@@ -888,13 +914,13 @@ class SelectCommandTests(unittest.TestCase):
         self.assertEqual(recorded["labels"], ["extra-primitives", "fuzz", "shuttle"])
         self.assertEqual(recorded["run"], {"provider": "github", "run": RUN, "attempt": 2})
         self.assertEqual(recorded["revision"], run.revision)
-        self.assertTrue(recorded["fuzz_requested"])
+        self.assertFalse(recorded["fuzz_requested"])
         self.assertEqual(recorded["jobs"]["shuttle"], "success")
         self.assertIn("required: ordinary, test-primitives-shuttle", output)
-        self.assertIn("test-shuttle, bolero-fuzz", output)
+        self.assertIn("test-deadlock-report, test-shuttle", output)
         loaded = Selection.load(run.directory / coverage_full.SELECTION)
         self.assertEqual(loaded.attempt, 2)
-        self.assertEqual([requirement.producer for requirement in loaded.required()][-2:], ["test-shuttle", "bolero-fuzz"])
+        self.assertEqual([requirement.producer for requirement in loaded.required()][-2:], ["test-deadlock-report", "test-shuttle"])
 
     def test_a_github_selection_needs_every_producer_job_and_the_tested_checkout(self) -> None:
         run = Run(self)
@@ -972,7 +998,7 @@ class EdgeTests(unittest.TestCase):
 
     def union_with(self, mutate, labels: Sequence[str] = ()) -> tuple[int, dict[str, object]]:
         run = Run(self)
-        run.complete(labels)
+        run.complete(labels, local=bool({"deloxide", "fuzz"}.intersection(labels)))
         mutate(run)
         status, record, _, _ = run.union()
         return status, record
@@ -1080,7 +1106,7 @@ class EdgeTests(unittest.TestCase):
 
     def test_a_report_of_untracked_files_only_contributes_nothing(self) -> None:
         def untracked(run: Run) -> None:
-            report = self.completion(run, "test-primitives-deloxide").parent / "lcov.info"
+            report = self.completion(run, "test-primitives-turmoil").parent / "lcov.info"
             report.write_text(lcov({f"{CI_ROOT}/src/generated.rs": {1: 1}}))
 
         status, record = self.union_with(untracked)
@@ -1175,7 +1201,7 @@ class WorkflowTests(unittest.TestCase):
             if "uses: actions/download-artifact" in step:
                 self.assertRegex(step, r"\n          pattern: \S+")
         extras = step_section(job, "Download native extra coverage")
-        self.assertIn("if: needs.extra-tests.outputs.coverage-required == 'true'", extras)
+        self.assertIn("if: needs.extra-tests.outputs.native-coverage-required == 'true'", extras)
         combine = step_section(job, "Combine coverage")
         self.assertIn("if: ${{ !cancelled() }}", combine)
 
@@ -1231,13 +1257,13 @@ class WorkflowTests(unittest.TestCase):
 
     def test_each_label_enabled_job_collects_its_producers_into_the_artifact_the_union_reads(self) -> None:
         for requirement in REQUIREMENTS:
-            if requirement.label is None or requirement.producer == coverage_full.FUZZ_PRODUCER:
+            if requirement.label is None or requirement.mode in {"deloxide", "deloxide-order", "deloxide-stress", "fuzz"}:
                 continue
             with self.subTest(producer=requirement.producer):
                 job = job_section(self.workflow, requirement.job)
                 self.assertIn(f"contains(github.event.pull_request.labels.*.name, '{requirement.label}')", job)
                 if requirement.job == "extra-tests":
-                    self.assertIn("run: just coverage-native-extras test-primitives\n", job)
+                    self.assertIn("run: just coverage-native-extras test-primitives-ordinary test-primitives-shuttle test-primitives-loom test-primitives-turmoil\n", job)
                     self.assertIn(f"name: {requirement.artifact}\n", job)
                 elif requirement.job == "deloxide":
                     selection = requirement.producer.removeprefix("test-")
@@ -1250,16 +1276,16 @@ class WorkflowTests(unittest.TestCase):
 
     def test_the_always_required_producers_come_from_their_jobs(self) -> None:
         extras = job_section(self.workflow, "extra-tests")
-        self.assertIn("run: just coverage-native-extras test-primitives\n", extras)
+        self.assertIn("run: just coverage-native-extras test-primitives-ordinary test-primitives-shuttle test-primitives-loom test-primitives-turmoil\n", extras)
         self.assertIn("name: coverage-native-extras", extras)
         diagnostic = job_section(self.workflow, "diagnostic-evidence")
-        self.assertIn("run: just coverage-deadlock", diagnostic)
+        self.assertIn("run: just coverage-native-extras test-deadlock-report --output target/deadlock.lcov", diagnostic)
         self.assertIn("name: diagnostic-evidence", diagnostic)
         self.assertIn("name: coverage-merged", job_section(self.workflow, "coverage"))
         bolero = (ROOT / ".github/workflows/bolero.yaml").read_text()
         self.assertIn("name: coverage-bolero-fuzz\n", bolero)
         self.assertIn("name: bolero-selection\n", bolero)
-        self.assertIn("contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')", bolero)
+        self.assertIn('FUZZ_REQUIRED: "false"', bolero)
 
     def test_the_coverage_job_retains_the_ordinary_report_and_merge_record_the_union_reads(self) -> None:
         upload = step_section(job_section(self.workflow, "coverage"), "Upload merged coverage")

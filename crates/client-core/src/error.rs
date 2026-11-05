@@ -15,7 +15,8 @@
 )]
 
 use nervix_client_wire::{
-    CancellationStage, ClientRequest, EmitterOpenRefusal, ReplyBody, RequestRejection,
+    CancellationStage, ClientRequest, CommandDisposition, EmitterOpenRefusal, ReplyBody,
+    RequestRejection,
 };
 use nervix_models::{ClientProducerRefusal, CommandExecutionReference, ResourceUploadIdentity};
 use thiserror::Error;
@@ -148,6 +149,13 @@ pub enum ClientError {
     RequestInterrupted { request: RequestKind },
     #[error("session retry deadline expired")]
     RetryDeadline,
+    /// The last server answer that still required repeating a command. It stays beneath the
+    /// uncertain command and above the retry deadline that ended its retry.
+    #[error("last unresolved command answer was {disposition:?}: {message}")]
+    LastUnresolvedAnswer {
+        disposition: CommandDisposition,
+        message: String,
+    },
     /// The command may have been admitted under `reference`, and its outcome did not arrive. The
     /// failure that left it unknown is beneath; running the same execution handle again recovers
     /// the outcome.
@@ -187,6 +195,10 @@ pub enum ClientError {
         request: RequestKind,
         stage: CancellationStage,
     },
+    /// The caller cancelled the call while it waited for something other than a reply, so the
+    /// call stopped there and sent nothing more. What it had already sent may still take effect.
+    #[error("the call was cancelled before its outcome arrived")]
+    CallCancelled,
     /// The server answered the request with a reply of a kind that does not answer it.
     #[error("the server answered the {request} request with a reply of another kind")]
     UnexpectedReply { request: RequestKind },
@@ -277,7 +289,12 @@ impl ClientError {
             | Self::RequestInterrupted { .. }
             | Self::ConnectServer(_)
             | Self::SessionOpenDeadline
-            | Self::RetryDeadline => true,
+            | Self::RetryDeadline
+            | Self::CallCancelled
+            | Self::RequestCancelled {
+                stage: CancellationStage::AfterAdmission,
+                ..
+            } => true,
             Self::Transport(_) => self.retryable_session_failure(),
             Self::StartSession(status) | Self::Restore(status) => matches!(
                 status.code(),

@@ -150,10 +150,15 @@ version bindings, domain lifecycle, ownership moves, activations and deactivatio
 state resets, force flushes, and affected topology. An HTTPS `VHOST` version refresh can therefore
 be `DYNAMIC` while every live node still installs a new listener certificate. A running-domain
 primary move raises an otherwise dynamic model or placement change to `ENTITY_PAUSE`; replica-role
-changes alone do not. Schedule reassignments identify the moved node and unit; the transaction
-report folds those identities to their logical node when attributing ownership and its affected
-subgraph. Current schedules have one `Single` unit, so the reported scope is unchanged. A schedule
-rebuild can raise a narrower model change to `DOMAIN_PAUSE`. In
+changes alone do not. Schedule reassignments identify the moved node and unit, and so does each
+ownership move in the report: a move of one partition of a partitioned relay names that partition,
+rendered as `unit=partition:<p>` after its node, while a node with one unit names no unit. The
+transaction report folds those identities to their logical node when attributing ownership and its
+affected subgraph, so moving one partition gates its relay. A schedule rebuild can raise a narrower
+model change to `DOMAIN_PAUSE`. `ALTER BRANCH ... SET PARTITIONS` is a `BranchPartitions` change,
+which needs a domain pause and which the registry accepts only while the domain is stopped, where it
+plans as `DYNAMIC` and takes effect at the next `START`; see
+[Relay Partitions](./relay.md#relay-partitions). In
 a stopped domain, a model or resource rebinding has no running work to pause and reports
 `DYNAMIC`, although the changed configuration still matters at the next start. Explicit `START`
 and `STOP` are individual `NO_PAUSE` steps with lifecycle effects; they determine whether later
@@ -205,6 +210,15 @@ example, can show a changed emitter, upstream gate, force-flushed work, and repl
 as different roles rather than as one ambiguous list of “affected nodes.”
 
 ## Coherent Preview And Guarded Commit
+
+The complete committed cluster-parameter record, including its revision, is part of the captured
+planning inputs and the preview's planning-basis fingerprint. Model validation uses its typed limits
+and the Models from that same consensus schedule. Application preflight and replicated publication
+compare that exact record before applying an effect. A parameter publication makes an earlier
+capture stale even when later assignments return its values to the same settings. `ALTER CLUSTER SET`
+runs outside domain transactions, through durable command execution; its transition validates all
+current Models and resource versions before publishing one parameter record. [Node Settings](node-settings.md)
+owns its syntax, bounds and live installation contract.
 
 The planner uses one captured view of the domain, models, resource versions, schedule, placement,
 membership, and liveness inputs for an ordered prefix. Its planning-basis fingerprint identifies

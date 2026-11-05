@@ -137,14 +137,19 @@ impl Arbitrary<'_> {
         let count = self.entropy.count(ITEMS);
         let mut invocations = Vec::with_capacity(count);
         for _ in 0..count {
-            let function = self.function_name();
-            let arguments = self.expression_arguments();
-            invocations.push(Invocation {
-                function,
-                arguments,
-            });
+            invocations.push(self.invocation());
         }
         invocations
+    }
+
+    /// One call a route's `INVOKE` makes.
+    pub(crate) fn invocation(&mut self) -> Invocation {
+        let function = self.function_name();
+        let arguments = self.expression_arguments();
+        Invocation {
+            function,
+            arguments,
+        }
     }
 
     fn expression_arguments(&mut self) -> Vec<Expression> {
@@ -156,7 +161,7 @@ impl Arbitrary<'_> {
         arguments
     }
 
-    fn inheritance(&mut self) -> Inheritance {
+    pub(crate) fn inheritance(&mut self) -> Inheritance {
         match self.entropy.byte() % 3 {
             0 => Inheritance::All,
             1 => Inheritance::AllExcept(self.distinct_expression_names::<FieldName>(1, ITEMS)),

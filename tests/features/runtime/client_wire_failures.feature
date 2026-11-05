@@ -332,6 +332,57 @@ Feature: Client wire failure regressions
       | 3            | resource     | CREATE RESOURCE replayed_resource; |
       | 3            | domain start | START;                             |
 
+  @client_wire_duplicate_append @slots_2
+  Scenario: A replay session that reaches a former leader attaches the transaction where the redirect leads
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    And a node other than placeholder "leader" is saved as placeholder "successor"
+    When these Plexus commands are executed on the active session
+      """
+      BEGIN;
+      """
+    And this Plexus command request is executed on the leader node
+      """
+      SHOW TRANSACTIONS;
+      """
+    Then the only transaction id is saved as placeholder "transaction_id"
+    Given command response delivery on node "{{leader}}" pauses after execution
+    When the active session sends this Plexus command request with execution reference "append-{{test_id}}" without reading its response
+      """
+      CREATE RESOURCE replayed_resource;
+      """
+    Then the command response delivery pause on node "{{leader}}" is reached
+    When the command response delivery pause on node "{{leader}}" is released
+    And leadership is transferred from node "{{leader}}" to node "{{successor}}"
+    Then node "{{successor}}" eventually reports a leader other than "{{leader}}"
+    And node "{{leader}}" eventually reports a leader other than "{{leader}}"
+    When a new session on node "{{leader}}" attaches to transaction "{{transaction_id}}" and executes this Plexus command with execution reference "append-{{test_id}}" at transaction position 0
+      """
+      CREATE RESOURCE replayed_resource;
+      """
+    Then the last command request succeeded
+    When this Plexus command request is executed on the leader node
+      """
+      SHOW TRANSACTIONS;
+      """
+    Then the last command output contains
+      """
+      id={{transaction_id}}
+      """
+    And the last command output contains
+      """
+      pending=1
+      """
+    When these Plexus commands are executed on the active session
+      """
+      REVERT;
+      """
+
   @client_wire_transaction_batch_leader_recovery
   Scenario: An exact transaction batch retry survives a leader change without repeating effects
     Given a 3 node nervix cluster is started
@@ -1237,8 +1288,8 @@ Feature: Client wire failure regressions
       CREATE VHOST edge wide-rows-{{test_id}}.example.com;
       CREATE ENDPOINT wide_ingress ON edge PATH '/records' TYPE HTTP;
       CREATE HTTP ENDPOINT INGESTOR wide_source
-        FROM wide_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 32MiB DECODE USING wide_record_codec
+        FROM wide_ingress MODE ACK MAX 1 ACK TIMEOUT 30s
+        ON QUIESCE REJECT RETRY AFTER 1s DECODE USING wide_record_codec
         TO wide_records
         SET sequence = message.sequence, note = message.note
         UNBRANCHED
@@ -1250,7 +1301,7 @@ Feature: Client wire failure regressions
       """
       CREATE SUBSCRIPTION wide_seen TO wide_records;
       """
-    And http payload is posted to node "node-1" with host "wide-rows-{{test_id}}.example.com" path "/records"
+    And http payload is acknowledged within "30s" by node "node-1" with host "wide-rows-{{test_id}}.example.com" path "/records"
       """
       {"sequence":1,"note":"{{wide_note}}"}
       """

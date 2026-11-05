@@ -7,6 +7,10 @@ chaos_dir="$(cd "${script_dir}/.." && pwd)"
 source "${chaos_dir}/tool-images.sh"
 # shellcheck source=../require-jq.sh
 source "${chaos_dir}/require-jq.sh"
+# shellcheck source=../cluster-parameters.sh
+source "${chaos_dir}/cluster-parameters.sh"
+# shellcheck source=cluster-parameters-fixture.sh
+source "${script_dir}/cluster-parameters-fixture.sh"
 
 if ! chaos_jq_supported; then
     printf 'self-test failed: the chaos scripts need jq 1.8 or later, not %s\n' "$(chaos_jq_found)" >&2
@@ -210,8 +214,11 @@ pause_events="${tmp_dir}/pause-events.ndjson"
 pause_result="${tmp_dir}/pause-duration.json"
 jq '.[0].Config.Env = [
     "NERVIX_RAFT_HEARTBEAT_INTERVAL=1500ms",
-    "NERVIX_NODE_UNAVAILABILITY_TIMEOUT=15s"
+    "NERVIX_NODE_ID=node-1"
 ] | .[0].State.Paused = false' "${inspection_before}" >"${pause_before}"
+pause_parameters="${tmp_dir}/pause-parameters.json"
+cluster_parameter_publication_fixture 15s node-1 >"${tmp_dir}/pause-parameters.txt"
+cluster_parameter_observation "${tmp_dir}/pause-parameters.txt" node-1 >"${pause_parameters}"
 jq '.[0].State.Paused = true' "${pause_before}" >"${pause_active}"
 cp "${pause_before}" "${pause_resumed}"
 # These fixtures run the pause deployment, so the verifier checks them against its settings.
@@ -228,11 +235,11 @@ printf '%s\n' \
     "$(jq -nc --arg id "${test_container_id}" '{Type:"container",Action:"unpause",Actor:{ID:$id},timeNano:1800000006000000000}')" \
     >"${pause_events}"
 "${pause_verifier}" before "${test_run_id}" "${test_project}" nervix-1 \
-    "${test_image_id}" "${pause_before}" "${pause_before}"
+    "${test_image_id}" "${pause_before}" "${pause_before}" "${pause_parameters}"
 "${pause_verifier}" paused "${test_run_id}" "${test_project}" nervix-1 \
-    "${test_image_id}" "${pause_before}" "${pause_active}"
+    "${test_image_id}" "${pause_before}" "${pause_active}" "${pause_parameters}"
 "${pause_verifier}" resumed "${test_run_id}" "${test_project}" nervix-1 \
-    "${test_image_id}" "${pause_before}" "${pause_resumed}" \
+    "${test_image_id}" "${pause_before}" "${pause_resumed}" "${pause_parameters}" \
     "${pause_events}" 5000 9999 "${pause_result}"
 jq -e '.pause_verified == true and .unpause_verified == true and (.actual_pause_ms - 6000 | fabs) < 1' \
     "${pause_result}" >/dev/null || fail 'verified pause duration was incorrect'
@@ -241,7 +248,7 @@ printf '%s\n' \
     "$(jq -nc --arg id "${test_container_id}" '{Type:"container",Action:"unpause",Actor:{ID:$id},timeNano:1800000001000000000}')" \
     >"${tmp_dir}/short-pause-events.ndjson"
 "${pause_verifier}" resumed "${test_run_id}" "${test_project}" nervix-1 \
-    "${test_image_id}" "${pause_before}" "${pause_resumed}" \
+    "${test_image_id}" "${pause_before}" "${pause_resumed}" "${pause_parameters}" \
     "${tmp_dir}/short-pause-events.ndjson" 800 2000 "${tmp_dir}/short-pause-duration.json"
 jq -e '.actual_pause_ms >= 800 and .actual_pause_ms <= 2000' \
     "${tmp_dir}/short-pause-duration.json" >/dev/null \
@@ -256,41 +263,49 @@ expect_pause_failure() {
 }
 
 expect_pause_failure 'no paused state' paused "${test_run_id}" "${test_project}" nervix-1 \
-    "${test_image_id}" "${pause_before}" "${pause_resumed}"
+    "${test_image_id}" "${pause_before}" "${pause_resumed}" "${pause_parameters}"
 expect_pause_failure 'still paused after injector' resumed "${test_run_id}" "${test_project}" nervix-1 \
-    "${test_image_id}" "${pause_before}" "${pause_active}" \
+    "${test_image_id}" "${pause_before}" "${pause_active}" "${pause_parameters}" \
     "${pause_events}" 5000 9999 "${pause_result}"
 expect_pause_failure 'missed long fault window' resumed "${test_run_id}" "${test_project}" nervix-1 \
-    "${test_image_id}" "${pause_before}" "${pause_resumed}" \
+    "${test_image_id}" "${pause_before}" "${pause_resumed}" "${pause_parameters}" \
     "${pause_events}" 15001 60000 "${pause_result}"
 expect_pause_failure 'missed short fault window' resumed "${test_run_id}" "${test_project}" nervix-1 \
-    "${test_image_id}" "${pause_before}" "${pause_resumed}" \
+    "${test_image_id}" "${pause_before}" "${pause_resumed}" "${pause_parameters}" \
     "${pause_events}" 800 2000 "${pause_result}"
 jq '.[0].State.StartedAt = "2026-09-27T00:01:00Z"' \
     "${pause_resumed}" >"${tmp_dir}/pause-restarted.json"
 expect_pause_failure 'restarted paused process' resumed "${test_run_id}" "${test_project}" nervix-1 \
-    "${test_image_id}" "${pause_before}" "${tmp_dir}/pause-restarted.json" \
+    "${test_image_id}" "${pause_before}" "${tmp_dir}/pause-restarted.json" "${pause_parameters}" \
     "${pause_events}" 5000 9999 "${pause_result}"
 sed 's/"Action":"unpause"/"Action":"stop"/' "${pause_events}" \
     >"${tmp_dir}/pause-missing-unpause.ndjson"
 expect_pause_failure 'missing unpause event' resumed "${test_run_id}" "${test_project}" nervix-1 \
-    "${test_image_id}" "${pause_before}" "${pause_resumed}" \
+    "${test_image_id}" "${pause_before}" "${pause_resumed}" "${pause_parameters}" \
     "${tmp_dir}/pause-missing-unpause.ndjson" 5000 9999 "${pause_result}"
-jq '.[0].Config.Env |= map(select(. != "NERVIX_NODE_UNAVAILABILITY_TIMEOUT=15s"))' \
-    "${pause_before}" >"${tmp_dir}/pause-wrong-threshold.json"
-expect_pause_failure 'wrong configured threshold' before "${test_run_id}" "${test_project}" nervix-1 \
-    "${test_image_id}" "${tmp_dir}/pause-wrong-threshold.json" "${tmp_dir}/pause-wrong-threshold.json"
-# A run that passes no liveness settings deploys the Compose defaults, and its pauses are judged
-# against those defaults instead of the pause deployment's.
+jq '.committed["node-unavailability-timeout"] = "10s" | .running["node-1"].values["node-unavailability-timeout"] = "10s"' \
+    "${pause_parameters}" >"${tmp_dir}/pause-different-policy.json"
+expect_pause_failure 'policy differs from the pause experiment' before "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${pause_before}" "${pause_before}" "${tmp_dir}/pause-different-policy.json"
+jq '.running["node-1"].revision = "16"' "${pause_parameters}" >"${tmp_dir}/pause-pending-policy.json"
+expect_pause_failure 'node has not installed the committed revision' before "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${pause_before}" "${pause_before}" "${tmp_dir}/pause-pending-policy.json"
+jq '.revision = "0" | .running["node-1"].revision = "0"' \
+    "${pause_parameters}" >"${tmp_dir}/pause-invalid-revision.json"
+expect_pause_failure 'parameter revision is not positive' before "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${pause_before}" "${pause_before}" "${tmp_dir}/pause-invalid-revision.json"
+# The default experiment has its own installed policy and local heartbeat.
 unset "${pause_deployment[@]}"
 jq '.[0].Config.Env = [
     "NERVIX_RAFT_HEARTBEAT_INTERVAL=250ms",
-    "NERVIX_NODE_UNAVAILABILITY_TIMEOUT=10s"
+    "NERVIX_NODE_ID=node-1"
 ]' "${pause_before}" >"${tmp_dir}/pause-default-deployment.json"
+cluster_parameter_publication_fixture 10s node-1 >"${tmp_dir}/pause-default-parameters.txt"
+cluster_parameter_observation "${tmp_dir}/pause-default-parameters.txt" node-1 >"${tmp_dir}/pause-default-parameters.json"
 "${pause_verifier}" before "${test_run_id}" "${test_project}" nervix-1 \
-    "${test_image_id}" "${tmp_dir}/pause-default-deployment.json" "${tmp_dir}/pause-default-deployment.json"
+    "${test_image_id}" "${tmp_dir}/pause-default-deployment.json" "${tmp_dir}/pause-default-deployment.json" "${tmp_dir}/pause-default-parameters.json"
 expect_pause_failure 'settings other than the deployed ones' before "${test_run_id}" "${test_project}" \
-    nervix-1 "${test_image_id}" "${pause_before}" "${pause_before}"
+    nervix-1 "${test_image_id}" "${pause_before}" "${pause_before}" "${tmp_dir}/pause-default-parameters.json"
 for setting in "${!deployed_liveness[@]}"; do
     export "${setting}=${deployed_liveness[${setting}]}"
 done
@@ -644,7 +659,6 @@ CHAOS_NODE_3_ADDRESS="10.213.7.13" \
 
 jq -e --arg image "${placeholder_image}" \
     --arg heartbeat "${CHAOS_RAFT_HEARTBEAT_INTERVAL:-250ms}" \
-    --arg node_timeout "${CHAOS_NODE_UNAVAILABILITY_TIMEOUT:-10s}" \
     --arg snapshot_entries "${CHAOS_RAFT_SNAPSHOT_ENTRY_THRESHOLD:-10000}" \
     --arg covered_entries "${CHAOS_RAFT_COVERED_LOG_ENTRIES_RETAINED:-1000}" '
     ([.services.admin, .services["nervix-1"], .services["nervix-2"], .services["nervix-3"]]
@@ -671,10 +685,9 @@ jq -e --arg image "${placeholder_image}" \
     and .services["clock-observer"].labels["io.nervix.chaos.role"] == "observer"
     and .services["clock-observer"].image == $image
     and .services["nervix-1"].environment.NERVIX_RAFT_HEARTBEAT_INTERVAL == $heartbeat
-    and .services["nervix-1"].environment.NERVIX_NODE_UNAVAILABILITY_TIMEOUT == $node_timeout
     and .services["nervix-1"].environment.NERVIX_RAFT_SNAPSHOT_ENTRY_THRESHOLD == $snapshot_entries
     and .services["nervix-1"].environment.NERVIX_RAFT_COVERED_LOG_ENTRIES_RETAINED == $covered_entries
-' "${compose_json}" >/dev/null || fail "Compose does not pin every Nervix service or contains a build"
+' "${compose_json}" >/dev/null || fail "Compose services differ in pinned images, run identity, pacing or node prerequisites"
 
 jq -e --arg nervix "${placeholder_image}" \
     --arg kafka "${chaos_kafka_image}" \

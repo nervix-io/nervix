@@ -99,6 +99,53 @@ three selections on one and three nodes. Its saturated-log counterpart, which ke
 command applying while its transaction commits, adds no tracked acquisition and stays outside
 them; its owner test and public scenario cover it.
 
+## Unit Allowance Transactions
+
+`nervix-rate-limit::Limiter` belongs to one execution unit. Admission takes `&mut self`, and its
+ordered clause vector owns every direct cell and keyed store. The mutable borrow excludes another
+payload throughout tentative charges, the latest-deadline calculation, and commit or refund.
+It adds no process-wide admission gate. No guard crosses an await; the caller receives the outcome
+and owns any wait before another whole-payload check.
+
+The direct GCRA cell is one selected `AtomicU64`, holding its epoch-relative horizon in
+nanoseconds. Zero denotes the actual fully replenished horizon at the epoch. Governor updates
+the scalar through a relaxed CAS loop; refund restores the exact pre-charge horizon under the
+transaction's exclusive writer scope. There is no cross-location publication or reference-count
+ordering claim. A failed later clause refunds every tentative charge, and waiting reports the
+latest governor `NotUntil` among the clauses. Costs above any burst and a zero key budget have
+distinct typed outcomes. An invalid charge shape or clock range is rejected before charging.
+
+A keyed clause shards its `ExpiryMap` by the remainder of a 128-bit fingerprint. Its explicit
+shard count and global `MAX KEYS` bound the store. Existing-key admission retains one blocking
+shard guard; missing-key installation, capacity eviction, statistics and generation capture take
+all shards in ascending index order. A one-shard lease never acquires another shard. The lease
+keeps the governor cell protected until whole-payload commit or refund. New keys and eviction
+remain tentative until commit. Accepted uses move the key to the shard's end with a globally
+ordered visit ordinal; the least ordinal among shard fronts is the global LRU victim. Refused
+payloads change neither retained debt nor LRU position. Visit reservation may leave ordinal gaps.
+Expiry removes keys whose last accepted use is at least `TTL` ago; statistics expires them before
+reporting active occupancy, and counts only capacity removals as evictions. All work is synchronous
+and bounded by the retained entries, declared shards and clause vector; the store has no timer or
+background task. The unit owner supplies nondecreasing monotonic observations.
+
+Generations capture live debt and retained key ages with their LRU ordinals. Fully replenished or
+expired state needs no retained horizon. UTC conversion preserves every field at the same anchor,
+credits elapsed time once on recovery, and drops horizons or TTLs that have elapsed. Restoring
+builds fresh stores and an epoch preceding the oldest retained use; malformed state is refused.
+
+The registered Loom invariant `rate-limit.direct.exact-refund` drives the production cell with a
+concurrent observer; its registered weakening clears debt instead of restoring it. The registered
+Shuttle check drives production keyed leases through concurrent charges, refunds, eviction and
+capacity observations at the exact TTL of two seeded keys, followed by a final expiry. It explores three participants with two attempts each;
+it does not model governor internals or physical elapsed time. The Deloxide workload
+`owner.rate-limit-keyed-transactions` reaches the tracked locks in `crates/rate-limit/src/keyed.rs`
+in all four selections, including fresh keyed restoration. It observes tracked blocking locks,
+not atomic ordering, UTC arithmetic or asynchronous waits. The concurrent-map ledger records this
+bounded protocol. `just test-rate-limit-model` and `just test-rate-limit-diagnostic` select only
+this package's registered records through the canonical runners; their evidence explicitly names
+that scope and never constitutes whole-workspace qualification. Full CI model runners retain
+their full inventories; Deloxide CI remains governed by the current execution policy.
+
 ## Remote ACK And Admission Owners
 
 `just bench-remote-owners` measures registration, admission, Alive, ordered parking/resume and
@@ -218,7 +265,11 @@ the applicable Turmoil suite and real-process Chaos faults retain their separate
 A concrete producer retains its branch channel handle. The relay publishes branch membership in a
 persistent immutable table; concurrent first binding selects one allocation with CAS. Each branch
 publishes an owner/consumer routing generation, whose cancellation parent fences ingress and
-outbound slots, including candidates created during replacement. Eviction cancels the exact branch
+outbound slots, including candidates created during replacement. A partitioned relay keeps one
+routing generation per partition, and a producer resolves its key's partition once, when it binds
+its branch channel, so no batch computes a partition or reaches a shared map. Replacing one
+partition's owner cancels only that partition's generation and the channels bound under it; the
+other partitions' producers keep their bindings. Eviction cancels the exact branch
 before withdrawing its allocation. Invalidation is scoped to the branch that ended: a relay owner
 invalidates its own relay's branch, and a processor, ingestor or reingestor invalidates the
 branches of the relays it publishes through for its key. Another relay's branch for the same key
@@ -309,8 +360,8 @@ writer.
 | Emitter execution plans | The decision layer prepares the domain's typed emitter and ordered source edges with lowered expressions from one schedule revision; schedule application installs them in that revision. Startup, swaps and relocation bind a selected plan to local mounts, schemas and UDFs; relay inputs are registered during those transitions. Remote consumer edges come from the same plans. | An emitter task owns its bound programs and emitter configuration for its lifetime. Per-batch work does not read the schedule or client Models; emitter retries reuse the typed configuration. A dynamic flush change sends only its new flush policy to the running task. |
 | Message-error route plans | The registry selects each DLQ route from the committed schedule. Domain installation binds its schemas, branch declaration, flush contract, relay target and SET program before tasks start. Schedule application publishes the complete bound route map with the routing state of one typed revision. | A failed record looks up its prepared route in the task’s retained immutable routing snapshot, which publishes the bound plans together with the routing revision, before running its VM program or delivery. A buffered route compares the bound plan allocation with its running delivery task; a replacement drains the preceding task and starts a task with the new target and cadence. |
 | Node identity and remote dispatcher | The node runtime publishes this once after cluster join, when the authenticated interconnect and process incarnation are known. Relay boundaries created afterwards retain the same dispatcher handle. | Readers borrow the stable node identity, incarnation, transport, admission service, and ACK registry without a write-once lock or repeated name allocation. |
-| Relay owner state | Each relay boundary publishes its scheduled owner, installed owner buffer, remote runtime-consumer set, and immutable branch-reset gate set. Schedule and relay lifecycle operations replace these values at their cutover points. | A batch borrows the current owner and buffer, then takes permits only from reset gates whose typed scope selects its branch. Multi-step ownership changes use the whole-relay dispatch gate described below so teardown cannot race an admitted dispatch. |
-| Relay branch presence | The relay's owner task publishes the complete membership of the concrete branches it holds, and whether it admitted unbranched work, when that membership changes: a branch appears, is evicted or expires, or the owner starts or stops. The relay's state placement keeps the same presence across execution rebuilds. See [Relay branch presence](#relay-branch-presence). | `DESCRIBE RELAY ... WHERE`, materialized reads, and the console's dataflow graph load one membership without a lock. A batch for a branch the owner already holds publishes nothing. |
+| Relay owner state | Each relay boundary publishes its scheduled owners, one per unit, as one immutable table, its installed owner buffers, one per unit this node owns, its remote runtime-consumer set, and immutable branch-reset gate set. Schedule and relay lifecycle operations replace these values whole at their cutover points; an owner task deactivates only the buffer it installed. | A batch borrows the current owner and buffer of the unit its producer resolved at binding, then takes permits only from reset gates whose typed scope selects its branch. Multi-step ownership changes use the whole-relay dispatch gate described below so teardown cannot race an admitted dispatch. |
+| Relay branch presence | The owner task of each unit of a relay publishes the complete membership of the concrete branches it holds, and whether it admitted unbranched work, when that membership changes: a branch appears, is evicted or expires, or the owner starts or stops. Each unit's state placement keeps the same presence across execution rebuilds. See [Relay branch presence](#relay-branch-presence). | `DESCRIBE RELAY ... WHERE`, materialized reads, and the console's dataflow graph load one membership without a lock. A batch for a branch the owner already holds publishes nothing. |
 | Subscription interest | The cluster live-state watcher rebuilds an immutable index from domain and relay to interested node incarnations and advertisement versions whenever gossip changes. | A relay owner performs borrowed lookups in one published index. It neither formats gossip keys nor waits on the gossip mutex per batch. Subscription creation waits until every live node has observed the exact subscriber incarnation and at least the current advertisement version before reporting success. |
 | Clock installation | Each domain-clock lifecycle on each node publishes the complete missing, stopped, uninstalled, unpaced, or paced installation. | A read validates its bound lifecycle generation against one installation, then advances that installation's nondecreasing timestamp watermark atomically. A same-generation replacement retains the watermark; a different generation cannot be clamped by a stale reader. |
 | Accepted clock progress | Each runtime domain publishes its newest accepted generation, tick id, logical boundary, and authority UTC observation through a watch. | The watch serializes comparison and replacement, so concurrent progress deliveries cannot regress the id or its authority UTC observation. Generation changes and stops publish absence. A session observer subscribes before reading, retains a sender for as long as its attachment lives, so removing the domain wakes it instead of closing its wait, and uses an execution snapshot only to add its serving node's logical reading to a tick frame. |
@@ -525,17 +576,21 @@ Generators retain the domain acknowledgement tracker. Ingest executions, groups 
 bindings retain the same domain/ingestor tracker pair. Task and branch metric handles retain the
 exact placement's dirty mark. Client batch outcome counters, quiesced payload counters/gauges and
 subscription drop counters retain their Prometheus children, including every declared outcome
-label combination, so recording resolves no label set.
+label combination, so recording resolves no label set. Persistent-command refusal counters resolve
+their four reason children at node metric registration and increment those retained handles when
+the application refuses admission. Completion, background recovery and follower consensus
+application do not record those events.
 
 Subscription generations also retain the node's executor and pass it directly to predicate
 evaluation. Executor admission continues to own worker and memory bounds for extension calls.
 The admission benchmark also constructs the current emitter context, resolving its routing,
 metrics mark, status publication and confirmation counter before the timed encoding runs.
 
-Each handoff entity has one immutable coordination-owner set and notification owner. Tasks retain
-that entity slot across repeated freezes. A watch registers before reading the publication;
-engagement and release replace it before notifying. Concurrent owners derive their replacement
-with the primitive publication boundary's reference update. Domain removal drops registry interest.
+Each unit of a handoff entity has one immutable coordination-owner set and notification owner.
+Tasks retain that unit's slot across repeated freezes. A watch registers before reading the
+publication; engagement and release replace it before notifying. Concurrent owners derive their
+replacement with the primitive publication boundary's reference update. Domain removal drops
+registry interest.
 
 Domain-clock publication contains lifecycle pause, generation and start-point observations alongside
 its installation. Ingestion reads admission and time from that one publication; Kafka offset polls
@@ -1030,7 +1085,9 @@ that is lost delays a checkpoint by at most one poll interval.
 ### Relay branch presence
 
 A relay's owner task owns its concrete branch instances: their activity order, the TTL scan that
-expires them, and the LRU eviction that bounds them. It keeps them in an ordinary indexed map beside
+expires them, and the LRU eviction that bounds them. A partitioned relay has one owner task, one
+presence and one LRU bound per partition, each changed only by its own owner; an observer of one key
+reads the presence of the key's partition. It keeps them in an ordinary indexed map beside
 a persistent set of their keys, and admits, evicts and expires through one owner type that changes
 both in the same step. A step that changes the membership publishes the set, sharing its structure
 with the membership published before it, so creating or releasing one branch copies only the path
@@ -1075,7 +1132,12 @@ branch generation. The persistent membership publication changes only at those b
 snapshot installation. Eviction first clears the exact row publication, then withdraws that member.
 Recreation allocates a new publication; a retained ended member never attaches to it. Rebinding
 waits for operations admitted under the preceding assignment before rebuilding the new task's
-mutable selections from the published views. Previous writer tokens refuse further mutations.
+mutable selections from the published views. Previous writer tokens refuse further mutations. A
+schedule change that places a relay again rebinds every unit of it a node keeps owning, including
+the partitions that did not move, so the node stops the relay-state task of each kept unit before
+the rebinding, while the relay's local dispatch is gated. The task applies the rows already queued
+to it under the assignment they were dispatched in, and its successor starts with the originator
+the new assignment issued.
 
 Domain routing retains one materialized publication per relay and its relay-state epoch. The
 installed state-replication routes supply the relay's immutable branch index. Dependency reads and
@@ -1511,7 +1573,13 @@ already admitted work retains its existing ACK and silence contracts.
 The production channel-owner Shuttle check
 `shuttle_forced_routing_fence_cancels_racing_bindings_until_successor_publication` races first-use
 binding against retirement and requires every preceding slot to remain cancelled across successor
-publication. The three-node `forced_failover_delivery` Cucumber scenario holds the former owner's
+publication. For a partitioned relay,
+`shuttle_replacing_one_partition_owner_retires_only_that_partitions_channels` races the producers
+of two partitions against replacing one partition's owner: the other partition's channel is never
+cancelled or rebound, the moved partition's preceding channel is cancelled, and its branch rebinds
+to the successor generation. `shuttle_fencing_one_partition_holds_only_its_bindings_until_successor_publication`
+races a binding of one partition against fencing the other, which stays fenced until its successor
+is published while the first keeps a live channel throughout. The three-node `forced_failover_delivery` Cucumber scenario holds the former owner's
 admission and runtime preparation, checks delivery and a later revision before releasing it, and
 runs in the active, order and lifecycle-stress Deloxide selections. Those selections observe the
 tracked gate, channel-ordering and ACK-owner locks; asynchronous cancellation, admission waits and
@@ -1836,6 +1904,13 @@ describe test selection, not a product wait deadline. The executor-saturation lo
 testing fault control. The [concurrent map inventory](https://github.com/nervix-io/nervix/blob/main/tests/concurrent-map-inventory-ledger.md)
 records the runtime ownership review; source contracts and expectations are the executable policy.
 
+The console's uncertain-command reply fixture uses a testing-only domain/query map after command
+execution. It substitutes three replies and retains at most four execution references, releases
+each map guard before queuing the reply, and drops the map with the scenario's injector. Its
+DashMap accesses and browser timers are untracked by Deloxide. The browser retry queue has one
+task owner; deterministic owner tests and public one- and three-node scenarios check its ordering,
+backoff and retained session attachments.
+
 ### Complete analysis and qualification
 
 The isolated tooling workspace uses `nightly-2026-09-17`; product builds use stable. The twelve
@@ -1924,6 +1999,14 @@ primitives there. The boundary selects mechanisms; the source contracts and prod
 checks below establish what a caller may do with them.
 
 ## Diagnostic Deadlock Detection
+
+The temporary CI execution policy disables all Deloxide execution, including the diagnostic
+evidence probes, primitive conformance and documentation checks, labeled lanes and diagnostic
+Chaos images. Labels, schedules, manual dispatch and reruns cannot re-enable them; that requires
+an explicit user decision. Ordinary report-tool diagnostics still run. Local diagnostic commands
+and their inventories remain available for targeted investigation. The
+[coverage contract](./coverage-reports.md) records the resulting CI producer selection and its
+qualification gap without weakening ordinary report integrity or the complexity gate.
 
 The resource-source-discovery workload exercises resource publication, a pending replica and
 installation once source visibility resumes, followed by a lookup of the replicated file. Its
@@ -2207,6 +2290,10 @@ column builder, TLS rebinding of every HTTPS listener, batched inference over in
 a restarted voter's ownership, and graceful shutdown with a slow cordon release and diagnostic
 server processes that stop gracefully, and its
 `stress-paced-simulation` invocation of the paced-driver scenarios with the stressed Rust driver.
+The Python companion uses the ordinary `nervix_client` package installed with the prerequisites.
+The runner selects that prepared interpreter explicitly, independently of its diagnostic Cargo
+target directory. The detector observes the diagnostic nodes those scenarios drive; it does not
+track synchronization inside the Python host or its ordinary client package.
 Endpoint ACK lifecycle examples carry `@deloxide_stress_endpoint_ack` and run in the separate
 `stress-endpoint-acknowledgement` invocation. Its serial process has a 900-second bound, including
 the existing 360-second teardown reserve. The baseline lifecycle process has a 3,960-second bound,
@@ -2282,6 +2369,14 @@ resume barriers use the existing async pause owner, whose ordering remains outsi
 observation; the public outcome and dependent mutation assert recovery under the original
 execution reference.
 
+The `@client_wire_standalone_completion` one- and three-node examples hold a coordinator after a
+failed commit attempt until transaction reconciliation commits the same command. The testing
+hook reads its node/domain point in `FaultInjectionState::command_pauses` once per failed attempt,
+clones the watch-backed pause and ends the map guard before waiting. The resumed coordinator
+removes the one-shot point after release. Both this DashMap and the watch wait are untracked by
+Deloxide. The owner test and
+public examples assert the original response and exact replay without changing commit ordering.
+
 The registered `@pulsar_message_metadata` workloads cover source metadata in all three delivery
 modes, branch-local event-time windows, broker redelivery and independent broker-stored batches.
 The batch oracle checks member sequence and event-time precedence, envelope inheritance and exact
@@ -2294,6 +2389,10 @@ broker waits remain outside its tracked lock graph. The existing ingestor-host S
 retain responsibility for host acknowledgement and cancellation interleavings.
 
 The registered `@restarted_voter_observation` workload reaches whole-cluster restart and automatic scheduling when the leader first hears a voter through a relayed heartbeat. Its test-only watch channels and concurrent fault map are untracked. The registered native metadata restore workload exercises distributed Kafka checkpoint replication, acknowledgement, restart and exact restoration above the resident replication message budget; its stream waits and assignment atomics retain their complementary checks.
+
+The `@restarted_voter_observation` workload also reaches concurrent live-policy discovery. Its
+test-only reconciliation gate releases after leadership is established and remains outside the
+detector's tracked lock graph.
 
 The lane builds all selected executables and diagnostic drivers before starting its workload clock.
 For each prepared invocation it lists what the build holds or reads
@@ -2614,6 +2713,14 @@ the tracked lock activity that was recorded; the complete scenario verdict also 
 delivery and recovery behavior that the external runner observes.
 
 ## Deterministic Concurrency Verification
+
+The consensus failed-submission fixture retains one async-mutex-owned state: idle, armed for a
+follower, or delivered with the complete request boundary. Each append stream retains its scoped
+control, so submission reaches no concurrent registry. Only a nonempty request to the armed
+follower consumes it, and later requests proceed. The unit control check and three-node public
+regression qualify that fault and recovery; they make no memory-ordering or lock-free notification
+claim. Deloxide does not observe the async mutex. The fixture adds no tracked acquisition and is
+inert outside test builds.
 
 The relay interaction's ordinary output-wake test stages a collected batch through the production
 admission path and awaits its domain-owned collection deadline before making the output wake
@@ -3080,3 +3187,32 @@ lock, concurrent map or memory-ordering protocol. OTEL entities delegate to one 
 The HTTP and WebSockets endpoint wrappers share an intake owner whose drop still ends the exact
 binding lifetime. Their existing host Shuttle checks and lifecycle Deloxide lanes remain the
 concurrency evidence; moving these owners requires current inventory paths, not a new protocol model.
+
+## Live Cluster Policy
+
+Runtime timing and resource bounds are immutable publications through the governed `ArcSwap`.
+Control-plane installation remains serialized by runtime admission. A new client attachment
+captures its grant and each worker batch keeps that attachment's row bound; no record consults a
+shared policy map. HTTP preparation captures its typed header-byte and field-count bounds once per publication.
+Snapshot owners observe changed intervals at the existing bounded replica-poll boundary, without
+a new wait/notify protocol or changes to checkpoint/acknowledgement ownership.
+
+A live node-unavailability interval change wakes the existing control-plane health watch. Retained
+watchers read the installed interval again when deriving their next deadline. The production-owner
+`cluster::peer_health_watcher::shuttle_tests::shuttle_a_policy_change_racing_a_retained_health_wait_is_never_missed`
+check, registered in the Shuttle inventory, races installation against wait registration without a
+peer deadline: a lost wake leaves it deadlocked. It runs 1,000 random schedules and 1,000 PCT schedules
+at depth three, each with the harness's 10,000-step limit. These searches supply the modeled random
+data that fair `select!` polling requires. The separate nondeterminism run repeats 100 random
+schedules twice for each search. Paused-clock unit tests separately check elapsed transition timing
+and unchanged publication. This check establishes notification liveness for the explored schedules;
+it makes no memory-ordering claim about the governed `ArcSwap` implementation.
+
+The application's `NodeInitialization` uses the primitive once-publication owner to open public
+policy-dependent work after live-policy catch-up and handler registration. Session and configured
+HTTP intake read that same publication before admission; it changes once per process and carries
+no row, batch or persisted state. The returning-parameter public scenario holds initial discovery
+through the existing test-pause owner and exercises observation, refusal and release. Its async
+pause, network waits and standard-library once publication remain outside the blocking-lock detector.
+The diagnostic parameter workloads reach the surrounding tracked owners; the public scenario and
+external partition recovery verify admission and observation during an isolated process restart.

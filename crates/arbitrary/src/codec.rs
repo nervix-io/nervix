@@ -61,7 +61,9 @@ impl Arbitrary<'_> {
             for field in fields {
                 rules.push(CodecEncodingRule {
                     field,
-                    encoding: CodecEncoding::Rfc3339,
+                    encoding: self
+                        .entropy
+                        .pick([CodecEncoding::Rfc3339, CodecEncoding::Base64]),
                 });
             }
             rules

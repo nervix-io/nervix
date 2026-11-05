@@ -10,7 +10,7 @@
     nervix::layer(harness, reason = "owns current vocabulary validation evidence")
 )]
 
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 
 use super::upgrade_headers::{
     WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders, WebsocketsUpgradeHeadersError,
@@ -41,7 +41,7 @@ fn application_headers_keep_values_and_normalize_field_names() {
 }
 
 #[test]
-fn upgrade_fields_refuse_protocol_fields_duplicates_injection_and_oversize_headers() {
+fn upgrade_fields_refuse_protocol_fields_duplicates_and_injection() {
     for name in [
         "Host",
         "Connection",
@@ -83,35 +83,35 @@ fn upgrade_fields_refuse_protocol_fields_duplicates_injection_and_oversize_heade
         }
     );
     assert!(!format!("{injection:#}").contains("hidden"));
-    let Err(limit) = WebsocketsUpgradeHeaders::parse(&[header("x-event", &"x".repeat(32 * 1024))])
-    else {
-        panic!("the name and value exceed 32 KiB");
-    };
-    assert_eq!(
-        limit.current_context(),
-        &WebsocketsUpgradeHeadersError::Limit
-    );
 }
 
 #[test]
-fn upgrade_header_limits_cover_count_and_total_bytes() {
-    for headers in [
-        (0..129)
-            .map(|index| header(&format!("x-field-{index}"), "v"))
-            .collect(),
-        vec![
-            header("x-one", &"a".repeat(16 * 1024)),
-            header("x-two", &"b".repeat(16 * 1024)),
-        ],
-    ] {
-        let Err(error) = WebsocketsUpgradeHeaders::parse(&headers) else {
-            panic!("the count or total field bytes exceed the current HTTP bounds");
-        };
-        assert_eq!(
-            error.current_context(),
-            &WebsocketsUpgradeHeadersError::Limit
-        );
-    }
+fn upgrade_headers_support_the_committed_policy_range() {
+    let headers: Vec<_> = (0..129)
+        .map(|index| header(&format!("x-field-{index}"), "v"))
+        .collect();
+    let parsed = WebsocketsUpgradeHeaders::parse(&headers)
+        .assured("the representation can hold a policy allowing129fields");
+    assert_eq!(parsed.iter().count(), 129);
+    let value = "v".repeat(32 * 1024);
+    let parsed = WebsocketsUpgradeHeaders::parse(&[header("x-key", &value)])
+        .assured("registry policy decides the admissible byte cap");
+    assert_eq!(parsed.iter().next().assured("one field").1.as_str(), value);
+}
+
+#[test]
+fn upgrade_header_count_stays_within_the_request_representation() {
+    let maximum = usize::try_from(crate::HttpHeaderFields::MAXIMUM)
+        .assured("the application-field representation bound fits usize");
+    let headers: Vec<_> = (0..=maximum)
+        .map(|index| header(&format!("x-field-{index}"), "v"))
+        .collect();
+    let error = WebsocketsUpgradeHeaders::parse(&headers)
+        .expect_err("application fields leave capacity for transport-owned headers");
+    assert_eq!(
+        error.current_context(),
+        &WebsocketsUpgradeHeadersError::Limit
+    );
 }
 
 #[test]
@@ -175,15 +175,17 @@ fn a_subprotocol_offer_is_unique_tokens_written_without_whitespace() {
 
 #[test]
 fn a_subprotocol_offer_counts_toward_the_upgrade_header_bounds() {
-    let mut headers: Vec<_> = (0..127)
+    let maximum = usize::try_from(crate::HttpHeaderFields::MAXIMUM)
+        .assured("the application-field representation bound fits usize");
+    let mut headers: Vec<_> = (0..maximum - 1)
         .map(|index| header(&format!("x-field-{index}"), "v"))
         .collect();
     headers.push(header("sec-websocket-protocol", "chat"));
     WebsocketsUpgradeHeaders::parse(&headers)
-        .assured("127 application fields and an offer make the 128 fields the bounds allow");
-    headers.push(header("x-field-127", "v"));
+        .assured("the offer fills the final application-field slot");
+    headers.push(header("x-final", "v"));
     let Err(error) = WebsocketsUpgradeHeaders::parse(&headers) else {
-        panic!("128 application fields and an offer exceed the 128-field bound");
+        panic!("an extra field exceeds the request representation");
     };
     assert_eq!(
         error.current_context(),

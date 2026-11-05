@@ -152,6 +152,7 @@ Feature: Web console visual creation
       """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    When leadership is transferred from node "{{new_leader}}" to node "{{old_leader}}"
     Given command response delivery on node "{{old_leader}}" pauses after execution
     When the web console is opened on node "{{old_leader}}"
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists

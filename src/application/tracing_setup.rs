@@ -41,10 +41,14 @@ use opentelemetry_sdk::{
     trace::{Sampler, SdkTracerProvider},
 };
 use tower_service::Service;
-use tracing::{Level, Metadata, Subscriber};
+use tracing::{
+    Event, Level, Metadata, Subscriber,
+    field::{Field, Visit},
+};
 use tracing_subscriber::{
-    EnvFilter, filter::filter_fn, fmt, fmt::writer::BoxMakeWriter,
-    prelude::__tracing_subscriber_SubscriberExt, registry::LookupSpan, util::SubscriberInitExt,
+    EnvFilter, Layer, filter::filter_fn, fmt, fmt::writer::BoxMakeWriter,
+    layer::Context as LayerContext, prelude::__tracing_subscriber_SubscriberExt,
+    registry::LookupSpan, util::SubscriberInitExt,
 };
 
 use super::{AppError, TracingArgs};
@@ -95,6 +99,7 @@ impl LogFilter {
     ) -> impl Subscriber + for<'span> LookupSpan<'span> + Send + Sync + 'static {
         tracing_subscriber::registry()
             .with(filter_fn(Self::admits))
+            .with(MqttPayloadRule)
             .with(self.configured)
     }
 
@@ -103,6 +108,86 @@ impl LogFilter {
         let returned_message =
             metadata.target() == Self::LAPIN_RETURNED_MESSAGES && *metadata.level() <= Level::INFO;
         !returned_message
+    }
+}
+
+/// The pinned MQTT driver's retained-publish refusal embeds the whole request in its message.
+/// Its target also owns ordinary connection warnings, so this rule visits only that message's
+/// fixed prefix and stops formatting before reaching the request.
+struct MqttPayloadRule;
+
+impl<S: Subscriber> Layer<S> for MqttPayloadRule {
+    fn event_enabled(&self, event: &Event<'_>, _: LayerContext<'_, S>) -> bool {
+        let metadata = event.metadata();
+        if metadata.target() != "rumqttc::eventloop" || *metadata.level() > Level::INFO {
+            return true;
+        }
+        let mut prefix = MqttWarningPrefix::Matching(
+            b"rejecting retained publish because the broker does not support retained messages:",
+        );
+        event.record(&mut prefix);
+        !prefix.matched()
+    }
+}
+
+/// A bounded comparison, with no allocation or retained event data. Matching either ends at the
+/// fixed prefix or at its first differing byte; no request value is rendered to decide it.
+enum MqttWarningPrefix {
+    Matching(&'static [u8]),
+    Matched,
+    Different,
+}
+
+impl MqttWarningPrefix {
+    fn matched(&self) -> bool {
+        matches!(self, Self::Matched)
+    }
+
+    fn record_message(&mut self, field: &Field, arguments: std::fmt::Arguments<'_>) {
+        if field.name() == "message" {
+            std::fmt::write(self, arguments).discarded(
+                "the bounded prefix writer ends formatting as soon as its comparison is decided",
+            );
+        }
+    }
+}
+
+impl Visit for MqttWarningPrefix {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.record_message(field, format_args!("{value:?}"));
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.record_message(field, format_args!("{value}"));
+    }
+}
+
+impl std::fmt::Write for MqttWarningPrefix {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::error_boundary(
+            outcome,
+            reason = "fmt::Error stops the foreign formatter after the fixed prefix comparison is \
+                      decided"
+        )
+    )]
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        let Self::Matching(remaining) = self else {
+            return Err(std::fmt::Error);
+        };
+        let remaining = *remaining;
+        let compared = remaining.len().min(value.len());
+        let (expected, rest) = remaining.split_at(compared);
+        if &value.as_bytes()[..compared] != expected {
+            *self = Self::Different;
+            return Err(std::fmt::Error);
+        }
+        if rest.is_empty() {
+            *self = Self::Matched;
+            return Err(std::fmt::Error);
+        }
+        *self = Self::Matching(rest);
+        Ok(())
     }
 }
 
@@ -392,8 +477,14 @@ impl io::Write for SharedFileWriter {
 /// that no leader was known. Without those lines an upload that recovered the version its own
 /// earlier call installed reads like one that found another upload's, and an upload that repeats
 /// nothing costs nothing.
+///
+/// Consensus receiver contexts identify the concrete node even when parallel clusters use the
+/// same names. Its vote and pre-vote clients record send and completion timing at `trace`, so the
+/// failing attempt shows whether an election waited before the Raft API, in its core, or for its
+/// response. These events are per election request, not per heartbeat. OpenRaft keeps its existing
+/// filter; collecting these boundaries does not enable its per-tick and per-append debug stream.
 const TEST_TRACE_FILTER: &str =
-    "nervix_interconnect=debug,nervix_consensus::replication=debug,\
+    "nervix_interconnect=debug,nervix_consensus=trace,nervix_consensus::replication=debug,\
      nervix_client_core::restoration=debug,nervix_client_core::upload=debug,\
      nervix_server::application=debug,nervix_client_core::consumer=debug,\
      nervix_client_core::producer=debug,nervix_server::application::session::consumers=debug,\

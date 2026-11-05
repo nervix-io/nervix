@@ -17,7 +17,7 @@
 )]
 
 use error_stack::Report;
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
     ConsensusError, ConsensusTransactionError, ReplicatedTransaction, TransactionMutationError,
     TransactionOutcome, TransactionQueueAdmission, TransactionQueueLimits, TransactionQueueRequest,
@@ -175,8 +175,11 @@ impl SessionServiceImpl {
             domain: &domain,
             request: &request,
             limits: TransactionQueueLimits {
-                max_statements: self.inner.transaction_max_statements,
-                max_source_bytes: self.inner.transaction_max_source_bytes,
+                max_statements: usize::try_from(
+                    self.cluster_parameters().transaction_max_statements(),
+                )
+                .assured("the committed count fits a supported target"),
+                max_source_bytes: self.cluster_parameters().transaction_max_source_bytes(),
             },
         };
         let observed = self
@@ -210,6 +213,15 @@ impl SessionServiceImpl {
             Ok(transaction) => return standalone_transaction_result(&transaction),
             Err(error) => error,
         };
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_standalone_transaction_if_armed(
+                self.inner.consensus.local_node_id(),
+                &domain,
+                crate::fault_injection::StandaloneTransactionBoundary::CommitFailure,
+            )
+            .await;
         if let Some(ConsensusError::LeadershipLost { observed }) =
             error.downcast_ref::<ConsensusError>()
         {
@@ -221,20 +233,26 @@ impl SessionServiceImpl {
             .consensus
             .current_transaction(&transaction_id)
             .await;
-        if let Some(attempt) = attempt
-            && let TransactionState::Committing(_) = attempt.state
-        {
-            // The committing transaction holds the command's domain mutation lease, and a pause
-            // its step engaged stays its own until that step's application completes. A terminal
-            // result would release the lease the transaction needs to finish, so the command stays
-            // applying and recovery under the same reference finishes the transaction first.
-            return CommandResult::new(
-                CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::StillApplying),
-                format!(
-                    "durable command transaction '{transaction_id}' remains applying: {message}; \
-                     retry it with the same reference to learn its outcome"
-                ),
-            );
+        if let Some(attempt) = attempt {
+            match &attempt.state {
+                // Another coordinator can finish the transaction while this attempt fails.
+                // Its recorded outcome decides the command, rather than this attempt's report.
+                TransactionState::Finished(_) => return standalone_transaction_result(&attempt),
+                TransactionState::Committing(_) => {
+                    // The committing transaction holds the command's domain mutation lease, and a
+                    // pause its step engaged stays its own until that step's application completes.
+                    // A terminal result would release the lease the transaction needs to finish,
+                    // so recovery under the same reference finishes the transaction first.
+                    return CommandResult::new(
+                        CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::StillApplying),
+                        format!(
+                            "durable command transaction '{transaction_id}' remains applying: \
+                             {message}; retry it with the same reference to learn its outcome"
+                        ),
+                    );
+                }
+                TransactionState::Open(_) => {}
+            }
         }
         command_error(format!(
             "durable command transaction '{transaction_id}' did not complete: {message}"
@@ -322,7 +340,11 @@ impl SessionServiceImpl {
         if let Err(error) = self
             .inner
             .consensus
-            .open_transaction(candidate, self.inner.transaction_max_open)
+            .open_transaction(
+                candidate,
+                usize::try_from(self.cluster_parameters().transaction_max_open())
+                    .assured("the committed count fits a supported target"),
+            )
             .await
             && self
                 .inner

@@ -20,6 +20,13 @@ Change the address with `--web-console-listen-addr` or `NERVIX_WEB_CONSOLE_LISTE
 published ports differ by installation method: see [Docker](installation-docker.md) and
 [Kubernetes Operator](installation-kubernetes.md).
 
+To serve HTTPS, configure `--web-console-https-listen-addr`, `--web-console-tls-cert`, and
+`--web-console-tls-key`. Set `--web-console-advertise-addr` to the client-reachable HTTPS host and
+port on each node; leader redirects then advertise HTTPS and the console reconnects over `wss`.
+Without an explicit advertise address, the HTTPS listen address is used. The certificate must be
+trusted by the browser and cover that host. It is loaded at startup, so restart after rotation.
+These options configure the console independently of the native session listener's TLS options.
+
 Any node works. Opening the console on a follower is supported — the console follows the leader
 redirect, reconnects there, and reports which node it reached:
 
@@ -28,7 +35,7 @@ connected to leader 'node-2'
 ```
 
 The console reports the leader each time its session connects, so the notice appears again when
-the session reconnects: after a lost connection, after a command whose outcome is not yet known, or
+the session reconnects: after a lost connection, after a reply that breaks the session contract, or
 after a leader change. A reconnect keeps the session's place: the console connects again where the
 redirect took it, selects its domain, attaches its clock, restores its subscription tabs and
 attaches its transaction again, and then sends its pending commands under their execution
@@ -136,12 +143,18 @@ branches. Schema fields are added in declaration order and can be moved or remov
 field selects its exact scalar type, then may wrap it in any sequence of variable vectors and
 fixed arrays; each fixed array needs a positive length. Optional and sensitive flags are separate
 controls. Wire fields select the types of their chosen format and an explicit `STRICT` or `LOOSE`
-mode. A wire schema's format is part of its identity, so JSON, CBOR, and AVRO definitions may
+mode. JSON offers `string`, `number`, `integer`, `boolean`, and `array`; AVRO offers `boolean`,
+`int`, `long`, `float`, `double`, `string`, `bytes`, and `array`. Codec field encoding controls
+select `RFC3339` or `BASE64` for explicit text interchange, as described in
+[Schemas And Codecs](schemas-and-codecs.md#codecs).
+A wire schema's format is part of its identity, so JSON, CBOR, and AVRO definitions may
 share a name. The preview and submitted command come from the completed semantic Model's
 canonical renderer, just as they do for the earlier forms.
 
 A branch form selects an internal key schema from a server-backed, searchable, paged list, then
-requires a TTL. It may set a positive maximum instance count with LRU eviction. The schema list
+requires a TTL. Its partition count starts at 1 and accepts a whole number from 1 through 65535; the
+preview omits `PARTITIONS 1` as `SHOW CREATE BRANCH` does. It may set a positive maximum instance
+count with LRU eviction. The schema list
 uses the draft's captured domain and the session's attached transaction prefix, so a schema staged
 earlier in the same transaction is selectable. Changing the captured domain keeps a previous
 selection visible but marks it invalid until it is selected again. An invalid branch key schema,
@@ -166,8 +179,9 @@ schema is an exact typed selection. Declared wire-schema choices are limited to 
 format, even when wire schemas of different formats share a name. JAQ-native and Protobuf codecs
 choose ingestion (decode), emitting (encode), or both, and may add an emitting-batch program after
 an emitting program. These are program editors: their contents remain jaq source in the current
-codec Model, including quotes and whitespace. RFC3339 field encoding rules can be added in order
-where the format supports them. The preview renders the complete codec Model as canonical Plexus.
+codec Model, including quotes and whitespace. Field encoding rules select RFC3339 or BASE64 and
+can be added in order where the format supports them. The preview renders the complete codec
+Model as canonical Plexus.
 
 The Protobuf controls select an existing resource and one of its completed versions, including
 `LATEST`, then accept an optional `.proto` file and include root, additional compiler
@@ -455,7 +469,17 @@ attached transaction stay as they were. See
 [Plexus Overview](plexus-overview.md) for its forms and output.
 
 Every persistent command keeps one execution reference while the browser waits, reconnects, or
-follows leadership. The transaction id and status are replicated. If the WebSocket closes
+follows leadership. When its outcome is not known yet, the console repeats it on the open session
+after a wait that starts at 250 milliseconds and doubles to at most five seconds. The command keeps
+its position ahead of later held commands, while session messages continue to arrive. The selected
+domain, clock and relay tabs keep their existing attachments. A redirect or an ended connection
+triggers recovery; an uncertain reply alone leaves the connection open. A reply whose outcome names
+another execution reference than its command's is a protocol violation: the console reports it with
+both references, takes nothing from that reply, neither its result nor its redirect, transaction or
+retry, and stops reading the connection. It reconnects as after a lost connection and sends the
+command again in its place under its own reference, so the leader answers with the command's own
+outcome; a Create form shows **Queued until reconnect** until then. The transaction id and
+status are replicated. If the WebSocket closes
 unexpectedly or leadership changes, the console reconnects and attaches that id before resuming a
 pending command. Each append is matched by its reference and expected position, and an outstanding
 commit remains pending through `COMMITTING` until its exact terminal result. A
@@ -494,11 +518,18 @@ its session delivers, and says where it left something out:
   command larger than the whole history says that it cannot be recalled.
 - While the console connects or waits to reconnect, at most 64 requests of its controls wait for
   the session, carrying at most 4 MiB of statements, completion input, and search text. Once
-  connected, at most 256 requests, carrying at most 16 MiB, are held or awaiting their reply.
-  Commands, subscription changes, and inspections wait in the order they were issued while 64
-  requests, the most the server admits for one session, are in flight, and go out as earlier
-  replies arrive; a completion, choice lookup, or domain selection goes out at once and is reported
-  if the server finds the session full. A request past either bound is not sent, and the control
+  connected, controls can admit at most 256 outstanding requests carrying at most 16 MiB.
+  Connection setup also restores the retained tabs, selected domain and clock, and transaction,
+  so a full control backlog cannot prevent its own recovery.
+  Every request shares the session's 64-place request window, including completion, choice lookup,
+  domain selection, connection setup and transaction attachment. Requests wait for earlier terminal
+  replies to free a place. Waiting controls respect the issue order of ready commands, subscription
+  changes and inspections; setup and reattachment precede the commands waiting for them. A waiting
+  completion is replaced
+  by the latest input, and each choice control keeps its latest waiting lookup. Superseded requests
+  already sent still count until their terminal replies, while their text and partial replies are
+  released immediately. Waiting lookups, selections and attachments end with their connection;
+  the replacement connection issues its own. A request past either bound is not sent, and the control
   that issued it shows why where its outcome would have appeared: the REPL, a form, a tab, the
   resource dialog, or the inspector. A completion request that is not sent reports a failed lookup
   rather than an empty list.
@@ -558,7 +589,10 @@ name, or `none`.
 
 Files or a whole directory can be uploaded from the browser as a new version of that resource in
 the selected domain. The successful upload result arrives after every current live node has
-verified and installed the version. An upload moves no binding: models keep the version they pin
+verified and installed the version. A refusal by a node that could not act as the leader, such as a
+leader that could not confirm its lease, decided nothing: the dialog keeps uploading and sends the
+same files again, waiting as the console waits before reconnecting, until the upload completes or
+fails, or the dialog is closed. An upload moves no binding: models keep the version they pin
 until [`REBIND RESOURCE`](resources.md#rebinding-existing-models) moves them. Version contents and
 how nodes consume them are covered in [Resources](resources.md).
 

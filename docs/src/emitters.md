@@ -247,7 +247,7 @@ connector `CLIENT` object, codec, header operations, or direct `VALUES` form. Th
 uses its ordinary `FROM` predicates, optional collection, materialized dependencies, ordered
 `INHERIT` and `SET`, route `WHERE`, error policies, placement, and `ATTACHED` or `DETACHED`
 boundary. A client emitter requires `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX <n>`, an explicit
-`ACK TIMEOUT` and `RETRY POLICY`, `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>`, and its
+`ACK TIMEOUT` and `RETRY POLICY`, `BATCH MAX MESSAGES <n> MAX SIZE <bytes>`, and its
 ordinary required `FLUSH` policy. `SHOW CREATE EMITTER` preserves this full contract.
 
 The declared output schema is exact. Construction starts empty; only explicitly inherited or set
@@ -354,8 +354,8 @@ whitespace or control character; normalization must keep it on that origin and m
 leading `//`. The normalized target is limited to 8 KiB. `write_header` accepts valid HTTP field
 names and UTF-8 values without control characters or leading/trailing whitespace in a nonempty
 value. The request carries those values as their exact UTF-8 bytes, including non-ASCII characters.
-Transport-owned headers cannot be written. After case-insensitive replacement, at most 128
-application headers and 32 KiB of name/value bytes are allowed.
+Transport-owned headers cannot be written. After case-insensitive replacement, application headers
+use the committed field-count and byte caps, 128 fields and 32 KiB by default.
 
 `ENCODE USING` permits the ordinary transforming construction clauses. `WITHOUT BODY` selects an
 absent request body and permits `WHERE` and `INVOKE` but no `INHERIT`, `SET` or `VALUES`. HTTP
@@ -429,7 +429,7 @@ an empty string is sent as an empty value. Two writes whose names are string lit
 same field, such as `write_header('X-Tenant', …)` and `write_header('x-tenant', …)`, are refused when
 the statement is validated, because the earlier one could never be sent; a name an expression
 computes is replaced at run time. An invalid or reserved write rejects its record even when a later
-write would replace it, and the 128-header and 32 KiB bounds apply after every replacement. The body is exactly the bytes the codec produced, with no wrapper, array,
+write would replace it, and the publication's captured committed field-count and byte caps apply after every replacement. The body is exactly the bytes the codec produced, with no wrapper, array,
 newline, form encoding or compression added; Nervix adds no `Content-Type`, and a declared
 `Content-Encoding` does not transform the bytes. `WITHOUT BODY` sends zero content bytes.
 
@@ -565,8 +565,8 @@ should receive a stable key taken from the record, such as
 `uuid_v4()`, stays the same across these retries but not across an upstream redelivery.
 
 `ALTER HTTP REQUEST EMITTER ... SET TO` restates the complete method, path, mode and body selection.
-`SET CLIENT` changes the referenced client, `SET MODE` changes the retry policy, and `SET ENCODE
-USING` selects a codec body. `DROP ENCODE` is invalid for HTTP; use a complete `SET TO <client> METHOD ...
+`SET CLIENT` changes the referenced client, `SET METHOD` and `SET PATH` change what each request
+names, `SET MODE` changes the retry policy, and `SET ENCODE USING` selects a codec body. `DROP ENCODE` is invalid for HTTP; use a complete `SET TO <client> METHOD ...
 WITHOUT BODY` replacement. The retained construction and error scopes must be valid for the new
 selection.
 
@@ -655,7 +655,8 @@ clause and its route construction, and before the flush policy:
 BATCH MAX MESSAGES <n> MAX SIZE <bytes>
 ```
 
-`MAX MESSAGES` is the most source records one batch carries, from 1 to 65,536. `MAX SIZE` is the
+`MAX MESSAGES` is the most source records one batch carries, from 1 through the committed
+`MAX_BATCH_MESSAGES` cap (65,536 by default), within the unsigned 32-bit representation. `MAX SIZE` is the
 most bytes its encoded payload may occupy: a positive whole number followed by `B`, `KB`, `KiB`,
 `MB`, `MiB`, `GB`, `GiB`, `TB` or `TiB`. Neither limit has a default, neither may be omitted, and
 neither is derived from the other or from `FLUSH ... MAX BATCH SIZE`, which measures Arrow memory
@@ -682,7 +683,7 @@ CREATE KAFKA TOPIC EMITTER kafka_notifications
 
 A statement is rejected, naming the offending value, when:
 
-- `MAX MESSAGES` is zero or above 65,536;
+- `MAX MESSAGES` is zero, exceeds its representation, or exceeds the committed batch-count cap;
 - `MAX SIZE` is zero, fractional, written without a unit, or past the 64-bit byte range;
 - `MAX SIZE` is above 1 MiB on an SQS emitter, the largest SQS message Nervix sends;
 - the clause is absent on a ClickHouse, Postgres, MySQL or MongoDB emitter;
@@ -822,7 +823,7 @@ counting what it writes around the payload:
 | Emitter | Limit checked before a message is written | Counted around the payload |
 | --- | --- | --- |
 | Kafka | The producer's `message.max.bytes` client setting | The record key, headers and record overhead |
-| MQTT | The Maximum Packet Size the broker declared in its latest `CONNACK`, and the largest packet the protocol can express | The fixed header, topic, packet identifier and property length |
+| MQTT | The Maximum Packet Size the broker declared in its latest `CONNACK`, and the largest packet the protocol can express | The fixed header, topic, packet identifier, every property and both variable-length prefixes |
 | NATS | The `max_payload` the server announced | The message headers |
 | Pulsar | The `maxMessageSize` the broker announced when the producer's connection opened | The message metadata: the properties, the partition key and the producer's own fields |
 | SQS | 1 MiB | Message attribute names, types and values, and the FIFO message group |
@@ -939,10 +940,25 @@ ALTER <CONNECTOR> <ENTITY> EMITTER <emitter>
   | ALTER FROM <relay> SET WHERE <expr>
   | ALTER FROM <relay> DROP WHERE
   | SET TO <complete destination body>
-  | SET MODE <transport-specific mode body>
   | SET CLIENT <client>
+  | SET <locator>
+  | SET <option>
+  | DROP <option>
+  | SET MODE <publishing mode>
   | SET ENCODE USING <codec>
   | DROP ENCODE
+  | SET <envelope clause>
+  | DROP <envelope clause keywords>
+  | SET PROPERTIES { '<key>' = <expression>, ... }
+  | DROP PROPERTIES
+  | SET INHERIT <inheritance>
+  | DROP INHERIT
+  | ADD SET <field> = <expression>
+  | DROP SET <field>
+  | ADD INVOKE <call>
+  | DROP INVOKE <n>
+  | SET WHERE <expression>
+  | DROP WHERE
   | SET COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]
   | DROP COLLECT
   | SET ATTACHED
@@ -951,7 +967,8 @@ ALTER <CONNECTOR> <ENTITY> EMITTER <emitter>
   | DROP BATCH
   | SET FLUSH EACH <duration> MAX BATCH SIZE <bytes>
   | SET FLUSH IMMEDIATE
-  | SET COMMIT EACH <duration> MAX SIZE <bytes>
+  | SET GENERAL ERROR IGNORE
+  | SET GENERAL ERROR LOG
   [, ...];
 ```
 
@@ -964,11 +981,46 @@ options, required `MODE`, its codec, direct `VALUES` mapping or explicit `WITHOU
 [envelope clauses](#envelope-clauses). It replaces the payload selection and the envelope. An
 explicitly written construction replaces the construction; omitting construction keeps the existing
 one. Batching and flush policies remain in place.
-`SET MODE` accepts only policies that entity represents. `SET CLIENT` changes its client reference.
-`SET COMMIT` is available for Iceberg. `SET ENCODE USING` and `DROP ENCODE` are available only for
-encoded destinations; dropping an absent codec fails, and HTTP requires an explicit body selection.
-`SET BATCH` adds or replaces a clause, while `DROP BATCH` fails if it is absent or required by the
-entity. These operations validate atomically against the complete candidate graph.
+
+The other operations change one part of the stored emitter and keep the rest of it as it was:
+
+- `SET CLIENT` changes the client reference of an entity that writes through a client.
+- `SET <locator>` writes the locator the entity declares, such as `SET TOPIC 'orders'`,
+  `SET QUEUE 'orders'` or `SET TABLE 'public.orders'`.
+- `SET <option>` writes one option the entity declares, in a form its body accepts, such as
+  `SET FIFO GROUP tenant`, `SET SEND BATCH`, `SET METHOD 'PUT'`, `SET ROUTING KEY input.region`,
+  `SET ON CONFLICT ('id') DO UPDATE`, `SET NAMESPACE 'Analytics.Events'`, `SET COMMIT EACH 1m MAX
+  SIZE 512MiB`, `SET ATTRIBUTES { … }` or `SET METRIC '…' UNIT '…' GAUGE`. `DROP <option>` removes
+  an optional option, such as `DROP FIFO GROUP`, `DROP PLATFORM`, `DROP ON CONFLICT` or
+  `DROP SCOPE`. Dropping an option the stored body does not write is refused, for example with
+  `the stored SQS QUEUE emitter writes no FIFO GROUP, so there is no FIFO GROUP to drop`, and a
+  required option has no `DROP`. An `ON CONFLICT` clause is checked against the stored `VALUES`
+  mapping as the body that writes both would be.
+- `SET MODE` writes one of the publishing modes the entity declares, with its complete policy.
+  Completion offers exactly those modes, and any other is refused where it is written.
+- `SET ENCODE USING` and `DROP ENCODE` are available only for encoded destinations; dropping an
+  absent codec fails, and HTTP requires an explicit body selection.
+- `SET <envelope clause>` writes one [envelope clause](#envelope-clauses) the entity declares, such
+  as `SET TIMESTAMP input.occurred_at`, `SET DELAY 5s` or the flag `SET MANDATORY`, in place of what
+  the envelope wrote for it. `DROP` followed by the clause's keywords removes it, such as
+  `DROP DELAY` or `DROP MANDATORY`. `SET PROPERTIES` replaces the properties the envelope sets and
+  `DROP PROPERTIES` removes them, under an entity that declares properties. A clause or a property
+  set the entity does not declare is refused where it is written, and dropping one the envelope
+  does not write is refused.
+- `SET INHERIT`, `DROP INHERIT`, `ADD SET`, `DROP SET <field>`, `ADD INVOKE`, `DROP INVOKE <n>`,
+  `SET WHERE` and `DROP WHERE` change the emitter's construction where it stands, as
+  [Codec-emitter construction](#codec-emitter-construction) describes it: `ADD SET` and
+  `ADD INVOKE` append after what the construction writes, `DROP SET` removes the one assignment to
+  the field, and `DROP INVOKE` removes the `n`th call counted from one in written order. A direct
+  `VALUES` emitter writes its values itself, so it offers `SET WHERE` and `DROP WHERE` alone. A
+  `DROP` of a part the construction does not write is refused.
+- `SET BATCH` adds or replaces a clause, while `DROP BATCH` fails if it is absent or required by
+  the entity.
+- `SET GENERAL ERROR` replaces the emitter's general error policy.
+
+An operation whose result the entity does not keep is refused once every operation of the
+statement has applied, by the registry checks every `CREATE` result also passes. These operations
+validate atomically against the complete candidate graph.
 
 `ADD FROM` rejects an already configured relay. `DROP FROM` cannot remove the final input.
 `ALTER FROM ... SET WHERE` adds or replaces that source's predicate; `ALTER FROM ... DROP WHERE`
@@ -976,8 +1028,8 @@ fails when the source has no predicate.
 
 Changing only `FLUSH` is a `DYNAMIC` update. The live emitter keeps its pending Arrow batches,
 installs the new cadence, and receives a force-flush kick, so buffered output is neither discarded
-nor re-encoded. Source-predicate, emitter, publishing-mode, client, codec, collection, batching, and
-attachment changes use
+nor re-encoded. Source-predicate, destination, option, publishing-mode, client, codec, envelope,
+construction, collection, batching, attachment and general error policy changes use
 `ENTITY_PAUSE`: Nervix gates all of the emitter's source relays, drains collected input and pending
 emitter output, replaces that emitter task, and releases the gates. Changing source membership uses
 `DOMAIN_PAUSE` because it changes graph topology. Other relays continue flowing during an entity
@@ -1061,11 +1113,12 @@ Each emitter that writes transport headers declares a
 | `PULSAR TOPIC` | `last_wins`, exact names | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | `RABBITMQ QUEUE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | `RABBITMQ EXCHANGE` | `sorted_by_name`, exact names | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
+| `MQTT TOPIC` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `NATS SUBJECT` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `NATS STREAM` | `ordered_repeats`, exact names | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `SQS QUEUE` | `last_wins`, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included; a value's exact type decides the type it travels as |
 
-`CLIENT CONSUMER`, `REDIS PUBSUB`, `MQTT TOPIC`, `ZEROMQ PUSH`, `SENTRY EVENT`, `SYSLOG COLLECTOR`, `OTEL LOGS`, `OTEL TRACES`, `OTEL METRICS`, `CLICKHOUSE TABLE`, `POSTGRES TABLE`, `MYSQL TABLE`, `MONGODB COLLECTION`, `ICEBERG TABLE` write no transport headers and refuse `write_header`.
+`CLIENT CONSUMER`, `REDIS PUBSUB`, `ZEROMQ PUSH`, `SENTRY EVENT`, `SYSLOG COLLECTOR`, `OTEL LOGS`, `OTEL TRACES`, `OTEL METRICS`, `CLICKHOUSE TABLE`, `POSTGRES TABLE`, `MYSQL TABLE`, `MONGODB COLLECTION`, `ICEBERG TABLE` write no transport headers and refuse `write_header`.
 <!-- connector-matrix:emit-headers:end -->
 
 Where an emitter keeps one value per name, a second `write_header` whose name is a string literal equal,
@@ -1130,11 +1183,13 @@ declares `DELAY` and `DEDUPLICATION ID`, which [SQS](#sqs) sends with each messa
 [RabbitMQ](#rabbitmq) entities declare `PERSISTENT`, `MANDATORY`, `TIMESTAMP` and their AMQP
 `PROPERTIES` below. Every emitter refuses clauses and keys its entity does not declare.
 
-For the forms its entity declares, `ALTER` offers `SET PERSISTENT` and `DROP PERSISTENT`,
-`SET TIMESTAMP <expression>` and `DROP TIMESTAMP`, and `SET PROPERTIES { … }` and `DROP PROPERTIES`.
-`SET PROPERTIES` replaces the complete nonempty property set. Each targeted operation preserves
-the envelope fields it does not name. Inside a property set, completion offers the declared keys
-that have not yet been written.
+For each clause its entity declares, `ALTER` offers `SET` with the clause written in full and
+`DROP` with its keywords, such as `SET PERSISTENT`, `SET TIMESTAMP <expression>` or `DROP DELAY`,
+and `SET PROPERTIES { … }` and `DROP PROPERTIES` where it declares properties; see
+[Altering emitters](#altering-emitters). `SET PROPERTIES` replaces the complete nonempty property
+set. Each operation preserves the envelope fields it does not name, and a `DROP` of a clause or of
+properties the envelope does not write is refused. Inside a property set, completion offers the
+declared keys that have not yet been written.
 
 | Clause | Written with | Value every record carries |
 | --- | --- | --- |
@@ -1166,8 +1221,9 @@ connector answers for it, so every attempt, including the one after an unknown o
 envelope the first attempt sent. `DESCRIBE EMITTER` prints the envelope on its `envelope:` line as
 the statement writes it, or `envelope: none`, and `SHOW CREATE` writes it in the destination's
 section. `ALTER … SET TO` replaces the envelope with the rest of the destination body, so a body
-that writes no envelope clause removes them. A changed envelope is a destination change, applied
-with `ENTITY_PAUSE`.
+that writes no envelope clause removes them, while `SET <envelope clause>`, `DROP` with a clause's
+keywords and `SET|DROP PROPERTIES` change one part and keep the rest. A changed envelope is a
+destination change, applied with `ENTITY_PAUSE`.
 
 ## TLS Client Configuration
 
@@ -1529,6 +1585,7 @@ CREATE RABBITMQ QUEUE EMITTER <name>
     [PERSISTENT]
     [MANDATORY]
     [TIMESTAMP occurred_at]
+    [PROPERTIES { '<key>' = <expression>, ... }]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
@@ -1570,6 +1627,7 @@ CREATE RABBITMQ EXCHANGE EMITTER <name>
     [PERSISTENT]
     [MANDATORY]
     [TIMESTAMP occurred_at]
+    [PROPERTIES { '<key>' = <expression>, ... }]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
@@ -1851,6 +1909,8 @@ CREATE MQTT TOPIC EMITTER <name>
   (QOS 0 | QOS 1 | QOS 2)
     MODE <mode>
     ENCODE USING <codec>
+    [RETAIN]
+    [PROPERTIES { '<key>' = <expression>, ... }]
   <construction>
   [BATCH MAX MESSAGES <count> MAX SIZE <bytes>]
   FLUSH IMMEDIATE
@@ -1866,13 +1926,13 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Locator and validation rule | TOPIC 'devices/Orders' (mqtt_topic) |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 0)<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 1 or 2) |
 | Options in statement order | `QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |
-| Headers | Not offered: A publication carries its topic, payload and quality of service; this implementation writes no MQTT 5 user property on it. |
+| Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Body | ENCODE USING &lt;codec&gt; |
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
 | Batch transformation required | no |
-| Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
-| PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| Envelope | RETAIN |
+| PROPERTIES keys and exact types | content_type: STRING<br>message_expiry: U32<br>response_topic: STRING<br>correlation_data: BYTES |
 | Buffers | publishes queued for the driver: set by 1 under NO ACK and ACK SEQUENTIAL, ACK PARALLEL MAX under ACK PARALLEL; when full, fails the publish for the host to retry |
 | Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>answers to QOS 1 and 2 publishes: `ACK TIMEOUT`<br>writes to the connection: unbounded<br>a silent connection: client key `keep_alive_ms`; two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 s when omitted |
 | Driver limits | Packets above the broker's maximum packet size are rejected.<br>QOS 0 connects a clean session; QOS 1 and 2 connect a persistent one with the maximum Session Expiry Interval, and SESSION is not an emitter option: a publisher without acknowledgement needs no session, and an acknowledged one always keeps it.<br>The client resumes its own session across reconnects, and a new client is refused while the broker keeps a session under its identity, since it holds no state to resume it with. |
@@ -1886,16 +1946,42 @@ the [ingestion topic filter rule](ingestors.md#external-names) without the `+` a
 so `TOPIC 'devices/+'` is refused when the emitter is created. The client's `addr` names the broker
 by its scheme, host and port alone, as [MQTT ingestion](ingestors.md#mqtt) describes.
 
+Write `RETAIN` after `ENCODE USING <codec>` to ask the broker to retain each publication for later
+subscribers. Optional `PROPERTIES { '<key>' = <expression>, ... }` follows `RETAIN`, or the codec
+when the flag is omitted. Each key may occur once, and every value must have its exact, required,
+non-sensitive type (use explicit sensitive-value leakage where intended):
+
+| Property | Exact type | Meaning |
+| --- | --- | --- |
+| `content_type` | `STRING` | The content type of the encoded payload. |
+| `message_expiry` | `U32` | Message lifetime in seconds, including zero; this is not a duration literal. |
+| `response_topic` | `STRING` | A nonempty MQTT publication topic, without subscription wildcards or NUL. |
+| `correlation_data` | `BYTES` | Opaque correlation bytes, including an empty value. |
+
+`INVOKE write_header(name, value)` writes MQTT 5 user properties. Both arguments are strings;
+names compare exactly, repeated names remain repeated and writes keep their order. MQTT string
+and binary property fields are limited to 65,535 bytes, and strings contain no NUL. A record that
+violates a field limit follows `ON MESSAGE ERROR` before it reaches the client. Packet admission
+counts every property and both variable-length prefixes, in addition to the topic, payload and
+packet identifier. A rejected record does not prevent its valid neighbours from being sent.
+
+Nervix evaluates this envelope once with its payload. Every retry carries identical flags,
+properties and user properties, including the original expiry interval. A broker may reduce
+that interval while storing or forwarding the message. Retention is broker state; it does not
+change the completion point of the emitter's QoS or make Nervix's in-memory attempts durable.
+
 CREATE refuses an unsupported QoS number with its value and accepted levels, such as
 `MQTT QOS must be 0, 1 or 2, found 3`, underlining the supplied number. Completion after `MODE`
 offers only the modes the written quality of service pairs with, and a statement that writes
 another is refused with the mode underlined and what it writes named, such as
 `MQTT TOPIC emitters name MODE NO ACK only with QOS 0; the statement writes QOS 1`.
 
-`ALTER` holds every result to the same pairing. `SET MODE` changes the mode within a quality of
-service, so `SET MODE ACK PARALLEL MAX 8 ...` is accepted at `QOS 1` and `SET MODE NO ACK ...` is
-refused there. `SET TO` changes the quality of service, or moves it and the mode together, through
-the complete destination body.
+`ALTER` holds every result to the same pairing, once every operation of the statement has applied.
+`SET MODE` changes the mode within a quality of service, so `SET MODE ACK PARALLEL MAX 8 ...` is
+accepted at `QOS 1` and `SET MODE NO ACK ...` is refused there. `SET QOS` changes the quality of
+service: alone between `QOS 1` and `QOS 2`, and beside the mode it pairs with across `QOS 0`, such
+as `SET QOS 2, SET MODE ACK SEQUENTIAL ...` on a `NO ACK` emitter, because no mode pairs with both.
+`SET TO` moves them together through the complete destination body.
 
 QoS 0 acknowledges client acceptance. When the emitter stops, it waits within the stop or shutdown
 deadline for its client to send the publishes it still holds, which a client cut off from its
@@ -2008,6 +2094,10 @@ The client connects again on its own after it loses its server, on the emitter's
 waits `BACKOFF` before its first attempt and doubles the wait for each further attempt up to `MAX`.
 When the emitter stops, its finish flushes what the client still holds by the finish deadline; see
 [Finishing an emitter](./connector-contract.md#finishing-an-emitter).
+
+NATS emitters use the same optional token, user NKey or mounted credentials-file authentication
+as ingestors. The [NATS client authentication rules](ingestors.md#nats) define mutual exclusion,
+confidential inspection and TLS configuration for both directions.
 
 ### NATS STREAM
 
@@ -3738,11 +3828,12 @@ meanwhile wait for that open, and the emitter commits them once it opens:
 | A catalog that fails the load | `failed to load ICEBERG table 'orders' in namespace 'Analytics.Events'`, followed by the catalog's error |
 | A catalog that does not hold the table, then fails the namespace lookup | `failed to look up ICEBERG namespace 'Analytics.Events'`, followed by the catalog's error |
 
-To move an emitter to a table in another namespace, `ALTER ICEBERG TABLE EMITTER ... SET TO`
-restates the complete destination with the new `NAMESPACE` and that table's `LOCATION`, as
-[Altering emitters](#altering-emitters) describes for every entity. The replaced emitter opens the
-table in the new namespace, which must already exist, and `SHOW CREATE EMITTER` and
-`DESCRIBE EMITTER` show the new namespace.
+To move an emitter to a table in another namespace, `ALTER ICEBERG TABLE EMITTER` writes the new
+`NAMESPACE` and that table's `LOCATION` in one statement, such as
+`SET NAMESPACE 'Analytics.Archive', SET LOCATION 's3://warehouse/archive/orders'`, or restates the
+complete destination with `SET TO`, as [Altering emitters](#altering-emitters) describes for every
+entity. The replaced emitter opens the table in the new namespace, which must already exist, and
+`SHOW CREATE EMITTER` and `DESCRIBE EMITTER` show the new namespace.
 
 #### Iceberg table schema
 
@@ -3864,7 +3955,8 @@ with every writer the emitter starts, and the five-digit count of the files that
 from `00000`. Each opening of the emitter therefore names its files apart from every other's. A
 commit appends its data files in one fast-append snapshot whose summary carries
 `nervix.emitter.append-id`, the identity a retry looks for, as
-[Iceberg retries](#iceberg-retries) describes.
+[Iceberg retries](#iceberg-retries) describes. The snapshot's manifest and manifest list go to the
+table's `write.metadata.path` property, and to `<table location>/metadata` when it is unset.
 
 The emitter writes nothing else:
 
@@ -3877,6 +3969,13 @@ The emitter writes nothing else:
   commit too.
 - **Schema changes.** The emitter never changes the table's schema; provision every column it
   maps, as [Iceberg table schema](#iceberg-table-schema) describes.
+- **Encryption.** The emitter writes no encrypted data files or manifests. A table whose
+  properties declare `encryption.key-id` opens and stages rows, but every commit fails before it
+  writes a data file, with `the Iceberg table declares an encryption key, and the emitter writes
+  no encrypted files`, and is retried on the declared retry policy, keeping its staged rows and
+  their acknowledgements. A format-version 3 table that declares one fails the open instead, as a
+  catalog that fails the load, because Nervix gives the catalog library no key management client
+  to read it with.
 - **Deletes and upserts.** A commit only appends data files. The emitter writes no equality or
   position deletes, replaces no rows and overwrites no files.
 - **Other catalogs.** The emitter commits through an Iceberg REST catalog, its `ICEBERG_REST`

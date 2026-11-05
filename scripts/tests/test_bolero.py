@@ -197,6 +197,8 @@ class InventoryTests(unittest.TestCase):
             "client-ffi-field-descriptors-malformed",
             "client-host-arrow-columns",
             "client-host-typed-field-descriptors",
+            "client-jvm-columns",
+            "client-jvm-fields",
             "branch-membership",
             "restore-installation-wire",
             "backup-capture-wire",
@@ -204,10 +206,12 @@ class InventoryTests(unittest.TestCase):
             "backup-section-mapping",
             "stopping-node-drain-wire",
             "cluster-peer-clock-probes",
+            "cluster-parameters",
             "restore-installation-storage",
             "restore-staging-kept-measurement",
             "typed-report", "typed-source-contract", "typed-site-union", "typed-source-syntax", "typed-hidden-tunables",
             "typed-non-aws-lc-crypto",
+            "nats-user-authentication",
             "plexus-statement",
             "plexus-statement-text",
             "plexus-emitter-envelopes",
@@ -343,6 +347,8 @@ class InventoryTests(unittest.TestCase):
             "wasm-generated-pools",
             "wasm-generated-pools-malformed",
             "expiry-map-operations",
+            "rate-limit-quota-bounds",
+            "rate-limit-utc-generations",
             "vm-decimal-rounding-floats",
             "vm-decimal-rounding-integers",
             "approx-into-rounding",
@@ -374,6 +380,7 @@ class InventoryTests(unittest.TestCase):
             "http-poll-response-headers",
             "http-emitter-requests",
             "mqtt-publish-packets",
+            "mqtt-publish-properties",
             "mqtt-publish-metadata",
             "postgres-insert-measures",
             "mysql-insert-measures",
@@ -399,10 +406,12 @@ class InventoryTests(unittest.TestCase):
             "dns-operation-budget",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
+            "nervix-connector-nats",
             "nervix-client-core",
             "nervix-client-wire",
             "nervix-client-ffi",
             "nervix-client-host",
+            "nervix-client-jvm",
             "nervix-server",
             "nervix-plexus",
             "nervix-plexus-format",
@@ -427,6 +436,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-wasm-sdk",
             "nervix-jaq",
             "nervix-expiry-map",
+            "nervix-rate-limit",
             "nervix-vm",
             "nervix-approx-into",
             "nervix-columnar-json",
@@ -977,6 +987,15 @@ class ExecutionTests(unittest.TestCase):
         with mock.patch.object(bolero, "command", return_value=missing_cases):
             with self.assertRaisesRegex(bolero.BoleroError, f"expected {iterations}"):
                 bolero.test_targets(self.inventory, (self.target,))
+
+    def test_jvm_classes_are_prepared_before_its_registered_harness(self) -> None:
+        target = dataclasses.replace(self.target, package="nervix-client-jvm", features=("jvm-tests",))
+        good = self.ordinary_result(target)
+        with mock.patch.object(bolero, "command", return_value=good) as command:
+            bolero.test_targets(self.inventory, (target,))
+        self.assertEqual(command.call_args_list[0], mock.call(["just", "build-client-jvm-tests"], timeout=1800))
+        self.assertIn("--no-run", command.call_args_list[1].args[0])
+        self.assertIn("--exact", command.call_args_list[2].args[0])
 
     def test_ordinary_prepares_each_exact_harness_before_bounded_execution(self) -> None:
         target = dataclasses.replace(self.target, package="nervix-server", features=())

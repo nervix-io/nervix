@@ -49,11 +49,10 @@ env:
   BOLERO_LABELS: ${{ inputs.labels-json || '[]' }}
 
 jobs:
-  # Check excludes this whole call only for its verified prose-only selection without `bolero-random`
-  # or `fuzz`. A pull request runs this ordinary randomized and corpus job only with `bolero-random`,
-  # which it carries only when its task requires the job: `fuzz` is the preferred Bolero evidence.
-  # A manual run always runs it. Once selected, every ordinary property remains required,
-  # including on reruns.
+  # Check excludes this call for verified prose without `bolero-random`. A pull request runs the
+  # ordinary randomized and corpus job only when its task requires that label. Manual runs execute
+  # the ordinary properties too. Sanitizer execution stays disabled under the temporary CI policy.
+  # Every selected ordinary property remains required, including on reruns.
   bolero-random:
     name: bolero-random
     if: (inputs.event-name || github.event_name) != 'pull_request' || contains(fromJSON(inputs.labels-json || '[]'), 'bolero-random')
@@ -71,6 +70,12 @@ jobs:
         with:
           toolchain: "1.99"
           targets: wasm32-unknown-unknown
+
+      - name: Setup Java for JNI properties
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
 
       - name: Install tools
         uses: taiki-e/install-action@v2
@@ -189,7 +194,8 @@ jobs:
 
   bolero-fuzz:
     name: bolero-fuzz (${{ matrix.shard }} of ${{ strategy.job-total }})
-    if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')
+    # Temporary CI policy: re-enabling execution requires an explicit user decision.
+    if: ${{ false }}
     strategy:
       fail-fast: false
       matrix:
@@ -214,6 +220,12 @@ jobs:
         with:
           toolchain: "1.99"
           targets: wasm32-unknown-unknown
+
+      - name: Setup Java for JNI properties
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
 
       - name: Setup pinned sanitizer nightly
         uses: dtolnay/rust-toolchain@nightly
@@ -420,7 +432,8 @@ jobs:
 
   bolero-fuzz-combined:
     name: bolero-fuzz-combined
-    if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')
+    # Temporary CI policy: re-enabling execution requires an explicit user decision.
+    if: ${{ false }}
     needs: [bolero-fuzz]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -474,7 +487,7 @@ jobs:
           FUZZ_RESULT: ${{ needs.bolero-fuzz.result }}
           COMBINED_RESULT: ${{ needs.bolero-fuzz-combined.result }}
           RANDOM_REQUIRED: ${{ (inputs.event-name || github.event_name) != 'pull_request' || contains(fromJSON(inputs.labels-json || '[]'), 'bolero-random') }}
-          FUZZ_REQUIRED: ${{ inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz') }}
+          FUZZ_REQUIRED: "false"
         run: |
           if [[ "$RANDOM_REQUIRED" == "true" ]]; then
             test "$RANDOM_RESULT" = success

@@ -197,6 +197,12 @@ comma-separated operations in written order:
 ```plexus,ignore
 ALTER <CONNECTOR> <ENTITY> INGESTOR <ingestor>
     SET FROM <complete body of the head's connector and entity>
+  | SET CLIENT <client>
+  | SET <locator>
+  | SET <option>
+  | DROP <option>
+  | SET MODE <delivery mode>
+  | SET START AT EARLIEST | LATEST
   | SET QUIESCE <quiesce body>
   | SET DECODE USING <codec>
   | SET TIMESTAMP NOW
@@ -208,9 +214,20 @@ ALTER <CONNECTOR> <ENTITY> INGESTOR <ingestor>
   | ADD ROUTE TO <relay> <full ingestor route body>
   | DROP ROUTE TO <relay>
   | REPLACE ROUTE TO <relay> <full ingestor route body>
+  | ALTER ROUTE TO <relay> <construction change>
   | SET GENERAL ERROR IGNORE
   | SET GENERAL ERROR LOG
   [, ...];
+
+<construction change> ::=
+    SET INHERIT <inheritance>
+  | DROP INHERIT
+  | ADD SET <field> = <expression>
+  | DROP SET <field>
+  | ADD INVOKE <call>
+  | DROP INVOKE <n>
+  | SET WHERE <expression>
+  | DROP WHERE
 ```
 
 A head whose connector and entity differ from those the stored ingestor reads is refused, for
@@ -219,16 +236,53 @@ it`. An alteration therefore never changes what an ingestor reads; drop the inge
 again under the other head instead.
 
 `SET FROM` accepts the complete body that follows `FROM` in a `CREATE` statement with the same
-head, and only that pair's body. Change a client or endpoint, a Kafka topic or offset mode,
-`INSTANCES`, the delivery mode, an `HTTP REQUEST`'s `METHOD`, `HEADERS` or `MAX BODY SIZE`, a
-`PROMETHEUS QUERY`'s `QUERY`, `MAX BODY SIZE` or `EVERY`, or source-specific subscription settings
-by supplying that complete body, including its required `ON QUIESCE` clause. `SET QUIESCE` changes
-only the quiesce mode and its variables. It parses every quiesce body, and the stored source refuses one it does not honor,
-for example with `HTTP ENDPOINT ingestors do not support ON QUIESCE SUSPEND`; there is no
-`DROP QUIESCE` operation. `SET DECODE USING` exists under every head except `CLIENT PRODUCER`,
-which decodes nothing. `ADD ROUTE` appends a route, while `REPLACE ROUTE` preserves the matched
-route's position. Duplicate routes to the same relay remain legal, so `DROP ROUTE` and
-`REPLACE ROUTE` reject an ambiguous target. An ingestor must retain at least one route.
+head, and only that pair's body, including its required `ON QUIESCE` clause. The other operations
+change one part of the stored body and keep the rest of it as it was:
+
+- `SET CLIENT` names the client the ingestor reads through. It exists under every head whose entity
+  reads through a client, and the client must configure the head's connector.
+- `SET <locator>` writes the locator the entity declares, as its body writes it, such as
+  `SET TOPIC 'orders'` or `SET SUBJECT 'orders.created'`. A `REDIS PUBSUB` ingestor takes both
+  `SET CHANNEL '<channel>'` and `SET PATTERN '<pattern>'`, and either replaces the subscription,
+  because a body holds exactly one.
+- `SET <option>` writes one option the entity declares, in a form its body accepts, such as
+  `SET OFFSET BY CONSUMER GROUP 'readers' START AT LATEST`, `SET SUBSCRIPTION …`, `SET SESSION
+  PERSISTENT`, `SET QOS 1`, `SET QUEUE GROUP 'workers'`, `SET METHOD 'POST'`, `SET HEADERS { … }`,
+  `SET MAX BODY SIZE 1MiB`, `SET QUERY '…'` or `SET EVERY 30s`. `DROP <option>` removes an optional
+  option, so its default or absence applies again: `DROP HEADERS` or `DROP MAX BODY SIZE`. Dropping
+  an option the stored body does not write is refused, for example with `the stored HTTP REQUEST
+  ingestor writes no HEADERS, so there is no HEADERS to drop`, and a required option has no
+  `DROP`. `INSTANCES` changes only through `SET FROM`.
+- `SET MODE` writes one of the delivery modes the entity declares, with its complete policy.
+  Completion offers exactly those modes, and any other is refused where it is written.
+- `SET START AT` changes where a `KAFKA TOPIC` consumer group or an owned `PULSAR TOPIC`
+  subscription starts a partition it holds no position for; see [Kafka](#kafka) and
+  [Pulsar](#pulsar).
+- `SET QUIESCE` changes only the quiesce mode and its variables, and offers and accepts exactly the
+  quiesce modes the entity declares; there is no `DROP QUIESCE` operation.
+- `ALTER ROUTE TO <relay>` changes the construction of the one route to `relay` where it stands,
+  as [Value Construction and Filters](#value-construction-and-filters) describes it: `SET INHERIT`
+  replaces what the route inherits, `ADD SET` appends an assignment after those it writes,
+  `DROP SET <field>` removes the one assignment to `field`, `ADD INVOKE` appends a call,
+  `DROP INVOKE <n>` removes the `n`th call counted from one in written order, and `SET WHERE` and
+  `DROP WHERE` replace and remove the route's filter. A route the ingestor does not write, or
+  writes more than once, is refused, and so is a `DROP` of a part the route does not write, such
+  as ``the construction writes no assignment to `note` ``.
+
+An option, mode or quiesce mode whose pairing with the rest of the body the entity does not keep
+is refused once every operation of the statement has applied, by the registry check every
+`CREATE` result also passes. An `MQTT TOPIC` ingestor that moves from `NO ACK` to an acknowledged
+mode therefore writes the session, the quality of service and the mode in one statement:
+`SET SESSION PERSISTENT, SET QOS 1, SET MODE ACK SEQUENTIAL …`. A declared quiesce mode the
+stored delivery mode cannot honor is refused the same way: `SET QUIESCE BUFFER MAX SIZE 1MiB` on
+an `HTTP ENDPOINT` ingestor in `MODE ACK MAX 8 ACK TIMEOUT 5s` fails with `HTTP ENDPOINT ingestors
+do not support ON QUIESCE BUFFER`.
+
+`SET DECODE USING` exists under every head except `CLIENT PRODUCER`, which decodes nothing.
+`ADD ROUTE` appends a route, while `REPLACE ROUTE` preserves the matched route's position.
+Duplicate routes to the same relay remain legal, so `DROP ROUTE`, `REPLACE ROUTE` and `ALTER ROUTE`
+reject an ambiguous target. An ingestor must retain at least one route. The altered ingestor is
+validated against the candidate graph exactly as the `CREATE` that writes it would be.
 
 Every ingestor alteration uses `ENTITY_PAUSE`. Nervix quiesces only the affected ingestor instances
 on all live nodes and waits for their already accepted in-flight work to drain before commit. That
@@ -848,7 +902,7 @@ session, is served only by the leader.
 A batch is one canonical Arrow IPC stream: the schema message, exactly one record batch, and the
 end-of-stream marker. It is uncompressed and has no dictionary or extension encodings, and its
 Arrow schema is exactly the input schema in Nervix's Arrow representation of each type, with no
-field metadata. A batch carries at most 65,536 rows and at most the bytes one submission may carry,
+field metadata. A batch carries at most the rows in its producer grant (65,536 by default) and at most the bytes one submission may carry,
 which is the smaller of the producer's granted bytes and what one session frame holds. The node
 that executes the ingestor validates the whole batch, its structure, bounds, and every column,
 before any row is admitted; a batch that fails is refused whole and has no effect on the graph.
@@ -896,10 +950,10 @@ may ask for, the session or node has no room left, or the session holds a transa
 | Limit | Value |
 | --- | --- |
 | Producers per session | 32 |
-| Outstanding bytes per session | 32 MiB |
+| Outstanding bytes per session | Committed producer cap, 32 MiB by default |
 | Outstanding bytes per node, including batches retained for forwarded producers | 128 MiB |
 | Batches one producer may ask to have outstanding | 1,024 |
-| Rows per batch | 65,536 |
+| Rows per batch | Grant's committed client-row cap, 65,536 by default |
 
 A batch holds its share of the credit from the moment it is sent until its outcome is observed. A
 batch sent beyond the credit is refused as `credit exceeded` without reaching the graph, and the
@@ -970,7 +1024,7 @@ applies, by the external system's own rule where it has one:
 | `REDIS PUBSUB` | `PATTERN` | 1 to 1,024 bytes of any text, which Redis matches against channel names as a glob; see [Redis Pub/Sub](#redis-pubsub) |
 | `NATS SUBJECT` | `SUBJECT` | At most 1,024 bytes of `.`-separated tokens, none empty, without whitespace or control characters; `*` stands for one token and `>` for the rest, each only as a whole token, and `>` only last |
 | `NATS SUBJECT` | `QUEUE GROUP` | 1 to 255 bytes without whitespace or control characters |
-| `NATS STREAM` | `STREAM` | 1 to 255 bytes without whitespace, control characters, `.`, `*`, `>`, `/` or `\`: the JetStream server's own rule |
+| `NATS STREAM` | `STREAM` | 1 to 255 bytes without whitespace, control characters, `.`, `*`, `>`, `/` or `\`: the JetStream server's rule, stricter only in refusing every whitespace and control character |
 | `NATS STREAM` | `CONSUMER` | The rule of a stream name |
 | `MQTT TOPIC` | `TOPIC` | A topic filter of 1 to 65,535 bytes without NUL; `+` stands for one level and `#` for the rest, each only as a whole level, and `#` only last. Levels are joined by `/` and may be empty. The first level is not `$share`, since Nervix forms the shared subscription itself |
 
@@ -1126,8 +1180,9 @@ open. A poll sends the value only to the client's origin, because it follows a r
 else. Complete serialization keeps the value, as it keeps every client secret, so a backup archive
 holds it; see [Backup And Restore](backup-and-restore.md).
 
-`ALTER HTTP REQUEST INGESTOR … SET FROM <complete body>` replaces the client, method, headers,
-response bound and cadence together, and the next poll sends the new request.
+`ALTER HTTP REQUEST INGESTOR` changes the client, method, headers, response bound or cadence
+alone with `SET CLIENT`, `SET METHOD`, `SET|DROP HEADERS`, `SET|DROP MAX BODY SIZE` or `SET EVERY`,
+or all of them together with `SET FROM <complete body>`, and the next poll sends the new request.
 
 #### HTTP Poll Responses
 
@@ -1192,8 +1247,9 @@ A response whose `content-length` announces more than the bound fails before its
 one whose body exceeds the bound fails when it does.
 
 `DESCRIBE INGESTOR` prints the bound in effect, whether the statement wrote it or not, in
-`options: METHOD 'GET' MAX BODY SIZE 16MiB EVERY 1s`. `SET FROM` replaces the whole body, so an
-`ALTER HTTP REQUEST INGESTOR` whose new body leaves `MAX BODY SIZE` out reads at most `16MiB` again.
+`options: METHOD 'GET' MAX BODY SIZE 16MiB EVERY 1s`. `DROP MAX BODY SIZE` restores that bound,
+and so does a `SET FROM` whose new body leaves `MAX BODY SIZE` out, because it replaces the whole
+body.
 
 #### HTTP Polling Intake And Quiesce
 
@@ -1635,12 +1691,12 @@ observe, and does not prevent the drop. A node removes owned subscriptions one a
 applies the drop once its removals have ended, so a drop whose broker cannot be reached completes
 only after that timeout for each owned subscription it removes. The subscription then remains until
 the operator removes it or the broker expires it. `STOP`, a node restart, a relocation and a restore
-keep the subscription. Replacing the source with `ALTER PULSAR TOPIC INGESTOR ... SET FROM ...`
-removes the preceding owned subscription after its consumers stop and before the replacement
-starts, unless the replacement reads the same subscription of the same qualified topic at the
-same resolved broker address. Client names, route, codec, delivery-mode, subscription type and
-instance-count changes do not change that identity. Short topics use their client's namespace, so a
-short name and its
+keep the subscription. Replacing the source with `ALTER PULSAR TOPIC INGESTOR`, by
+`SET FROM ...` or by an operation such as `SET TOPIC` or `SET SUBSCRIPTION`, removes the preceding
+owned subscription after its consumers stop and before the replacement starts, unless the
+replacement reads the same subscription of the same qualified topic at the same resolved broker
+address. Client names, route, codec, delivery-mode, subscription type and instance-count changes
+do not change that identity. Short topics use their client's namespace, so a short name and its
 fully qualified spelling identify the same topic. Broker addresses compare their URL scheme,
 host and effective port; an omitted port means 6650 for `pulsar` and 6651 for `pulsar+ssl`.
 Different configured host names are distinct addresses even if DNS resolves them alike.
@@ -1909,8 +1965,9 @@ Every message exposes two typed metadata fields, both `STRING` and optional:
 
 For example, `SET channel = metadata.channel` records which channel delivered each message of a
 `PATTERN 'orders.*'` subscription, and the same route's `WHERE channel = 'orders.eu'` then keeps
-only that channel's messages. `ALTER REDIS PUBSUB INGESTOR ... SET FROM` replaces the complete
-body, so it moves an ingestor from a channel to a pattern or back; the source then subscribes again
+only that channel's messages. `ALTER REDIS PUBSUB INGESTOR ... SET CHANNEL '<channel>'` or
+`SET PATTERN '<pattern>'` replaces the subscription, as a `SET FROM` with a complete body does, so
+either moves an ingestor from a channel to a pattern or back; the source then subscribes again
 with the new body.
 
 Redis Pub/Sub carries no transport headers, so `read_header` and `read_headers` are refused when
@@ -2176,8 +2233,8 @@ and sends `DISCONNECT` with session expiry zero. Cleanup is best-effort: an unre
 reported and does not prevent the drop. Its retained state can remain until the broker expires it
 or the operator clears it.
 
-Changing the input with `ALTER MQTT TOPIC INGESTOR ... SET FROM ...` retires the preceding filter
-and prepares the changed sessions at the new endpoint before the replacement starts. A failure to
+Changing the input with `ALTER MQTT TOPIC INGESTOR`, by `SET FROM ...` or by an operation such as
+`SET TOPIC`, retires the preceding filter and prepares the changed sessions at the new endpoint before the replacement starts. A failure to
 clean up the preceding endpoint does not prevent moving to a reachable new endpoint. Sessions
 whose broker, identity, filter, session mode and QoS still match are retained, including across
 an instance-count change. Changing a filter discards the retired filter's broker queue.
@@ -2251,6 +2308,19 @@ Header reads retain the wire order, including interleaved repeated names, with e
 
 `NATS SUBJECT` ingestors use Core NATS queue subscriptions. `QUEUE GROUP` and `INSTANCES`
 are mandatory; use `INSTANCES 1` for a single queue member.
+
+The NATS client accepts one optional authentication key: `token`, `nkey_seed` for a user NKey
+seed, or `credentials_file` for a NATS user credentials file containing its JWT and signing seed.
+These three keys are mutually exclusive; `CREATE NATS CLIENT` refuses any pair before connecting.
+Mount a resource containing a credentials file and write its resolved path, such as
+`'credentials_file' = '{{identity}}/user.creds'`. All three keys are confidential in public
+inspection. URL user information remains delegated to the NATS driver.
+
+Ingestors and emitters use the same authentication and TLS options. A `tls://` address requires
+TLS on both sides, with the configured CA and optional paired client certificate and key.
+An unreadable or malformed credentials file is a configuration failure; a broker refusing the
+identity is a connection failure reported by the boundary's existing general error policy and
+retry cadence. Nervix does not create accounts or users on the broker.
 
 Core NATS retains no backlog, so `SUSPEND` is unavailable to `NATS SUBJECT`. A quiesced instance remains a member of
 its queue group and keeps receiving its share; that share is buffered or discarded rather than
@@ -2355,6 +2425,13 @@ delivery's opaque acknowledgement subject. Buffering retains each field's typed 
 A lost connection ends the instance's pull as it ends a `NATS SUBJECT` instance's subscription, and
 `DESCRIBE INGESTOR` shows it as the transient error `NATS connection lost` until the instance has
 connected, looked the consumer up and pulled again on its `RETRY POLICY`.
+
+`ALTER NATS STREAM INGESTOR` changes one part of the stored body in place, as
+[Altering Ingestors](#altering-ingestors) describes: `SET STREAM '<stream>'`,
+`SET CONSUMER '<consumer>'` and `SET MODE` write the parts this entity declares, beside `SET CLIENT`
+and `SET QUIESCE`. A position belongs to its consumer, so after `SET STREAM` or `SET CONSUMER` the
+ingestor continues from the position of the consumer it now names, and the consumer it left keeps
+its own position, with everything published to its stream since pending for it.
 
 ### ZeroMQ
 
@@ -2582,9 +2659,9 @@ CA alone. Either way it connects directly: an SQS client takes no proxy, and ign
 name, a silent name server, an unreachable answer or a service that does not answer within
 `timeout_ms` fails the queue lookup, a poll, or a deletion. The AWS SDK makes each request once, so
 a failed lookup or poll is at once a transient source failure that `DESCRIBE INGESTOR` shows, such as
-`the SQS queue lookup did not finish within timeout_ms 5s`, and the source retries it on its
-`RETRY POLICY` alone, so an ingestor started while the service is unreachable consumes once the
-service answers. A queue that does not exist fails the
+`the SQS queue lookup did not finish within timeout_ms 5s`. The source host schedules retries
+using the ingestor's `RETRY POLICY`, so an ingestor started while the service is unreachable
+consumes once the service answers. A queue that does not exist fails the
 lookup with its name, such as `SQS queue 'orders' does not exist`, and is retried the same way;
 Nervix never creates it.
 
@@ -2786,9 +2863,9 @@ limits the JSON a poll reads rather than the size of its transfer. A response wh
 length or whose body exceeds the bound fails its poll.
 
 `DESCRIBE INGESTOR` prints the bound in effect, whether the statement wrote it or not, in
-`options: QUERY 'bulk' MAX BODY SIZE 16MiB EVERY 1s`. `SET FROM` replaces the whole body, so an
-`ALTER PROMETHEUS QUERY INGESTOR` whose new body leaves `MAX BODY SIZE` out reads at most `16MiB`
-again.
+`options: QUERY 'bulk' MAX BODY SIZE 16MiB EVERY 1s`. `DROP MAX BODY SIZE` restores that bound,
+and so does a `SET FROM` whose new body leaves `MAX BODY SIZE` out, because it replaces the whole
+body.
 
 #### Prometheus Intake And Quiesce
 
@@ -3128,9 +3205,12 @@ This opens an outbound WebSocket connection through a `WEBSOCKETS CLIENT` and de
 binary frames. Its optional `HEADERS { 'authorization' = 'Bearer token' }` clause follows `FROM
 <client>` and takes literal string names and values. Names are case-insensitive; repeated names,
 protocol-owned fields (`Host`, hop-by-hop framing fields and every `Sec-WebSocket-*` field except
-`Sec-WebSocket-Protocol`), malformed values, more than 128 fields, or more than 32 KiB of field
-name/value bytes are refused before activation. Each value, a credential included, is visible in
-`DESCRIBE INGESTOR` and `SHOW CREATE INGESTOR`.
+`Sec-WebSocket-Protocol`) and malformed values are refused before activation. The committed
+`http-header-fields` and `http-header-bytes` parameters bound the field count and the total field
+name/value bytes; their defaults are 128 fields and 32 KiB. Admission and parameter changes check
+these requirements, so lowering a cap cannot invalidate an existing ingestor. Raising a cap
+permits new declarations above those defaults, within the HTTP representation's bounds. Each
+value, a credential included, is visible in `DESCRIBE INGESTOR` and `SHOW CREATE INGESTOR`.
 
 `HEADERS { 'sec-websocket-protocol' = 'v2.events, v1.events' }` offers subprotocols in the order
 of preference written. The value lists one or more subprotocol tokens (RFC 6455): elements

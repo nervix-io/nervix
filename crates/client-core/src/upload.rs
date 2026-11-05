@@ -32,7 +32,9 @@ use tonic::{Request, Response, Status, codegen::http::uri::PathAndQuery, transpo
 use tracing::debug;
 
 use crate::{
-    client::{Client, RecoveryDeadline, RecoveryMode, SessionRecovery},
+    client::{
+        Client, LOCAL_STATEMENT_IN_TRANSACTION, RecoveryDeadline, RecoveryMode, SessionRecovery,
+    },
     connection::GrpcConnector,
     error::{ClientError, RequestKind},
     exchange::SESSION_LIMITS,
@@ -87,7 +89,9 @@ impl Client {
 
     /// Uploads `directory` as a version of the resource `identifier` names. Both `domain` and
     /// `upload_identity` stay the same across every retry and redirect, so an upload the server
-    /// already installed is recovered rather than installed twice.
+    /// already installed is recovered rather than installed twice. A session that holds an active
+    /// transaction refuses the upload before it sends anything: a version is never transaction
+    /// content, so reverting the transaction could not take it back.
     pub async fn upload_resource_from_directory_with_identity(
         &self,
         identifier: &str,
@@ -96,6 +100,11 @@ impl Client {
         upload_identity: ResourceUploadIdentity,
         on_progress: impl Fn(u64) + Send + Sync + Clone + 'static,
     ) -> error_stack::Result<CommandOutcome, ClientError> {
+        if self.active_transaction_status().await.is_some() {
+            return Ok(CommandOutcome::failed_locally(
+                LOCAL_STATEMENT_IN_TRANSACTION.to_string(),
+            ));
+        }
         let resource =
             ResourceName::parse(identifier).change_context(ClientError::InvalidResourceName {
                 name: identifier.to_string(),

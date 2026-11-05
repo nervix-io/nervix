@@ -14,8 +14,8 @@ class API alone publishes no record, commits no parameter, detects no capacity a
 running service. A node publishes, carries and verifies its prerequisites as
 [Prerequisites At Join](#prerequisites-at-join) describes, and its
 [startup preflight](#the-startup-preflight) detects its memory and measures its volumes. Cluster
-parameters are not committed through Raft and capability records are not announced: a node reads
-its cluster parameters from its own options, and its capabilities stay local claims.
+parameters have one committed Raft record, seeded at the first bootstrap and changed through
+`ALTER CLUSTER SET`. Capability records are not announced yet; those remain local claims.
 
 Runtime admission and failed committed-runtime installation share the existing half-second retry
 cadence owned by `RuntimeAdmission`. This remains an internal policy constant pending settings
@@ -77,6 +77,11 @@ election timeout. Gossip derives its failure detector the same way: it assumes t
 intervals between a peer's heartbeats until it has observed some, and takes no gap longer than
 twenty gossip intervals as a sample, 5 and 10 seconds by default.
 
+The maximum Raft election timeout also bounds the leader lease and a heartbeat's response wait.
+The interval still schedules heartbeats; an answer later than one interval but inside the lease
+can renew it using that request's sending time. This adds no node setting or separate timing
+prerequisite.
+
 A proposed new prerequisite first has to establish why a committed cluster parameter applied by
 rebuilding its owner cannot express it.
 
@@ -120,8 +125,9 @@ Each refusal names the setting or directory it judged, with the values involved:
 | Resolver | `failed to load the name resolver configuration`, above the cause that resolver loading reports |
 
 Only the restore-staging quota, a node capability, follows the volume. The resource quotas are
-cluster parameters with fixed defaults, 4 GiB and 16 GiB: a node whose database volume is smaller
-refuses to start until its operator gives it quotas that fit. A node that passes logs
+cluster parameters with fixed defaults, 4 GiB and 16 GiB. A node whose database volume is smaller
+refuses to start. Provision a larger volume, seed smaller quotas on a new cluster, or change an
+existing cluster's committed quotas through `ALTER CLUSTER SET` before joining it. A node that passes logs
 `the startup preflight passed` at `info` with its memory limit, its memory budgets, the size of both
 volumes and the restore-staging quota it resolved.
 [Capacity Planning](capacity-planning.md#what-a-node-needs-to-start) sizes them.
@@ -264,9 +270,16 @@ server's command-line edge and printed under its own heading by `--help`. One gr
 node's identity, listen and advertised addresses, TLS files, name resolution files and storage
 paths. Those are what a node is provisioned with, not settings. Every other group is the
 command-line form of one owner's class-typed group: each option is named by its definition's
-`NAME`, has the environment variable `NERVIX_` followed by that name, and prints the default its
-definition returns. Durations and byte quantities print in the edge's forms, such as `250ms`,
+`NAME`, has the environment variable `NERVIX_` followed by that name with underscores, and shows
+the default its definition returns. Cluster-parameter help identifies it as a bootstrap default. Durations and byte quantities print in the edge's forms, such as `250ms`,
 `15m` and `64MiB`, which read back to exactly the same value.
+
+The session listener's `--grpc-tls-cert` and `--grpc-tls-key` paths belong to that provisioning
+group, with `NERVIX_GRPC_TLS_CERT` and `NERVIX_GRPC_TLS_KEY` as their environment variables. They
+have no default and are both required in HTTPS mode; HTTP mode refuses them. Resolution produces
+an HTTP transport or an HTTPS transport carrying both paths. Material is validated and loaded
+once before startup opens listeners; changing it requires a node restart. Console TLS paths have
+the same startup lifetime. TLS algorithm policy remains separate from these node-specific files.
 
 The edge converts each group once, and the application carries the result: a `NodeIdentity` and a
 `NodeSettings` holding every group. The shutdown coordinator is derived from the shutdown timeout
@@ -283,6 +296,8 @@ describes, defaults included.
 | `--node-unavailability-timeout` | cluster parameter | membership |
 | `--replica-count` | cluster parameter | scheduling |
 | `--state-snapshot-interval` | cluster parameter | runtime |
+| `--domain-drain-timeout`, `--entity-gate-deadline` | cluster parameter | cluster policy |
+| `--max-batch-messages`, `--client-producer-session-bytes`, `--client-consumer-session-bytes`, `--udf-code-bytes`, `--http-header-bytes`, `--http-header-fields`, `--client-batch-rows` | cluster parameter | model and session policy |
 | `--restore-staging-max-bytes` | node capability | runtime |
 | `--transaction-idle-timeout`, `--transaction-tombstone-retention`, `--transaction-max-statements`, `--transaction-max-source-bytes`, `--transaction-max-open` | cluster parameter | transaction limits |
 | `--command-retry-validity`, `--command-execution-capacity` | cluster parameter | command execution |
@@ -292,8 +307,10 @@ describes, defaults included.
 | `--otel-trace-sample-ratio` | node capability | trace export |
 | `--memory-limit` | node capability | capacity |
 
-Each node still reads its cluster parameters from its own options; until they are committed once
-for the cluster, give every node the same value. The memory watermarks have no default: without
+Cluster-parameter options are optional seeds for the first bootstrap. An explicit command-line
+or environment value, including a value equal to the default, is refused on every later start.
+The help text names the definition's default without supplying an implicit seed option. The
+memory watermarks have no default: without
 them the node runs no memory-pressure supervisor. `--memory-limit` and
 `--restore-staging-max-bytes` have no default value either: without them the node detects its
 memory limit and derives its restore-staging quota from its database volume, as
@@ -343,12 +360,94 @@ A capability is a local claim; a cluster parameter retains one committed authori
 The alpha rule still requires one current data or message shape. Operational values coexist
 within that shape. A roll introduces no earlier schema, dual decoder or migration path.
 
+### Committed Parameter Changes
+
+Cluster parameters have one durable authority. The first node that creates the cluster seeds its
+parameter record from the bootstrap options. After that boundary, options for those parameters
+are refused at startup, including on a returning bootstrap node. Change the record through
+Plexus, the Nervix graph definition language:
+
+```plexus
+ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;
+```
+
+The statement runs outside domain transactions and needs no selected domain. Its assignments
+form one transition: either every assignment is committed or none is. A duplicate parameter,
+an invalid value, or a cap that an existing model exceeds refuses the transition with the
+parameter and owning model identified. Timings that drive repeated work or retained validity
+must be greater than zero and no longer than `u32::MAX` whole seconds, with nanosecond precision
+within that range. Counts used by a wire or native count fit its current representation. HTTP
+application headers default to 128 distinct fields; `HTTP_HEADER_FIELDS` changes that count up to
+16,384. This limit leaves 8,192 distinct-field slots in the native request map for client and
+transport headers. A prerequisite cannot be assigned through this statement.
+
+Validation and publication share a commit fence. A concurrent model change or parameter change
+invalidates a captured transition before it applies, and validation runs again against the
+current state. Model admission carries its captured parameter record through validation and
+publication; application preflight and replicated apply compare its complete values and revision.
+An identified transaction preview also includes that record in its planning basis. Any parameter
+publication invalidates an earlier preview, including when its queued Models still fit the limits
+or later assignments return the same values. A stale expected preview leaves the transaction open
+with no effects until the caller inspects it again and decides whether to commit.
+Restored model batches capture their Models, resource versions and parameter record together at
+the model-planning step and carry that view through content preparation and publication. A valid
+archive can still have its model step refused by a limit committed since archive preparation.
+Known HTTP header names contribute their count and byte requirement even when their values depend
+on input. Dynamic names may replace earlier values, so transition validation retains only guaranteed
+byte contributions; request preparation checks each complete evaluated envelope against its captured
+bounds.
+
+HTTP polling headers use these same committed caps. Admission and parameter transitions count
+every declared name and the complete literal or non-templated client-secret value. The header
+declaration refuses repeated names ignoring case. A templated secret contributes its known name
+at admission; the host captures the current caps when it composes the connector, which checks the
+complete resolved values before opening a request. A raised cap governs new requests and a lower
+cap cannot invalidate a polling request's known requirements. Syntax validation checks physical
+representation bounds separately from committed policy, and secret values remain redacted.
+Sizing keeps unresolved client or secret bindings available for the graph validator to resolve
+when a transaction candidate becomes complete; it preserves their known name requirements.
+
+WebSocket connection ingestors use the same committed caps for their literal upgrade headers.
+The subprotocol offer counts as one field, with its canonical comma-joined tokens contributing
+to the byte count. Model admission and parameter transitions both check these requirements;
+raising the caps permits new declarations above the defaults. Syntax and plan conversion retain
+the physical HTTP representation bounds independently of cluster policy.
+
+Each live node installs the committed record before reporting that revision ready. Runtime timing
+and resource-store owners publish a new immutable policy over the same storage. Snapshot tasks
+observe interval changes at their existing bounded replication-poll boundary; a changed interval
+starts a fresh period, while an unrelated parameter does not postpone a checkpoint. Client
+attachments retain their granted byte and row limits until they end; new attachments and HTTP
+publication preparation capture the current limits. The change does not discard payloads, acknowledgement
+ownership, or stored state. A successful response means the live participants have installed the
+change. An uncertain response retains its execution reference and resumes the same recorded
+transition, even when a later command has changed another parameter.
+
+`DESCRIBE CLUSTER` reports committed values and each node's running revision and values. A node
+that has not applied the current record remains visibly behind. Sessions receive an informational
+notice after their node successfully installs a parameter revision. The installation supervisor
+retries a failed graph installation; a retry of the same revision sends no additional parameter
+notice. A joining or returning node obtains the
+live cluster's published record before activating services that consume it and verifies that
+record against consensus as it catches up.
+Public session and observability listeners start before live-policy discovery. `SHOW CLUSTER
+STATUS` and `DESCRIBE CLUSTER` remain available while an isolated returning node waits; status
+reports `node.initialization=initializing` until initialization completes, then `ready`. Liveness
+and metrics remain available, while `/readyz` returns 503 until initialization finishes and a
+leader is known. Policy-dependent commands, session attachments, resource transfers and configured
+HTTP intake refuse work until the live publication is known, the local committed record has caught
+up, and initialization has registered its owners. No stale local record supplies startup policy. A durable command retains its execution reference and receives a nonterminal `OutcomeUnknown(NotYetAuthoritative)` during this wait, so reconnecting cannot turn an earlier committed result into a failure.
+Discovery waits for a live publication or the first stop request, including a typed join refusal;
+shutdown cancels the wait and retains that refusal through cleanup. During a whole-cluster restart,
+peers start concurrently: each returning node needs another process's live publication before it
+can finish startup.
+
 Only the first bootstrapping node supplies parameter seed flags; another node given them
 refuses startup. Changes validate the transition at commit: existing Models must fit a lowered
 cap, and prerequisite relationships must still hold. Apply committed changes live. Rebuild an
-owner that captures settings at construction over its existing storage; rebuilding the leader's
-Raft owner costs a leadership change. Where a library cannot be rebuilt, expose the specific
-restart requirement and committed-versus-running drift.
+owner that captures settings at construction over its existing storage. The current record changes
+no OpenRaft construction setting: heartbeat and election timing remain prerequisites. Committed
+and running revisions are published together, and delayed observations cannot move them backward.
 
 ## Fixed Values And The Source Ratchet
 
@@ -465,3 +564,8 @@ leader's judgment of voter runs and candidates, a joining node's handling of its
 verdicts' gossip text, whose registered `models-admission-verdicts` Bolero property requires it to
 read back unchanged. Interconnect unit tests and the `stale recorded endpoint` case of the
 [deterministic interconnect simulation](interconnect-simulation.md) cover the stale route.
+
+Resource-volume checks use the chosen seed before the first commit, and the live publication for
+a joining or returning node. Local default resource limits do not refuse a node before it can
+learn that policy. The local preflight still measures and validates the restore-staging capability
+before opening the database or binding listeners.

@@ -49,6 +49,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Session subscriptions and domain clock attachment | `Sessions` |
 | Configuration backups, their archives, bounded waits and exact-reference recovery, `DESCRIBE BACKUP`, and `RESTORE` | `Backup And Restore`; cut timeout phases and their elapsed measurements: `Backup And Restore Architecture` → `Observability` |
 | Metrics and runtime inspection | `Metrics And Observability` |
+| Persistent-command history size, retry-fence age and admission refusal metrics | `Metrics And Observability` → `Command Execution History` |
 | Full graph examples | `Examples` |
 | Applications that pace producers and consumers by an attached domain clock, and the `TIMESTAMP AT`/`TIMESTAMP NOW` admission they meet | `Paced Simulation Drivers` and `Domains And Time` |
 | WASM guest ABI and output timing | `WASM Processor Guests` |
@@ -66,6 +67,13 @@ is outside the curated Plexus index.
 For the CLI's `subscribe` and `domain-clock` shell streams and their line formats, read
 [Command Line Client](https://docs.nervix.io/client-tools-cli.html) directly. Follow the same
 documentation version as the selected index; this client chapter is outside the curated Plexus index.
+
+For browser controls waiting behind commands, lookup replacement, uncertain-command recovery on
+the open session, a reply that names another execution, and reconnect behavior, read
+[Web Console](https://docs.nervix.io/client-tools-web-console.html#bounded-buffers) and
+[Client Session Protocol](https://docs.nervix.io/client-session-protocol.html#restoration-and-bounded-consumers)
+directly. Follow the same documentation version as the selected index; these client chapters are
+outside the curated Plexus index.
 
 Prefer the narrow indexed topic over an old copied snippet. Do not leave the immutable version
 selected by the documentation index when following related material.
@@ -199,13 +207,17 @@ current connection, retry and deadline limits.
   TLS trust roots, handshake capacity, message/frame limits, inbound idle bounds, recovery and graceful close,
   read `Ingestors` → `WEBSOCKETS CONNECTION` in the selected documentation index.
   A successful upgrade does not establish data delivery or reset repeated-failure backoff.
+  Committed `http-header-fields` and `http-header-bytes` caps govern literal upgrade headers,
+  including the canonical subprotocol offer, at admission and during parameter changes.
   Check the effective idle bound together with the ping cadence and the peer's inbound activity.
 - Every internal schema and every declared JSON, CBOR, or AVRO wire schema is non-empty; types and
   optionality match exactly. Declared wire formats are separate entity kinds even when their names
   coincide. They declare `MODE STRICT|LOOSE` after their names, and a mode-only change uses `ALTER
   WIRE <format> SCHEMA <wire_schema> MODE STRICT|LOOSE`. SYSLOG is a predefined singleton wire
   schema referenced directly with `FROM SYSLOG`; it has no name or model lifecycle.
-- Every codec explicitly handles any wire/internal datetime or shape difference. Every JAQ-backed
+- Every codec explicitly declares text interchange with `ENCODE field AS RFC3339` for datetimes
+  and `ENCODE field AS BASE64` for bytes in JSON or AVRO strings. Read `Schemas And Codecs` for
+  the exact binding matrix and native byte representations. Every JAQ-backed
   codec uses `WITH JAQ TRANSFORMATIONS` and declares `ON INGESTION`, `ON EMITTING`, or both in that
   order; `ON EMITTING BATCH` may follow `ON EMITTING` and yields exactly one value per batch. Every `ON INGESTION` output is an object that fits the internal schema, and a payload that
   unfolds into several messages is decoded, acknowledged, and redelivered as a whole.
@@ -217,8 +229,10 @@ current connection, retry and deadline limits.
   client reference in `Connector Capabilities` names those keys. Read `Common` → `Syslog` →
   `Ingestor` for transport metadata and when a TLS connection exposes a verified client subject.
 - Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
-  owner-buffer bound, not a per-branch or per-consumer bound; nonowner producer and remote consumer
-  nodes each have one additional fixed dispatch slot.
+  owner-buffer bound, once per partition when its branch declares `PARTITIONS <n>`, not a
+  per-branch or per-consumer bound; nonowner producer and remote consumer nodes each have one
+  additional fixed dispatch slot. A branch's partition count changes only on a stopped domain
+  (`ALTER BRANCH <branch> SET PARTITIONS <n>`); read `Streams And State` → `Relay Partitions`.
   On native 64-bit targets, its positive integer range ends at `18446744073709551615`, and stored,
   replicated, and restarted definitions retain the exact accepted capacity.
 - Every ordinary processor input/output uses the same named branch, or all are unbranched.
@@ -255,6 +269,8 @@ current connection, retry and deadline limits.
 - For Core NATS completion, JetStream PubAck, reconnect retries and finish outcomes, read
   [Emitters → NATS](../../../../docs/src/emitters.md#nats) and
   [Finishing an emitter](../../../../docs/src/connector-contract.md#finishing-an-emitter).
+  For NATS client authentication, secret inspection and mounted credentials, read
+  [Ingestors → NATS](../../../../docs/src/ingestors.md#nats) before choosing a client CONFIG key.
 - CLIENT, ClickHouse, Postgres, MySQL, and MongoDB emitters declare `BATCH MAX MESSAGES <n> MAX SIZE
   <bytes>` before `FLUSH`; other supported emitters may, with `MAX MESSAGES` from 1 to 65,536, a positive
   whole-unit `MAX SIZE`, at most `1MiB` for SQS, `ON EMITTING BATCH` in a batching Sentry
@@ -343,8 +359,9 @@ current connection, retry and deadline limits.
   required `NAMESPACE` names the catalog namespace independently of the Nervix domain; provision
   each of its case-preserving dot-separated levels before starting the emitter. Until the catalog
   holds the namespace and the table, the emitter retries its open and `DESCRIBE EMITTER` names the
-  namespace or the table it lacks. Move an emitter to another namespace with `SET TO`, restating
-  its complete destination with the new `NAMESPACE` and that table's `LOCATION`. A
+  namespace or the table it lacks. Move an emitter to another namespace with
+  `SET NAMESPACE '...', SET LOCATION '...'` in one `ALTER`, naming that table's `LOCATION`, or with
+  `SET TO` restating its complete destination. A
   `DATETIME`, at the top level or inside a `VEC` or `ARRAY`, is written at the containing
   microsecond and needs a `timestamptz` column, not `timestamptz_ns`. A commit writes each mapped
   column into the table column of its name, in any `VALUES` order, and a null into each optional
@@ -354,9 +371,10 @@ current connection, retry and deadline limits.
   a null, such as an `OPTIONAL` field; wrap it in `coalesce(...)` with a never-null argument. A
   commit refuses a table changed after open in the same way, naming the column, and retries until
   the table can take the mapped columns again.
-- Point an Iceberg emitter at an unpartitioned table. Its data files carry no partition values, so
-  a table whose current partition spec has a field opens but fails every commit, and the emitter
-  retries it without end. The emitter only appends Parquet data files with the Parquet library's
+- Point an Iceberg emitter at an unpartitioned, unencrypted table. Its data files carry no partition
+  values, so a table whose current partition spec has a field opens but fails every commit, and the
+  emitter retries it without end; a table whose properties declare `encryption.key-id` does the
+  same, because the emitter writes no encrypted files. The emitter only appends Parquet data files with the Parquet library's
   default writer properties: it writes no deletes or upserts, never changes the table's schema and
   commits only through an `ICEBERG_REST` catalog client. Set `'path_style_access' = true` on an
   `S3` client whose S3-compatible store serves buckets as paths, or whose bucket name contains a
@@ -451,8 +469,10 @@ current connection, retry and deadline limits.
   `metadata.correlation_data` explicitly before using it as text.
 - An `MQTT TOPIC` emitter writes its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, `NO ACK` only at
   `QOS 0` and `ACK` only at `QOS 1` or `QOS 2`. `SET MODE` stays within the written quality of
-  service, and `SET TO` changes it. Read `Emitters` → `MQTT` for what each level completes on and
-  for the persistent session a new client cannot take over.
+  service; `SET QOS` changes it, beside `SET MODE` in the same `ALTER` when it crosses `QOS 0`, and
+  `SET TO` changes both. Read `Emitters` → `MQTT` for what each level completes on and for the
+  persistent session a new client cannot take over. Use that section for `RETAIN`, typed publish
+  `PROPERTIES` and ordered, repeated user properties written with `write_header`.
 - An `MQTT CLIENT`'s `addr` is `mqtt://` or `mqtts://`, a host and a port, with no credentials,
   path or query: write `username` and `password` (redacted on inspection), `keep_alive_ms` in
   whole seconds and the source admission bound `max_packet_size` as their own keys, checked against
@@ -498,8 +518,10 @@ current connection, retry and deadline limits.
 - A `NATS STREAM` ingestor reads a durable pull consumer an operator provisioned:
   `STREAM '<stream>' CONSUMER '<consumer>'` with `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL`, and
   `SUSPEND`, `BUFFER` or `DROP` quiesce. Nervix creates neither the stream nor the consumer, and it
-  refuses a push consumer and one whose acknowledgement policy is not explicit. Read `Ingestors` →
-  `NATS` for redelivery, `MaxRequestBatch`, `MaxRequestExpires` and `AckWait`.
+  refuses a push consumer and one whose acknowledgement policy is not explicit. `SET STREAM` and
+  `SET CONSUMER` move it in place, and it continues from the position of the consumer it then
+  names. Read `Ingestors` → `NATS` for redelivery, `MaxRequestBatch`, `MaxRequestExpires` and
+  `AckWait`.
 - For NATS routing by the actual delivery, use the metadata fields declared in `Ingestors` →
   `NATS`; a wildcard subscription's subject is concrete, and a stream's reply is its acknowledgement
   subject. `NATS SUBJECT` emitters can write `REPLY TO`; read `Emitters` → `NATS` for its value
@@ -667,8 +689,10 @@ coverage limits, including requested-read historical edges and untracked async s
 Choose checks relevant to the configured graph:
 
 - `SHOW CREATE <kind> <name>;` confirms the stored canonical definition.
-- `DESCRIBE RELAY <relay>;` reports the relay owner and optional materialized-state replicas;
-  `DESCRIBE RELAY <relay> WHERE (...);` is owner-authoritative for concrete branch state.
+- `DESCRIBE RELAY <relay>;` reports the relay owner and optional materialized-state replicas, or
+  one owner line per partition of a partitioned relay;
+  `DESCRIBE RELAY <relay> WHERE (...);` is owner-authoritative for concrete branch state and names
+  the key's partition and its owner.
 - `SHOW RELAY <relay> MATERIALIZED STATE;` inspects materialized data and placement, masking
   `SENSITIVE` payload fields and branch-key fields on both the owner and other nodes.
 - `DESCRIBE INGESTOR`, `DESCRIBE JUNCTION`, other processor-specific `DESCRIBE` commands, and
@@ -739,8 +763,9 @@ Choose checks relevant to the configured graph:
   `nervix_restore_staging_reclaimed_bytes_total` at `/metrics`; the backup chapter distinguishes
   logical usage from SST allocation. Recover an uncertain applying restore by sending it again
   under its exact execution reference, as the Rust client's `restore_with_reference` does;
-  `nervix-cli restore` starts every run under a fresh reference. After a terminal failed restore,
-  restore into a fresh target name.
+  `nervix-cli restore` starts every run under a fresh reference, while a `RESTORE` statement the CLI
+  reported as not known yet is sent again under its reference when it runs again at the prompt or
+  with `--execution-reference`. After a terminal failed restore, restore into a fresh target name.
   Restore metadata preparation has a separate per-node `restore_metadata` memory grant, defaulting
   to 2 GiB and admitted before decoding or planning. Native lifecycle, Kafka, deduplicator and
   window checkpoints stream through quota-owned files and 64 KiB windows with a fixed 2 MiB bulk
@@ -788,6 +813,8 @@ Choose checks relevant to the configured graph:
   outside the curated Plexus index.
 - `SHOW TRANSACTIONS;` checks open/committing progress and retained commit, revert, failure, or
   expiry outcomes.
+- Recover an interrupted command under its original execution reference. A transaction's state
+  alone does not establish that command's outcome; follow `Client Session Protocol` → `Exact Recovery`.
 
 For a parse error, follow the reported expected token and compare clause order with the relevant
 public example. For an MQTT QoS, session or mode pairing refusal, use the underlined token and the

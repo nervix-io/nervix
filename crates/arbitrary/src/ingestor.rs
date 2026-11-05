@@ -6,19 +6,20 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AckWindow, ClientIngestMode, ClientIngestorEntity, ClientProducerIngestor, CreateIngestor,
     EndpointIngestMode, HttpEndpointIngestor, HttpIngestorEntity, HttpRequestIngestMode,
-    HttpRequestIngestor, IngestQuiesceMode, IngestQuiesceOverflow, IngestTimestampSource,
-    IngestorDeclaration, IngestorEntity, IngestorEntityBody, IngestorEntityKind, IngestorInput,
-    KafkaIngestMode, KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicIngestor, MqttIngestMode,
-    MqttIngestorEntity, MqttQos, MqttSession, MqttTopicIngestor, NatsIngestMode,
-    NatsIngestorEntity, NatsStreamIngestMode, NatsStreamIngestor, NatsSubjectIngestor,
-    PrometheusIngestMode, PrometheusIngestorEntity, PrometheusQueryIngestor, PulsarIngestMode,
-    PulsarIngestorEntity, PulsarSubscription, PulsarSubscriptionOwnership, PulsarTopicIngestor,
-    RabbitMqIngestMode, RabbitMqIngestorEntity, RabbitMqQueueIngestor, RedisIngestorEntity,
-    RedisPubSubIngestMode, RedisPubSubIngestor, RedisSubscriptionTarget, RetryPolicy,
-    SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor, SqsReceiveMax, SyslogIngestMode,
-    SyslogIngestorEntity, SyslogListenerIngestor, TransportIngestorInput,
-    WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
-    WebsocketsIngestorEntity, ZeroMqIngestMode, ZeroMqIngestorEntity, ZeroMqPullIngestor,
+    HttpRequestIngestor, IngestQuiesceKind, IngestQuiesceMode, IngestQuiesceOverflow,
+    IngestTimestampSource, IngestorDeclaration, IngestorEntity, IngestorEntityBody,
+    IngestorEntityKind, IngestorInput, KafkaIngestMode, KafkaIngestorEntity, KafkaOffsetMode,
+    KafkaTopicIngestor, MqttIngestMode, MqttIngestorEntity, MqttQos, MqttSession,
+    MqttTopicIngestor, NatsIngestMode, NatsIngestorEntity, NatsStreamIngestMode,
+    NatsStreamIngestor, NatsSubjectIngestor, PrometheusIngestMode, PrometheusIngestorEntity,
+    PrometheusQueryIngestor, PulsarIngestMode, PulsarIngestorEntity, PulsarSubscription,
+    PulsarSubscriptionOwnership, PulsarTopicIngestor, RabbitMqIngestMode, RabbitMqIngestorEntity,
+    RabbitMqQueueIngestor, RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor,
+    RedisSubscriptionTarget, RetryPolicy, SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor,
+    SqsReceiveMax, SyslogIngestMode, SyslogIngestorEntity, SyslogListenerIngestor,
+    TransportIngestorInput, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
+    WebsocketsIngestMode, WebsocketsIngestorEntity, ZeroMqIngestMode, ZeroMqIngestorEntity,
+    ZeroMqPullIngestor,
 };
 
 use crate::{
@@ -478,6 +479,27 @@ impl Arbitrary<'_> {
             .assured("every transport supports at least one quiesce mode");
         let chosen = self.entropy.index(count);
         supported.swap_remove(chosen)
+    }
+
+    /// A quiesce mode of `kind`, with its own sizes and durations.
+    pub(crate) fn quiesce_mode_of(&mut self, kind: IngestQuiesceKind) -> IngestQuiesceMode {
+        match kind {
+            IngestQuiesceKind::Suspend => IngestQuiesceMode::Suspend,
+            IngestQuiesceKind::Buffer => IngestQuiesceMode::Buffer {
+                max_size: self.positive_byte_size(),
+                overflow: self.entropy.pick([
+                    IngestQuiesceOverflow::DropOldest,
+                    IngestQuiesceOverflow::DropNewest,
+                ]),
+            },
+            IngestQuiesceKind::Drop => IngestQuiesceMode::Drop,
+            IngestQuiesceKind::Reject => IngestQuiesceMode::Reject {
+                retry_after: self.duration(),
+            },
+            IngestQuiesceKind::EndpointBuffer => IngestQuiesceMode::EndpointBuffer {
+                max_size: self.positive_byte_size(),
+            },
+        }
     }
 
     /// Every quiesce mode, each with its own sizes and durations.

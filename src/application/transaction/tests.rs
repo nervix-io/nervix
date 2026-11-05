@@ -35,6 +35,8 @@ use super::{
     },
     TransactionAttachment, TransactionLimits,
 };
+#[cfg(feature = "testing")]
+use crate::captured_logs::CapturedLogs;
 
 #[test]
 fn planning_error_message_includes_attached_validation_detail() {
@@ -245,6 +247,84 @@ async fn empty_transaction_commit_storage_failure_is_reported() {
             .map(|tx| tx.state),
         Some(TransactionState::Committing(_))
     ));
+
+    drop(service);
+    drop(registry);
+    let _ = std::fs::remove_dir_all(path);
+}
+
+/// A clean close whose revert the leader fails to record reports the revert's whole cause chain,
+/// so an operator can tell a refused proposal from a storage failure, and leaves the transaction
+/// open for a later attach.
+#[cfg(feature = "testing")]
+#[nervix_primitives::test]
+async fn a_clean_close_revert_that_fails_reports_its_cause_and_leaves_the_transaction_open() {
+    let probe = ConsensusTestProbe::default();
+    let TestService {
+        service,
+        registry,
+        path,
+    } = build_test_service_with_probe(true, probe.clone()).await;
+    let id = "clean-close-revert-failure".to_string();
+    let mut subscriptions = SessionSubscriptions::new();
+    let activity = service.transaction_activity();
+    let transaction = ReplicatedTransaction::open(
+        id.clone(),
+        DomainName::parse("default").assured("the test domain name is valid"),
+        subscriptions.user.clone(),
+        activity,
+    );
+    service
+        .inner
+        .consensus
+        .open_transaction(transaction, TransactionLimits::default().max_open())
+        .await
+        .assured("the test transaction opens below the admission limit");
+    let attachment = service
+        .attach_transaction(id.clone(), &mut subscriptions)
+        .await;
+    assert!(
+        matches!(attachment, TransactionAttachment::Attached { .. }),
+        "the owner's session attaches its open transaction: {attachment:?}"
+    );
+    probe.storage_fault().fail_next(
+        format!("revert-transaction:{id}"),
+        StorageBoundary::BeforeCommit,
+    );
+
+    let logs = CapturedLogs::default();
+    // `#[nervix_primitives::test]` runs the whole future on the calling thread, so the thread-local
+    // default the guard installs stays in force across the await.
+    let guard = tracing::subscriber::set_default(logs.subscriber());
+    service.clean_close_transaction(&mut subscriptions).await;
+    drop(guard);
+    let logs = logs.contents();
+
+    assert!(
+        logs.contains("failed to revert transaction during clean session close"),
+        "the failed revert must be reported: {logs}"
+    );
+    assert!(
+        logs.contains("consensus proposal failed: consensus storage failed"),
+        "the report must carry the revert's cause, not only its outermost context: {logs}"
+    );
+    assert!(
+        matches!(
+            service
+                .inner
+                .consensus
+                .current_transaction(&id)
+                .await
+                .map(|transaction| transaction.state),
+            Some(TransactionState::Open(_))
+        ),
+        "a revert that was not recorded leaves the transaction open"
+    );
+    assert_eq!(
+        subscriptions.transaction_id(),
+        None,
+        "the closed session releases its binding"
+    );
 
     drop(service);
     drop(registry);
@@ -827,5 +907,289 @@ async fn attaching_to_committed_transaction_returns_the_recorded_aggregate() {
 
     owner.stop_all().await;
     observer.stop_all().await;
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+/// Commits a one-schema transaction for `owner` in `domain` and returns its identity.
+async fn commit_owner_transaction(
+    service: &crate::application::SessionServiceImpl,
+    domain: &str,
+    owner: &mut SessionSubscriptions,
+) -> String {
+    let committed = service
+        .test_command(
+            CommandRequest {
+                query: "BEGIN; CREATE SCHEMA notification ( user_id U32 ); COMMIT".to_string(),
+                domain: Some(named(domain)),
+                execution_reference: test_execution_reference(),
+                expected_transaction_position: None,
+                expected_preview: None,
+            },
+            owner,
+        )
+        .await;
+    assert!(
+        committed.succeeded(),
+        "commit must succeed: {}",
+        committed.message
+    );
+    committed
+        .transaction
+        .as_ref()
+        .assured("a commit result carries its transaction status")
+        .transaction_id()
+        .to_string()
+}
+
+#[nervix_primitives::test]
+async fn a_session_that_held_a_transaction_another_commit_finished_commits_it_after_reconciliation()
+{
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(false).await;
+    create_test_domain(&service.inner.consensus, "held_commit").await;
+    let mut owner = SessionSubscriptions::new();
+    let transaction_id = commit_owner_transaction(&service, "held_commit", &mut owner).await;
+    // A second session attached the transaction before the owner's commit finished it.
+    let mut resumed = SessionSubscriptions::new();
+    resumed.bind_transaction(transaction_id.clone());
+    service
+        .inner
+        .transaction_bindings
+        .insert(transaction_id.clone(), resumed.session_id.clone());
+
+    service.reconcile_transactions_once().await;
+    let committed = service
+        .test_command(
+            CommandRequest {
+                query: "COMMIT".to_string(),
+                domain: Some(named("held_commit")),
+                execution_reference: test_execution_reference(),
+                expected_transaction_position: None,
+                expected_preview: None,
+            },
+            &mut resumed,
+        )
+        .await;
+
+    assert!(
+        committed.succeeded(),
+        "the session that held the finished transaction receives its recorded commit: {}",
+        committed.message
+    );
+    let status = committed
+        .transaction
+        .as_ref()
+        .assured("a commit result carries its transaction status");
+    assert_eq!(status.lifecycle(), &TransactionLifecycle::Committed);
+    assert!(!resumed.transaction_active());
+    assert!(
+        !service
+            .inner
+            .transaction_bindings
+            .contains_key(&transaction_id)
+    );
+
+    owner.stop_all().await;
+    resumed.stop_all().await;
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[nervix_primitives::test]
+async fn a_session_releases_a_transaction_after_its_finished_record_is_reclaimed() {
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(false).await;
+    create_test_domain(&service.inner.consensus, "reclaimed_commit").await;
+    let mut owner = SessionSubscriptions::new();
+    let transaction_id = commit_owner_transaction(&service, "reclaimed_commit", &mut owner).await;
+
+    // A session that attached before another request finished the transaction still holds its
+    // binding. Advance the cleanup cutoff beyond the finished record's age, without making the
+    // test wait for the configured retention.
+    service
+        .inner
+        .consensus
+        .remove_finished_transactions(Timestamp::from_unix_nanos(i64::MAX))
+        .await
+        .assured("the leader can remove the finished transaction after its retention");
+    assert!(
+        service
+            .inner
+            .consensus
+            .current_transaction(&transaction_id)
+            .await
+            .is_none()
+    );
+
+    for direct in [false, true] {
+        for query in ["COMMIT", "REVERT"] {
+            let mut resumed = SessionSubscriptions::new();
+            resumed.bind_transaction(transaction_id.clone());
+            service
+                .inner
+                .transaction_bindings
+                .insert(transaction_id.clone(), resumed.session_id.clone());
+            let unknown = if direct {
+                if query == "COMMIT" {
+                    service.commit_bound_transaction(&mut resumed, None).await
+                } else {
+                    service.revert_bound_transaction(&mut resumed).await
+                }
+            } else {
+                service
+                    .test_command(
+                        CommandRequest {
+                            query: query.to_string(),
+                            domain: Some(named("reclaimed_commit")),
+                            execution_reference: test_execution_reference(),
+                            expected_transaction_position: None,
+                            expected_preview: None,
+                        },
+                        &mut resumed,
+                    )
+                    .await
+            };
+            assert!(!unknown.succeeded(), "{unknown:?}");
+            assert!(unknown.message.contains("is unknown"), "{unknown:?}");
+            assert!(
+                !resumed.transaction_active(),
+                "{query} must end a session's hold on a transaction whose record is gone"
+            );
+            assert!(
+                !service
+                    .inner
+                    .transaction_bindings
+                    .contains_key(&transaction_id)
+            );
+
+            let begun = service
+                .test_command(
+                    CommandRequest {
+                        query: "BEGIN".to_string(),
+                        domain: Some(named("reclaimed_commit")),
+                        execution_reference: test_execution_reference(),
+                        expected_transaction_position: None,
+                        expected_preview: None,
+                    },
+                    &mut resumed,
+                )
+                .await;
+            assert!(begun.succeeded(), "{begun:?}");
+            service.clean_close_transaction(&mut resumed).await;
+            resumed.stop_all().await;
+        }
+    }
+
+    let mut attaching = SessionSubscriptions::new();
+    attaching.bind_transaction(transaction_id.clone());
+    service
+        .inner
+        .transaction_bindings
+        .insert(transaction_id.clone(), attaching.session_id.clone());
+    let attachment = service
+        .attach_transaction(transaction_id.clone(), &mut attaching)
+        .await;
+    let TransactionAttachment::Refused(refused) = attachment else {
+        panic!("the reclaimed transaction cannot be attached: {attachment:?}");
+    };
+    assert!(refused.message.contains("is unknown"), "{refused:?}");
+    assert!(!attaching.transaction_active());
+    assert!(
+        !service
+            .inner
+            .transaction_bindings
+            .contains_key(&transaction_id)
+    );
+
+    let begun = service
+        .test_command(
+            CommandRequest {
+                query: "BEGIN".to_string(),
+                domain: Some(named("reclaimed_commit")),
+                execution_reference: test_execution_reference(),
+                expected_transaction_position: None,
+                expected_preview: None,
+            },
+            &mut attaching,
+        )
+        .await;
+    assert!(begun.succeeded(), "{begun:?}");
+    let new_id = attaching
+        .transaction_id()
+        .assured("BEGIN binds its new transaction")
+        .to_string();
+    assert!(matches!(
+        service
+            .attach_transaction(transaction_id.clone(), &mut attaching)
+            .await,
+        TransactionAttachment::Refused(_)
+    ));
+    assert_eq!(attaching.transaction_id(), Some(new_id.as_str()));
+    assert!(
+        service
+            .inner
+            .transaction_bindings
+            .get(&new_id)
+            .is_some_and(|binding| binding.value() == &attaching.session_id)
+    );
+    service.clean_close_transaction(&mut attaching).await;
+
+    owner.stop_all().await;
+    attaching.stop_all().await;
+    let _ = std::fs::remove_dir_all(&path);
+}
+
+#[nervix_primitives::test]
+async fn reattaching_a_finished_transaction_the_session_still_named_releases_it() {
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(false).await;
+    create_test_domain(&service.inner.consensus, "finished_reattach").await;
+    let mut owner = SessionSubscriptions::new();
+    let transaction_id = commit_owner_transaction(&service, "finished_reattach", &mut owner).await;
+    // The session still names the transaction, but the leader holds no binding for it, as after
+    // a leadership change.
+    let mut resumed = SessionSubscriptions::new();
+    resumed.bind_transaction(transaction_id.clone());
+
+    let attached = service
+        .attach_transaction(transaction_id, &mut resumed)
+        .await;
+    let TransactionAttachment::AlreadyFinished { transaction, .. } = attached else {
+        panic!("attaching a finished transaction must be terminal, found {attached:?}");
+    };
+    assert_eq!(transaction.lifecycle(), &TransactionLifecycle::Committed);
+    assert!(
+        !resumed.transaction_active(),
+        "a finished attach must end the hold of the session that still named the transaction"
+    );
+    let begun = service
+        .test_command(
+            CommandRequest {
+                query: "BEGIN".to_string(),
+                domain: Some(named("finished_reattach")),
+                execution_reference: test_execution_reference(),
+                expected_transaction_position: None,
+                expected_preview: None,
+            },
+            &mut resumed,
+        )
+        .await;
+
+    assert!(
+        begun.succeeded(),
+        "the released session begins a new transaction: {}",
+        begun.message
+    );
+
+    owner.stop_all().await;
+    resumed.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }

@@ -269,15 +269,23 @@ fn client_declaration_keeps_the_address_at_the_driver_boundary() {
         names,
         vec![
             "addr",
+            "credentials_file",
+            "nkey_seed",
             "timeout_ms",
             "tls_ca_file",
             "tls_cert_file",
-            "tls_key_file"
+            "tls_key_file",
+            "token"
         ]
     );
     for key in config.keys() {
         assert_eq!(key.owner, ClientConfigOwner::Nervix, "{}", key.name);
-        assert!(!key.confidential, "{}", key.name);
+        assert_eq!(
+            key.confidential,
+            matches!(key.name, "credentials_file" | "nkey_seed" | "token"),
+            "{}",
+            key.name
+        );
     }
     let address = config
         .key("addr")
@@ -285,6 +293,11 @@ fn client_declaration_keeps_the_address_at_the_driver_boundary() {
     assert_eq!(address.presence, ClientConfigPresence::Required);
     assert_eq!(address.value, ClientConfigValue::DriverAddress);
     for (name, value) in [
+        (
+            "credentials_file",
+            ClientConfigValue::File(ClientConfigFile::MountedFile),
+        ),
+        ("nkey_seed", ClientConfigValue::String),
         ("timeout_ms", ClientConfigValue::Milliseconds),
         (
             "tls_ca_file",
@@ -298,6 +311,7 @@ fn client_declaration_keeps_the_address_at_the_driver_boundary() {
             "tls_key_file",
             ClientConfigValue::File(ClientConfigFile::PrivateKey),
         ),
+        ("token", ClientConfigValue::String),
     ] {
         let key = config
             .key(name)
@@ -328,6 +342,32 @@ fn client_schema_accepts_the_current_connection_settings() {
             config_entry("tls_key_file", "identity.key"),
         ])
         .assured("every declared key admits a value of its declared type");
+}
+
+#[rstest]
+#[case::token("token", "private-token")]
+#[case::nkey("nkey_seed", "private-seed")]
+#[case::credentials("credentials_file", "{{identity}}/user.creds")]
+fn authentication_inspection_preserves_complete_configuration_and_masks_the_secret(
+    #[case] key: &str,
+    #[case] value: &str,
+) {
+    let schema = CreateClientNats::<u64>::DECLARATION.config;
+    let entries = [
+        config_entry("addr", "nats://127.0.0.1:4222"),
+        config_entry(key, value),
+    ];
+    schema
+        .validate(&entries)
+        .assured("the declaration accepts one authentication method");
+    assert_eq!(
+        schema.inspection_entries(&entries),
+        [
+            entries[0].clone(),
+            config_entry(key, crate::CLIENT_CONFIG_REDACTION),
+        ]
+    );
+    assert_eq!(entries[1].value, value);
 }
 
 #[rstest]
