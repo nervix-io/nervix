@@ -693,9 +693,9 @@ JSON protocol's error type `QueueDoesNotExist`. Any other failure to reach the s
 certificate that does not name the configured host, is described by every cause of the driver's
 connection error, which describes the connection and never a record; a service's own response keeps
 its existing description. None of these failures rejects a record or acknowledges input. Both
-directions keep the SDK's own retries disabled, so the SDK makes each request once and the host
-retries a failed one on the entity's declared backoff alone. A request that runs out of `timeout_ms`
-keeps the contract's `DeadlineElapsed` as its innermost cause, naming the request and the key.
+directions keep the SDK's own retries disabled, so the SDK makes each request once. The host owns
+retry scheduling for resume, read, acknowledgement and publish failures. A request that runs out of
+`timeout_ms` keeps the contract's `DeadlineElapsed` as its innermost cause, naming the request and the key.
 Pooled connections stay open when their host's answer changes or expires; the next connection
 resolves again.
 
@@ -747,8 +747,9 @@ sequenceDiagram
 ### Blocking work and the node's executor
 
 A connector runs on the host's asynchronous tasks and never blocks one. Synchronous work it does
-itself, such as writing or reading a local file, goes through the node's bounded executor, which the
-emitter host hands a connector as `EmitterHost::executor`. The connector chooses the storage or CPU class
+itself, such as writing or reading a local file, goes through the node's bounded executor. The
+emitter host supplies it as `EmitterHost::executor`; ingestor composition passes the same node-owned
+handle in a connector plan where its startup needs synchronous work. The connector chooses the storage or CPU class
 of its work and the memory it charges; the executor admits that work beside the rest of the node's,
 and a refusal is the connector's own typed failure. The Iceberg emitter appends to and reads its
 Arrow IPC staging files on the filesystem storage workers. A staging write the node cannot take now
@@ -866,8 +867,12 @@ is declared as it behaves, and a buffer that nothing bounds yet is declared unbo
 shows each gap until its connector closes it. A `PROMETHEUS QUERY` or `HTTP REQUEST` response is
 bounded by its statement's `MAX BODY SIZE` (16 MiB where omitted). A response that exceeds the
 bound fails the poll, which the ingestor reports as its transient error, and the next poll reads
-again. The HTTP polling request's method and headers are carried by the typed ingestor plan;
-its client supplies the required total `timeout_ms` and TLS settings. The polling client follows
+again. The HTTP polling request's method, literal or client-secret header declarations and captured
+committed header caps are carried by the typed ingestor plan. After the host resolves client
+configuration, the connector checks the complete header values and count before opening the
+request and retains sensitivity on secret values. Admission and parameter transitions check every
+known value and name; a templated secret's full value is checked at open. Its client supplies the
+required total `timeout_ms` and TLS settings. The polling client follows
 redirects and uses a proxy only as [HTTP client transport](#http-client-transport) describes. An
 HTTP response carries its status and scheduled poll instant into the same metadata group as its
 response headers, including when quiescence buffers the poll.
@@ -964,8 +969,8 @@ signaling precedes its mount. This syntax does not change which layer interprets
 how clients connect, pool or execute.
 
 Client keys are lowercase and case-sensitive. The pure registry refuses unknown, repeated,
-missing-required or mistyped Nervix-owned keys and incomplete TLS identities before a candidate
-can become an active graph. It also refuses a key its driver reads as another name for a property
+missing-required or mistyped Nervix-owned keys, mutually exclusive keys and incomplete TLS
+identities before a candidate can become an active graph. It also refuses a key its driver reads as another name for a property
 the client accepts under one name, and a key written under a prefix the driver strips, since the
 driver would apply whichever of two entries for one property it was handed last. Kafka properties
 and object-store/catalog properties are explicitly
@@ -1132,8 +1137,22 @@ acknowledgement for a subscriber. Both directions carry headers by name, and the
 no typed metadata field. The emitter declares Core `NO ACK` and `JETSTREAM ACK` publication, codec
 payloads, no envelope clause, and optional batching without a protocol maximum: each server
 announces its `max_payload`, and the client refuses a message above it before writing it. The
-unpooled client's Nervix-owned keys are the address, `timeout_ms` and the TLS files, while the
-address's userinfo and query options belong to the driver and are masked in inspection. The
+unpooled client's Nervix-owned keys are the address, `timeout_ms`, the TLS files and the optional
+authentication keys `token`, `credentials_file` and `nkey_seed`. Its schema declares the latter
+three mutually exclusive and confidential, and identifies `credentials_file` as a mounted file.
+Both sides build authentication and TLS options through one connector-owned builder, then attach
+their own connection-loss notifications or reconnect policy. Token authentication uses the driver;
+nkey and JWT credentials use its auth callback with AWS-LC Ed25519 signing. The connector validates
+the fixed-size user seed's base32, user prefix and transcription checksum, and reads a mounted
+credentials file through the node's filesystem workers. Its immutable mounted length is charged to
+credentials memory before allocation or reading, and that charge stays until the temporary bytes
+are cleared. Cancellation is checked before and after the bounded file read. Admission or execution
+refusal judges no credential and remains a retryable initialization failure, distinct from invalid
+configuration. Decoded seed bytes and temporary file bytes are cleared on drop. Reading preserves
+the filesystem's typed I/O cause without rendering the path; parsing
+preserves a value-free typed authentication cause. A broker's authentication refusal remains a
+typed connection failure. The cryptography chapter records the signing owner and its FIPS limits.
+The address's userinfo and query options belong to the driver and are masked in inspection. The
 NATS-specific declaration tests, generated grammar conformance and one-/three-node public
 declaration scenarios qualify these facts together.
 
@@ -1149,15 +1168,21 @@ with `SESSION PERSISTENT` and `QOS 1` or `QOS 2`, the session a broker keeps mes
 redelivers after a lost connection; `BUFFER` and `DROP` stay connected under any session. The
 ingestor's headers are a publish's MQTT 5 user properties, `ordered_repeats` exact names, and its
 metadata is the delivered packet's topic, retain flag, quality of service and duplicate flag, then
-its content type, response topic, correlation data and message expiry; the emitter carries no
-transport headers. Every emitter statement writes `QOS 0`, `QOS 1` or `QOS 2`, which has no default,
+its content type, response topic, correlation data and message expiry. The emitter writes ordered,
+repeated MQTT 5 user properties through its text header model. Every emitter statement writes
+`QOS 0`, `QOS 1` or `QOS 2`, which has no default,
 and its modes declare what each can complete: `NO ACK` only with `QOS 0`, which nothing answers, and
 `ACK` with either window only with `QOS 1` or `QOS 2`, which a broker answers with `PUBACK` or
 `PUBCOMP`. The start plan holds the two as one value, so the connector receives no pairing the
 declaration refuses. The emitter connects a clean session at `QOS 0` and a persistent one otherwise,
 and declares that as a driver limit rather than an option, together with the session a new client
-cannot resume. It takes codec payloads, no envelope clause and optional batching up to the Maximum
-Packet Size each broker declares when the client connects. The unpooled client's keys are
+cannot resume. Its envelope declares `RETAIN` and the exact `PROPERTIES` types `content_type STRING`,
+`message_expiry U32` (seconds), `response_topic STRING` and `correlation_data BYTES`. The connector
+validates MQTT string/binary field bounds and the response topic before handing a record to its
+driver. Packet measurement includes the complete property section and its variable-length prefix;
+the retained payload keeps the same envelope for every retry. It takes codec payloads and optional
+batching up to the Maximum Packet Size each broker declares when the client connects. The unpooled
+client's keys are
 all Nervix-owned: `addr` names the broker by `mqtt` or `mqtts`, a host and a nonzero port, and
 nothing else, since a connection reads no credentials, path, query or fragment from it;
 `client_id`; and the TLS files, of which `tls_ca_file` is required exactly with `mqtts` and the
@@ -1209,13 +1234,16 @@ ingestor names a subscription of 1 to 255 bytes with its declared owner and type
 `SUSPEND`, since the durable subscription keeps its backlog. The emitter declares `NO ACK` and
 `ACK` publishing, optional batching under the `maxMessageSize` the broker announces, the `TIMESTAMP`
 and `DELIVER AFTER` envelope clauses it writes as each message's `event_time` and `deliver_at_time`,
-and no other envelope clause or properties. Message properties are headers in both directions, `ordered_repeats` on ingestion and `last_wins` on
-emission. A Pulsar client declares only the keys both directions read. `namespace` holds exactly a
-tenant and a namespace, with the default `public/default` written once in the declaration, and topic
-qualification reads that effective value, so a namespace that cannot qualify a topic is refused at
-`CREATE`. `tls_ca_file`, `tls_allow_insecure_connection` and `tls_hostname_verification_enabled`
-require a `pulsar+ssl` address, since a plaintext connection uses none of them. The
-Pulsar-specific declaration tests, generated grammar conformance and one-/three-node public
+and no other envelope clause or properties. Message properties are headers in both directions,
+`ordered_repeats` on ingestion and `last_wins` on emission. A Pulsar client declares only the keys
+both directions read, and both directions connect through one builder in the connector, so the two
+cannot disagree on how they connect. `namespace` holds exactly a tenant and a namespace, with the
+default `public/default` written once in the declaration, and topic qualification reads that
+effective value, so a namespace that cannot qualify a topic is refused at `CREATE`. `auth_token` is
+confidential, so inspection shows it redacted. `tls_ca_file`, `tls_cert_file`, `tls_key_file`,
+`tls_allow_insecure_connection` and `tls_hostname_verification_enabled` require a `pulsar+ssl`
+address, since a plaintext connection uses none of them, and the certificate and key are a pair.
+The Pulsar-specific declaration tests, generated grammar conformance and one-/three-node public
 declaration scenarios qualify these facts together.
 
 Every-node execution is independent of the kind of reference an ingestor names. HTTP and WebSocket
@@ -1348,7 +1376,7 @@ the `write_header` calls of one record become on the published message.
 | --- | --- | --- | --- |
 | `last_wins`, exact names | `SQS QUEUE` | `PULSAR TOPIC` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | `last_wins`, exact names; STRING as String; U8, I8, U16, I16, U32, I32, U64, I64 as Number; BYTES as Binary | None | `SQS QUEUE` | one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included; a value's exact type decides the type it travels as |
-| `ordered_repeats`, exact names | `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC` | `KAFKA TOPIC` | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
+| `ordered_repeats`, exact names | `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC` | `KAFKA TOPIC`, `MQTT TOPIC` | every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | `repeats_by_name`, exact names | `NATS SUBJECT` | `NATS SUBJECT` | every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |
 | `repeats_by_name`, lowercase names | `HTTP REQUEST`, `HTTP ENDPOINT`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT` | None | every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |
 | `sorted_by_name`, exact names | `RABBITMQ QUEUE` | `RABBITMQ QUEUE`, `RABBITMQ EXCHANGE` | one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
@@ -2915,6 +2943,18 @@ sequenceDiagram
   assignment changes without reading node-wide state or execution registries. The Kafka commit and
   acknowledgement boundary remains the state's highest durable replica progress.
 
+- **Kafka client build.** Kafka clients, ingestors and emitters run librdkafka 2.12.1 through
+  Nervix's fork of `rust-rdkafka`, `nervix-io/rust-rdkafka`, which carries the librdkafka backport
+  of the duplicate `FETCH_STOP` fix and builds librdkafka's TLS on AWS-LC instead of OpenSSL. Its
+  `aws-lc` feature compiles librdkafka with CMake against the libcrypto and libssl that
+  `aws-lc-sys` builds with its `ssl` feature: the same `aws-lc-sys` `aws-lc-rs` links, so Kafka
+  TLS, SASL SCRAM and OAUTHBEARER share the product's one AWS-LC. The fork's build reads the
+  `links` metadata of the AWS-LC crate its backend selects under that crate's versioned key, so a
+  new `aws-lc-sys` release changes only the version the fork requires. An upgrade of `aws-lc-rs`
+  that moves to another `aws-lc-sys` moves the fork in the same change, because `just ratchet`
+  refuses a product that links two; [Cryptography](cryptography.md) owns that rule and lists what
+  librdkafka and the libcurl of its OAUTHBEARER token requests implement themselves.
+
 - **Pulsar client.** The Pulsar ingestor and emitter build on Nervix's fork of `pulsar-rs`,
   `nervix-io/pulsar-rs`, because the released crate discards delivered redelivery counts and
   `CommandConnected`, and returns from an
@@ -2931,7 +2971,26 @@ sequenceDiagram
   command, and resolves the acknowledgement with the broker's `CommandAckResponse`, its server
   error, or the client's operation timeout. A negative acknowledgement returns whether the consumer
   sent its redelivery request, with the connection error that kept it from being sent, where the
-  released crate only logs that error.
+  released crate only logs that error. A TLS connection takes a complete rustls client
+  configuration from Nervix, because the released crate's rustls path presents no client certificate
+  and reads neither of its insecure options, so the shared TLS provider owns trust and identity for
+  this connector as it does for the others. A connection that failed for good returns its error,
+  where the released crate replaces it with a fixed message, so a broker's `AuthenticationError`
+  reaches the host, and the fork logs neither the `CONNECT` frame nor an authentication response,
+  which carry the client's credential.
+  The connector authenticates a token under the broker's `token` method. A certificate without a
+  token authenticates under `tls`, the method that makes a broker read the TLS session, and carries
+  no data. With both, the token names the role and the certificate satisfies a broker's
+  `tlsRequireTrustedClientCertOnConnect`.
+  The driver's retries are off in both directions: no connection retry and no operation retry, so
+  a `ServiceNotReady`, a refused connection or a failed consumer reconnect reaches the host at once.
+  The host owns the retry: a failed read or resume follows the source's retry policy, a failed emitter
+  open follows the emitter's, and a failed start, which an owned subscription's join or a client
+  that cannot connect ends, is retried by the node's runtime reconciliation. An unreachable broker
+  at start therefore keeps the domain from starting rather than becoming a transient status.
+  The one retry left in the driver is a partitioned topic's: a consumer of one partition whose
+  single reconnect fails ends, and the multi-topic consumer resubscribes it at its 30-second topic
+  refresh while the other partitions keep flowing.
 - **NATS source.** Each source instance owns one client and its queue subscription. The client
   reports a lost connection through its event callback, and the instance ends the subscription
   with a read failure once it has handed over every message the client received before the loss,
@@ -3415,3 +3474,23 @@ That evidence supports the current ingestor and emitter behavior; it does not cl
 Its Kafka A/B measurements found lower bounded-pressure rates and a separate 16-partition commit
 failure that require owner investigation. An integration must preserve its own transport and
 delivery semantics rather than assuming a generic envelope or exactly-once external outcome.
+
+## Committed Host Bounds
+
+The Nervix host validates batch counts and client-emitter batch bytes against the committed
+cluster policy. HTTP request preparation captures typed header-byte and field-count bounds for that publication.
+Transition validation counts known HTTP header names independently of their values and preserves
+guaranteed byte contributions across dynamic replacements. `HttpApplicationHeaders` enforces the
+captured limits and the syntax contract on the evaluated envelope. Connector
+transport ownership and per-record acknowledgement boundaries are unchanged.
+HTTP polling headers are literal plan inputs. Their complete count and byte requirements are
+checked against that same committed policy at model admission and parameter transitions, with
+case-insensitive replacement and the last written value retained. A lowering cannot invalidate
+an existing request. The field-count setting ends at 16,384 application fields, leaving native
+capacity for client and transport fields. The connector receives the validated literal fields
+without a second fixed default.
+Each literal name/value write and the final retained envelope must fit the byte cap.
+WebSocket upgrade headers use the same committed caps at model admission and parameter
+transitions. Their canonical subprotocol offer counts as one field, and its comma-joined tokens
+contribute to the byte count. Syntax and plan conversion enforce physical HTTP representation
+bounds; they impose no second fixed default on a model admitted under raised cluster caps.

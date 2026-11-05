@@ -124,6 +124,62 @@ mod tests {
     const QOS_2: &str =
         "QOS 2 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s";
 
+    #[test]
+    fn retained_publish_properties_use_the_shared_envelope_in_written_order() {
+        let source = statement("devices/orders", QOS_1).replace(
+            " INHERIT ALL",
+            " RETAIN PROPERTIES {'content_type' = 'application/json', 'message_expiry' = (600 AS \
+             U32), 'response_topic' = 'replies', 'correlation_data' = hex_decode('00ff')} INHERIT \
+             ALL",
+        );
+        let Some(Model::Emitter(emitter)) = created_model(&source) else {
+            panic!("the MQTT declaration admits its retained publication properties");
+        };
+        assert!(emitter.envelope.retain);
+        let keys: Vec<&str> = emitter
+            .envelope
+            .properties
+            .iter()
+            .map(|property| property.name.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "content_type",
+                "message_expiry",
+                "response_topic",
+                "correlation_data"
+            ]
+        );
+    }
+
+    #[test]
+    fn property_completion_is_confined_to_mqtt_publish_properties() {
+        let prefix = "CREATE MQTT TOPIC EMITTER publishing FROM events TO mqtt_main TOPIC \
+                      'devices/orders' QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY \
+                      BACKOFF 250ms MAX 30s ENCODE USING event_codec RETAIN PROPERTIES {";
+        assert_offers_exactly(
+            prefix,
+            &[
+                "\"content_type\"",
+                "\"correlation_data\"",
+                "\"message_expiry\"",
+                "\"response_topic\"",
+            ],
+        );
+    }
+
+    #[rstest]
+    #[case("{'unknown' = 'value'}")]
+    #[case("{'content_type' = 'one', 'content_type' = 'two'}")]
+    fn publish_properties_refuse_unknown_and_repeated_keys(#[case] properties: &str) {
+        let source = statement("devices/orders", QOS_1).replace(
+            " INHERIT ALL",
+            &format!(" PROPERTIES {properties} INHERIT ALL"),
+        );
+        assert!(refused(&source));
+    }
+
     /// A complete `MQTT TOPIC` emitter statement that publishes to `topic` as `publication` says:
     /// its quality of service and its publishing mode.
     fn statement(topic: &str, publication: &str) -> String {

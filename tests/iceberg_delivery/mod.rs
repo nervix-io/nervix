@@ -24,13 +24,19 @@ use nervix_primitives::time::{Instant, timeout};
 
 use super::{
     DescribedEmitterRetry, ICEBERG_REST_ADDR, IcebergCatalogGate, ScenarioWorld,
-    common::iceberg_catalog_gate::HeldCommitArrival, current_leader_node, docstring,
-    expand_placeholders, iceberg_row_matches_expected, iceberg_staging_files, iceberg_table_rows,
-    parse_duration_text, run_plexus_commands_on_node, rustfs_iceberg_table,
+    append_cucumber_log_line, common::iceberg_catalog_gate::HeldCommitArrival, current_leader_node,
+    docstring, expand_placeholders, iceberg_row_matches_expected, iceberg_staging_files,
+    iceberg_table_rows, parse_duration_text, run_plexus_commands_on_node, rustfs_iceberg_table,
 };
 
 /// The snapshot summary property that counts every row the table holds at that snapshot.
 const TOTAL_RECORDS_PROPERTY: &str = "total-records";
+
+/// The snapshot summary property that counts the data files the commit that wrote it appended.
+const ADDED_DATA_FILES_PROPERTY: &str = "added-data-files";
+
+/// The snapshot summary property that counts the rows the commit that wrote it appended.
+const ADDED_RECORDS_PROPERTY: &str = "added-records";
 
 /// How often a step that waits for the table or DESCRIBE looks again.
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -297,6 +303,12 @@ async fn then_iceberg_data_files_obey_batch_bounds(
                     "Iceberg table {table} has a file beyond {max_rows} rows or {max_bytes} \
                      bytes: {files:?}"
                 );
+                // The rows and Parquet bytes of every data file, retained as evidence of what
+                // the bounds produced.
+                append_cucumber_log_line(&format!(
+                    "Iceberg table {table} holds {rows} rows in data files of (rows, bytes) \
+                     {files:?}"
+                ));
                 return;
             }
         }
@@ -307,6 +319,65 @@ async fn then_iceberg_data_files_obey_batch_bounds(
         );
         nervix_primitives::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+/// What one commit appended to a table, from the summary of the snapshot it wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CommitAppend {
+    data_files: u64,
+    rows: u64,
+}
+
+/// One count the summary of `snapshot` reports, such as the data files its commit appended.
+fn summary_count(
+    snapshot: &iceberg::spec::Snapshot,
+    property: &str,
+    table: &str,
+) -> Result<u64, String> {
+    let Some(value) = snapshot.summary().additional_properties.get(property) else {
+        return Err(format!(
+            "snapshot {} of Iceberg table {table} does not report {property}",
+            snapshot.snapshot_id()
+        ));
+    };
+    value
+        .parse::<u64>()
+        .map_err(|error| format!("Iceberg table {table} reports {property} as '{value}': {error}"))
+}
+
+/// What the commit that wrote the table's current snapshot appended, so a step tells one commit of
+/// several data files apart from several commits of one data file each.
+async fn latest_commit_append(world: &ScenarioWorld, table: &str) -> Result<CommitAppend, String> {
+    let loaded = rustfs_iceberg_table(world.dependencies.endpoints(), &world.domain, table).await?;
+    let Some(snapshot) = loaded.metadata().current_snapshot() else {
+        return Err(format!("no commit has appended to Iceberg table {table}"));
+    };
+    let data_files = summary_count(snapshot, ADDED_DATA_FILES_PROPERTY, table)?;
+    let rows = summary_count(snapshot, ADDED_RECORDS_PROPERTY, table)?;
+    Ok(CommitAppend { data_files, rows })
+}
+
+#[then(
+    expr = "the latest commit to the Iceberg table {string} appended {int} data files holding \
+            {int} rows"
+)]
+async fn then_the_latest_commit_appended(
+    world: &mut ScenarioWorld,
+    table: String,
+    data_files: u64,
+    rows: u64,
+) {
+    let table = expand_placeholders(world, &table);
+    let appended = latest_commit_append(world, &table)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("could not read the latest commit to Iceberg table {table}: {error}")
+        });
+    assert_eq!(
+        appended,
+        CommitAppend { data_files, rows },
+        "the latest commit to Iceberg table {table} appended {appended:?}"
+    );
 }
 
 /// How many rows the table holds while a commit it would hold is still to come: a gate hold or a

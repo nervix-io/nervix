@@ -2,7 +2,7 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Pulsar client and producer configuration, its TLS options, topic
+//! - **Owns.** The one client both directions connect through, producer configuration, topic
 //!   qualification, the consumers of the declared subscription type an ingestor reads through,
 //!   message properties as ingest headers, per-message acknowledgement, record and property
 //!   publication, the event time and delivery time a message carries from its record, the
@@ -26,6 +26,7 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
+mod connection;
 mod ingestor;
 mod message_times;
 
@@ -38,12 +39,14 @@ use std::future::Future;
 
 use arch_into::ArchInto as _;
 use async_trait::async_trait;
+use connection::PulsarClientConnection;
+pub use connection::{PulsarClientError, PulsarRefusal};
 use error_stack::Report;
 use futures_util::{FutureExt, StreamExt as _, stream::FuturesUnordered};
 pub use ingestor::{
-    PulsarAckReceipts, PulsarMessageProperties, PulsarRefusal, PulsarTopicIngestor,
-    PulsarTopicIngestorError, PulsarTopicIngestorMessage, PulsarTopicIngestorPlan,
-    PulsarTopicIngestorPosition, PulsarTopicIngestorSettings, PulsarUnresolvedRequest,
+    PulsarAckReceipts, PulsarMessageProperties, PulsarTopicIngestor, PulsarTopicIngestorError,
+    PulsarTopicIngestorMessage, PulsarTopicIngestorPlan, PulsarTopicIngestorPosition,
+    PulsarTopicIngestorSettings, PulsarUnresolvedRequest,
 };
 use message_times::{PulsarMessageTimeError, PulsarMessageTimes};
 use meticulous::OptionExt as _;
@@ -51,9 +54,8 @@ use nervix_connector::{
     AckConfirmation, BrokerAnswer, BrokerPublishingMode, BrokerVerdict, ConfirmationWindow,
     ConfirmationWindowError, EmitterFinish, EmitterFinishError, EmitterFinishResult, EmitterHost,
     EmitterLifecycle, EmitterOpenError, EmitterRecord, EmitterRecordId, EmitterStartResult,
-    EmitterWriteError, PerRecordOutcome, RecordEmitter, RejectedEmitterMember, client_config_value,
-    client_tls_paths, optional_bool_client_config_value, optional_client_config_value,
-    read_tls_file,
+    EmitterWriteError, PerRecordOutcome, RecordEmitter, RejectedEmitterMember,
+    optional_client_config_value,
 };
 use nervix_models::{ClientConfigEntry, ConnectorKind, PulsarTopicName, Timestamp};
 use nervix_primitives::{
@@ -61,8 +63,7 @@ use nervix_primitives::{
     time::{Instant, timeout_at},
 };
 use pulsar::{
-    ConnectionRetryOptions, Error as PulsarError, OperationRetryOptions, Pulsar,
-    TlsOptions as PulsarTlsOptions, TokioExecutor,
+    Error as PulsarError, TokioExecutor,
     error::{ConnectionError as PulsarConnectionError, ProducerError as PulsarProducerError},
     message::proto::{CommandSendReceipt, ServerError as PulsarServerError},
     producer::{Message as PulsarProducerMessage, SendFuture as PulsarSendFuture},
@@ -386,7 +387,15 @@ impl PulsarTopicEmitter {
         topic: &PulsarTopicName,
         mode: BrokerPublishingMode,
     ) -> EmitterStartResult<pulsar::Producer<TokioExecutor>> {
-        let pulsar = Self::client_from_config(config, mode).await?;
+        // A publish's acknowledgement timeout bounds what the driver waits for on its behalf.
+        let operation_timeout = match mode {
+            BrokerPublishingMode::NoAck => None,
+            BrokerPublishingMode::Ack(settings) => Some(settings.timeout),
+        };
+        let pulsar = PulsarClientConnection::new(config, operation_timeout)
+            .open()
+            .await
+            .map_err(Self::client_error)?;
         let topic_name = qualified_topic(config, topic);
         pulsar
             .producer()
@@ -394,97 +403,6 @@ impl PulsarTopicEmitter {
             .build()
             .await
             .map_err(Self::start_error)
-    }
-
-    async fn client_from_config(
-        config: &[ClientConfigEntry],
-        mode: BrokerPublishingMode,
-    ) -> EmitterStartResult<Pulsar<TokioExecutor>> {
-        let addr = Self::config_value(config, "addr")?;
-        let (connection_retry_options, operation_retry_options) = Self::retry_options(mode);
-        let mut builder = Pulsar::builder(addr, TokioExecutor)
-            .with_connection_retry_options(connection_retry_options)
-            .with_operation_retry_options(operation_retry_options)
-            .with_outbound_channel_size(PULSAR_OUTBOUND_CAPACITY);
-        if let Some(tls_options) = Self::tls_options_from_config(config)? {
-            if let Some(certificate_chain) = tls_options.certificate_chain {
-                builder = builder.with_certificate_chain(certificate_chain);
-            }
-            builder = builder
-                .with_allow_insecure_connection(tls_options.allow_insecure_connection)
-                .with_tls_hostname_verification_enabled(
-                    tls_options.tls_hostname_verification_enabled,
-                );
-        }
-        builder.build().await.map_err(Self::start_error)
-    }
-
-    fn retry_options(
-        mode: BrokerPublishingMode,
-    ) -> (ConnectionRetryOptions, OperationRetryOptions) {
-        let mut operation = OperationRetryOptions {
-            max_retries: Some(0),
-            ..Default::default()
-        };
-        if let BrokerPublishingMode::Ack(settings) = mode {
-            operation.operation_timeout = settings.timeout;
-        }
-        (
-            ConnectionRetryOptions {
-                max_retries: 0,
-                ..Default::default()
-            },
-            operation,
-        )
-    }
-
-    fn tls_options_from_config(
-        config: &[ClientConfigEntry],
-    ) -> EmitterStartResult<Option<PulsarTlsOptions>> {
-        let tls = client_tls_paths(config);
-        if tls.cert_file.is_some() || tls.key_file.is_some() {
-            return Err(Self::config_error(
-                "Pulsar TLS currently supports only 'tls_ca_file'; client authentication via \
-                 'tls_cert_file' and 'tls_key_file' is not supported",
-            ));
-        }
-
-        let allow_insecure_connection =
-            Self::optional_bool_config_value(config, "tls_allow_insecure_connection")?;
-        let tls_hostname_verification_enabled =
-            Self::optional_bool_config_value(config, "tls_hostname_verification_enabled")?;
-
-        if tls.ca_file.is_none()
-            && allow_insecure_connection.is_none()
-            && tls_hostname_verification_enabled.is_none()
-        {
-            return Ok(None);
-        }
-
-        let mut tls_options = PulsarTlsOptions::default();
-        if let Some(ca_file) = tls.ca_file.as_ref() {
-            tls_options.certificate_chain = Some({
-                let mapping_input = read_tls_file(ca_file, "TLS CA certificate");
-                match mapping_input {
-                    Ok(mapped_value) => Ok(mapped_value),
-                    Err(error) => Err({
-                        let message = error.current_context().to_string();
-                        error
-                            .change_context(EmitterOpenError::InvalidConfiguration {
-                                connector: PULSAR.keyword(),
-                            })
-                            .attach_printable(message)
-                    }),
-                }
-            }?);
-        }
-        if let Some(allow_insecure_connection) = allow_insecure_connection {
-            tls_options.allow_insecure_connection = allow_insecure_connection;
-        }
-        if let Some(tls_hostname_verification_enabled) = tls_hostname_verification_enabled {
-            tls_options.tls_hostname_verification_enabled = tls_hostname_verification_enabled;
-        }
-        Ok(Some(tls_options))
     }
 
     /// Every way an ACK publish ends goes through the shared window, which settles answers
@@ -556,48 +474,21 @@ impl PulsarTopicEmitter {
         RejectedEmitterMember::external(record, occurred_at, rejection.message())
     }
 
-    fn config_value(config: &[ClientConfigEntry], key: &str) -> EmitterStartResult<String> {
-        {
-            let mapping_input = client_config_value(config, key, PULSAR.keyword());
-            match mapping_input {
-                Ok(mapped_value) => Ok(mapped_value),
-                Err(error) => Err({
-                    let message = error.current_context().to_string();
-                    error
-                        .change_context(EmitterOpenError::InvalidConfiguration {
-                            connector: PULSAR.keyword(),
-                        })
-                        .attach_printable(message)
-                }),
+    /// A client that did not connect: one its configuration cannot describe is invalid, and any
+    /// other could not be initialized. An emitter shows the message its emitter attached, so the
+    /// failure's whole chain is what its status says.
+    fn client_error(error: Report<PulsarClientError>) -> Report<EmitterOpenError> {
+        let connector = PULSAR.keyword();
+        let context = match error.current_context() {
+            PulsarClientError::Configuration => {
+                EmitterOpenError::InvalidConfiguration { connector }
             }
-        }
-    }
-
-    fn optional_bool_config_value(
-        config: &[ClientConfigEntry],
-        key: &str,
-    ) -> EmitterStartResult<Option<bool>> {
-        {
-            let mapping_input = optional_bool_client_config_value(config, key);
-            match mapping_input {
-                Ok(mapped_value) => Ok(mapped_value),
-                Err(error) => Err({
-                    let message = error.current_context().to_string();
-                    error
-                        .change_context(EmitterOpenError::InvalidConfiguration {
-                            connector: PULSAR.keyword(),
-                        })
-                        .attach_printable(message)
-                }),
+            PulsarClientError::Refused { .. } | PulsarClientError::NotOpened => {
+                EmitterOpenError::Initialize { connector }
             }
-        }
-    }
-
-    fn config_error(error: impl std::fmt::Display) -> Report<EmitterOpenError> {
-        Report::new(EmitterOpenError::InvalidConfiguration {
-            connector: PULSAR.keyword(),
-        })
-        .attach_printable(error.to_string())
+        };
+        let description = format!("{error:#}");
+        error.change_context(context).attach_printable(description)
     }
 
     fn start_error(error: PulsarError) -> Report<EmitterOpenError> {
@@ -685,7 +576,6 @@ mod tests {
             command_partitioned_topic_metadata_response::LookupType as PartitionLookupType,
         },
     };
-    use tempfile::tempdir;
     use tokio_util::codec::Framed;
 
     use super::*;
@@ -821,6 +711,62 @@ mod tests {
                 Some("Reached the maximum number of connections".to_string()),
             )
         )));
+    }
+
+    /// The host shows the message an emitter attached, so a client's whole failure reaches the
+    /// emitter's status while the emitter's own context stays what a caller decides from.
+    #[test]
+    fn an_emitter_describes_a_client_that_did_not_connect_by_its_whole_failure() {
+        let refused = PulsarTopicEmitter::client_error(Report::new(PulsarClientError::Refused {
+            refusal: PulsarRefusal {
+                error: Some(PulsarServerError::AuthenticationError),
+                reason: Some("Unable to authenticate".to_string()),
+            },
+        }));
+        let not_opened = PulsarTopicEmitter::client_error(
+            Report::new(PulsarError::Connection(PulsarConnectionError::Disconnected))
+                .change_context(PulsarClientError::NotOpened),
+        );
+        let configuration =
+            PulsarTopicEmitter::client_error(Report::new(PulsarClientError::Configuration));
+
+        let connector = PULSAR.keyword();
+        assert_eq!(
+            refused.current_context(),
+            &EmitterOpenError::Initialize { connector }
+        );
+        assert_eq!(
+            not_opened.current_context(),
+            &EmitterOpenError::Initialize { connector }
+        );
+        assert_eq!(
+            configuration.current_context(),
+            &EmitterOpenError::InvalidConfiguration { connector }
+        );
+        assert_eq!(
+            attached_message(&refused),
+            "the PULSAR broker refused the connection with AuthenticationError: Unable to \
+             authenticate"
+        );
+        assert_eq!(
+            attached_message(&not_opened),
+            format!(
+                "no connection to the PULSAR broker opened: {}",
+                PulsarError::Connection(PulsarConnectionError::Disconnected)
+            )
+        );
+        assert_eq!(
+            attached_message(&configuration),
+            "invalid PULSAR client configuration"
+        );
+    }
+
+    /// The printable attachment the host reads for an emitter's status.
+    fn attached_message(error: &Report<EmitterOpenError>) -> String {
+        let attached = error
+            .downcast_ref::<String>()
+            .assured("the emitter attached the client's failure as text");
+        attached.clone()
     }
 
     /// How the fake broker answers one message, chosen by the first byte of its payload.
@@ -1513,66 +1459,6 @@ mod tests {
             second.metadata.deliver_at_time
         );
         assert_eq!(second.metadata.deliver_at_time, Some(981_173_111_789));
-    }
-
-    #[test]
-    fn client_retries_are_disabled_in_favor_of_the_declared_retry_policy() {
-        let (connection, operation) =
-            PulsarTopicEmitter::retry_options(BrokerPublishingMode::NoAck);
-
-        assert_eq!(connection.max_retries, 0);
-        assert_eq!(operation.max_retries, Some(0));
-        assert!(!operation.allow_retry(0));
-    }
-
-    #[test]
-    fn pulsar_tls_options_load_certificate_chain_and_flags() {
-        let tempdir = tempdir().expect("tempdir should be created");
-        let ca_path = tempdir.path().join("ca.pem");
-        std::fs::write(&ca_path, "test-ca").expect("ca file should be written");
-
-        let options = PulsarTopicEmitter::tls_options_from_config(&[
-            entry("tls_ca_file", &ca_path.display().to_string()),
-            entry("tls_allow_insecure_connection", "true"),
-            entry("tls_hostname_verification_enabled", "false"),
-        ])
-        .expect("pulsar tls options should load")
-        .expect("tls options should be present");
-
-        assert_eq!(
-            options
-                .certificate_chain
-                .expect("certificate chain should be present"),
-            b"test-ca".to_vec()
-        );
-        assert!(options.allow_insecure_connection);
-        assert!(!options.tls_hostname_verification_enabled);
-    }
-
-    #[test]
-    fn pulsar_tls_options_reject_client_auth_material() {
-        let error = PulsarTopicEmitter::tls_options_from_config(&[
-            entry("tls_cert_file", "/tmp/client.crt"),
-            entry("tls_key_file", "/tmp/client.key"),
-        ])
-        .expect_err("pulsar mTLS material should be rejected");
-        let error = format!("{error:?}");
-
-        assert!(error.contains("tls_cert_file"));
-        assert!(error.contains("tls_key_file"));
-    }
-
-    #[test]
-    fn pulsar_tls_options_reject_invalid_boolean_values() {
-        let error = PulsarTopicEmitter::tls_options_from_config(&[entry(
-            "tls_allow_insecure_connection",
-            "maybe",
-        )])
-        .expect_err("invalid pulsar tls boolean should be rejected");
-        let error = format!("{error:?}");
-
-        assert!(error.contains("tls_allow_insecure_connection"));
-        assert!(error.contains("maybe"));
     }
 
     /// PULSAR TOPIC emitters declare last wins with exact names: a record's header writes become

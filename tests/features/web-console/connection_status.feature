@@ -13,20 +13,36 @@ Feature: Web console connection status
     Given a 3 node nervix cluster is started
     Then the current leader node is saved as placeholder "leader"
     And a node other than placeholder "leader" is saved as placeholder "follower"
-    When the web console is opened on node "{{follower}}"
+    When leadership is transferred from node "{{follower}}" to node "{{leader}}"
+    And the web console is opened on node "{{follower}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".terminal" contains "connected to leader '{{leader}}'"
 
   Scenario: Web console reconnects after leader switchover
     Given a 3 node nervix cluster is started
-    Then the current leader node is saved as placeholder "old_leader"
-    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    When the web console is opened on node "{{old_leader}}"
+    When the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And the first leader connected by the web console is saved as placeholder "old_leader"
     And selector ".terminal" contains "connected to leader '{{old_leader}}'"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
     When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
     Then node "{{old_leader}}" eventually reports leader "{{new_leader}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".terminal" contains "connected to leader '{{new_leader}}'"
+
+  Scenario: Web console follows leadership changes before and after its initial connection
+    Given a 3 node nervix cluster is started
+    Then the current leader node is saved as placeholder "entry_node"
+    And a node other than placeholder "entry_node" is saved as placeholder "initial_target"
+    When leadership is transferred from node "{{entry_node}}" to node "{{initial_target}}"
+    And the web console is opened on node "{{entry_node}}"
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And the first leader connected by the web console is saved as placeholder "old_leader"
+    And selector ".terminal" contains "connected to leader '{{old_leader}}'"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
+    Then node "{{old_leader}}" eventually reports leader "{{new_leader}}"
+    And selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".terminal" contains "connected to leader '{{new_leader}}'"
 
   Scenario: Web console keeps the session during a server outage

@@ -58,6 +58,7 @@ mod entity_drain;
 mod entity_drain_tests;
 mod execution;
 mod handoff_gate_link;
+mod interest_visibility;
 mod live_view_gap;
 #[cfg(test)]
 mod live_view_gap_tests;
@@ -75,6 +76,7 @@ mod resource_publication_tests;
 mod resource_upload_reply;
 #[cfg(test)]
 mod resource_upload_reply_tests;
+mod resource_upload_start;
 mod restarted_voter;
 mod restore_publication;
 #[cfg(test)]
@@ -98,6 +100,7 @@ use entity_drain::ForcedEntityDrainTimeout;
 pub(crate) use entity_drain::ObservedEntityDrain;
 use execution::NodeExecution;
 use handoff_gate_link::HandoffGateLink;
+use interest_visibility::InterestVisibilityRefusal;
 use live_view_gap::{LiveViewGap, LiveViewGapState};
 use materialized_reads::DelayedMaterializedReads;
 use model_publication::ModelPublicationRefusal;
@@ -107,6 +110,7 @@ use relay_memory::RelayMemoryFill;
 use relocation_commit::RelocationCommitRefusal;
 use resource_publication::ResourcePublicationRefusal;
 use resource_upload_reply::ResourceUploadReplyLoss;
+use resource_upload_start::ResourceUploadStartRefusal;
 use restarted_voter::{StartupObservationEnd, StartupVoterGossip};
 use restore_publication::RestorePublicationFailure;
 pub use restore_staging::RestoreStagingKind;
@@ -174,6 +178,9 @@ struct FaultInjectionState {
     /// so the public regression verifies that its construction failures actually happened.
     refused_runtime_installations:
         DashMap<ClusterNodeName, RuntimeInstallationRefusals, RandomState>,
+    /// One-shot, node-local refusals of the next subscription interest visibility check a node
+    /// answers, each keeping whether it was delivered so a scenario proves the refusal happened.
+    refused_interest_visibility: DashMap<ClusterNodeName, InterestVisibilityRefusal, RandomState>,
     wasm_reset_publication_authority_losses:
         DashMap<DomainName, WasmResetPublicationAuthorityLoss, RandomState>,
     failed_wasm_reset_publications: DashMap<DomainName, WasmResetPublicationFailure, RandomState>,
@@ -232,6 +239,10 @@ struct FaultInjectionState {
     /// Losses of the reply to a node's next upload call that installs a version, each keeping
     /// whether an installing call met it.
     lost_resource_upload_replies: DashMap<ClusterNodeName, ResourceUploadReplyLoss, RandomState>,
+    /// Refusals of a node's next resource upload start, each keeping whether an upload start met
+    /// it.
+    refused_resource_upload_starts:
+        DashMap<ClusterNodeName, ResourceUploadStartRefusal, RandomState>,
     /// Failures of every staging of one kind of a restored domain's checkpoints until cleared,
     /// each keeping whether a staging met it.
     failed_restore_checkpoint_stagings:
@@ -461,6 +472,7 @@ enum CommandPausePoint {
     Admission(ClusterNodeName),
     ClientInspectionAdmission(DomainName),
     RuntimeInstallation(ClusterNodeName),
+    InitialClusterParameters(ClusterNodeName),
     ForcedRecoveryMissingSchedule(ClusterNodeName),
     RuntimePreparation(ClusterNodeName),
     ApplicationRevisionResponse(ClusterNodeName),
@@ -538,6 +550,7 @@ impl Default for FaultInjection {
                 stalled_emitter_connectors: DashMap::default(),
                 failed_schedule_publications: DashMap::default(),
                 refused_runtime_installations: DashMap::default(),
+                refused_interest_visibility: DashMap::default(),
                 wasm_reset_publication_authority_losses: DashMap::default(),
                 failed_wasm_reset_publications: DashMap::default(),
                 failed_entity_gate_engagements: DashMap::default(),
@@ -558,6 +571,7 @@ impl Default for FaultInjection {
                 failed_resource_installations: DashMap::default(),
                 refused_resource_publications: DashMap::default(),
                 lost_resource_upload_replies: DashMap::default(),
+                refused_resource_upload_starts: DashMap::default(),
                 failed_restore_checkpoint_stagings: DashMap::default(),
                 failed_restore_state_publications: DashMap::default(),
                 native_metadata_interruptions: DashMap::default(),
@@ -1431,6 +1445,23 @@ impl FaultInjection {
         self.arm_command_pause(CommandPausePoint::Admission(node_id));
     }
 
+    /// Holds initial live-policy discovery after the public observation listeners start.
+    pub fn pause_initial_cluster_parameters_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::InitialClusterParameters(node_id));
+    }
+
+    pub async fn wait_for_initial_cluster_parameters_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::InitialClusterParameters(
+            node_id.clone(),
+        ))
+        .await;
+    }
+
+    pub fn release_initial_cluster_parameters_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::InitialClusterParameters(
+            node_id.clone(),
+        ));
+    }
     pub async fn wait_for_command_admission_pause(&self, node_id: &ClusterNodeName) {
         self.wait_for_command_pause(&CommandPausePoint::Admission(node_id.clone()))
             .await;
@@ -2299,6 +2330,14 @@ impl FaultInjection {
 
     pub(crate) async fn pause_command_admission_if_armed(&self, node_id: &ClusterNodeName) {
         self.pause_command_if_armed(CommandPausePoint::Admission(node_id.clone()))
+            .await;
+    }
+
+    pub(crate) async fn pause_initial_cluster_parameters_if_armed(
+        &self,
+        node_id: &ClusterNodeName,
+    ) {
+        self.pause_command_if_armed(CommandPausePoint::InitialClusterParameters(node_id.clone()))
             .await;
     }
 

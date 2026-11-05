@@ -60,9 +60,11 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use strum::{AsRefStr, EnumIter, IntoEnumIterator};
 use tikv_jemalloc_ctl::{epoch, epoch_mib, stats};
 
+mod command_execution;
 mod interconnection;
 mod restore_staging;
 
+use command_execution::CommandExecutionMetrics;
 pub use interconnection::NodeObservations;
 use interconnection::{InterconnectionCollector, InterconnectionCollectorHandle};
 use restore_staging::RestoreStagingMetrics;
@@ -1614,6 +1616,7 @@ struct BranchInstanceReferences {
 #[derive(Debug, Clone)]
 struct PrometheusMetrics {
     registry: Registry,
+    command_execution: CommandExecutionMetrics,
     restore_staging: RestoreStagingMetrics,
     /// Registered empty and filled in once the node's transport, executor and consensus observer
     /// exist. See [`RuntimeMetrics::install_node_observations`].
@@ -2258,9 +2261,11 @@ impl PrometheusMetrics {
                  name",
             );
 
+        let command_execution = CommandExecutionMetrics::register(&registry);
         let restore_staging = RestoreStagingMetrics::register(&registry);
         Self {
             registry,
+            command_execution,
             restore_staging,
             interconnection,
             messages_total,
@@ -3931,6 +3936,13 @@ impl RuntimeMetrics {
 
     pub(crate) fn record_restore_staging(&self, observation: RestoreStagingObservation) {
         self.series.prometheus.restore_staging.record(observation);
+    }
+
+    pub(crate) fn record_command_execution_refusal(
+        &self,
+        refusal: &nervix_consensus::CommandExecutionAdmissionError,
+    ) {
+        self.series.prometheus.command_execution.record(refusal);
     }
 
     /// Give this node's exposition the transport, execution and consensus state its

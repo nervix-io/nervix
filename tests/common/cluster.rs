@@ -8,7 +8,7 @@ use std::{
     fs::OpenOptions,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
 
@@ -81,19 +81,17 @@ use nervix_primitives::{
 use nervix_server::{
     FaultInjection, SchedulerMode,
     application::{
-        Application, CommandExecutionPolicy, InternalTransportMode, NodeIdentity, NodeSettings,
-        SchedulingSettings, SettingOverride, ShutdownCoordinator, ShutdownOutcome,
+        Application, CommandExecutionPolicy, GrpcTransport, InternalTransportMode, NodeIdentity,
+        NodeSettings, SchedulingSettings, SettingOverride, ShutdownCoordinator, ShutdownOutcome,
         ShutdownSettings, TransactionBounds, TransactionLimits, init_tracing_to_file,
     },
     cluster::{MembershipSettings, MembershipValues},
     memory_pressure::{MemoryPressureConfig, MemoryPressureSettings},
-    runtime::{
-        DEFAULT_DOMAIN_DRAIN_TIMEOUT, DEFAULT_TEMP_DIR, RuntimeSettings, branch_task_stop_timeout,
-    },
+    runtime::{DEFAULT_TEMP_DIR, RuntimeSettings, branch_task_stop_timeout},
 };
 use pulsar::{
-    ConsumerOptions as PulsarConsumerOptions, Pulsar, SubType as PulsarSubType, TokioExecutor,
-    consumer::InitialPosition as PulsarInitialPosition,
+    Authentication, ConsumerOptions as PulsarConsumerOptions, Pulsar, SubType as PulsarSubType,
+    TokioExecutor, consumer::InitialPosition as PulsarInitialPosition,
 };
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
@@ -123,8 +121,8 @@ use super::{
     command_recovery::LeaderRoutes,
     dependencies::{
         DependencyEndpoints, KAFKA_ADDR, MQTT_ADDR, NATS_ADDR, NATS_TLS_ADDR, PULSAR_ADDR,
-        PULSAR_ADMIN_ADDR, PULSAR_TLS_ADDR, RABBITMQ_ADDR, REDIS_ADDR, SQS_ENDPOINT,
-        SQS_TLS_ENDPOINT,
+        PULSAR_ADMIN_ADDR, PULSAR_AUTH_ADDR, PULSAR_AUTH_TOKEN, PULSAR_TLS_ADDR, RABBITMQ_ADDR,
+        REDIS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
     },
     kafka_group_member::ExternalKafkaGroupMember,
     nats_observer::NatsObserver,
@@ -174,7 +172,7 @@ pub(crate) const DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT: Duration =
 /// conflict while an ingestor's check holds a non-durable cursor of the same name.
 const PULSAR_PROVISION_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT: Duration =
-    branch_task_stop_timeout(DEFAULT_DOMAIN_DRAIN_TIMEOUT);
+    branch_task_stop_timeout(nervix_models::DomainDrainTimeout::DEFAULT);
 const DEFAULT_GRACEFUL_SHUTDOWN_PHASE_FLOOR: Duration =
     match DEFAULT_TEST_DRAIN_TIMEOUT.checked_add(DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT) {
         Some(timeout) => timeout,
@@ -185,7 +183,8 @@ const DEFAULT_GRACEFUL_SHUTDOWN_PHASE_FLOOR: Duration =
 /// policy, not an upper bound on valid shutdown. Configured bounded phases may raise its floor.
 const NODE_SHUTDOWN_LIVENESS_WATCHDOG: Duration = Duration::from_secs(5 * 60);
 const _: () = assert!(
-    DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT.as_nanos() > DEFAULT_DOMAIN_DRAIN_TIMEOUT.as_nanos(),
+    DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT.as_nanos()
+        > nervix_models::DomainDrainTimeout::DEFAULT.as_nanos(),
     "the runtime branch stop budget must include its post-drain grace"
 );
 const _: () = assert!(
@@ -230,10 +229,6 @@ pub(crate) fn test_basic_auth_token_for_password(password: &str) -> String {
 
 pub(crate) fn test_basic_authorization_for_password(password: &str) -> String {
     format!("Basic {}", test_basic_auth_token_for_password(password))
-}
-
-pub(crate) fn test_basic_auth_token() -> String {
-    test_basic_auth_token_for_password(TEST_AUTH_PASSWORD)
 }
 
 pub(crate) fn test_basic_authorization() -> String {
@@ -1052,6 +1047,8 @@ pub(crate) struct TestClusterConfig {
     pub transaction_max_source_bytes: u64,
     pub transaction_max_open: usize,
     pub grpc_mode: InternalTransportMode,
+    /// Whether the console's reserved port serves HTTP or HTTPS in this scenario.
+    pub web_console_mode: InternalTransportMode,
     pub graceful_shutdown_drain: bool,
     pub drain_timeout: Duration,
     pub shutdown_timeout: Duration,
@@ -1085,6 +1082,7 @@ impl Default for TestClusterConfig {
             transaction_max_source_bytes: 1024 * 1024,
             transaction_max_open: 1024,
             grpc_mode: InternalTransportMode::Http,
+            web_console_mode: InternalTransportMode::Http,
             graceful_shutdown_drain: false,
             drain_timeout: DEFAULT_TEST_DRAIN_TIMEOUT,
             shutdown_timeout: DEFAULT_TEST_SHUTDOWN_TIMEOUT,
@@ -1225,7 +1223,13 @@ impl Cluster {
             address,
         } in planned
         {
-            let mut spec = NodeSpec::new(&roots.storage, &interconnect_ca, &node_id, index == 1)?;
+            let mut spec = NodeSpec::new(
+                &roots.storage,
+                &interconnect_ca,
+                &node_id,
+                index == 1,
+                config.grpc_mode,
+            )?;
             spec.set_interconnect_address(address);
             spec.dns = dns.as_ref().map(ClusterDns::configuration);
             fault_injection
@@ -1342,6 +1346,51 @@ impl Cluster {
         )
         .await
         .map_err(io::Error::other)
+    }
+
+    /// Starts a node only as far as its public status service, even when no peer is running.
+    /// Initialization and route installation remain the scenario's explicit observations.
+    pub(crate) async fn start_node_until_observable(&mut self, node_id: &str) -> io::Result<()> {
+        let handle = self
+            .nodes
+            .get_mut(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        let node = node_name(&handle.spec.node_id);
+        NodeStartup::start(
+            &node,
+            &mut ObservableNode(handle),
+            PhaseDeadline::after(ATTEMPT_READINESS_BUDGET),
+            StartupRetryPolicy::BindBeforeRuntime,
+        )
+        .await
+        .map_err(io::Error::other)
+    }
+
+    /// Starts one owned node with live-policy discovery held. Readiness must remain false,
+    /// so this fixture waits for the explicit startup boundary instead of the ready probe.
+    pub(crate) async fn start_node_waiting_for_parameters(
+        &mut self,
+        node_id: &str,
+    ) -> io::Result<()> {
+        let handle = self
+            .nodes
+            .get_mut(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        let node = node_name(&handle.spec.node_id);
+        let fault = handle.fault_injection.clone();
+        fault.pause_initial_cluster_parameters_on(node.clone());
+        let deadline = PhaseDeadline::after(NODE_STARTUP_BUDGET);
+        handle.start()?;
+        match deadline
+            .bound(fault.wait_for_initial_cluster_parameters_pause(&node))
+            .await
+        {
+            BeforeDeadline::Finished(()) => Ok(()),
+            BeforeDeadline::Passed => Err(io::Error::other(format!(
+                "node '{node_id}' did not reach initial live-policy discovery within {:?}",
+                deadline.elapsed()
+            ))),
+        }
     }
 
     /// Names a setting `node_id` starts with from its next launch on, over the cluster's own. A
@@ -1630,7 +1679,13 @@ impl Cluster {
                 .or_default()
                 .extend(pending.setting_overrides);
         }
-        let mut spec = NodeSpec::new(&self.roots.storage, &self.interconnect_ca, node_id, false)?;
+        let mut spec = NodeSpec::new(
+            &self.roots.storage,
+            &self.interconnect_ca,
+            node_id,
+            false,
+            config.grpc_mode,
+        )?;
         if let Some(cluster_id) = &pending.cluster_id {
             spec.claim_cluster(&self.interconnect_ca, cluster_id)?;
         }
@@ -2154,17 +2209,18 @@ impl Cluster {
             }
         }
         if arrangement.relayed_voter().is_some() {
-            // The relayed voter's scenario observes scheduling while the bootstrap node leads, so
-            // that node starts first. The held heartbeat can keep replication from catching the
-            // voter up, so the others start without waiting for catch-up: the scenario reaches and
-            // releases the observation barrier before it waits for that.
-            self.start_node_within(&bootstrap, construction).await?;
-            for node_id in node_ids.iter().filter(|node_id| **node_id != bootstrap) {
-                self.start_node_without_waiting_for_raft_catch_up_within(node_id, construction)
-                    .await?;
-            }
-            self.wait_for_any_leader(&bootstrap).await?;
-            return self.wait_for_leader(&bootstrap, Some(&bootstrap)).await;
+            // Returning nodes discover live policy from another process before reporting ready,
+            // so every voter starts together. The held heartbeat can prevent catch-up; the
+            // scenario releases it after observing scheduling with the bootstrap node leading.
+            self.start_restarted_nodes_together(construction, None)
+                .await?;
+            let leader = self.wait_for_leader_among_running().await?;
+            self.leadership_move(&bootstrap)
+                .complete(&leader, construction.nested(STATUS_WAIT_BUDGET))
+                .await?;
+            self.fault_injection
+                .begin_startup_voter_observation(&node_name(&bootstrap));
+            return Ok(());
         }
         self.start_restarted_nodes_together(
             construction,
@@ -2422,7 +2478,7 @@ impl Cluster {
             .nodes
             .get(node_id)
             .ok_or_else(|| io::Error::other(format!("unknown node '{node_id}'")))?;
-        Ok(handle.spec.web_console_url())
+        Ok(handle.spec.web_console_url(handle.config.web_console_mode))
     }
 
     pub(crate) fn http_uri(&self, node_id: &str, path: &str) -> io::Result<String> {
@@ -2442,7 +2498,9 @@ impl Cluster {
             .nodes
             .get(node_id)
             .ok_or_else(|| io::Error::other(format!("unknown node '{node_id}'")))?;
-        Ok(handle.spec.web_console_url_with_password(password))
+        Ok(handle
+            .spec
+            .web_console_url_with_password(password, handle.config.web_console_mode))
     }
 
     pub(crate) fn node_base_dir(&self, node_id: &str) -> io::Result<PathBuf> {
@@ -2451,6 +2509,20 @@ impl Cluster {
             .get(node_id)
             .ok_or_else(|| io::Error::other(format!("unknown node '{node_id}'")))?;
         Ok(handle.spec.base_dir.clone())
+    }
+
+    /// Replaces one node's provisioned files. Its running native listener retains its loaded key.
+    pub(crate) fn replace_native_tls_material(
+        &self,
+        node_id: &str,
+        certificate: &[u8],
+        private_key: &[u8],
+    ) -> io::Result<()> {
+        let directory = self.node_base_dir(node_id)?;
+        let paths = NativeSessionTlsPaths::for_node(&directory);
+        std::fs::write(paths.certificate, certificate)?;
+        std::fs::write(paths.private_key, private_key)?;
+        Ok(())
     }
 
     /// Where one node exposes its metrics, as an owned address a sampling task can keep after the
@@ -2619,6 +2691,11 @@ impl Cluster {
 
     pub(crate) async fn publish_pulsar_tls(&self, topic: &str, payload: &str) -> io::Result<()> {
         publish_pulsar_tls(&self.dependencies, topic, payload).await
+    }
+
+    /// Publishes to the broker that authenticates its clients, with the token it accepts.
+    pub(crate) async fn publish_pulsar_auth(&self, topic: &str, payload: &str) -> io::Result<()> {
+        publish_pulsar_auth(&self.dependencies, topic, payload).await
     }
 
     /// Publishes `messages` to `topic` in order, each under its Pulsar key.
@@ -3324,6 +3401,11 @@ impl Cluster {
         observe_pulsar_tls(&self.dependencies, topic).await
     }
 
+    /// Observes a topic of the broker that authenticates its clients, with the token it accepts.
+    pub(crate) async fn observe_pulsar_auth(&self, topic: &str) -> io::Result<BrokerObserver> {
+        observe_pulsar_auth(&self.dependencies, topic).await
+    }
+
     pub(crate) async fn observe_nats(&self, subject: &str) -> io::Result<BrokerObserver> {
         observe_nats(&self.dependencies, subject).await
     }
@@ -3392,6 +3474,17 @@ impl Cluster {
     pub(crate) fn restore_gossip_for_node(&self, node_id: &str) {
         self.fault_injection
             .restore_gossip_for_node(&node_name(node_id));
+    }
+
+    /// Makes `node_id` refuse the next subscription interest visibility check it answers.
+    pub(crate) fn refuse_interest_visibility_on(&self, node_id: &str) {
+        self.fault_injection
+            .refuse_interest_visibility_on(node_name(node_id));
+    }
+
+    pub(crate) fn interest_visibility_refusal_delivered(&self, node_id: &str) -> bool {
+        self.fault_injection
+            .interest_visibility_refusal_delivered(&node_name(node_id))
     }
 
     pub(crate) async fn wait_for_health_response_pause(
@@ -4268,25 +4361,56 @@ impl NodeHandle {
             }
             NodeTaskState::NotStarted | NodeTaskState::Terminal(_) => {}
         }
-        if self.config.grpc_mode == InternalTransportMode::Https {
-            ensure_dev_tls_assets()?;
-        }
-
         let settings = self.config.node_settings(&self.spec.node_id)?;
         let db_path = self.spec.db_path()?;
+        let grpc_transport = match self.config.grpc_mode {
+            InternalTransportMode::Http => GrpcTransport::Http,
+            InternalTransportMode::Https => {
+                let paths = NativeSessionTlsPaths::for_node(&self.spec.base_dir);
+                let listen_addr = parse_addr(&self.spec.grpc_https_addr())?;
+                GrpcTransport::Https {
+                    listen_addr,
+                    advertise_addr: listen_addr.into(),
+                    certificate: paths.certificate,
+                    private_key: paths.private_key,
+                }
+            }
+        };
+        let console_tls = matches!(self.config.web_console_mode, InternalTransportMode::Https);
+        let console_listen_addr = if console_tls {
+            SocketAddr::new(HOST, 0)
+        } else {
+            parse_addr(&self.spec.web_console_addr())?
+        };
+        let console_https_listen_addr = if console_tls {
+            Some(parse_addr(&self.spec.web_console_addr())?)
+        } else {
+            None
+        };
+        let console_certificate = if console_tls {
+            Some(self.spec.interconnect_tls_cert.clone())
+        } else {
+            None
+        };
+        let console_private_key = if console_tls {
+            Some(self.spec.interconnect_tls_key.clone())
+        } else {
+            None
+        };
         let identity = NodeIdentity::builder()
             .addr(parse_addr(&self.spec.grpc_addr())?)
-            .grpc_mode(self.config.grpc_mode)
-            .grpc_https_listen_addr(Some(parse_addr(&self.spec.grpc_https_addr())?))
+            .grpc_transport(grpc_transport)
             .http_listen_addr(parse_addr(&self.spec.http_addr())?)
             .https_listen_addr(parse_addr(&self.spec.https_addr())?)
             .observability_listen_addr(parse_addr(&self.spec.observability_addr())?)
-            .web_console_listen_addr(parse_addr(&self.spec.web_console_addr())?)
+            .web_console_listen_addr(console_listen_addr)
             .web_console_advertise_addr(Some(parse_addr(&self.spec.web_console_addr())?.into()))
+            .web_console_https_listen_addr(console_https_listen_addr)
+            .web_console_tls_cert(console_certificate)
+            .web_console_tls_key(console_private_key)
             .cluster_id(self.spec.cluster_id.clone())
             .node_id(node_name(&self.spec.node_id))
             .grpc_advertise_addr(parse_addr(&self.spec.grpc_addr())?.into())
-            .grpc_https_advertise_addr(Some(parse_addr(&self.spec.grpc_https_addr())?.into()))
             .interconnect_listen_addr(self.spec.interconnect_listen_addr())
             .interconnect_advertise_addr(
                 self.spec
@@ -4365,7 +4489,7 @@ impl NodeHandle {
         let domain_drain_timeout = self
             .fault_injection
             .domain_drain_timeout()
-            .unwrap_or(DEFAULT_DOMAIN_DRAIN_TIMEOUT);
+            .unwrap_or(nervix_models::DomainDrainTimeout::DEFAULT);
         let configured_phase_floor = application_drain_timeout
             .checked_add(branch_task_stop_timeout(domain_drain_timeout))
             .ok_or_else(|| {
@@ -4533,6 +4657,39 @@ impl NodeHandle {
     }
 }
 
+/// A startup whose completion boundary is public observation, before runtime initialization.
+/// It shares the ordinary node's launch, failed-attempt cleanup and listener reallocation.
+struct ObservableNode<'node>(&'node mut NodeHandle);
+
+impl StartableNode for ObservableNode<'_> {
+    fn launch(&mut self) -> io::Result<()> {
+        self.0.launch()
+    }
+
+    async fn readiness(
+        &mut self,
+        attempt: u32,
+        readiness: PhaseDeadline,
+    ) -> error_stack::Result<(), NodeStartupError> {
+        let endpoint = self.0.status_endpoint();
+        let node = node_name(&self.0.spec.node_id);
+        self.0
+            .task
+            .wait_until_ready(&node, attempt, readiness, POLL_INTERVAL, |phase| {
+                ReadinessProbeOutcome::probe_observation(&endpoint, phase)
+            })
+            .await
+    }
+
+    async fn clean_up(&mut self, cleanup: PhaseDeadline) -> AttemptCleanup {
+        self.0.clean_up(cleanup).await
+    }
+
+    fn move_to_fresh_ports(&mut self, ports: StartupPorts) -> io::Result<()> {
+        self.0.move_to_fresh_ports(ports)
+    }
+}
+
 impl StartableNode for NodeHandle {
     fn launch(&mut self) -> io::Result<()> {
         self.start()
@@ -4671,6 +4828,21 @@ enum NodeShutdownError {
     Deadline(NodeStopRecord),
 }
 
+/// Files explicitly provisioned for each HTTPS native listener when its node is first created.
+struct NativeSessionTlsPaths {
+    certificate: PathBuf,
+    private_key: PathBuf,
+}
+
+impl NativeSessionTlsPaths {
+    fn for_node(directory: &Path) -> Self {
+        Self {
+            certificate: directory.join("native-session.pem"),
+            private_key: directory.join("native-session-key.pem"),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct NodeSpec {
     node_id: String,
@@ -4731,11 +4903,24 @@ impl NodeSpec {
         interconnect_ca: &InterconnectTestCa,
         node_id: &str,
         allow_bootstrap: bool,
+        grpc_mode: InternalTransportMode,
     ) -> io::Result<Self> {
         let base_dir = root.path().join(node_id);
         std::fs::create_dir_all(&base_dir)?;
         let (interconnect_tls_cert, interconnect_tls_key) =
             interconnect_ca.issue_node(TEST_CLUSTER_ID, node_id, &base_dir)?;
+        if matches!(grpc_mode, InternalTransportMode::Https) {
+            ensure_dev_tls_assets()?;
+            let paths = NativeSessionTlsPaths::for_node(&base_dir);
+            std::fs::copy(
+                dev_tls_ca_file().with_file_name("node-2.pem"),
+                paths.certificate,
+            )?;
+            std::fs::copy(
+                dev_tls_ca_file().with_file_name("node-2-key.pem"),
+                paths.private_key,
+            )?;
+        }
         let ports = NodePorts::allocate()?;
         let syslog_ingestor_host = Self::syslog_ingestor_host(node_id)?;
 
@@ -4924,18 +5109,18 @@ impl NodeSpec {
         format!("http://{}:{}{path}", HOST, self.http_port)
     }
 
-    fn web_console_url(&self) -> String {
-        format!(
-            "http://{}:{}/console/?auth={}",
-            HOST,
-            self.web_console_port,
-            test_basic_auth_token()
-        )
+    fn web_console_url(&self, mode: InternalTransportMode) -> String {
+        self.web_console_url_with_password(TEST_AUTH_PASSWORD, mode)
     }
 
-    fn web_console_url_with_password(&self, password: &str) -> String {
+    fn web_console_url_with_password(&self, password: &str, mode: InternalTransportMode) -> String {
+        let scheme = match mode {
+            InternalTransportMode::Http => "http",
+            InternalTransportMode::Https => "https",
+        };
         format!(
-            "http://{}:{}/console/?auth={}",
+            "{}://{}:{}/console/?auth={}",
+            scheme,
             HOST,
             self.web_console_port,
             test_basic_auth_token_for_password(password)
@@ -5196,6 +5381,19 @@ pub(crate) struct AcknowledgedHttpPublisher {
 }
 
 impl AcknowledgedHttpPublisher {
+    /// Bounds the complete request and its explicit refusal retries, including a stalled request
+    /// or response body. Run this on an owned runtime task when the scenario runner can stall.
+    pub(crate) async fn publish_bounded(&self, payload: &str) -> io::Result<()> {
+        nervix_primitives::time::timeout(self.wait, self.publish(payload))
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("HTTP payload was not acknowledged within {:?}", self.wait),
+                )
+            })?
+    }
+
     /// Posts `payload` until the endpoint answers 200 with a completed outcome.
     ///
     /// The sender owns the retry of a 503: a full ACK window, a downstream refusal, an expired ACK
@@ -6048,7 +6246,7 @@ async fn publish_pulsar(
     topic: &str,
     payload: &str,
 ) -> io::Result<()> {
-    publish_pulsar_with_addr(dependencies.get(PULSAR_ADDR)?, None, topic, payload).await
+    publish_pulsar_with_addr(dependencies.get(PULSAR_ADDR)?, None, None, topic, payload).await
 }
 
 async fn publish_pulsar_tls(
@@ -6059,15 +6257,40 @@ async fn publish_pulsar_tls(
     publish_pulsar_with_addr(
         dependencies.get(PULSAR_TLS_ADDR)?,
         Some(dependencies.tls_ca_pem()?),
+        None,
         topic,
         payload,
     )
     .await
 }
 
+async fn publish_pulsar_auth(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    payload: &str,
+) -> io::Result<()> {
+    publish_pulsar_with_addr(
+        dependencies.get(PULSAR_AUTH_ADDR)?,
+        None,
+        Some(pulsar_token_authentication(dependencies)?),
+        topic,
+        payload,
+    )
+    .await
+}
+
+/// The credential the broker that authenticates its clients accepts.
+fn pulsar_token_authentication(dependencies: &DependencyEndpoints) -> io::Result<Authentication> {
+    Ok(Authentication {
+        name: "token".to_string(),
+        data: dependencies.get(PULSAR_AUTH_TOKEN)?.as_bytes().to_vec(),
+    })
+}
+
 async fn publish_pulsar_with_addr(
     addr: &str,
     ca_certificate_chain: Option<Vec<u8>>,
+    authentication: Option<Authentication>,
     topic: &str,
     payload: &str,
 ) -> io::Result<()> {
@@ -6078,6 +6301,9 @@ async fn publish_pulsar_with_addr(
             let mut builder = Pulsar::builder(addr, TokioExecutor);
             if let Some(ca_certificate_chain) = ca_certificate_chain.clone() {
                 builder = builder.with_certificate_chain(ca_certificate_chain);
+            }
+            if let Some(authentication) = authentication.clone() {
+                builder = builder.with_auth(authentication);
             }
             let pulsar: Pulsar<_> = builder.build().await.map_err(io::Error::other)?;
             let mut producer = pulsar
@@ -7416,6 +7642,7 @@ async fn observe_pulsar(
     observe_pulsar_with_addr(
         dependencies.get(PULSAR_ADDR)?,
         None,
+        None,
         topic,
         PulsarSubType::Exclusive,
     )
@@ -7428,6 +7655,7 @@ async fn observe_pulsar_shared(
 ) -> io::Result<BrokerObserver> {
     observe_pulsar_with_addr(
         dependencies.get(PULSAR_ADDR)?,
+        None,
         None,
         topic,
         PulsarSubType::Shared,
@@ -7442,6 +7670,21 @@ async fn observe_pulsar_tls(
     observe_pulsar_with_addr(
         dependencies.get(PULSAR_TLS_ADDR)?,
         Some(dependencies.tls_ca_pem()?),
+        None,
+        topic,
+        PulsarSubType::Exclusive,
+    )
+    .await
+}
+
+async fn observe_pulsar_auth(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+) -> io::Result<BrokerObserver> {
+    observe_pulsar_with_addr(
+        dependencies.get(PULSAR_AUTH_ADDR)?,
+        None,
+        Some(pulsar_token_authentication(dependencies)?),
         topic,
         PulsarSubType::Exclusive,
     )
@@ -7459,6 +7702,7 @@ fn host_unix_millis() -> u64 {
 async fn observe_pulsar_with_addr(
     addr: &str,
     ca_certificate_chain: Option<Vec<u8>>,
+    authentication: Option<Authentication>,
     topic: &str,
     subscription_type: PulsarSubType,
 ) -> io::Result<BrokerObserver> {
@@ -7478,6 +7722,9 @@ async fn observe_pulsar_with_addr(
             let mut builder = Pulsar::builder(addr, TokioExecutor);
             if let Some(ca_certificate_chain) = ca_certificate_chain.clone() {
                 builder = builder.with_certificate_chain(ca_certificate_chain);
+            }
+            if let Some(authentication) = authentication.clone() {
+                builder = builder.with_auth(authentication);
             }
             let pulsar: Pulsar<_> = builder.build().await.map_err(io::Error::other)?;
             let consumer = pulsar

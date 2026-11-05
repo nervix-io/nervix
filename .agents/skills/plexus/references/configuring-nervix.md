@@ -49,6 +49,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Session subscriptions and domain clock attachment | `Sessions` |
 | Configuration backups, their archives, bounded waits and exact-reference recovery, `DESCRIBE BACKUP`, and `RESTORE` | `Backup And Restore`; cut timeout phases and their elapsed measurements: `Backup And Restore Architecture` → `Observability` |
 | Metrics and runtime inspection | `Metrics And Observability` |
+| Persistent-command history size, retry-fence age and admission refusal metrics | `Metrics And Observability` → `Command Execution History` |
 | Full graph examples | `Examples` |
 | Applications that pace producers and consumers by an attached domain clock, and the `TIMESTAMP AT`/`TIMESTAMP NOW` admission they meet | `Paced Simulation Drivers` and `Domains And Time` |
 | WASM guest ABI and output timing | `WASM Processor Guests` |
@@ -66,6 +67,12 @@ is outside the curated Plexus index.
 For the CLI's `subscribe` and `domain-clock` shell streams and their line formats, read
 [Command Line Client](https://docs.nervix.io/client-tools-cli.html) directly. Follow the same
 documentation version as the selected index; this client chapter is outside the curated Plexus index.
+
+For browser controls waiting behind commands, lookup replacement and reconnect behavior, read
+[Web Console](https://docs.nervix.io/client-tools-web-console.html#bounded-buffers) and
+[Client Session Protocol](https://docs.nervix.io/client-session-protocol.html#restoration-and-bounded-consumers)
+directly. Follow the same documentation version as the selected index; these client chapters are
+outside the curated Plexus index.
 
 Prefer the narrow indexed topic over an old copied snippet. Do not leave the immutable version
 selected by the documentation index when following related material.
@@ -199,6 +206,8 @@ current connection, retry and deadline limits.
   TLS trust roots, handshake capacity, message/frame limits, inbound idle bounds, recovery and graceful close,
   read `Ingestors` → `WEBSOCKETS CONNECTION` in the selected documentation index.
   A successful upgrade does not establish data delivery or reset repeated-failure backoff.
+  Committed `http-header-fields` and `http-header-bytes` caps govern literal upgrade headers,
+  including the canonical subprotocol offer, at admission and during parameter changes.
   Check the effective idle bound together with the ping cadence and the peer's inbound activity.
 - Every internal schema and every declared JSON, CBOR, or AVRO wire schema is non-empty; types and
   optionality match exactly. Declared wire formats are separate entity kinds even when their names
@@ -257,6 +266,8 @@ current connection, retry and deadline limits.
 - For Core NATS completion, reconnect retries and finish outcomes, read
   [Emitters → NATS](../../../../docs/src/emitters.md#nats) and
   [Finishing an emitter](../../../../docs/src/connector-contract.md#finishing-an-emitter).
+  For NATS client authentication, secret inspection and mounted credentials, read
+  [Ingestors → NATS](../../../../docs/src/ingestors.md#nats) before choosing a client CONFIG key.
 - CLIENT, ClickHouse, Postgres, MySQL, and MongoDB emitters declare `BATCH MAX MESSAGES <n> MAX SIZE
   <bytes>` before `FLUSH`; other supported emitters may, with `MAX MESSAGES` from 1 to 65,536, a positive
   whole-unit `MAX SIZE`, at most `1MiB` for SQS, `ON EMITTING BATCH` in a batching Sentry
@@ -454,7 +465,8 @@ current connection, retry and deadline limits.
 - An `MQTT TOPIC` emitter writes its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, `NO ACK` only at
   `QOS 0` and `ACK` only at `QOS 1` or `QOS 2`. `SET MODE` stays within the written quality of
   service, and `SET TO` changes it. Read `Emitters` → `MQTT` for what each level completes on and
-  for the persistent session a new client cannot take over.
+  for the persistent session a new client cannot take over. Use that section for `RETAIN`, typed
+  publish `PROPERTIES` and ordered, repeated user properties written with `write_header`.
 - An `MQTT CLIENT`'s `addr` is `mqtt://` or `mqtts://`, a host and a port, with no credentials,
   path or query: write `username` and `password` (redacted on inspection), `keep_alive_ms` in
   whole seconds and the source admission bound `max_packet_size` as their own keys, checked against
@@ -525,7 +537,8 @@ current connection, retry and deadline limits.
   transport headers. Read `Ingestors` → `Pulsar` for identity formatting and conversion bounds.
 - A `PULSAR CLIENT`'s `namespace` is exactly `'tenant/namespace'` (default `public/default`), and
   its TLS keys require a `pulsar+ssl://` `addr`; check both against `Ingestors` → `Pulsar` before
-  generating a client.
+  generating a client. A client authenticates with a confidential `auth_token`, a paired
+  `tls_cert_file` and `tls_key_file`, or both, the same way in both directions.
 - Every client ingestor is a `CLIENT PRODUCER INGESTOR` whose source is `FROM SCHEMA <schema> MODE
   ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d> ON QUIESCE
   SUSPEND` and nothing else: no external connector client, codec, `DECODE USING`, headers, or `NO ACK`. The

@@ -7,7 +7,7 @@
 //!   the connection it opens to the broker through the node resolver, the session, quality of
 //!   service and shared subscription an ingestor reads through, the Maximum Packet Size an ingestor
 //!   advertises, manual acknowledgement and local replay of publishes, the quality of service each
-//!   record is published at, the Maximum Packet Size the broker declares and the rejection of a
+//!   record is published at, its retain flag and MQTT 5 properties, the Maximum Packet Size the broker declares and the rejection of a
 //!   record whose PUBLISH packet would exceed it, the QoS 0 publishes an emitter's client still holds
 //!   until it sends them, and confirmation classification.
 //! - **Depends on.** The connector contract, the node DNS resolver, vocabulary values,
@@ -30,6 +30,7 @@
 mod client_options;
 mod connection;
 mod ingestor;
+mod publication;
 #[cfg(test)]
 #[cfg_attr(
     nervix_lint,
@@ -71,7 +72,7 @@ use nervix_connector::{
     PerRecordOutcome, RecordEmitter, RejectedEmitterMember, next_retry_delay,
 };
 use nervix_dns::DnsResolver;
-use nervix_models::{ClientConfigEntry, MqttTopicName};
+use nervix_models::{ClientConfigEntry, MqttTopicName, PropertyType};
 use nervix_primitives::{
     sync::{
         Arc,
@@ -82,6 +83,7 @@ use nervix_primitives::{
     time::{Instant, sleep, timeout_at},
 };
 use nervix_recovery::Discarded as _;
+use publication::MqttPublishProperties;
 use rumqttc::{
     AsyncClient, ClientError as MqttClientError, ConnAck, Event, Incoming,
     PubAckReason as MqttPubAckReason, PubRecReason as MqttPubRecReason, PublishNotice,
@@ -140,6 +142,14 @@ pub struct MqttTopicEmitter {
 
 /// Why one record is not a PUBLISH packet this emitter can send.
 #[derive(Debug, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "the emitter projects these validation failures into per-record external \
+                  rejections"
+    )
+)]
 enum MqttRecordError {
     #[error(
         "MQTT PUBLISH packet of {packet_bytes} bytes exceeds the broker's maximum packet size of \
@@ -150,10 +160,21 @@ enum MqttRecordError {
         maximum: NonZeroU32,
     },
     #[error(
-        "MQTT PUBLISH payload of {payload_bytes} bytes does not fit the largest packet the \
+        "MQTT PUBLISH with a {payload_bytes}-byte payload does not fit the largest packet the \
          protocol can express"
     )]
     BeyondProtocol { payload_bytes: usize },
+    #[error("MQTT PUBLISH field '{field}' of {bytes} bytes exceeds its 65535-byte wire limit")]
+    PropertyLength { field: &'static str, bytes: usize },
+    #[error("MQTT PUBLISH field '{field}' contains NUL")]
+    PropertyNul { field: &'static str },
+    #[error("MQTT PUBLISH response_topic must name one nonempty literal topic")]
+    ResponseTopic,
+    #[error("MQTT PUBLISH property '{name}' does not accept a value of type {actual}")]
+    PropertyType {
+        name: &'static str,
+        actual: PropertyType,
+    },
 }
 
 type MqttRecordResult<T> = Result<T, Report<MqttRecordError>>;
@@ -163,15 +184,13 @@ type MqttRecordResult<T> = Result<T, Report<MqttRecordError>>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MqttPublishFraming {
     /// The variable header in front of the payload: the topic's two-byte length prefix and its
-    /// bytes, the packet identifier QoS 1 and 2 carry, and the one-byte length of the empty
-    /// property section.
+    /// bytes, and the packet identifier QoS 1 and 2 carry. The property section is record-local.
     variable_header_bytes: usize,
 }
 
 impl MqttPublishFraming {
     fn new(topic: &MqttTopicName, mode: MqttPublishingMode) -> Self {
         const TOPIC_LENGTH_PREFIX_BYTES: usize = 2;
-        const PROPERTY_LENGTH_BYTES: usize = 1;
         const IN_MEMORY: &str = "a topic name and a few framing bytes fit in usize";
         let packet_identifier_bytes = match mode {
             MqttPublishingMode::Qos0 => 0,
@@ -180,11 +199,8 @@ impl MqttPublishFraming {
         let topic_bytes = TOPIC_LENGTH_PREFIX_BYTES
             .checked_add(topic.as_str().len())
             .assured(IN_MEMORY);
-        let identified_bytes = topic_bytes
+        let variable_header_bytes = topic_bytes
             .checked_add(packet_identifier_bytes)
-            .assured(IN_MEMORY);
-        let variable_header_bytes = identified_bytes
-            .checked_add(PROPERTY_LENGTH_BYTES)
             .assured(IN_MEMORY);
         Self {
             variable_header_bytes,
@@ -193,9 +209,22 @@ impl MqttPublishFraming {
 
     /// The size of the whole PUBLISH packet the client writes for a payload of `payload_bytes`:
     /// the fixed header byte, the Remaining Length, the variable header and the payload.
-    fn packet_bytes(self, payload_bytes: usize) -> MqttRecordResult<usize> {
+    fn packet_bytes(
+        self,
+        payload_bytes: usize,
+        properties_bytes: usize,
+    ) -> MqttRecordResult<usize> {
         const BOUNDED: &str = "the remaining length was checked against the MQTT maximum above";
-        let Some(remaining_bytes) = self.variable_header_bytes.checked_add(payload_bytes) else {
+        let mut remaining = self
+            .variable_header_bytes
+            .checked_add(Self::length_bytes(properties_bytes));
+        if let Some(bytes) = remaining {
+            remaining = bytes.checked_add(properties_bytes);
+        }
+        if let Some(bytes) = remaining {
+            remaining = bytes.checked_add(payload_bytes);
+        }
+        let Some(remaining_bytes) = remaining else {
             return Err(Report::new(MqttRecordError::BeyondProtocol {
                 payload_bytes,
             }));
@@ -205,17 +234,23 @@ impl MqttPublishFraming {
                 payload_bytes,
             }));
         }
-        let length_bytes: usize = match remaining_bytes {
-            0..=127 => 1,
-            128..=16_383 => 2,
-            16_384..=2_097_151 => 3,
-            _ => 4,
-        };
+        let length_bytes = Self::length_bytes(remaining_bytes);
         let fixed_header_bytes = length_bytes.checked_add(1).verified(BOUNDED);
         let packet_bytes = remaining_bytes
             .checked_add(fixed_header_bytes)
             .verified(BOUNDED);
         Ok(packet_bytes)
+    }
+
+    /// The MQTT variable byte integer's width. A value above its four-byte range is rejected by
+    /// `packet_bytes` before a measured packet is returned.
+    fn length_bytes(value: usize) -> usize {
+        match value {
+            0..=127 => 1,
+            128..=16_383 => 2,
+            16_384..=2_097_151 => 3,
+            _ => 4,
+        }
     }
 }
 
@@ -504,11 +539,17 @@ impl MqttTopicEmitter {
             .map_err(|error| Report::new(error).change_context(invalid()))
     }
 
-    /// Accepts a payload of `payload_bytes` whose PUBLISH packet the protocol can express and the
-    /// broker declared it will receive, or says why no packet of it can be sent.
-    fn admit(&self, payload_bytes: usize) -> MqttRecordResult<()> {
-        let packet_bytes = self.framing.packet_bytes(payload_bytes)?;
-        self.broker_limit.admit(packet_bytes)
+    /// Validates one owned envelope and admits its complete packet before the driver takes it.
+    fn prepare_options(&self, record: &mut EmitterRecord) -> MqttRecordResult<PublishOptions> {
+        let properties = MqttPublishProperties::new(
+            std::mem::take(&mut record.envelope.properties),
+            std::mem::take(&mut record.headers),
+        )?;
+        let packet_bytes = self
+            .framing
+            .packet_bytes(record.payload.len(), properties.encoded_bytes())?;
+        self.broker_limit.admit(packet_bytes)?;
+        Ok(properties.into_options(self.mode, record.envelope.retain))
     }
 
     /// Whether the client refused to take a record because of the record itself, so handing it over
@@ -576,25 +617,26 @@ impl MqttTopicEmitter {
     ) -> PerRecordOutcome<EmitterRecordId> {
         self.unsent.drop_settled();
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
-        for record in records {
+        for mut record in records {
             nervix_primitives::task::consume_budget().await;
             let record_id = record.id;
             let occurred_at = record.occurred_at;
             // The client would fail its connection on a packet the broker refuses to receive, so
             // a record whose packet cannot be sent is rejected before it is handed over.
-            if let Err(error) = self.admit(record.payload.len()) {
-                outcome.reject(RejectedEmitterMember::external(
-                    record_id,
-                    occurred_at,
-                    format!("mqtt rejected record: {error}"),
-                ));
-                continue;
-            }
-            let handed_over = self.client.try_publish_tracked(
-                self.topic.as_str(),
-                record.payload,
-                PublishOptions::at_most_once(),
-            );
+            let options = match self.prepare_options(&mut record) {
+                Ok(options) => options,
+                Err(error) => {
+                    outcome.reject(RejectedEmitterMember::external(
+                        record_id,
+                        occurred_at,
+                        format!("mqtt rejected record: {error}"),
+                    ));
+                    continue;
+                }
+            };
+            let handed_over =
+                self.client
+                    .try_publish_tracked(self.topic.as_str(), record.payload, options);
             match handed_over {
                 Ok(notice) => {
                     self.unsent.hold(Box::pin(notice.wait_completion_async()));
@@ -628,25 +670,26 @@ impl MqttTopicEmitter {
     ) -> PerRecordOutcome<EmitterRecordId> {
         let mut window: ConfirmationWindow<MqttAnswer> =
             ConfirmationWindow::new(MQTT, settings, records.len());
-        for record in records {
+        for mut record in records {
             nervix_primitives::task::consume_budget().await;
             let record_id = record.id;
             let occurred_at = record.occurred_at;
             // The client would fail its connection on a packet the broker refuses to receive, so
             // a record whose packet cannot be sent is rejected before it is handed over.
-            if let Err(error) = self.admit(record.payload.len()) {
-                window.reject(RejectedEmitterMember::external(
-                    record_id,
-                    occurred_at,
-                    format!("mqtt rejected record: {error}"),
-                ));
-                continue;
-            }
-            let handed_over = self.client.try_publish_tracked(
-                self.topic.as_str(),
-                record.payload,
-                self.mode.publish_options(),
-            );
+            let options = match self.prepare_options(&mut record) {
+                Ok(options) => options,
+                Err(error) => {
+                    window.reject(RejectedEmitterMember::external(
+                        record_id,
+                        occurred_at,
+                        format!("mqtt rejected record: {error}"),
+                    ));
+                    continue;
+                }
+            };
+            let handed_over =
+                self.client
+                    .try_publish_tracked(self.topic.as_str(), record.payload, options);
             let notice = match handed_over {
                 Ok(notice) => notice,
                 Err(error) if Self::is_record_client_rejection(&error) => {
@@ -784,11 +827,11 @@ mod tests {
         }
     }
 
-    fn topic(name: &str) -> MqttTopicName {
+    pub(super) fn topic(name: &str) -> MqttTopicName {
         MqttTopicName::parse(name).expect("the test topic is a valid topic name")
     }
 
-    fn confirmed() -> AckConfirmation {
+    pub(super) fn confirmed() -> AckConfirmation {
         AckConfirmation {
             max_in_flight: NonZeroUsize::MIN,
             timeout: Duration::from_secs(1),
@@ -822,7 +865,7 @@ mod tests {
             let framing = MqttPublishFraming::new(&topic("batched_out"), mode);
             for payload_bytes in [0, 1, 100, 127, 128, 16_000, 16_383, 16_384, 2_097_000] {
                 let packet_bytes = framing
-                    .packet_bytes(payload_bytes)
+                    .packet_bytes(payload_bytes, 0)
                     .expect("every tested payload fits an MQTT packet");
                 assert_eq!(
                     packet_bytes,
@@ -840,12 +883,12 @@ mod tests {
         let largest_payload = MQTT_MAX_REMAINING_LENGTH - 4;
 
         let largest_packet = framing
-            .packet_bytes(largest_payload)
+            .packet_bytes(largest_payload, 0)
             .expect("the largest remaining length is still a packet");
         assert_eq!(largest_packet, MQTT_MAX_REMAINING_LENGTH + 5);
         for payload_bytes in [largest_payload + 1, usize::MAX] {
             let error = framing
-                .packet_bytes(payload_bytes)
+                .packet_bytes(payload_bytes, 0)
                 .expect_err("a payload past the largest remaining length has no packet");
             assert_eq!(
                 error.current_context(),
@@ -937,9 +980,38 @@ mod tests {
         qos: u8,
         payload: PayloadLength,
         broker_maximum: Option<u32>,
+        user_property: Option<u16>,
+        message_expiry: Option<u32>,
     }
 
     impl PublishCase {
+        fn properties(&self) -> Option<rumqttc::PublishProperties> {
+            let user_properties = match self.user_property {
+                Some(bytes) => vec![("k".to_owned(), "x".repeat(usize::from(bytes)))],
+                None => Vec::new(),
+            };
+            let properties = rumqttc::PublishProperties {
+                user_properties,
+                message_expiry_interval: self.message_expiry,
+                ..Default::default()
+            };
+            if properties == rumqttc::PublishProperties::default() {
+                None
+            } else {
+                Some(properties)
+            }
+        }
+
+        fn property_bytes(&self) -> usize {
+            let user_bytes = match self.user_property {
+                // Identifier, two string lengths, the one-byte key, then the value.
+                Some(bytes) => 6 + usize::from(bytes),
+                None => 0,
+            };
+            let expiry_bytes = if self.message_expiry.is_some() { 5 } else { 0 };
+            user_bytes + expiry_bytes
+        }
+
         fn topic(&self) -> String {
             let mut topic = String::with_capacity(self.topic.len());
             for byte in &self.topic {
@@ -1014,11 +1086,13 @@ mod tests {
                 } else {
                     2
                 };
-                let header = 2 + name.len() + identifier + 1;
-                assert_eq!(framing.variable_header_bytes, header);
+                let base_header = 2 + name.len() + identifier;
+                assert_eq!(framing.variable_header_bytes, base_header);
+                let property_bytes = case.property_bytes();
+                let header = base_header + variable_integer_bytes(property_bytes) + property_bytes;
                 let payload_bytes = case.payload_bytes(header);
                 let remaining = header + payload_bytes;
-                let measured = framing.packet_bytes(payload_bytes);
+                let measured = framing.packet_bytes(payload_bytes, property_bytes);
                 if remaining > MQTT_MAX_REMAINING_LENGTH {
                     let Err(error) = measured else {
                         panic!("a remaining length of {remaining} bytes has no packet");
@@ -1037,8 +1111,12 @@ mod tests {
                     1 + variable_integer_bytes(remaining) + remaining
                 );
                 if payload_bytes <= 2_200_000 {
-                    let mut publish =
-                        rumqttc::Publish::new(name.as_str(), qos, vec![0_u8; payload_bytes], None);
+                    let mut publish = rumqttc::Publish::new(
+                        name.as_str(),
+                        qos,
+                        vec![0_u8; payload_bytes],
+                        case.properties(),
+                    );
                     if qos != rumqttc::QoS::AtMostOnce {
                         publish.pkid = 1;
                     }
@@ -1185,6 +1263,94 @@ mod tests {
             Vec::new(),
             Timestamp::from_unix_nanos(0),
         )
+    }
+
+    #[nervix_primitives::test]
+    async fn publish_property_bytes_count_against_the_broker_limit_before_queueing() {
+        use nervix_connector::{PropertyValue, RecordEnvelope, RecordProperty};
+        let fixture = DnsFixture::start().await;
+        let mut emitter = qos0_emitter("mqtt://127.0.0.1:9", "properties", fixture.dns.clone());
+        emitter.broker_limit.declare(&connack(Some(64)));
+        let oversized = record(0, 1).with_envelope(RecordEnvelope {
+            properties: vec![RecordProperty {
+                name: "content_type",
+                value: PropertyValue::String("p".repeat(100)),
+            }],
+            ..RecordEnvelope::default()
+        });
+        let outcome = emitter
+            .publish(vec![oversized, record(1, 2)])
+            .await
+            .into_parts();
+        assert_eq!(outcome.delivered, [EmitterRecordId::new(1)]);
+        assert_eq!(outcome.rejected.len(), 1);
+        assert_eq!(outcome.rejected[0].id, EmitterRecordId::new(0));
+        assert!(outcome.infrastructure_error.is_none());
+    }
+
+    #[nervix_primitives::test]
+    async fn the_emitter_writes_every_publish_property_and_ordered_user_property() {
+        use nervix_connector::{PropertyValue, RecordEnvelope, RecordProperty};
+        let fixture = DnsFixture::start().await;
+        let broker = ScriptedBroker::start().await;
+        let address = broker.addr();
+        let script = nervix_primitives::task::spawn(async move {
+            let mut connection = broker.accept().await;
+            let publication = connection.read_publish().await;
+            connection.puback(publication.packet_id, 0).await;
+            (publication.properties, connection)
+        });
+        let mut config = qos0_config(&address, "properties", fixture.dns.clone());
+        config.mode = MqttPublishingMode::Qos1(confirmed());
+        let mut emitter = MqttTopicEmitter::new(config, EmitterHost::new(SilentHost))
+            .assured("the fixture supplies valid connector configuration");
+        let mut message = record(0, 1).with_envelope(RecordEnvelope {
+            retain: true,
+            properties: vec![
+                RecordProperty {
+                    name: "content_type",
+                    value: PropertyValue::String("application/json".to_owned()),
+                },
+                RecordProperty {
+                    name: "message_expiry",
+                    value: PropertyValue::U32(600),
+                },
+                RecordProperty {
+                    name: "response_topic",
+                    value: PropertyValue::String("responses/Case".to_owned()),
+                },
+                RecordProperty {
+                    name: "correlation_data",
+                    value: PropertyValue::Bytes(vec![0, 255, 16]),
+                },
+            ],
+            ..RecordEnvelope::default()
+        });
+        message.headers = vec![
+            ("trace".to_owned(), "first".to_owned()),
+            ("trace".to_owned(), "second".to_owned()),
+        ];
+        let outcome = emitter.publish(vec![message]).await.into_parts();
+        assert_eq!(outcome.delivered, [EmitterRecordId::new(0)]);
+        assert!(outcome.rejected.is_empty());
+        assert!(outcome.infrastructure_error.is_none());
+        let (observed, _connection) = script
+            .await
+            .assured("the scripted broker completed its exchange");
+        assert_eq!(
+            observed,
+            Some(rumqttc::PublishProperties {
+                content_type: Some("application/json".to_owned()),
+                message_expiry_interval: Some(600),
+                response_topic: Some("responses/Case".to_owned()),
+                correlation_data: Some(vec![0, 255, 16].into()),
+                user_properties: vec![
+                    ("trace".to_owned(), "first".to_owned()),
+                    ("trace".to_owned(), "second".to_owned())
+                ],
+                ..rumqttc::PublishProperties::default()
+            })
+        );
     }
 
     #[nervix_primitives::test]

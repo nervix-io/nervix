@@ -4,7 +4,8 @@
 //! Layer: test harness.
 //! - **Owns.** Starting a console page with its connection recorder and optional bounded initial
 //!   frame gate, reading the page's record, releasing the gate, closing the session connection the
-//!   page holds, and checking the record against the scenario's consoles and reported leaders.
+//!   page holds, saving its first serving leader, and checking the record against the scenario's
+//!   consoles and reported leaders.
 //! - **Depends on.** The scenario's browser page and cluster, and the console connection record
 //!   and its checks.
 //! - **Must not know.** How the console drives its session, or how a node serves it.
@@ -24,11 +25,12 @@ use crate::common::console_connections::{
 /// What a console page runs before any script of its own.
 const RECORDER: &str = include_str!("recorder.js");
 
-/// Whether the initial session frames reach the page immediately or at the scenario's release.
+/// The page's initial session delivery and optional bounded frame observations.
 #[derive(Clone, Copy)]
 pub(super) enum InitialSession {
     Deliver,
     Hold,
+    ObserveRequests,
 }
 
 /// A bounded gate installed after the recorder and before the console's own scripts.
@@ -48,6 +50,10 @@ pub(super) async fn record_console_connections(
 ) -> playwright_rs::Result<()> {
     let script = match initial_session {
         InitialSession::Deliver => RECORDER.to_string(),
+        InitialSession::ObserveRequests => {
+            let observer = super::web_console_request_window::observer_script();
+            format!("{RECORDER}\n{observer}")
+        }
         InitialSession::Hold => {
             let path = serde_json::to_string(CONSOLE_SESSION_PATH)
                 .assured("the public session path serializes as JavaScript text");
@@ -102,6 +108,25 @@ async fn read_record(page: &playwright_rs::Page) -> ConsoleConnectionRecord {
     page.evaluate::<(), ConsoleConnectionRecord>(READ_RECORD, None::<&()>)
         .await
         .assured("every console page starts with the connection recorder")
+}
+
+#[then(expr = "the first leader connected by the web console is saved as placeholder {string}")]
+async fn then_initial_console_leader_is_saved(world: &mut ScenarioWorld, placeholder: String) {
+    let record = read_record(browser_page(world)).await;
+    let node = match record.first_serving_node() {
+        Ok(Some(node)) => node,
+        Ok(None) => {
+            panic!("the console has not received a serving-leader report; its connections:{record}")
+        }
+        Err(error) => panic!("{error:#}; the web console's connections:{record}"),
+    };
+    let node = node.to_string();
+    assert!(
+        world.cluster().node_ids().binary_search(&node).is_ok(),
+        "the console's first serving leader '{node}' must belong to this scenario's cluster",
+    );
+    append_cucumber_log_line(&format!("the console first connected to leader '{node}'"));
+    world.placeholders.insert(placeholder, node);
 }
 
 /// The leaders the nodes reported on the page's connections.

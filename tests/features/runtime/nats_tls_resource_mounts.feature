@@ -1,5 +1,5 @@
 Feature: NATS TLS resource mounts
-  Scenario Outline: NATS ingestor consumes over native TLS with a mounted resource directory
+  Scenario Outline: NATS ingestors and emitters use native TLS with a mounted resource directory
     Given NATS TLS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -10,11 +10,11 @@ Feature: NATS TLS resource mounts
     And node "node-1" has dev TLS resource directory "dev_tls"
     When these Plexus commands are executed
       """
-      CREATE RESOURCE dev_tls;
+      CREATE RESOURCE nats_tls_identity;
       """
     And these Plexus commands are executed through the client on the leader node
       """
-      UPLOAD RESOURCE dev_tls VERSION "{{dev_tls}}";
+      UPLOAD RESOURCE nats_tls_identity VERSION "{{dev_tls}}";
       """
     And these Plexus commands are executed
       """
@@ -30,11 +30,12 @@ Feature: NATS TLS resource mounts
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_nats_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_nats_notifications;
+        CREATE RELAY delivered SCHEMA notification BRANCHED BY by_nats_notifications;
         CREATE NATS CLIENT nats_tls
-        MOUNT dev_tls VERSION 1
+        MOUNT nats_tls_identity VERSION 1
         CONFIG {
           'addr' = '{{nats_tls_addr}}',
-          'tls_ca_file' = '{{dev_tls}}/ca.pem'
+          'tls_ca_file' = '{{nats_tls_identity}}/ca.pem'
         };
         CREATE NATS SUBJECT INGESTOR nats_notifications
         FROM nats_tls SUBJECT 'notifications_{{test_id}}' QUEUE GROUP 'nats_tls_notifications_group_{{test_id}}' INSTANCES 1 MODE NO ACK
@@ -46,14 +47,23 @@ Feature: NATS TLS resource mounts
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE SUBSCRIPTION notifications_subscription TO notifications;
+        CREATE NATS SUBJECT EMITTER forwarded FROM notifications
+        TO nats_tls SUBJECT 'tls_forwarded_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s
+        ENCODE USING notification_codec INHERIT ALL FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        CREATE NATS SUBJECT INGESTOR returning
+        FROM nats_tls SUBJECT 'tls_forwarded_{{test_id}}' QUEUE GROUP 'tls_return_{{test_id}}' INSTANCES 1 MODE NO ACK
+        ON QUIESCE DROP DECODE USING notification_codec
+        TO delivered INHERIT ALL BRANCHED BY by_nats_notifications SET user_id = message.user_id
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+        CREATE SUBSCRIPTION notifications_subscription TO delivered;
         START;
       """
     Then within "10s" repeatedly publishing NATS TLS message to subject "notifications_{{test_id}}" yields a relay subscription payload
       """
       {"user_id":42}
       """
-    And the last relay subscription payload contains key fragment '{"user_id":42}'
+    And the last relay subscription payload contains '{"user_id":42}'
 
     Examples:
       | cluster_size | replica_count |

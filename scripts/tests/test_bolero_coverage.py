@@ -498,7 +498,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("tested-sha: ${{ github.sha }}", check)
         self.assertIn("event-name: ${{ github.event_name }}", check)
         self.assertIn("labels-json: ${{ toJSON(github.event.pull_request.labels.*.name) }}", check)
-        self.assertIn("if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')", self.workflow)
+        self.assertIn("if: ${{ false }}", self.workflow)
         self.assertIn("name: coverage-bolero-fuzz", self.workflow)
         self.assertIn("just coverage-bolero 30", self.workflow)
 
@@ -517,8 +517,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn(f"RANDOM_REQUIRED: ${{{{ {requested} }}}}\n", gate)
         self.assertIn("needs: [bolero-random, bolero-fuzz, bolero-fuzz-combined]", gate)
 
-    def test_sanitizer_shards_run_the_plan_and_one_job_proves_the_whole_inventory_ran(self) -> None:
-        label = "if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')"
+    def test_disabled_sanitizer_jobs_retain_their_plan_and_combiner(self) -> None:
+        label = "if: ${{ false }}"
         shards = self.job("bolero-fuzz")
         self.assertIn(label, shards)
         self.assertIn("name: bolero-fuzz (${{ matrix.shard }} of ${{ strategy.job-total }})", shards)

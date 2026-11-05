@@ -232,7 +232,11 @@ fn is_invalid_storage(error: &io::Error) -> bool {
     } else {
         inner.downcast_ref::<StorageFailure>()
     };
-    matches!(failure, Some(StorageFailure::InvalidState))
+    match failure {
+        Some(StorageFailure::InvalidState) => true,
+        Some(StorageFailure::StateMetadata(cause)) => is_invalid_storage(cause),
+        _ => false,
+    }
 }
 
 /// The facts the readers of a recovered state rely on without checking them again: every record

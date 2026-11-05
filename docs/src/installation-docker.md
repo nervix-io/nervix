@@ -8,6 +8,30 @@ For a reproducible or production deployment, replace the rolling tag with a revi
 tag or image digest. Use TLS, a secret manager, and a client-reachable advertise hostname instead
 of the local-development defaults shown here.
 
+## Native Session TLS
+
+Provision a session certificate chain and matching private key for each node. Mount the node's
+certificate directory read-only, for example with
+`--volume "$PWD/session-tls/node-1:/etc/nervix/session:ro"`, and add these environment variables
+to its `docker run` command:
+
+| Variable | Example value |
+|---|---|
+| `NERVIX_GRPC_MODE` | `https` |
+| `NERVIX_GRPC_HTTPS_LISTEN_ADDR` | `0.0.0.0:47390` |
+| `NERVIX_GRPC_HTTPS_ADVERTISE_ADDR` | `nervix.example.com:47390` |
+| `NERVIX_GRPC_TLS_CERT` | `/etc/nervix/session/chain.pem` |
+| `NERVIX_GRPC_TLS_KEY` | `/etc/nervix/session/key.pem` |
+
+Publish the HTTPS listener's port and choose a client-reachable advertised host and port for
+every node. The leaf certificate must cover that advertised hostname or IP address. Clients
+verify it against their configured CA, as shown in [Native Session TLS](installation-cargo.md#native-session-tls).
+The server validates and loads the files at startup. Replace the files in the mounted directory
+and restart the container to rotate them.
+
+The console has separate HTTPS listener and certificate options. Its explicit advertised host
+and port must reach that HTTPS listener when it is enabled; see [Web Console](client-tools-web-console.md#opening-the-console).
+
 ## CUDA Images
 
 Build a local CUDA image from a repository checkout with `just docker-build-cuda`; the build

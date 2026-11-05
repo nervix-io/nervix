@@ -113,6 +113,7 @@ pub fn statement_parser<'src>()
         .map(Statement::Create)
         .boxed();
     let administration = boxed_choice!(
+        crate::cluster_parameters::alter_cluster_parser().map(Statement::AlterCluster),
         crate::placement::alter_placement_parser().map(Statement::AlterPlacement),
         crate::schema::alter_schema_parser().map(Statement::AlterSchema),
         crate::schema::alter_wire_schema_parser_any(),

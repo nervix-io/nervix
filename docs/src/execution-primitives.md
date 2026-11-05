@@ -363,6 +363,12 @@ let an unavailable broker hold those operations behind it. The connector class b
 without taking another class's admission. All classes still use the process-wide blocking pool;
 admission isolation does not reserve physical threads.
 
+NATS authentication reads its immutable mounted credentials file on filesystem storage workers.
+Ingestor composition and the emitter host supply the actual node executor. The file's length is
+charged to credentials memory before its bytes are allocated, and the charge stays until the
+zeroizing temporary buffer is cleared. Admission, worker and cancellation failures retain typed
+initialization outcomes; a refusal that read no credential is not an authentication rejection.
+
 Everything else that blocks a thread is a declared owner in
 `crates/primitives/blocking-permissions.toml`, which names the file, the blocking items the owner
 names there by their paths below `nervix_primitives`, the owner, why it stays outside the executor,

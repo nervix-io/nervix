@@ -79,8 +79,9 @@ minutes to compile. cargo-auditable and cargo-sonic compile with `cargo install 
 the lockfile each crate published, so a later compatible release of one of their dependencies can
 neither change them nor stop them compiling. Moving a tool to another version changes its version
 pin and, for an archive, the checksum of each build architecture; an archive that does not match
-its checksum fails the build. The kache pin is the `KACHE_VERSION` that CI's kache-backed jobs
-install, which the recipes pass to the build.
+its checksum fails the build. Kache's archive holds its client and the engine the client runs only
+with, and the builder installs both and checks that each reports the pinned version. The kache pin
+is the `KACHE_VERSION` that CI's kache-backed jobs install, which the recipes pass to the build.
 
 `Dockerfile.debian` has two complete image targets: `cpu` (the default) and `cuda`. The recipes
 select them with `--target cpu` and `--target cuda`, respectively. Both targets copy the same
@@ -306,30 +307,36 @@ count, such as `just validate 2`, or use `just --jobs 2 validate` to select anot
 `JUST_JOBS` also supplies the default. Validation runs the product and compiler tooling Clippy
 recipes in one invocation, so they share the same limit. In `just validate-ci` the lints and the
 other validations run beside each other, each building in directories of its own, so none waits for
-another's directory lock, and the typed ratchet runs once they have finished. CI's `checks` job
-passes four as well, because memory limits it rather than CPUs: each recipe's Cargo already uses
+another's directory lock, and the typed ratchet runs once they have finished. `just validate-ci
+<jobs> 1/2` and `just validate-ci <jobs> 2/2` each run one part of those checks, and together they
+are every check: the first checks formatting, the ordinary, Turmoil and Deloxide lints and the
+source, dependency and documentation validations, and the second lints the Shuttle and Loom modes and
+the compiler tooling and runs the typed ratchet once its own lints have finished. CI's `checks` job
+runs the two parts as the shards `checks (1 of 2)` and `checks (2 of 2)` on two Boat runners, and the
+second also runs the script tests with the ratchet tools it built. Each passes four jobs, because
+memory limits it rather than CPUs: each recipe's Cargo already uses
 every CPU, and in Check 41126961308, which compiled the server cold, one recipe per CPU overlapped
 enough Clippy compilations to pass the runner's 32 GB and one was killed. The typed ratchet's
 admission queue admits its server analyses as if nothing else ran: beside the lints, the kernel's
 out-of-memory killer ended the ratchet's Shuttle analysis of the server in Check 41066649586.
 
-Each package and configuration is a separate parallel dependency of one shared Clippy recipe.
-The `[parallel]` groups map package lists onto that recipe, including the packages checked with
-`--all-features` and the compiler tooling packages. Feature, target, profile and compiler selections
-stay separate, so mutually exclusive execution modes never share a Cargo invocation.
-
-Clippy builds in sixteen directories, `clippy/0` to `clippy/f` beneath `CARGO_TARGET_DIR`, or the
-repository's `target` directory when that variable is unset. The last hexadecimal digit of the
-SHA-256 of a configuration's package, Cargo arguments and toolchain selects its directory, so each
-run of a configuration returns to the directory that holds its artifacts. The configurations in a
-directory share the dependencies they build, build scripts included, and Cargo keeps the artifacts
-of different features, profiles, targets and flags, and of the stable and nightly compilers, apart
-there. Configurations in the same directory take turns on its build directory lock, so two of them
-selected at once run one after the other; sixteen directories let up to sixteen build at once, where
-four left a 16-CPU runner mostly idle behind the server's long compilations. Nothing deletes these
-directories, locally or on CI: the sixteen of them bound what a lint leaves on disk. `just
-cargo-clippy-package <package> [arguments ...]` runs a focused check of all targets through the same
-recipe. The compiler driver builds keep their separate `typed-ratchet/driver` directory. All builds
+Each package and configuration is a dependency of one shared Clippy recipe, and the configurations
+run in lanes. A lane holds the configurations that can reuse one another's build artifacts: one
+execution mode, one target and compiler, and packages that share most of their dependency graph,
+such as the Plexus language and its clients, the vocabulary and engines below them, the server with
+the cluster's network stack, the connectors of HTTP and database services, and those of message
+brokers. Mutually exclusive execution modes never share a Cargo invocation or a lane. A lane runs
+its configurations one after another in its own directory beneath `CARGO_TARGET_DIR`, or the
+repository's `target` directory when that variable is unset, at `clippy/<lane>`, so each finds fresh
+what the configurations before it compiled alike, build scripts included. Lanes run in parallel, as
+many at once as the job limit allows, and no configuration waits for another lane's build directory
+lock or holds a job slot while it waits. The longest lane bounds a run, so a family too large for one
+lane splits into numbered sublanes of at most eight configurations, `clippy/<lane>-<n>`, closer
+packages together, trading the reuse between sublanes for parallelism. Nothing deletes these directories, locally or on CI:
+the lanes bound what a lint leaves on disk. `just cargo-clippy-package <package> [arguments ...]`
+runs a focused check of all targets through the same recipe, in a `clippy/package` directory that
+repeated focused checks share. The compiler driver builds keep their separate `typed-ratchet/driver`
+directory, and the compiler tooling's own Clippy lane builds on the analysis nightly. All builds
 retain the configured kache wrapper. Cargo's compiler job limit applies separately within each
 invocation.
 
@@ -355,17 +362,20 @@ just test-scenarios --input tests/features/tools/cli_session.feature \
 such as `'tests/features/runtime/{first,second}.feature'` so the scenario runner expands it.
 Pass each option and its value separately; a quoted string containing several options stays one
 argument. `test-scenarios-reuse` accepts the same selections and keeps dependency containers for
-the next run. `just test-scenario-arguments` checks both recipes without compiling Rust or
-starting services.
+the next run. `coverage-scenarios` and `coverage-scenarios-append` take an LCOV output path before
+the same scenario arguments and preserve those boundaries too. `just test-scenario-arguments`
+checks all four recipes without compiling Rust or starting services.
 
 For representation properties and sanitizer fuzzing, see
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md). The focused entry points are
 `just test-bolero [filter]`, `just fuzz-list` and
 `just fuzz <target> [duration]`. These commands and the dedicated Bolero workflow own target
-discovery; repository validation does not run Bolero checks. In CI, that workflow runs the
-sanitizer campaigns, the preferred Bolero evidence, for a pull request labeled `fuzz`, and the
-randomized properties for one labeled `bolero-random`, which a pull request carries only when its
-task requires that run. `just help` lists the recipes.
+discovery; repository validation does not run Bolero checks. The temporary CI execution policy
+disables Deloxide and sanitizer fuzz targets for every trigger, including labels and manual runs.
+Re-enabling either requires an explicit user decision. Local targeted checks remain available when
+a concrete risk needs them. CI runs randomized properties for a pull request labeled `bolero-random`
+only when its task requires that run. Ordinary diagnostics, coverage integrity and complexity checks
+remain required; see [Coverage Reports](./coverage-reports.md). `just help` lists the recipes.
 
 Native CI builds for validation, unit tests, scenarios, client conformance, Turmoil, Shuttle,
 Loom, Bolero and extra checks use Clang 23 with Wild. Cargo's `x86_64-unknown-linux-gnu` linker
@@ -386,7 +396,7 @@ just test-connectors <filter>
 Each CI job's `runs-on` label picks one of three kinds of machine.
 
 GitHub's own hosted runners, which are free for a public repository, run the jobs that coordinate a
-run or need little of a machine: the test selection, the PR title check, the image metadata and
+run or need little of a machine: the test selection, the unit tests, the PR title check, the image metadata and
 manifest, the chaos plans and verdicts, the Bolero gate and the combination of its shards, the
 benchmark comment, the coverage merges, the book and the deployment checks. They also run the chaos
 shards, on the workers the suites were qualified on. `ubuntu-24.04` has 4 CPUs, 16 GB of memory and
@@ -398,7 +408,7 @@ inspection or stop took 8 to 29 seconds against the chaos suite's 30-second boun
 operation, and three of fourteen soak shards failed their network qualification.
 
 [Boat](https://boat.dev) machines, which the boat CI GitHub App starts for every job whose `runs-on`
-names a Boat size, run every other job but the three that run on Blacksmith. Each gets a fresh
+names a Boat size, run every other job but those that run on Blacksmith. Each gets a fresh
 x86_64 Ubuntu 24.04 virtual machine with Docker, deleted when the job ends.
 `.github/actionlint.yaml` declares the Boat labels to `just validate-workflows`. Boat runs a public
 repository's jobs only for the GitHub users its account setting lists, and only when both a run's
@@ -408,7 +418,7 @@ minute, hour and day. A job's size follows the memory and disk its builds use ra
 since a Boat machine has only 2 GB of memory per CPU, with 4 GB of swap beside it:
 
 - `boat-xlarge`, with 16 CPUs, 32 GB and 251 GB of disk, runs validation, the diagnostic evidence,
-  the unit tests, the scenario shards, the extra checks, Shuttle, Loom, the Deloxide
+  the extra checks, Shuttle, Loom, the Deloxide
   lane, the Bolero randomized properties, the image builds and the benchmarks. In October 2026 the
   extra checks used about 95 GiB of disk and the amd64 image build lost its runner on a 16 GB
   machine.
@@ -433,11 +443,22 @@ needs more than Boat's 32 GB, even with eight compilers. The other two are compi
 Check run 40991534806 kache's downloads spent most of their time waiting for the lock of its local
 store, 1.8 to 4.6 seconds each against 0.4 seconds on Blacksmith, the Loom qualification shards
 reached their two-hour limit after about 107 minutes of compiling, and the client conformance build
-took 49 of its job's 60 minutes. `.github/actionlint.yaml` declares the Blacksmith labels as well.
+took 49 of its job's 60 minutes.
+
+The scenario shards are timing sensitive, and they run on Blacksmith's
+`blacksmith-8vcpu-ubuntu-2404`, with 8 CPUs, 32 GB and 160 GB of disk. On `boat-xlarge` a shard
+lost on average a tenth of its CPU to its host and up to 58% at peaks, and its failures followed
+that loss. The unit tests run on GitHub's hosted `ubuntu-24.04`, whose 150 GB disk had about
+84 GiB free, room for their 5.1 GiB archive and the 32 GiB it restores: on Boat, on 3 November 2026,
+downloading the archive took 18 minutes and restoring it another 10, so the job reached its
+30-minute limit before any test ran. `.github/actionlint.yaml` declares the Blacksmith labels as
+well.
 
 An archive restores only at the checkout path it was built in, and it checks that path before it
-restores any file. The scenario build runs on Blacksmith and publishes its path, so the `tests` job
-and the shards on Boat bind-mount their checkout there, and restore and run from that path.
+restores any file. The scenario build and the scenario shards run on Blacksmith, whose runners
+check a repository out at the same path, so each shard restores and runs from its own checkout.
+GitHub's hosted runner checks out at another path, so the build publishes its path, and the `tests`
+job bind-mounts its checkout there, and restores and runs from that path.
 
 A kache-backed job uses the cache bucket in its runner's region: the EU bucket on Boat's European
 machines, and the US bucket on GitHub's hosted runners and on Blacksmith's US runners.
@@ -490,21 +511,19 @@ compares it with the workflows.
 | `shuttle` | Check | The Shuttle checks and their replay check |
 | `loom` | Check | The Loom models and their weakening qualification |
 | `turmoil` | Check | The Turmoil simulation suite and its replay check |
-| `deloxide` | Check | The four Deloxide lanes and each selection's supervision qualification |
 | `client-conformance` | Check | The cross-language client probes against one- and three-node clusters |
 | `bolero-random` | Check, through Bolero | Bolero's randomized properties and corpus replay, which a manual run of the Bolero workflow always runs |
-| `fuzz` | Check, through Bolero | The Bolero sanitizer campaigns and the combined record of their shards |
 | `extra-doctests` | Check | Capability doctests |
 | `extra-miri` | Check | Miri over the expiry map |
 | `extra-mutation` | Check | Mutation tests of the expiry map |
 | `extra-runners` | Check | Python coverage of the reporters, gates and collectors: patch coverage, the ordinary merge, the CRAP report, the full union, the paced simulation policy, the release gate, the deployment controller, the kache contract, the connector matrix renderer, the test selection, the wasm-bindgen tool, the native collector and the primitive source validator |
 | `extra-compiler` | Check | Source contracts, compiler diagnostics, paired API doctests, compiler cache qualification and the Python coverage of the ratchet's runners |
 | `extra-bench-smoke` | Check | Benchmark smoke tests |
-| `extra-primitives` | Check | Primitive boundary conformance in every mode, and its compile and browser checks. `coverage-full` then requires those collections |
+| `extra-primitives` | Check | Primitive boundary conformance in ordinary, Shuttle, Loom and Turmoil modes, plus ordinary documentation and browser checks. `coverage-full` then requires those collections |
 | `extra-completion-walk` | Check | The Plexus completion walk |
 | `extra-connector-matrix` | Check | The Plexus connector declaration export |
-| `chaos` | Docker Build | The chaos smoke suite against the release image and the diagnostic image |
-| `chaos-soak` | Docker Build | The chaos soak suite against both images |
+| `chaos` | Docker Build | The chaos smoke suite against the release image |
+| `chaos-soak` | Docker Build | The chaos soak suite against the release image |
 | `benchmark` | Docker Build | The product comparison against the pull request's image and the ordinary primitive probe, with the comparison commented on the pull request |
 | `book` | Docker Build | A published preview of the book, its PDF and the Plexus agent index, with its links commented on the pull request |
 | `no-docker` | Docker Build | Nothing: it stops the image builds and every job that needs an image, which are `benchmark`, `chaos`, `chaos-soak` and the deployment checks. `book` and every Check job still run |
@@ -522,12 +541,13 @@ a primitive `extra-primitives`. A pull request carries `benchmark` only when its
 measured comparison, such as a change that claims a performance effect, and `no-docker` only when
 nothing in it needs an image. `no-docker` never authorizes a test exclusion.
 
-`fuzz`, `chaos`, `chaos-soak` and `deloxide` are expensive in CI, so they stay off by default and
-their checks run locally first. A pull request carries one only for a strong, task-specific need
+`deloxide` and `fuzz` do not enable CI execution under the temporary policy; re-enabling either
+requires an explicit user decision. Diagnostic Chaos execution is disabled too.
+`chaos` and `chaos-soak` are expensive in CI, so they stay off by default and their checks run locally first. A pull request carries one only for a strong, task-specific need
 that local verification cannot reasonably satisfy, not because it touches related code. It enables
 the fewest lanes that need CI, says why in its description, and records the local commands,
-revision, seeds or scenarios and results there. A release qualification still needs them, because
-`just release-evidence` requires their checks. Once a label has enabled a check, the check's result
+revision, seeds or scenarios and results there. A complete release qualification remains unavailable while its diagnostic and sanitizer evidence
+is prohibited; a policy skip supplies no such evidence. Once a label has enabled a check, the check's result
 stands: removing the label never hides a failure.
 
 Which runner a job uses, its size, its provider and the cache bucket that follows them change only
@@ -888,10 +908,9 @@ identity, the invariant it owns, its selections and the coverage it declares; a 
 renamed there in the same change. A source file that starts acquiring tracked blocking locks needs
 an `[[owner]]` record naming the workloads that reach them or the path the lane does not reach and
 why: `just validate-deloxide-applicability`, part of `just validate`, holds the records to the
-compiler's acquisition catalog. For a pull request labeled `deloxide`, CI's `deloxide` job runs
-every selection through the native coverage collector, as `just coverage-native-extras test-deloxide test-deloxide-order
-test-deloxide-stress test-deloxide-stress-restore` does locally,
-and keeps their attempts, completion records and diagnostic coverage reports as artifacts. The
+compiler's acquisition catalog. CI execution of every Deloxide selection is temporarily disabled. Locally,
+`just coverage-native-extras test-deloxide test-deloxide-order test-deloxide-stress test-deloxide-stress-restore`
+retains each attempt, completion record and diagnostic coverage report. The
 ordinary report tool also exports selected artifacts, records explicit proofs in reviewed copies and
 qualifies whole-process evidence. `just coverage-deadlock` measures the diagnostic implementation
 and the ordinary report command in separate instrumented builds through the native collector.
@@ -902,8 +921,7 @@ owner. For async-only or otherwise untracked changes, name the other checks that
 path; for documentation-only work, record why no diagnostic execution applies. Use the toolchain
 files' declared `llvm-tools` for the compiler that produced each coverage profile, retaining the
 configured kache wrapper. Registered product Bolero properties run as ordinary tests in the
-ordinary suites, and the compiler-tooling ones in `just test-typed-ratchet`; sanitizer CI, the
-preferred Bolero evidence, runs only with `fuzz`, the randomized Bolero job only with
+ordinary suites, and the compiler-tooling ones in `just test-typed-ratchet`; sanitizer CI is temporarily disabled, and the randomized Bolero job runs only with
 `bolero-random`, and a skipped run supplies no execution evidence. API rejections use paired
 current `compile_fail` and compiling doctests, which `just test` runs and CI runs for a pull request
 labeled `extra-doctests`.
@@ -969,9 +987,9 @@ Run the suite locally for a change to the chaos runner, or to the membership, fa
 delivery behavior its scenarios verify. The `chaos` label stays off by default, as
 [CI labels](#ci-labels) says.
 
-Each suite runs twice on CI: against the release image and against the Deloxide diagnostic image
-of the same revision, which `just docker-build-diagnostic` builds and whose label makes every run
-judge the deadlock evidence of its nodes. Locally, `just build-chaos-diagnostic-image` overlays a
+CI runs each selected suite against the release image. The temporary policy disables diagnostic
+image builds and diagnostic Chaos execution, including reusable and manual calls. Locally,
+`just build-chaos-diagnostic-image` overlays a
 release-mode diagnostic server of this checkout on an available image:
 
 ```bash
@@ -1019,8 +1037,7 @@ and build-target matrix, result guarantees, and recorded performance evidence. N
 generated-instruction inspection, complete scalar/level differential checks including forced
 fallback, and a measured caller. Use its [qualification recipes](./simd-kernels.md#qualification)
 and [measurement recipes](./simd-kernels.md#measurement-and-recorded-evidence), retaining kache.
-Registered product Bolero properties run as ordinary tests in the ordinary suites; sanitizer CI,
-the preferred Bolero evidence, requires the `fuzz` label, the randomized Bolero job the
+Registered product Bolero properties run as ordinary tests in the ordinary suites; sanitizer CI is temporarily disabled, and the randomized Bolero job requires the
 `bolero-random` label, and a skip supplies no execution or coverage evidence. API-rejection checks use paired
 current `compile_fail` and compiling doctests. Publish new benchmark and validation artifacts on
 the corresponding ClickUp task; keep durable architectural conclusions in the chapter.
