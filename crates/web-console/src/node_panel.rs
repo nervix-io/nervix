@@ -18,9 +18,7 @@ use leptos::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_client_wire::{NoticeKind, NoticeLevel, ServerNotice};
 
-/// How many entries the panel keeps: as many as the REPL transcript keeps records. Older entries
-/// are dropped, while the count of received events keeps every one.
-const MAX_ENTRIES: usize = super::MAX_HISTORY_RECORDS;
+use super::MAX_HISTORY_RECORDS;
 
 /// What identifies one entry. A membership event names the session that received it, so the same
 /// event repeated within that session joins its entry; any other event has an entry of its own.
@@ -63,7 +61,8 @@ impl ClusterEvent {
 }
 
 /// The cluster events the console received across its sessions, oldest first and bounded by
-/// [`MAX_ENTRIES`].
+/// [`MAX_HISTORY_RECORDS`], as many as the REPL transcript keeps records. Older entries are dropped,
+/// while the count of received events keeps every one.
 #[derive(Debug, Clone, Default)]
 pub(super) struct ClusterEventLog {
     entries: IndexMap<EntryKey, ClusterEvent>,
@@ -119,7 +118,7 @@ impl ClusterEventLog {
                 occurrences: 1,
             },
         );
-        if self.entries.len() > MAX_ENTRIES {
+        if self.entries.len() > MAX_HISTORY_RECORDS {
             self.entries.shift_remove_index(0);
         }
     }
@@ -274,7 +273,7 @@ mod tests {
     #[test]
     fn the_log_keeps_its_newest_entries_and_counts_every_event() {
         let mut log = ClusterEventLog::default();
-        let total = MAX_ENTRIES
+        let total = MAX_HISTORY_RECORDS
             .checked_add(3)
             .assured("the test log bound is small");
         for index in 0..total {
@@ -288,7 +287,7 @@ mod tests {
         let last = total
             .checked_sub(1)
             .assured("the test records more than one event");
-        assert_eq!(shown.len(), MAX_ENTRIES);
+        assert_eq!(shown.len(), MAX_HISTORY_RECORDS);
         assert_eq!(
             shown.first().map(|(message, _)| message.as_str()),
             Some(format!("transition {last}").as_str())
