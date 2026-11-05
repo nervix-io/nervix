@@ -2,6 +2,16 @@
 
 *Plexus, the Nervix graph definition language.*
 
+`nervix-rate-limit::Quota` validates count, period, burst and nanosecond horizon bounds once;
+`Charge` carries a nonzero 32-bit cost and distinguishes direct from fingerprint-keyed accounting.
+A `Limiter` rejects a mismatched charge vector before changing any allowance. Direct horizon zero
+is a real instant at its epoch, denoting full replenishment, rather than missing state. A saved
+direct horizon uses `Option<Duration>` for live debt; keyed generations carry every retained
+fingerprint, positive remaining horizon, age and LRU ordinal. Generation validation refuses
+duplicate identities, capacity excess, invalid horizon or age bounds, and unordered ordinals.
+Restoration creates fresh stores only from a validated generation. UTC conversion omits elapsed
+horizons and expired keys instead of reconstructing allowance debt from absent state.
+
 Client configuration declarations distinguish required, optional, defaulted and address-scheme-dependent keys, Nervix and driver
 ownership, typed value rules, TLS certificate/identity file roles and delegated property namespaces.
 `All` is an explicit driver namespace, not an empty-prefix sentinel. The vocabulary schema owns

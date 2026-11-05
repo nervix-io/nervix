@@ -10,6 +10,12 @@
 
 [[package]]
 checks = [
+  "shuttle_tests::shuttle_key_leases_refund_exactly_and_never_exceed_the_global_capacity",
+]
+name = "nervix-rate-limit"
+
+[[package]]
+checks = [
   "tests::shuttle_checks::shuttle_a_dropped_job_waiting_for_a_place_gives_up_its_place_and_charge",
   "tests::shuttle_checks::shuttle_a_job_waiting_for_a_place_takes_the_first_freed_place",
   "tests::shuttle_checks::shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit",
