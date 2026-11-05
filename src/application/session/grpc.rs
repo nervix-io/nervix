@@ -82,13 +82,15 @@ impl PresentedCall {
         }
     }
 
-    /// Authenticates the presented credentials, or names the status the call ends with when they
-    /// do not authenticate it.
-    async fn authenticate(self, service: &SessionServiceImpl) -> Result<UserName, Status> {
+    /// Authenticates the presented credentials, or reports why they do not authenticate the call.
+    async fn authenticate(
+        self,
+        service: &SessionServiceImpl,
+    ) -> Result<UserName, Report<GrpcAuthenticationError>> {
         service
             .authenticate_client(self.call, self.credentials.as_ref())
             .await
-            .map_err(|refusal| GrpcAuthenticationError::status(Report::new(refusal.into())))
+            .map_err(|refusal| Report::new(refusal.into()))
     }
 }
 
@@ -203,7 +205,10 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for Exchange {
         let service = self.service.clone();
         let limits = self.limits;
         Box::pin(async move {
-            let user = PresentedCall::of(&request).authenticate(&service).await?;
+            let user = PresentedCall::of(&request)
+                .authenticate(&service)
+                .await
+                .map_err(GrpcAuthenticationError::status)?;
             let (failure_sender, failure) = oneshot::channel();
             let mut failure_report = FailureReport {
                 sender: Some(failure_sender),
@@ -278,7 +283,10 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for Upload {
         let limits = self.limits;
         let admission = service.inner.admission_shutdown.clone();
         until_admission_closes(admission, async move {
-            let user = PresentedCall::of(&request).authenticate(&service).await?;
+            let user = PresentedCall::of(&request)
+                .authenticate(&service)
+                .await
+                .map_err(GrpcAuthenticationError::status)?;
             let reply = service.serve_upload(user, request.into_inner()).await?;
             #[cfg(feature = "testing")]
             if service.loses_installed_upload_reply(&reply) {
@@ -311,7 +319,10 @@ impl ClientStreamingService<VerifiedFrame<RestoreFrame>> for Restore {
         let limits = self.limits;
         let admission = service.inner.admission_shutdown.clone();
         until_admission_closes(admission, async move {
-            let user = PresentedCall::of(&request).authenticate(&service).await?;
+            let user = PresentedCall::of(&request)
+                .authenticate(&service)
+                .await
+                .map_err(GrpcAuthenticationError::status)?;
             let reply = service.serve_restore(user, request.into_inner()).await?;
             match reply.encode(&limits) {
                 Ok(frame) => Ok(Response::new(frame)),
@@ -345,7 +356,10 @@ impl ServerStreamingService<VerifiedFrame<BackupDownloadRequestFrame>> for Downl
         let limits = self.limits;
         let admission = service.inner.admission_shutdown.clone();
         until_admission_closes(admission.clone(), async move {
-            let user = PresentedCall::of(&request).authenticate(&service).await?;
+            let user = PresentedCall::of(&request)
+                .authenticate(&service)
+                .await
+                .map_err(GrpcAuthenticationError::status)?;
             let frames = service
                 .serve_backup_download(user, request.get_ref(), limits)
                 .await
