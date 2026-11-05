@@ -180,14 +180,14 @@ impl RecordEmitter for NatsStreamEmitter {
             nervix_primitives::task::consume_budget().await;
             let record_id = record.id;
             let occurred_at = record.occurred_at;
-            let mut message = PublishMessage::build().payload(record.payload.into());
-            if !record.headers.is_empty() {
-                message = message.headers(NatsSubjectEmitter::header_map(&record.headers));
-            }
-            if let Some(id) = record.envelope.message_id.as_deref() {
-                message = message.message_id(id);
-            }
-            message = message.expected_stream(self.stream.as_str());
+            let headers = async_nats::HeaderMap::from_ordered_with_stream(
+                record.headers,
+                record.envelope.message_id,
+                self.stream.as_str().to_owned(),
+            );
+            let message = PublishMessage::build()
+                .payload(record.payload.into())
+                .headers(headers);
             let handed_over = self
                 .context
                 .send_publish(self.subject.clone(), message)
