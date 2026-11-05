@@ -329,7 +329,7 @@ metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the recei
 QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an MQTT TOPIC
 ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter writes beside
 its publishing mode, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a
-`PATTERN`, and that header state. Consensus's `raft_kinded_jetstream_` keyspaces and current state
+`PATTERN`, and that header state. Consensus's `raft_kind_` keyspaces and current state
 metadata encoding identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule and the statements a transaction keeps. The runtime state
 store's `unit-labelled-metric-checkpoint-segments` format identifies the checkpoints it keeps,

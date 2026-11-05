@@ -491,8 +491,8 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The dedicated database owns exactly four current keyspaces: `raft_kinded_jetstream_logs`,
-`raft_kinded_jetstream_meta`, `raft_kinded_jetstream_state`, and `raft_kinded_jetstream_snapshots`.
+The dedicated database owns exactly four current keyspaces: `raft_kind_logs`,
+`raft_kind_meta`, `raft_kind_state`, and `raft_kind_snapshots`.
 Opening it validates the complete keyspace namespace before reading any records. This namespace
 identifies the current Model shape, including the separate JSON and CBOR wire type enums, AVRO representation types,
 explicit `BASE64` codec encoding, a Pulsar subscription's required type, an owned Pulsar
