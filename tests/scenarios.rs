@@ -211,6 +211,7 @@ mod cli_outcomes;
 mod clickhouse_connections;
 mod client_consumers;
 mod client_producers;
+mod client_traffic;
 mod common;
 mod database_batches;
 #[cfg(feature = "deloxide")]
@@ -714,6 +715,9 @@ struct ScenarioWorld {
     consumers: client_consumers::ScenarioConsumers,
     /// The distinct-tenant payloads the last generating step posted and no assertion has received.
     generated_payloads: generated_http_payloads::GeneratedPayloads,
+    /// The authentication counts one node exported before a scenario's attempts, which its
+    /// assertions compare the node's later counts with.
+    client_authentication_baseline: client_traffic::AuthenticationBaseline,
 }
 
 impl fmt::Debug for ScenarioWorld {

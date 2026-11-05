@@ -128,14 +128,6 @@ pub enum AppError {
     InitMemoryPressureMonitor,
     #[error("gRPC server failed")]
     Serve,
-    #[error("HTTP server failed")]
-    ServeHttp,
-    #[error("HTTPS server failed")]
-    ServeHttps,
-    #[error("observability server failed")]
-    ServeObservability,
-    #[error("web console server failed")]
-    ServeWebConsole,
     #[error("failed to initialize tracing")]
     InitTracing,
     #[error("failed to register termination signal handlers")]

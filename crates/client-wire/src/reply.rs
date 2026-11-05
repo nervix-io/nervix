@@ -506,7 +506,10 @@ impl CancelOutcome {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Where a cancellation found the request it ended. Its `snake_case` name labels the node's
+/// cancellation series.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::IntoStaticStr, strum::EnumIter)]
+#[strum(serialize_all = "snake_case")]
 pub enum CancellationStage {
     /// The request was not admitted and has no effects.
     BeforeAdmission,
@@ -545,7 +548,9 @@ impl RequestCancelled {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Why a request was not served. Its `snake_case` name labels the node's rejection series.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::IntoStaticStr, strum::EnumIter)]
+#[strum(serialize_all = "snake_case")]
 pub enum RequestRejection {
     /// A field is missing, malformed or out of range.
     InvalidRequest,
