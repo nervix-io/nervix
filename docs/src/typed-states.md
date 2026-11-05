@@ -626,7 +626,10 @@ Peer selection and transport handling follow the [interconnect contract](./inter
 committed membership publications, with every constituent voter set. It derives the voter union
 only for identity and admission checks; the union cannot stand in for the joint configuration's
 quorum state or its last target set. Completing a joint transition is a distinct planned mutation.
-The expected uniform target is complete only when its effective membership entry is committed.
+The completion boundary revalidates that state in OpenRaft's serialized core, distinguishing an
+already uniform publication from an applied continuation carrying its returned voter set. Only the
+continuation proposes a membership entry, using the core's current joint target. The expected
+uniform target is complete only when its effective membership entry is committed.
 These are observation and planning values, not a second persisted membership encoding. See
 [Consensus Storage And Replication](consensus-storage-and-replication.md#follower-catch-up-and-learner-promotion).
 

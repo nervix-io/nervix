@@ -356,8 +356,13 @@ configuration requires a majority of each constituent voter set; its union is no
 If the second step is refused or interrupted, reconciliation finishes the recorded target before
 planning another admission or address update. It preserves existing learners and completes the
 removal of voters excluded by a `DROP NODE`, rather than deriving a replacement target from the
-joint union or from gossip. A timed wait counts as success only when the expected uniform target
-is committed. Leadership changes and retries can continue the same committed joint transition.
+joint union or from gossip. Before proposing that continuation, it reads the effective and committed
+membership together in OpenRaft's serialized core: a previously timed-out request may have finished
+before the metrics publication catches up. An already uniform core needs no additional membership
+entry. Otherwise OpenRaft's neutral voter change flattens the core's current joint target, and
+reconciliation waits for the returned uniform membership to be committed. A timed wait counts as
+success only when the observed configuration is committed and uniform. Leadership changes and
+retries can continue the same committed joint transition.
 
 When discovery reports a different interconnect endpoint for an existing member, reconciliation
 replaces that member's recorded Raft address. A returning voter keeps its voter role; it is not

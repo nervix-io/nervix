@@ -1143,11 +1143,14 @@ struct MembershipSnapshot {
     committed: StdArc<StoredMembershipOf>,
 }
 
+enum MembershipCompletion {
+    NoJointChange { current: MembershipSnapshot },
+    Applied { voters: BTreeSet<ClusterNodeName> },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MembershipMutation {
-    CompleteVoterChange {
-        voters: BTreeSet<ClusterNodeName>,
-    },
+    CompleteVoterChange,
     UpdateAddress {
         node_id: ClusterNodeName,
         endpoint: NodeEndpoint,
@@ -1200,11 +1203,9 @@ impl MembershipSnapshot {
             mut verdicts,
             mut refusals,
         } = self.judge_voter_runs(&candidates, &voters);
-        if let Some(target) = self.joint_target() {
+        if self.joint_target().is_some() {
             return MembershipPlan {
-                mutations: vec![MembershipMutation::CompleteVoterChange {
-                    voters: target.clone(),
-                }],
+                mutations: vec![MembershipMutation::CompleteVoterChange],
                 refusals,
                 verdicts,
             };
@@ -4341,7 +4342,7 @@ impl Administrator {
         let state = self.inner.store.inner.state();
         let admission_fences = (&state.node_admission_fences).into();
         let mut next_snapshot = Some(before.clone());
-        // A completion returns a confirmed uniform snapshot, whose plan cannot request another
+        // A completion returns a current uniform snapshot, whose plan cannot request another
         // completion. The second pass preserves further admission/address work in this call.
         while let Some(current) = next_snapshot.take() {
             nervix_primitives::task::consume_budget().await;
@@ -4357,8 +4358,8 @@ impl Administrator {
             for mutation in mutations {
                 nervix_primitives::task::consume_budget().await;
                 match mutation {
-                    MembershipMutation::CompleteVoterChange { voters } => {
-                        next_snapshot = Some(self.complete_voter_change(&voters).await?);
+                    MembershipMutation::CompleteVoterChange => {
+                        next_snapshot = Some(self.complete_voter_change().await?);
                     }
                     MembershipMutation::UpdateAddress { node_id, endpoint } => {
                         let operation = format!("update address of '{node_id}' to {endpoint}");
@@ -4460,32 +4461,73 @@ impl Administrator {
     }
 
     /// Finish the existing transition's target, preserving ordinary learners and removing voters
-    /// excluded by a pending DROP NODE. Further discovery work uses the confirmed publication.
+    /// excluded by a pending DROP NODE. Further discovery work uses the current publication.
     async fn complete_voter_change(
         &self,
-        voters: &BTreeSet<ClusterNodeName>,
     ) -> error_stack::Result<MembershipSnapshot, ConsensusError> {
-        let operation = format!("complete voter change towards {voters:?}");
-        self.inner.events.report(format!("raft {operation}"));
+        let operation = "complete recorded voter change".to_string();
         let proposed_under = self.inner.leader_tenure();
         let completion = async {
-            self.inner
-                .raft
-                .change_membership(voters.clone(), false)
-                .await
-                .map_err(|error| self.inner.write_failure(error, proposed_under))?;
-            self.wait_for_committed_membership(voters).await
+            let result =
+                Self::propose_voter_change_completion(&self.inner.raft, &self.inner.events)
+                    .await
+                    .map_err(|error| self.inner.write_failure(error, proposed_under))?;
+            match result {
+                MembershipCompletion::NoJointChange { current } => Ok(current),
+                MembershipCompletion::Applied { voters } => {
+                    self.wait_for_committed_membership(&voters).await
+                }
+            }
         };
         match timeout(MEMBERSHIP_MUTATION_TIMEOUT, completion).await {
             Ok(result) => result,
             Err(_) => {
                 let observed = self.membership_snapshot();
-                if observed.is_committed_uniform(voters) {
+                if observed
+                    .target_voters()
+                    .is_some_and(|voters| observed.is_committed_uniform(voters))
+                {
                     return Ok(observed);
                 }
                 Err(Report::new(self.membership_timeout(operation, &observed)))
             }
         }
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::error_boundary(
+            library,
+            reason = "preserves OpenRaft's membership result for the consensus reporting boundary"
+        )
+    )]
+    async fn propose_voter_change_completion(
+        raft: &NervixRaft,
+        events: &ConsensusEvents,
+    ) -> Result<MembershipCompletion, RaftError<TypeConfig, ClientWriteError<TypeConfig>>> {
+        // A previous timed-out request can advance the core before its metrics are published.
+        // Read behind that request in the core's queue before deciding to append a completion.
+        let current = raft
+            .with_raft_state(|state| MembershipSnapshot {
+                effective: state.membership_state.effective().clone(),
+                committed: state.membership_state.committed().clone(),
+            })
+            .await
+            .map_err(RaftError::Fatal)?;
+        let Some(target) = current.joint_target() else {
+            return Ok(MembershipCompletion::NoJointChange { current });
+        };
+        events.report(format!("raft complete voter change towards {target:?}"));
+        // OpenRaft's neutral voter change flattens its current joint target and preserves learners.
+        let response = raft
+            .change_membership(ChangeMembers::AddVoterIds(BTreeSet::new()), false)
+            .await?;
+        let membership = response
+            .membership
+            .verified("a completed membership write carries its uniform membership");
+        Ok(MembershipCompletion::Applied {
+            voters: membership.voter_ids().collect(),
+        })
     }
 
     async fn wait_for_committed_membership(
@@ -8197,10 +8239,9 @@ mod tests {
             joint
                 .automatic_mutations(&gossip, &BTreeMap::new())
                 .mutations,
-            vec![MembershipMutation::CompleteVoterChange {
-                voters: voters(&target).voter_ids()
-            }]
+            vec![MembershipMutation::CompleteVoterChange]
         );
+        assert_eq!(joint.joint_target(), Some(&voters(&target).voter_ids()));
         assert!(
             joint
                 .node(&ClusterNodeName::parse("node-4").assured("valid test node"))
@@ -8242,10 +8283,9 @@ mod tests {
         let fences = BTreeMap::from([(removed, ClusterNodeIncarnation::new(3))]);
         assert_eq!(
             joint.automatic_mutations(&gossip, &fences).mutations,
-            vec![MembershipMutation::CompleteVoterChange {
-                voters: voters(&target).voter_ids()
-            }]
+            vec![MembershipMutation::CompleteVoterChange]
         );
+        assert_eq!(joint.joint_target(), Some(&voters(&target).voter_ids()));
         assert!(
             voters(&target)
                 .automatic_mutations(&gossip, &fences)
@@ -8276,6 +8316,89 @@ mod tests {
         snapshot.committed = snapshot.effective.clone();
         assert!(snapshot.is_committed_uniform(&expected));
         assert!(!snapshot.is_committed_uniform(&voters(&["node-1", "node-2"]).voter_ids()));
+    }
+
+    struct SingleNodeMembershipNetwork;
+
+    impl openraft::RaftNetworkFactory<TypeConfig> for SingleNodeMembershipNetwork {
+        type Network = super::NetworkClient<()>;
+
+        async fn new_client(
+            &mut self,
+            _target: ClusterNodeName,
+            _node: &super::Node,
+        ) -> Self::Network {
+            panic!("a single-node membership fixture has no remote peer")
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn membership_completion_leaves_an_already_uniform_core_log_unchanged()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let node = ClusterNodeName::parse("node-1")?;
+        let store =
+            FjallStore::from_database(temp_database(), nervix_execution::Executor::default())
+                .await?;
+        let config = nervix_primitives::sync::StdArc::new(super::Config::default().validate()?);
+        let raft = super::NervixRaft::new(
+            node.clone(),
+            config,
+            SingleNodeMembershipNetwork,
+            store.clone(),
+            store,
+        )
+        .await?;
+        raft.initialize(BTreeMap::from([(
+            node.clone(),
+            super::Node::new("127.0.0.1:1"),
+        )]))
+        .await?;
+        raft.wait(Some(super::MEMBERSHIP_MUTATION_TIMEOUT))
+            .metrics(
+                |metrics| {
+                    metrics.current_leader.as_ref() == Some(&node)
+                        && metrics.last_applied.as_ref().map(|entry| entry.index)
+                            == metrics.last_log_index
+                        && metrics
+                            .membership_config
+                            .membership()
+                            .get_joint_config()
+                            .len()
+                            == 1
+                        && metrics.membership_config.log_id()
+                            == metrics.committed_membership_config.log_id()
+                },
+                "the single-node leader has applied its committed uniform membership",
+            )
+            .await?;
+        let before = raft
+            .with_raft_state(|state| state.log_ids.last().cloned())
+            .await?;
+        let completion = super::timeout(
+            super::MEMBERSHIP_MUTATION_TIMEOUT,
+            super::Administrator::propose_voter_change_completion(
+                &raft,
+                &super::ConsensusEvents::new(),
+            ),
+        )
+        .await;
+        let after = raft
+            .with_raft_state(|state| state.log_ids.last().cloned())
+            .await;
+        raft.shutdown()
+            .await
+            .expect("the fixture Raft task should stop");
+
+        let outcome = completion.expect("membership completion should answer within its bound")?;
+        let super::MembershipCompletion::NoJointChange { current } = outcome else {
+            panic!("the core already has its uniform configuration");
+        };
+        assert!(current.is_committed_uniform(&BTreeSet::from([node])));
+        assert_eq!(
+            after?, before,
+            "an already uniform core needs no membership log entry"
+        );
+        Ok(())
     }
 
     fn heartbeat_mismatch(voter: Duration, run: Duration) -> PrerequisiteMismatch {
