@@ -19,7 +19,21 @@ the moment its manifest lands, and a reader never mixes parts of two uploads.
 `download --name NAME --path DIR` extracts one artifact into DIR and fails if it does not exist.
 `download --pattern GLOB --path DIR` extracts every artifact whose name matches into DIR/<name>, and
 a pattern that matches nothing is not an error, because a job that did not run uploaded nothing.
-Every part is checked against its manifest entry and fetched again if it differs.
+Each request for a part asks for the bytes after those it already holds, so an attempt that was cut
+off resumes where it stopped. Every part is checked against its manifest entry once it is whole,
+and fetched again from its start if it differs.
+
+Every wait of a transfer is bounded, and a transfer says how it is going. A connection that does
+not open within 20 s, one that moves no byte for 60 s, and a body that moves less than 256 KiB/s
+over 30 s are cut off and tried again: R2 sometimes serves one object at a few KiB/s for many
+minutes, to every reader at once, before it drops them, while a new request usually moves at full
+speed. Each retry waits longer than the last, from 2 s doubling to 30 s, lengthened by up to half at
+random so that parts failing together are not retried together. Six failures in a row fail the
+transfer, but a download attempt that kept bytes starts a new count, so a part that keeps moving,
+however slowly, is bounded only by the job's time limit. While parts move, a line every ten seconds
+reports the bytes moved, the current rate, how many parts are done, moving, waiting to retry or
+queued, and the slowest part moving. When one part fails the others stop, and a transfer that is
+interrupted, as a job's cancellation or time limit does, reports how far it got as its error.
 
 PATHS is one pattern a line, as the replaced action read them, because what a job reads back
 depends on these rules. A pattern is relative to the working directory. `**` matches any depth, and
@@ -41,11 +55,13 @@ developing-nervix.md lists them.
 from __future__ import annotations
 
 import argparse
+import collections
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 import contextlib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+import enum
 import fnmatch
 import gzip
 import hashlib
@@ -54,11 +70,15 @@ import http.client
 import json
 import os
 from pathlib import Path
+import random
 import re
+import signal
 import sys
 import tarfile
 import tempfile
+import threading
 import time
+from types import TracebackType
 from typing import BinaryIO, TypeVar
 from urllib.parse import quote, urlsplit
 import uuid
@@ -66,13 +86,27 @@ from xml.etree import ElementTree
 
 PART_BYTES = 128 * 1024 * 1024
 CONCURRENT_TRANSFERS = 8
-# Six attempts wait 2, 4, 8, 16 and 30 seconds between them: a minute of a store being away.
+# A body moves a block at a time: an upload reads its part file this much at once, and a download
+# takes at most this much from one read of its connection. A body's pace is checked block by block.
+BLOCK_BYTES = 256 * 1024
+# How long opening a connection may take, its TLS handshake included.
+CONNECT_SECONDS = 20
+# How long a connection may move no byte at all, waiting for an answer or inside a body.
+IDLE_SECONDS = 60
+# A body that moves less than SLOWEST_BYTES_PER_SECOND over SLOW_SECONDS is cut off, and its part
+# tried again. A runner's healthy connection to R2 moves 1 to 12 MiB/s, but R2 sometimes serves one
+# object at a few KiB/s for many minutes, to every reader at once, before it drops them.
+SLOWEST_BYTES_PER_SECOND = 256 * 1024
+SLOW_SECONDS = 30
+# Six failures in a row wait 2, 4, 8, 16 and 30 seconds between them, each lengthened by up to half
+# at random so that parts failing together are not retried together: at least a minute of a store
+# being away.
 TRANSFER_ATTEMPTS = 6
+FIRST_BACKOFF_SECONDS = 2
 LONGEST_BACKOFF_SECONDS = 30
-# How long a connection may make no progress at all. A transfer that progresses has no limit here;
-# the job's own timeout bounds it.
-SOCKET_SECONDS = 60
-SOCKET_BLOCK_BYTES = 1024 * 1024
+BACKOFF_JITTER = 0.5
+# How often a transfer of parts reports how far they got.
+REPORT_SECONDS = 10
 GZIP_DEFAULT_LEVEL = 1
 # The key prefix of an upload's parts, which the bucket's lifecycle rules match.
 PART_PREFIXES = {"standard": "runs", "transfer": "transfer"}
@@ -88,6 +122,8 @@ ENVIRONMENT = {
     "access_key": "R2_ARTIFACTS_ACCESS_KEY_ID",
     "secret_key": "R2_ARTIFACTS_SECRET_ACCESS_KEY",
 }
+# Lines come from every thread moving a part, and each one is printed whole.
+OUTPUT = threading.Lock()
 
 T = TypeVar("T")
 
@@ -104,18 +140,308 @@ class Transient(Exception):
     """A transfer failed in a way the next attempt may not."""
 
 
-def with_retries(what: str, operation: Callable[[], T]) -> T:
-    """Run a transfer until it succeeds or its attempts run out."""
-    for attempt in range(1, TRANSFER_ATTEMPTS + 1):
+class Stopped(Exception):
+    """A part stops moving, because another part of its transfer failed or the transfer was
+    interrupted."""
+
+
+@dataclass(frozen=True)
+class Limits:
+    """How long a request may wait or crawl, how it is retried, and how often a transfer reports."""
+
+    connect_seconds: float = CONNECT_SECONDS
+    idle_seconds: float = IDLE_SECONDS
+    slowest_bytes_per_second: int = SLOWEST_BYTES_PER_SECOND
+    slow_seconds: float = SLOW_SECONDS
+    attempts: int = TRANSFER_ATTEMPTS
+    first_backoff_seconds: float = FIRST_BACKOFF_SECONDS
+    longest_backoff_seconds: float = LONGEST_BACKOFF_SECONDS
+    backoff_jitter: float = BACKOFF_JITTER
+    report_seconds: float = REPORT_SECONDS
+
+    def backoff(self, failures: int) -> float:
+        """The wait after `failures` failed attempts in a row."""
+        doubled = self.first_backoff_seconds * 2 ** (failures - 1)
+        return min(doubled, self.longest_backoff_seconds) * random.uniform(1, 1 + self.backoff_jitter)
+
+
+def say(line: str) -> None:
+    """Print one line of the log, whole, whichever thread prints it."""
+    with OUTPUT:
+        print(line, flush=True)
+
+
+def size(count: float) -> str:
+    """A byte count in binary units, as a report prints it."""
+    if count < 1024:
+        return f"{count:.0f} B"
+    scaled = count / 1024
+    for unit in ("KiB", "MiB", "GiB"):
+        if scaled < 1024:
+            return f"{scaled:.1f} {unit}"
+        scaled /= 1024
+    return f"{scaled:.1f} TiB"
+
+
+def duration(seconds: float) -> str:
+    """An elapsed time as minutes and seconds, and hours when it has any."""
+    minutes, whole_seconds = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}:{minutes:02}:{whole_seconds:02}"
+    return f"{minutes}:{whole_seconds:02}"
+
+
+def describe(error: BaseException) -> str:
+    """The cause of a failed attempt, as its log line names it."""
+    if isinstance(error, Transient):
+        return str(error)
+    if str(error):
+        return f"{type(error).__name__}: {error}"
+    return type(error).__name__
+
+
+class Phase(enum.Enum):
+    """Where one part of a transfer stands."""
+
+    QUEUED = "queued"
+    MOVING = "moving"
+    WAITING = "waiting to retry"
+    DONE = "done"
+
+
+class Progress:
+    """How far the parts of one artifact got. The threads moving the parts update it, and the
+    thread that started them reports it."""
+
+    def __init__(
+        self,
+        name: str,
+        verb: str,
+        lengths: Sequence[int],
+        limits: Limits,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.name = name
+        self.verb = verb
+        self.lengths = tuple(lengths)
+        self.total = sum(self.lengths)
+        self.limits = limits
+        self.clock = clock
+        self.stopping = threading.Event()
+        self.lock = threading.Lock()
+        self.moved = [0] * len(self.lengths)
+        self.phases = [Phase.QUEUED] * len(self.lengths)
+        self.failed_attempts = 0
+        self.started = clock()
+        # What the previous report saw, which only the reporting thread reads and writes.
+        self.reported_at = self.started
+        self.reported = [0] * len(self.lengths)
+
+    def part(self, index: int) -> PartProgress:
+        return PartProgress(self, index)
+
+    def enter(self, index: int, phase: Phase) -> None:
+        with self.lock:
+            self.phases[index] = phase
+            if phase is Phase.WAITING:
+                self.failed_attempts += 1
+            if phase is Phase.DONE:
+                self.moved[index] = self.lengths[index]
+
+    def add(self, index: int, count: int) -> None:
+        with self.lock:
+            self.moved[index] += count
+
+    def reset(self, index: int) -> None:
+        with self.lock:
+            self.moved[index] = 0
+
+    @staticmethod
+    def rate(moved: int, reported: int, interval: float) -> float:
+        """How fast a part moved since the previous report. A part that started again since then
+        moved all it holds within the interval."""
+        if interval <= 0:
+            return 0.0
+        if moved < reported:
+            return moved / interval
+        return (moved - reported) / interval
+
+    def report(self) -> str:
+        """How far the parts got since the transfer started, how fast they moved since the previous
+        report, and which moving part is the slowest."""
+        now = self.clock()
+        with self.lock:
+            moved = list(self.moved)
+            phases = list(self.phases)
+        interval = now - self.reported_at
+        rates = [self.rate(current, previous, interval) for current, previous in zip(moved, self.reported, strict=True)]
+        self.reported_at = now
+        self.reported = moved
+        held = sum(moved)
+        share = held / self.total if self.total else 1.0
+        counts = collections.Counter(phases)
+        line = (
+            f"{self.name}: {self.verb} {size(held)} of {size(self.total)} ({share:.0%}) in "
+            f"{duration(now - self.started)}, {size(sum(rates))}/s; parts: {counts[Phase.DONE]} done, "
+            f"{counts[Phase.MOVING]} moving, {counts[Phase.WAITING]} waiting to retry, "
+            f"{counts[Phase.QUEUED]} queued"
+        )
+        moving = [index for index, phase in enumerate(phases) if phase is Phase.MOVING]
+        if not moving:
+            return line
+        slowest = min(moving, key=rates.__getitem__)
+        return (
+            f"{line}; slowest part-{slowest}: {size(moved[slowest])} of {size(self.lengths[slowest])} "
+            f"at {size(rates[slowest])}/s"
+        )
+
+    def finish(self) -> None:
+        """Print the line a finished transfer ends with. A transfer some of whose attempts failed
+        says so as a warning, so that a store that slowed a job down shows in the run's summary."""
+        elapsed = self.clock() - self.started
+        speed = self.total / elapsed if elapsed > 0 else 0.0
+        line = (
+            f"{self.name}: {self.verb} {size(self.total)} in {len(self.lengths)} parts in "
+            f"{duration(elapsed)}, {size(speed)}/s"
+        )
+        if self.failed_attempts:
+            say(f"::warning title=CI artifact::{line}, after {self.failed_attempts} failed attempts")
+            return
+        say(line)
+
+
+@dataclass(frozen=True)
+class PartProgress:
+    """One part's handle on the progress of its transfer."""
+
+    progress: Progress
+    index: int
+
+    @property
+    def stopping(self) -> threading.Event:
+        return self.progress.stopping
+
+    def enter(self, phase: Phase) -> None:
+        self.progress.enter(self.index, phase)
+
+    def add(self, count: int) -> None:
+        self.progress.add(self.index, count)
+
+    def reset(self) -> None:
+        self.progress.reset(self.index)
+
+
+def pause(stopping: threading.Event, seconds: float) -> None:
+    """Wait out a backoff, unless the transfer stops first."""
+    if stopping.wait(seconds):
+        raise Stopped()
+
+
+def with_retries(
+    what: str,
+    operation: Callable[[], T],
+    limits: Limits,
+    part: PartProgress | None = None,
+    kept: Callable[[], int] | None = None,
+) -> T:
+    """Run a request until it succeeds, fails for a reason a retry does not change, or fails
+    `limits.attempts` times in a row. `kept` counts the bytes the attempts have kept for the next
+    one to continue from, and an attempt that kept more starts a new count of failures in a row."""
+    stopping = threading.Event() if part is None else part.stopping
+    failures = 0
+    attempt = 0
+    while True:
+        if stopping.is_set():
+            raise Stopped()
+        attempt += 1
+        before = 0 if kept is None else kept()
+        if part is not None:
+            part.enter(Phase.MOVING)
         try:
             return operation()
         except (OSError, http.client.HTTPException, Transient) as error:
-            if attempt == TRANSFER_ATTEMPTS:
-                raise ArtifactError(f"{what} failed {attempt} times, last with {error}") from error
-            delay = min(2**attempt, LONGEST_BACKOFF_SECONDS)
-            print(f"{what}: attempt {attempt} failed with {error}; retrying in {delay} s", flush=True)
-            time.sleep(delay)
-    raise AssertionError("the last attempt returns or raises")
+            if stopping.is_set():
+                raise Stopped() from error
+            after = 0 if kept is None else kept()
+            if after > before:
+                failures = 1
+            else:
+                failures += 1
+            cause = describe(error)
+            if failures >= limits.attempts:
+                raise ArtifactError(f"{what} failed {failures} times in a row, last with {cause}") from error
+            delay = limits.backoff(failures)
+            if after:
+                step = f"resuming at {size(after)}"
+            else:
+                step = "retrying"
+            say(f"{what}: attempt {attempt} failed with {cause}; {step} in {delay:.1f} s")
+            if part is not None:
+                part.enter(Phase.WAITING)
+            pause(stopping, delay)
+
+
+class Meter:
+    """The pace of one attempt's body, which must move `slowest_bytes_per_second` for each of every
+    `slow_seconds`. An attempt whose body falls behind is cut off as too slow."""
+
+    def __init__(
+        self, limits: Limits, stopping: threading.Event, clock: Callable[[], float] = time.monotonic
+    ) -> None:
+        self.limits = limits
+        self.stopping = stopping
+        self.clock = clock
+        self.quota = limits.slowest_bytes_per_second * limits.slow_seconds
+        self.since = clock()
+        self.moved = 0
+
+    def count(self, moved: int) -> None:
+        """Count a block that moved. The attempt stops when its transfer is stopping, and when the
+        bytes moved since the body last met its pace fall short of it for `slow_seconds`."""
+        if self.stopping.is_set():
+            raise Stopped()
+        now = self.clock()
+        self.moved += moved
+        if self.moved >= self.quota:
+            self.since = now
+            self.moved = 0
+            return
+        elapsed = now - self.since
+        if elapsed >= self.limits.slow_seconds:
+            raise Transient(
+                f"too slow: {size(self.moved)} in {elapsed:.0f} s, "
+                f"below {size(self.limits.slowest_bytes_per_second)}/s"
+            )
+
+
+class MeteredBody:
+    """A part file as http.client reads it to send it, a block at a time. A block counts as sent
+    when http.client asks for the next one, which it does once it has sent the last."""
+
+    def __init__(
+        self,
+        file: BinaryIO,
+        part: PartProgress,
+        limits: Limits,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.file = file
+        self.part = part
+        self.limits = limits
+        self.clock = clock
+        self.meter: Meter | None = None
+        self.unsent = 0
+
+    def read(self, amount: int = -1) -> bytes:
+        if self.meter is None:
+            self.meter = Meter(self.limits, self.part.stopping, self.clock)
+        if self.unsent:
+            self.part.add(self.unsent)
+            self.meter.count(self.unsent)
+        block = self.file.read(amount)
+        self.unsent = len(block)
+        return block
 
 
 def error_code(body: bytes) -> str:
@@ -164,6 +490,82 @@ def authorization(
 
 
 @dataclass(frozen=True)
+class Part:
+    length: int
+    sha256: str
+
+
+class ReceivedPart:
+    """One part as its attempts receive it. Each attempt asks for the bytes after those kept, so one
+    that was cut off resumes where it stopped. The part's manifest entry judges it once it is whole,
+    and a part that does not match is received again from its start."""
+
+    def __init__(self, path: Path, part: Part, progress: PartProgress) -> None:
+        self.part = part
+        self.progress = progress
+        self.output = path.open("wb", buffering=BLOCK_BYTES)
+        self.digest = hashlib.sha256()
+        self.received = 0
+
+    def __enter__(self) -> ReceivedPart:
+        return self
+
+    def __exit__(
+        self,
+        kind: type[BaseException] | None,
+        error: BaseException | None,
+        trace: TracebackType | None,
+    ) -> None:
+        self.output.close()
+
+    def kept(self) -> int:
+        return self.received
+
+    def complete(self) -> bool:
+        """Whether the part holds every byte its manifest entry counts, which an attempt cut off
+        after its last block leaves for the next one to check."""
+        return self.received >= self.part.length
+
+    def wanted(self) -> str:
+        """The byte range the next attempt asks for: everything after the bytes kept."""
+        return f"bytes={self.received}-"
+
+    def accept(self, response: http.client.HTTPResponse) -> None:
+        """Take a response's body as the rest of the part, or as the whole part when the store
+        answered with all of it."""
+        if response.status != 206:
+            self.restart()
+        wanted = self.part.length - self.received
+        if response.length is not None and response.length != wanted:
+            self.restart()
+            raise Transient(f"{response.length} bytes on offer where {wanted} were asked for")
+
+    def write(self, block: bytes) -> None:
+        self.output.write(block)
+        self.digest.update(block)
+        self.received += len(block)
+        self.progress.add(len(block))
+
+    def finish(self) -> None:
+        """Check the whole part against its manifest entry."""
+        if self.received < self.part.length:
+            raise Transient(f"the body ended at {self.received} of {self.part.length} bytes")
+        if self.received == self.part.length and self.digest.hexdigest() == self.part.sha256:
+            self.output.flush()
+            return
+        received = self.received
+        self.restart()
+        raise Transient(f"{received} bytes that do not match the manifest")
+
+    def restart(self) -> None:
+        self.output.seek(0)
+        self.output.truncate()
+        self.digest = hashlib.sha256()
+        self.received = 0
+        self.progress.reset()
+
+
+@dataclass(frozen=True)
 class Bucket:
     """The artifacts' bucket, addressed by path below its account's endpoint."""
 
@@ -171,6 +573,7 @@ class Bucket:
     endpoint: str
     access_key: str
     secret_key: str
+    limits: Limits = field(default_factory=Limits)
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> Bucket:
@@ -189,11 +592,13 @@ class Bucket:
         method: str,
         key: str,
         query: str = "",
-        body: bytes | BinaryIO | None = None,
+        body: bytes | BinaryIO | MeteredBody | None = None,
         length: int = 0,
+        headers: Mapping[str, str] | None = None,
     ) -> Iterator[http.client.HTTPResponse]:
-        """One signed request, whose response is open inside the block. A status a retry can
-        change raises Transient, and an absent object raises Missing."""
+        """One signed request, whose response is open inside the block; `headers` are signed with
+        it. A status a retry can change raises Transient, and so do a connection that does not open
+        in time and one that moves nothing for too long; an absent object raises Missing."""
         endpoint = urlsplit(self.endpoint)
         path = "/" + quote(f"{self.name}/{key}" if key else self.name, safe="/-_.~")
         signed = {
@@ -201,18 +606,28 @@ class Bucket:
             "x-amz-content-sha256": UNSIGNED_PAYLOAD,
             "x-amz-date": datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ"),
         }
-        headers = dict(signed)
-        headers["Authorization"] = authorization(
+        if headers:
+            signed.update(headers)
+        request_headers = dict(signed)
+        request_headers["Authorization"] = authorization(
             self.access_key, self.secret_key, REGION, method, path, query, signed, UNSIGNED_PAYLOAD
         )
         if method == "PUT":
-            headers["Content-Length"] = str(length)
+            request_headers["Content-Length"] = str(length)
         kind = http.client.HTTPSConnection if endpoint.scheme == "https" else http.client.HTTPConnection
-        connection = kind(endpoint.netloc, timeout=SOCKET_SECONDS, blocksize=SOCKET_BLOCK_BYTES)
+        connection = kind(endpoint.netloc, timeout=self.limits.connect_seconds, blocksize=BLOCK_BYTES)
         try:
+            try:
+                connection.connect()
+            except TimeoutError as error:
+                raise Transient(f"no connection within {self.limits.connect_seconds:g} s") from error
+            connection.sock.settimeout(self.limits.idle_seconds)
             target = f"{path}?{query}" if query else path
-            connection.request(method, target, body=body, headers=headers)
-            response = connection.getresponse()
+            try:
+                connection.request(method, target, body=body, headers=request_headers)
+                response = connection.getresponse()
+            except TimeoutError as error:
+                raise Transient(f"nothing moved for {self.limits.idle_seconds:g} s") from error
             if response.status == 404:
                 raise Missing(key)
             if response.status in TRANSIENT_STATUSES or response.status >= 500:
@@ -229,44 +644,55 @@ class Bucket:
             with self.exchange("PUT", key, body=data, length=len(data)) as response:
                 response.read()
 
-        with_retries(f"storing {key}", attempt)
+        with_retries(f"storing {key}", attempt, self.limits)
 
-    def put_file(self, key: str, path: Path, length: int) -> None:
+    def put_file(self, key: str, path: Path, length: int, progress: PartProgress) -> None:
+        """Send one part, from its start on every attempt."""
+
         def attempt() -> None:
-            with path.open("rb") as body, self.exchange("PUT", key, body=body, length=length) as response:
-                response.read()
+            progress.reset()
+            with path.open("rb") as file:
+                body = MeteredBody(file, progress, self.limits)
+                with self.exchange("PUT", key, body=body, length=length) as response:
+                    response.read()
 
-        with_retries(f"storing {key}", attempt)
+        with_retries(f"storing {key}", attempt, self.limits, progress)
+        progress.enter(Phase.DONE)
 
     def get_bytes(self, key: str) -> bytes:
         def attempt() -> bytes:
             with self.exchange("GET", key) as response:
                 return response.read()
 
-        return with_retries(f"reading {key}", attempt)
+        return with_retries(f"reading {key}", attempt, self.limits)
 
-    def get_file(self, key: str, path: Path, length: int, sha256: str) -> None:
-        """Fetch one part, and fetch it again if it does not match its manifest entry."""
+    def get_file(self, key: str, path: Path, part: Part, progress: PartProgress) -> None:
+        """Fetch one part, resuming an attempt that was cut off where it stopped, and fetching the
+        part again from its start if it does not match its manifest entry."""
+        with ReceivedPart(path, part, progress) as received:
 
-        def attempt() -> None:
-            digest = hashlib.sha256()
-            received = 0
-            with self.exchange("GET", key) as response, path.open("wb") as output:
-                while block := response.read(SOCKET_BLOCK_BYTES):
-                    output.write(block)
-                    digest.update(block)
-                    received += len(block)
-            if received != length or digest.hexdigest() != sha256:
-                raise Transient(f"{received} bytes that do not match the manifest")
+            def attempt() -> None:
+                if not received.complete():
+                    with self.exchange("GET", key, headers={"range": received.wanted()}) as response:
+                        received.accept(response)
+                        meter = Meter(self.limits, progress.stopping)
+                        try:
+                            while block := response.read1(BLOCK_BYTES):
+                                received.write(block)
+                                meter.count(len(block))
+                        except TimeoutError as error:
+                            raise Transient(f"nothing arrived for {self.limits.idle_seconds:g} s") from error
+                received.finish()
 
-        with_retries(f"reading {key}", attempt)
+            with_retries(f"reading {key}", attempt, self.limits, progress, received.kept)
+        progress.enter(Phase.DONE)
 
     def list_page(self, query: str) -> bytes:
         def attempt() -> bytes:
             with self.exchange("GET", "", query) as response:
                 return response.read()
 
-        return with_retries("listing the run's artifacts", attempt)
+        return with_retries("listing the run's artifacts", attempt, self.limits)
 
     def artifact_names(self, run: str) -> list[str]:
         """The artifacts of a run: every name below its prefix, page by page."""
@@ -289,6 +715,42 @@ class Bucket:
                     names.append(element.text.removeprefix(prefix).rstrip("/"))
             if not token:
                 return names
+
+
+def move_parts(progress: Progress, move: Callable[[PartProgress], None]) -> None:
+    """Move every part, CONCURRENT_TRANSFERS at a time, and report how far they got every
+    `report_seconds` until the last one is done. The first part to fail stops the others: none
+    starts after it, and those moving stop at their next block or backoff."""
+
+    def guarded(part: PartProgress) -> None:
+        try:
+            move(part)
+        except Stopped:
+            return
+        except BaseException:
+            progress.stopping.set()
+            raise
+
+    pool = ThreadPoolExecutor(CONCURRENT_TRANSFERS)
+    try:
+        pending = {pool.submit(guarded, progress.part(index)) for index in range(len(progress.lengths))}
+        while pending:
+            finished, pending = wait(pending, timeout=progress.limits.report_seconds, return_when=FIRST_EXCEPTION)
+            for future in finished:
+                future.result()
+            if pending:
+                say(progress.report())
+    except KeyboardInterrupt:
+        progress.stopping.set()
+        # How far a cancelled or timed out job got, in its run's summary.
+        say(f"::error title=CI artifact::interrupted: {progress.report()}")
+        raise
+    except BaseException:
+        progress.stopping.set()
+        say(f"{progress.report()}; stopping the other parts")
+        raise
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
 
 
 def segment_regex(segment: str) -> str:
@@ -399,12 +861,6 @@ class Selection:
         return cls(root=root, files=files)
 
 
-@dataclass(frozen=True)
-class Part:
-    length: int
-    sha256: str
-
-
 class PartWriter:
     """Cuts one written stream into files of at most `part_bytes`."""
 
@@ -479,7 +935,7 @@ def write_archive(selection: Selection, stream: gzip.GzipFile | PartWriter) -> i
             try:
                 archive.add(path, arcname=os.path.relpath(path, selection.root), recursive=False)
             except FileNotFoundError:
-                print(f"::warning title=CI artifact::{path} went away before it was packed", flush=True)
+                say(f"::warning title=CI artifact::{path} went away before it was packed")
                 continue
             packed += 1
     return packed
@@ -517,19 +973,19 @@ def upload(
     with transfer_directory() as directory:
         writer = PartWriter(Path(directory), part_bytes)
         files = pack(selection, writer, compression_level)
+        lengths = [part.length for part in writer.parts]
+        say(f"{name}: {files} files, {sum(lengths)} bytes in {len(lengths)} parts")
         upload_id = uuid.uuid4().hex
+        progress = Progress(name, "sent", lengths, bucket.limits)
 
-        def send(index: int) -> None:
-            part = writer.parts[index]
-            key = f"{prefix}/{run}/{name}/{upload_id}/part-{index}"
-            bucket.put_file(key, writer.path(index), part.length)
+        def send(part: PartProgress) -> None:
+            key = f"{prefix}/{run}/{name}/{upload_id}/part-{part.index}"
+            bucket.put_file(key, writer.path(part.index), lengths[part.index], part)
 
-        with ThreadPoolExecutor(CONCURRENT_TRANSFERS) as transfers:
-            list(transfers.map(send, range(len(writer.parts))))
+        move_parts(progress, send)
         manifest = {"prefix": prefix, "upload": upload_id, "parts": [asdict(part) for part in writer.parts]}
         bucket.put_bytes(manifest_key(run, name), json.dumps(manifest).encode())
-    total = sum(part.length for part in writer.parts)
-    print(f"{name}: {files} files, {total} bytes in {len(writer.parts)} parts")
+    progress.finish()
 
 
 def fetch(bucket: Bucket, run: str, name: str, destination: Path) -> None:
@@ -538,22 +994,24 @@ def fetch(bucket: Bucket, run: str, name: str, destination: Path) -> None:
     prefix = manifest["prefix"]
     upload_id = manifest["upload"]
     destination.mkdir(parents=True, exist_ok=True)
+    progress = Progress(name, "received", [part.length for part in parts], bucket.limits)
+    say(f"{name}: {progress.total} bytes in {len(parts)} parts")
     with transfer_directory() as directory:
         paths = [Path(directory) / f"part-{index}" for index in range(len(parts))]
 
-        def receive(index: int) -> None:
-            key = f"{prefix}/{run}/{name}/{upload_id}/part-{index}"
-            bucket.get_file(key, paths[index], parts[index].length, parts[index].sha256)
+        def receive(part: PartProgress) -> None:
+            key = f"{prefix}/{run}/{name}/{upload_id}/part-{part.index}"
+            bucket.get_file(key, paths[part.index], parts[part.index], part)
 
         try:
-            with ThreadPoolExecutor(CONCURRENT_TRANSFERS) as transfers:
-                list(transfers.map(receive, range(len(parts))))
+            move_parts(progress, receive)
         except Missing as error:
             raise ArtifactError(f"{name} of run {run} has expired: its parts are gone") from error
+        progress.finish()
         with contextlib.closing(PartReader(paths)) as reader:
             with tarfile.open(fileobj=reader, mode="r|*") as archive:
                 archive.extractall(destination, filter="data")
-    print(f"{name}: extracted into {destination}")
+    say(f"{name}: extracted into {destination}")
 
 
 def download(bucket: Bucket, run: str, name: str, pattern: str, destination: Path) -> None:
@@ -565,13 +1023,13 @@ def download(bucket: Bucket, run: str, name: str, pattern: str, destination: Pat
         return
     matching = [item for item in bucket.artifact_names(run) if fnmatch.fnmatchcase(item, pattern)]
     if not matching:
-        print(f"run {run} has no artifact matching {pattern}")
+        say(f"run {run} has no artifact matching {pattern}")
     for item in matching:
         try:
             fetch(bucket, run, item, destination / item)
         except Missing:
             # Parts without a manifest are an upload that never finished: no artifact at all.
-            print(f"::warning title=CI artifact::{item} of run {run} was never completed", flush=True)
+            say(f"::warning title=CI artifact::{item} of run {run} was never completed")
 
 
 def parse_arguments(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -612,13 +1070,16 @@ def run_upload(arguments: argparse.Namespace) -> None:
     if arguments.if_no_files_found == "error":
         raise ArtifactError(message)
     if arguments.if_no_files_found == "warn":
-        print(f"::warning title=CI artifact::{message}", flush=True)
+        say(f"::warning title=CI artifact::{message}")
     else:
-        print(message)
+        say(message)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = parse_arguments(argv)
+    # A job that is cancelled or runs out of time signals its step with SIGINT and then SIGTERM.
+    # Both interrupt a transfer, which reports how far it got.
+    previous = signal.signal(signal.SIGTERM, signal.default_int_handler)
     try:
         if not arguments.run:
             raise ArtifactError("GITHUB_RUN_ID or --run must name the run")
@@ -628,8 +1089,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             bucket = Bucket.from_environment(os.environ)
             download(bucket, arguments.run, arguments.name, arguments.pattern, Path(arguments.path))
     except ArtifactError as error:
-        print(f"::error title=CI artifact::{error}", flush=True)
+        say(f"::error title=CI artifact::{error}")
         return 1
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        signal.signal(signal.SIGTERM, previous)
     return 0
 
 
