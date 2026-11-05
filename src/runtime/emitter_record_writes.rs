@@ -1599,6 +1599,7 @@ mod tests {
                 clauses: Some(
                     RecordEnvelope {
                         message_id: Some(format!("message-{variant}")),
+                        reply_to: Some(format!("reply-{variant}")),
                         ..RecordEnvelope::default()
                     }
                     .into(),

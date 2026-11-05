@@ -35,6 +35,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Kafka domain offsets across explicit starts, reconnects, instance changes and restored backups | `Ingestors` → `Kafka`, and `Backup And Restore` |
 | Pulsar topic names, subscription ownership/TYPE/start position, received metadata, shared client authentication/TLS, receipt deadlines and delayed delivery | `Ingestors` → `Pulsar`, `Emitters` → `Pulsar`, then the `PULSAR TOPIC` mirror in `Connector Capabilities` |
 | Plexus entity modes, ordered options, typed metadata, generated client CONFIG key/type/confidentiality tables and directional differences | `Connector Capabilities`, then the entity's `Ingestors` or `Emitters` section |
+| MQTT shared-subscription support, session/QoS/mode pairings, client identities, keep-alive and recovery | `Ingestors` → `MQTT`, `Emitters` → `MQTT`, then `Connector Capabilities` → `MQTT TOPIC` |
 | Typed batches applications publish through client sessions, producer outcomes, and limits | `Ingestors` → `Client Ingestors`, and `Sessions` → `Producers` |
 | Constructed Arrow output applications receive and explicitly ACK, retry or reject | `Emitters` → `Client emitters`, `Sessions` → `Emitter Consumers`, and `Client Implementation Manual` → `Emitter Consumers` |
 | Junctions, deduplication, ordering, windows, inference, WASM, correlation, reingestion, and error routes | `Runtime Nodes` |
@@ -475,9 +476,10 @@ current connection, retry and deadline limits.
   persistent session a new client cannot take over. Use that section for `RETAIN`, typed publish
   `PROPERTIES` and ordered, repeated user properties written with `write_header`.
 - An `MQTT CLIENT`'s `addr` is `mqtt://` or `mqtts://`, a host and a port, with no credentials,
-  path or query: write `username` and `password` (redacted on inspection), `keep_alive_ms` in
-  whole seconds and the source admission bound `max_packet_size` as their own keys, checked against
-  the client key table in `Ingestors` → `MQTT`; its `tls_*` files belong only with `mqtts`. Write
+  path or query: write `username` and `password` (redacted on inspection), `keep_alive_ms` as
+  milliseconds representing whole seconds and the source admission bound `max_packet_size` as
+  their own keys, checked against the client key table in `Ingestors` → `MQTT`; its `tls_*` files
+  belong only with `mqtts`. Write
   MQTT wildcards only in an ingestor's `TOPIC`, as whole levels with `#` last and never a leading
   `$share` level, which Nervix forms itself; an emitter's `TOPIC` is one literal topic. Check both
   against the MQTT sections of `Ingestors` and `Emitters`.
@@ -523,6 +525,10 @@ current connection, retry and deadline limits.
   `SET CONSUMER` move it in place, and it continues from the position of the consumer it then
   names. Read `Ingestors` → `NATS` for redelivery, `MaxRequestBatch`, `MaxRequestExpires` and
   `AckWait`.
+- For NATS routing by the actual delivery, use the metadata fields declared in `Ingestors` →
+  `NATS`; a wildcard subscription's subject is concrete, and a stream's reply is its acknowledgement
+  subject. `NATS SUBJECT` emitters can write `REPLY TO`; read `Emitters` → `NATS` for its value
+  rules and retry boundary. Both directions preserve header order and require TLS for `tls://`.
 - A `NATS STREAM` emitter publishes to an operator-provisioned `STREAM '<stream>'` and a literal
   `SUBJECT '<subject>'` that stream captures. Use `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX
   <n>` with an `ACK TIMEOUT` and retry policy. The stream is checked when the emitter opens;
@@ -682,6 +688,10 @@ Choose checks relevant to the configured graph:
   incomplete application batches, retries, ACKs and rejections.
 - Read `Ingestors` and `Emitters` for the `SHOW INGESTORS`, `SHOW EMITTERS` and `DESCRIBE`
   inspection contracts, including effective options versus canonical `SHOW CREATE` configuration.
+- `DESCRIBE EMITTER` also reports connector publish/commit attempts and wall durations under
+  `destination:`. Read `Metrics And Observability` → `Connector Interactions` for the bounded
+  outcomes, registered-at-zero children and process-local history. These attempts are separate
+  from edge counters, which count each delivered record once.
 - The observability server's `/metrics` endpoint reports raw graph-edge counters and histograms,
   including batch-size resolution for tuning collection and flush boundaries. Read `Metrics And
   Observability` for the current histogram buckets. The endpoint also reports
