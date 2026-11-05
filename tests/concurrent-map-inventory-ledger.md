@@ -373,11 +373,13 @@ snapshot clone and before the pure eligibility decision. Replicated removal rech
 references when it applies. The pass reaches `transaction_bindings` only to remove the binding of
 a transaction it expires, a control-plane write. It no longer sweeps finished transactions: a
 finished transaction's binding stays with the session that holds it until that session's next
-request for the transaction is answered from the recorded outcome and releases it, that session
-attaches the transaction and finds it finished, the session closes, or leadership changes. An attach
+request for the transaction is answered from the recorded outcome and releases it, a COMMIT or
+REVERT finds its tombstone removed and releases it, that session attaches the transaction and finds
+it finished or unknown and releases it, the session closes, or leadership changes. An attach
 whose own touch finds the transaction finished, as when an overdue transaction expires at attach,
-removes the binding too. A session holds at most one binding, so the map stays bounded by live
-sessions. Retaining a tombstone does not retain a session binding.
+removes the binding too. Binding removal compares the bound session atomically with removal, so an
+earlier session cannot withdraw a later session's takeover. A session holds at most one binding,
+so the map stays bounded by live sessions. Retaining a tombstone does not retain a session binding.
 
 ### Rust client attachment recovery
 
