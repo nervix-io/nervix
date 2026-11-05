@@ -1434,6 +1434,34 @@ fn when_controlled_nats_endpoint_holds_after(world: &mut ScenarioWorld, publishe
     controlled_nats_endpoint(world).hold_after(publishes);
 }
 
+#[when("the controlled NATS endpoint drops replies after its next publish")]
+fn when_controlled_nats_endpoint_drops_replies_after_next_publish(world: &mut ScenarioWorld) {
+    controlled_nats_endpoint(world).drop_replies_after_next_publish();
+}
+
+#[then(expr = "within {string} the controlled NATS endpoint forwards at least {int} publishes")]
+async fn then_controlled_nats_endpoint_forwards_publishes(
+    world: &mut ScenarioWorld,
+    duration: String,
+    count: u64,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be valid");
+    nervix_primitives::time::timeout(
+        duration,
+        controlled_nats_endpoint(world).forwarded_publishes_at_least(count),
+    )
+    .await
+    .expect("the controlled NATS endpoint did not forward enough publishes");
+}
+
+#[then(expr = "within {string} the controlled NATS endpoint discards a server reply")]
+async fn then_controlled_nats_endpoint_discards_reply(world: &mut ScenarioWorld, duration: String) {
+    let duration = parse_duration_text(&duration).expect("step duration must be valid");
+    nervix_primitives::time::timeout(duration, controlled_nats_endpoint(world).discarded_reply())
+        .await
+        .expect("the controlled NATS endpoint did not discard a server reply");
+}
+
 /// Stands a forwarder in front of the MQTT broker that can drop chosen PUBLISH packets, and names
 /// its address `{{mqtt_filtered_addr}}`.
 #[given("an MQTT endpoint that drops chosen publishes is configured")]
@@ -7316,6 +7344,110 @@ fn given_consensus_commits_on_every_node_take(world: &mut ScenarioWorld, duratio
         );
         world.consensus_commit_delays.insert(node_id, duration);
     }
+}
+
+/// Hold only the follower's answer, after it has accepted the heartbeat. The followers therefore
+/// keep hearing the same leader while its acknowledgements arrive later than one heartbeat period.
+#[when(expr = "follower heartbeat answers take {string} while the leader idles for {string}")]
+async fn when_follower_heartbeat_answers_are_late(
+    world: &mut ScenarioWorld,
+    delay: String,
+    idle: String,
+) {
+    let delay = parse_duration_text(&delay).expect("heartbeat answer delay must be valid");
+    let idle = parse_duration_text(&idle).expect("heartbeat idle period must be valid");
+    let timings =
+        nervix_consensus::RaftTimings::resolve(Some(world.cluster_config.raft_heartbeat_interval))
+            .expect("the configured heartbeat interval must be valid");
+    assert!(
+        delay > world.cluster_config.raft_heartbeat_interval
+            && delay < timings.election_timeout_max(),
+        "the answer must be later than a heartbeat but inside the leader lease"
+    );
+    assert!(
+        idle > timings.election_timeout_max(),
+        "the idle observation must span one leader lease"
+    );
+
+    let leader = current_leader_node(world).await;
+    let before = world
+        .cluster()
+        .current_leadership(&leader)
+        .await
+        .expect("the leader must report its term before the delay");
+    let followers = world
+        .cluster()
+        .node_ids()
+        .into_iter()
+        .filter(|node| node != &leader)
+        .collect::<Vec<_>>();
+    assert_eq!(followers.len(), 2, "this regression requires three voters");
+    let observed_after = Instant::now() + idle;
+    for follower in &followers {
+        world
+            .fault_injection
+            .set_consensus_heartbeat_response_delay(
+                &crate::common::cluster::node_name(follower),
+                delay,
+            );
+    }
+
+    nervix_primitives::time::timeout(idle + Duration::from_secs(5), async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let both_received = followers.iter().all(|follower| {
+                world.fault_injection.delayed_consensus_heartbeat_requests(
+                    &crate::common::cluster::node_name(follower),
+                ) >= 2
+            });
+            if Instant::now() >= observed_after && both_received {
+                break;
+            }
+            nervix_primitives::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("both followers must receive delayed heartbeats across one leader lease");
+    let after = world
+        .cluster()
+        .current_leadership(&leader)
+        .await
+        .expect("the leader must report its term after the delay");
+    assert_eq!(after, before, "the same node must still lead in its term");
+    for follower in &followers {
+        let received = world
+            .fault_injection
+            .delayed_consensus_heartbeat_requests(&crate::common::cluster::node_name(follower));
+        assert!(
+            received >= 2,
+            "follower '{follower}' delayed only {received} heartbeats"
+        );
+    }
+    world.placeholders.insert("lease_leader".into(), leader);
+}
+
+#[then(expr = "the delayed-heartbeat leader creates domain {string} within {string}")]
+async fn then_delayed_heartbeat_leader_creates_domain(
+    world: &mut ScenarioWorld,
+    name: String,
+    budget: String,
+) {
+    let name = expand_placeholders(world, &name);
+    let budget = parse_duration_text(&budget).expect("command budget must be valid");
+    let leader = world
+        .placeholders
+        .get("lease_leader")
+        .expect("the preceding step saved the delayed-heartbeat leader");
+    let command = format!("CREATE DOMAIN {name};");
+    nervix_primitives::time::timeout(
+        budget,
+        world.cluster().run_command(leader, &world.domain, &command),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("the still-leading node '{leader}' did not commit '{name}': {error}")
+    })
+    .unwrap_or_else(|error| panic!("the still-leading node '{leader}' refused '{name}': {error}"));
 }
 
 #[given(expr = "{int} sessions keep creating domains named {string} through the leader node")]
@@ -28500,6 +28632,24 @@ async fn then_nats_jetstream_stream_eventually_contains_payload(
         .wait_for_nats_stream_payload(&stream, &subject, &expected)
         .await
         .expect("NATS JetStream stream did not receive expected payload");
+}
+
+#[then(expr = "NATS JetStream stream {string} holds exactly {int} messages")]
+async fn then_nats_jetstream_stream_holds_exactly_messages(
+    world: &mut ScenarioWorld,
+    stream: String,
+    count: u64,
+) {
+    let stream = expand_placeholders(world, &stream);
+    let held = world
+        .cluster()
+        .nats_stream_message_count(&stream)
+        .await
+        .unwrap_or_else(|error| panic!("failed to read NATS JetStream stream '{stream}': {error}"));
+    assert_eq!(
+        held, count,
+        "NATS JetStream stream '{stream}' holds {held} messages"
+    );
 }
 
 /// Publishes one NATS message whose payload is a JSON array of `count` records, the `n`th of which
