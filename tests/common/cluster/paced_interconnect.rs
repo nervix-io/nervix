@@ -189,6 +189,17 @@ async fn forward(
 }
 
 impl Cluster {
+    /// Retains only the release signal; dropping the cluster still ends the pacer's sockets.
+    pub(crate) fn interconnect_pacing_release(&self, node_id: &str) -> CancellationToken {
+        self.nodes[node_id]
+            .spec
+            .paced_interconnect
+            .as_ref()
+            .assured("the scenario installed its byte pacer before observing fault release")
+            .release_pacing
+            .clone()
+    }
+
     /// Releases this scenario's byte fault on existing and future connections, preserving their
     /// sockets and every byte already in flight.
     pub(crate) fn release_interconnect_pacing(&self, node_id: &str) {
