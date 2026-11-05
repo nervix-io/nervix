@@ -301,6 +301,12 @@ before data-stream admission. A management request failure uses the same unreach
 as a heartbeat; subsequent data-stream setup failures remain transport failures. Neither path
 retries inside the adapter or changes the caller's retry gate.
 
+A heartbeat worker accepts a follower answer arriving inside the leader lease, even after one
+heartbeat interval, and credits its original sending time. Its management request and worker share
+that lease deadline. A timeout or transport failure still becomes an unreachable-peer outcome;
+the lease check uses the acknowledged request's sending time. Empty replication
+probes retain their shorter soft deadline and existing failure projection.
+
 An ended consensus append input completes normally without a peer operation or a peer error. With
 a first request available, stream setup may return the existing typed admission, membership or
 transport failure as an unreachable-peer result. The caller's retry gate runs before that setup
@@ -1303,7 +1309,11 @@ holding the server's status and the description it gave, if any, beneath `Ingest
 An acknowledgement or a negative acknowledgement the server does not answer keeps the client's
 `RequestError` beneath `Acknowledge` or `NegativelyAcknowledge`, and one without a connection to
 send it on is `Disconnected`. A
-NATS JetStream publish keeps the driver's `PublishError` beneath `EmitterWriteError::Publish` when the
+NATS STREAM opening reports `EmitterOpenError::MissingExternalEntity` with the stream name if its
+lookup finds no stream; its public emitter status uses that typed error's value-free display text
+to name the missing stream. Other lookup failures keep the driver's typed cause beneath `Initialize`.
+A stream publish whose subject the named stream does not capture is a per-record external rejection.
+Other NATS JetStream publish failures keep the driver's `PublishError` beneath `EmitterWriteError::Publish` when the
 client does not take a record within `ACK TIMEOUT` and when a record's `PubAck` fails, each with the
 connector's description of the failure for the emitter's transient error. A message above the
 server's `max_payload` becomes a record rejection with code `external` and operation `publish`, and a
