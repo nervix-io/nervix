@@ -1,6 +1,7 @@
 mod byte_pace;
 mod paced_interconnect;
 mod snapshot_receive;
+mod status;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -66,6 +67,7 @@ use nervix_primitives::{
 };
 use nervix_test_environment::workspace_root;
 use paced_interconnect::PacedInterconnect;
+use status::ClusterStatus;
 
 /// Cucumber node ids are fixed strings from the feature files, so they always parse.
 pub(crate) fn node_name(raw: &str) -> ClusterNodeName {
@@ -5623,105 +5625,6 @@ async fn publish_secure_websocket(
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct ClusterStatus {
-    raw: String,
-    current_leader: Option<String>,
-    current_term: Option<u64>,
-    raft_state: Option<String>,
-    last_applied: Option<u64>,
-    membership: BTreeMap<String, String>,
-    membership_joint: Option<bool>,
-    membership_committed: Option<bool>,
-    interconnect: BTreeMap<String, String>,
-}
-
-impl ClusterStatus {
-    fn parse(raw: String) -> Self {
-        let mut current_leader = None;
-        let mut current_term = None;
-        let mut raft_state = None;
-        let mut last_applied = None;
-        let mut membership = BTreeMap::new();
-        let mut membership_joint = None;
-        let mut membership_committed = None;
-        let mut interconnect = BTreeMap::new();
-        let mut in_membership = false;
-        let mut in_interconnect = false;
-
-        for line in raw.lines() {
-            if let Some(value) = line.strip_prefix("raft.current_leader: ") {
-                let trimmed = value.trim();
-                if trimmed != "(none)" {
-                    current_leader = Some(trimmed.to_string());
-                }
-            }
-
-            if let Some(value) = line.strip_prefix("raft.current_term: ") {
-                current_term = value.trim().parse::<u64>().ok();
-            }
-
-            if let Some(value) = line.strip_prefix("raft.state: ") {
-                raft_state = Some(value.trim().to_string());
-            }
-
-            if let Some(value) = line.strip_prefix("raft.last_applied: ") {
-                let trimmed = value.trim();
-                if trimmed != "(none)" {
-                    last_applied = trimmed.parse::<u64>().ok();
-                }
-            }
-
-            if let Some(value) = line.strip_prefix("raft.membership_joint: ") {
-                membership_joint = value.trim().parse().ok();
-            }
-            if let Some(value) = line.strip_prefix("raft.membership_committed: ") {
-                membership_committed = value.trim().parse().ok();
-            }
-
-            if line == "raft.membership:" {
-                in_membership = true;
-                in_interconnect = false;
-                continue;
-            }
-
-            if line == "[interconnect]" {
-                in_interconnect = true;
-                in_membership = false;
-                continue;
-            }
-
-            if in_membership {
-                if !line.starts_with("- ") {
-                    in_membership = false;
-                } else if let Some((node_id, role)) = parse_membership_line(line) {
-                    membership.insert(node_id, role);
-                }
-            }
-
-            if in_interconnect {
-                if !line.starts_with("- ") {
-                    in_interconnect = false;
-                } else if let Some((node_id, status)) = parse_interconnect_line(line) {
-                    interconnect.insert(node_id, status);
-                }
-            }
-        }
-
-        Self {
-            raw,
-            current_leader,
-            current_term,
-            raft_state,
-            last_applied,
-            membership,
-            membership_joint,
-            membership_committed,
-            interconnect,
-        }
-    }
-}
-
 impl ClusterStatus {
     /// The leadership this status reports: the leader it names in the term it reports, when it
     /// names both.
@@ -5729,34 +5632,6 @@ impl ClusterStatus {
         let leader = self.current_leader.clone()?;
         let term = self.current_term?;
         Some(ReportedLeadership { leader, term })
-    }
-
-    fn membership_is_ready(&self) -> bool {
-        self.membership_joint == Some(false) && self.membership_committed == Some(true)
-    }
-
-    fn has_ready_voters(&self, expected: &BTreeSet<String>) -> bool {
-        if !self.membership_is_ready() {
-            return false;
-        }
-        let mut observed = BTreeSet::new();
-        for (node, role) in &self.membership {
-            if role == "voter" {
-                observed.insert(node.clone());
-            }
-        }
-        &observed == expected
-    }
-
-    /// Whether a committed uniform membership holds `node_id` as a voter.
-    fn is_ready_voter(&self, node_id: &str) -> bool {
-        if !self.membership_is_ready() {
-            return false;
-        }
-        match self.membership.get(node_id) {
-            Some(role) => role == "voter",
-            None => false,
-        }
     }
 }
 
@@ -5766,49 +5641,6 @@ pub(crate) fn interconnect_status_from_text(raw: &str, peer: &str) -> Option<Str
         .interconnect
         .get(peer)
         .cloned()
-}
-
-#[cfg(test)]
-mod membership_status_tests {
-    use super::{BTreeSet, ClusterStatus};
-
-    #[rstest::rstest]
-    #[case(true, true, false)]
-    #[case(true, false, false)]
-    #[case(false, false, false)]
-    #[case(false, true, true)]
-    fn voter_readiness_requires_a_committed_uniform_membership(
-        #[case] joint: bool,
-        #[case] committed: bool,
-        #[case] ready: bool,
-    ) {
-        let expected = BTreeSet::from([
-            "node-1".to_string(),
-            "node-2".to_string(),
-            "node-3".to_string(),
-        ]);
-        let status = ClusterStatus::parse(format!(
-            "raft.membership_joint: {joint}\nraft.membership_committed: \
-             {committed}\nraft.membership:\n- node-1 [voter] 127.0.0.1:41001\n- node-2 [voter] \
-             127.0.0.1:41002\n- node-3 [voter] 127.0.0.1:41003"
-        ));
-        assert_eq!(status.has_ready_voters(&expected), ready);
-        assert_eq!(status.is_ready_voter("node-3"), ready);
-    }
-}
-
-fn parse_membership_line(line: &str) -> Option<(String, String)> {
-    let item = line.strip_prefix("- ")?;
-    let (node_id, rest) = item.split_once(" [")?;
-    let (role, _) = rest.split_once(']')?;
-    Some((node_id.to_string(), role.to_string()))
-}
-
-fn parse_interconnect_line(line: &str) -> Option<(String, String)> {
-    let item = line.strip_prefix("- ")?;
-    let (node_id, rest) = item.split_once(": ")?;
-    let (_, status) = rest.split_once("status=")?;
-    Some((node_id.to_string(), status.to_string()))
 }
 
 /// Renders a client outcome as its aggregate message followed by every non-empty statement

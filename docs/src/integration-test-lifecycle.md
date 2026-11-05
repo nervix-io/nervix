@@ -81,6 +81,8 @@ still joint, or a uniform entry that has not committed, cannot complete cluster 
 new member's convergence wait. Real-process start and relaunch convergence require the same
 membership observations alongside agreement on the leader and fresh connected peer targets.
 Missing status observations are not treated as successful readiness.
+The in-process status parser is shared with the focused Rust harness tests, so its readiness
+matrix executes under the standard test runner alongside the real-process convergence reader.
 
 ## Wide Subscription Row Input
 
