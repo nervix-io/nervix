@@ -515,6 +515,13 @@ current connection, retry and deadline limits.
   `BUFFER` or `DROP` quiesce. Write NATS wildcards only in an ingestor's `SUBJECT`, as whole
   tokens with `>` last; an emitter's `SUBJECT` is one literal subject. Check both against the NATS
   sections of `Ingestors` and `Emitters`.
+- A `NATS STREAM` ingestor reads a durable pull consumer an operator provisioned:
+  `STREAM '<stream>' CONSUMER '<consumer>'` with `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL`, and
+  `SUSPEND`, `BUFFER` or `DROP` quiesce. Nervix creates neither the stream nor the consumer, and it
+  refuses a push consumer and one whose acknowledgement policy is not explicit. `SET STREAM` and
+  `SET CONSUMER` move it in place, and it continues from the position of the consumer it then
+  names. Read `Ingestors` → `NATS` for redelivery, `MaxRequestBatch`, `MaxRequestExpires` and
+  `AckWait`.
 - A `PULSAR TOPIC` emitter's `TIMESTAMP <expression>` is each message's event time: an exact,
   non-null, non-sensitive `DATETIME`, written as the millisecond that contains it, and a time before
   `1970-01-01T00:00:00.001Z` rejects its record through `ON MESSAGE ERROR`. Its `DELIVER AFTER
