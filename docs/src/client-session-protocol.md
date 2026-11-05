@@ -725,6 +725,14 @@ stays applying. The finalization boundary returns that disposition unchanged and
 under the original reference to determine the terminal outcome. Reconciliation follows the same
 rule when an attempt is interrupted after admission.
 
+An ordinary model command applies through its own durable transaction. A failed commit attempt
+does not decide the command's result when another coordinator has already finished that
+transaction: the serving coordinator recovers its recorded outcome, including the command's
+message, diagnostics and admission. A committed transaction answers success; a recorded terminal
+failure keeps that failure. A transaction still committing answers `OutcomeUnknown` with cause
+`StillApplying`, and a typed leadership loss retains the leader-recovery response. The original
+execution reference and completion barrier govern all of these paths.
+
 A transaction's configured tombstone age cannot shorten an applying execution's recovery lifetime.
 An applying transaction request retains its finished target; an applying ordinary command retains
 its internal transaction and every planning refresh attempt through their recorded mutation owner.

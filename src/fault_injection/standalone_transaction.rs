@@ -2,7 +2,7 @@
 //!
 //! Layer: test harness, outside the product layer order.
 //! - **Owns.** Node- and domain-scoped barriers after a standalone command's transaction lookup and
-//!   after the preflight of its statement.
+//!   after the preflight of its statement, and after a failed commit attempt.
 //! - **Depends on.** The shared one-shot pause owner and vocabulary identities.
 //! - **Must not know.** Plexus syntax, transaction outcomes or recovery policy.
 
@@ -10,13 +10,15 @@ use nervix_models::{ClusterNodeName, DomainName};
 
 use super::{CommandPausePoint, FaultInjection};
 
-/// Where a coordinator preparing a standalone command's transaction is held.
+/// Where a coordinator applying a standalone command's transaction is held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StandaloneTransactionBoundary {
     /// The coordinator has looked its transaction up and not yet acted on what it observed.
     Lookup,
     /// The coordinator has preflighted the command's statement and not yet acted on the result.
     Preflight,
+    /// A commit attempt failed, and the coordinator has not yet interpreted its report.
+    CommitFailure,
 }
 
 impl FaultInjection {

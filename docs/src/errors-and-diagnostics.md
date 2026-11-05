@@ -2486,10 +2486,13 @@ An ordinary command whose internal transaction is still committing when its comm
 any other report, such as `TransactionCommitError::RecoverQuiescence` above a drain timeout or a
 consensus write refused by a saturated log, answers `OutcomeUnknown` with the `StillApplying` cause
 rather than `Failed`. That report describes one attempt, and the committing transaction keeps the
-command's domain mutation lease until recovery under the same reference records the outcome. A
-model step that adopts its transaction's own pause validates its frozen planning inputs against
-the domain as that pause left it, so `PlanningInputsChanged` names only inputs that another owner
-changed.
+command's domain mutation lease until recovery under the same reference records the outcome. If
+another coordinator has already finished that transaction, the ordinary command recovers its
+recorded outcome instead: an obsolete commit-attempt report cannot replace a committed success or
+the transaction's recorded terminal failure. Typed leadership loss still selects the leader
+response. A model step that adopts its transaction's own pause validates its frozen planning inputs
+against the domain as that pause left it, so `PlanningInputsChanged` names only inputs that another
+owner changed.
 
 An ordinary command's preflight, queue, and commit-planning refusals are reports decided against
 its coordinator's observation of the command's internal transaction. Before the session maps such a
