@@ -18,6 +18,16 @@ name, and the console recorder checks an opened WSS connection to the advertised
 
 ## Paced Interconnect Fixture
 
+The separate failed-append regression establishes retained history on all three nodes before
+stopping one follower and creating its backlog. It arms a single nonempty submission on the
+future leader before transferring leadership, then restarts the follower without waiting for
+catch-up. Arming therefore does not race the transfer, and the one failed submission happens
+after the follower is running again. Its request boundary is retained for the assertion. Native client
+attachment and commit, applied backlog and later writes, and a strict read on the successor
+verify recovery within the existing scenario and product budgets. The control uses an async
+mutex and releases the fault registry's guard before awaiting; neither the failure nor its
+observation requires a blocking lock or a new lifecycle task.
+
 The rate-limited follower catch-up scenario starts a TCP byte pacer before restarting a stopped
 node. Its listener takes the existing advertised endpoint and forwards opaque bytes to a private
 interconnect listener on the restarted node. The advertised endpoint stays fixed so retained peer
@@ -513,7 +523,7 @@ The lane then selects `@paced_simulation_reopen` from the public paced-driver fe
 Rust driver in the lane's selection and supplies its path to the same scenario fixture, so the
 driver installs its own detector before entering its runtime. Both drivers exercise endpoint
 replacement, pending submission ownership, explicit replay and replacement refusal against
-diagnostic nodes on one and three nodes, without retries. Python uses the ordinary shared binding;
+diagnostic nodes on one and three nodes, without retries. Python uses the ordinary native package;
 its locks and condition variables are outside this detector.
 
 The buffered-route replacement scenario accounts for every reading in the first run's outcomes
@@ -658,8 +668,9 @@ by a second each, including eleven rows from the first branch before both branch
 retain the same field, key, ordering and shared-timestamp checks, and separately reject a catch-up
 burst, physical scheduling at the slow rate, corrupt rows and a stalled or failed subscription.
 
-`tests-deps` builds the CLI, the Plexus formatter, the paced simulation's Rust driver and the shared
-C binding its Python driver loads in the normal target directory. Every service a scenario depends
+`tests-deps` builds the CLI, the Plexus formatter, the paced simulation's Rust driver and its native
+Python package wheel in the normal target directory. It installs the wheel and the Python coverage
+runtime into `target/paced-simulation/python` before scenarios start. Every service a scenario depends
 on is a container that `crates/test-environment` starts through testcontainers, which pulls its
 image or, for the mock server that no registry holds, builds it on first use: no recipe or workflow
 prepares or starts one. The NATS authentication fixture starts three independent enforcing
@@ -679,10 +690,15 @@ CLI process coverage recipe exercises transaction inspection and the clock-follo
 scenarios.
 
 `test-scenarios-coverage-build`, `coverage-scenarios` and `coverage-scenarios-append` also build the
-paced simulation's Rust driver and the shared binding with coverage flags, and the scenario runner
-selects them through `NERVIX_PACED_SIMULATION_PATH` and `NERVIX_CLIENT_LIBRARY`. A driver process
-inherits the profile location of the scenario binary that starts it, so the Rust driver and the
-binding loaded by the Python driver write their profiles into the same report when they exit.
+paced simulation's Rust driver and native Python extension with coverage flags. The scenario runner
+selects them through `NERVIX_PACED_SIMULATION_PATH` and `NERVIX_PACED_SIMULATION_PYTHON`, the latter
+naming the interpreter whose environment holds the package. The archive carries exactly one wheel,
+and the build job installs `uv` to run maturin and prepare CPython. `test-scenarios-coverage-unpack`
+installs the wheel with coverage into a fresh CPython 3.12 environment
+before any scenario starts. The shard compiles nothing. The instrumented extension also remains
+beside the suite as an object for LLVM's report. Each driver process inherits the scenario
+binary's profile location, so both the Rust driver and Python extension contribute their counters
+to the same ordinary report when they exit.
 
 The CI `scenarios-build` job uses the shared native
 [CI linker](./developing-nervix.md#validation-and-tests) for the server, CLI, unit tests and scenario harness,
@@ -714,7 +730,7 @@ that thread ran on a CPU for 86 percent of the run, every scenario took about 1.
 median across the factor `3` runs, and the run needed 279,439 slot-seconds where 48 slots had
 needed at most 215,000. More slots added no throughput, so the job keeps factor `3`. Memory was no
 limit on those runs' runner, which used at most 28 GiB of its 62. The archive build runs on
-`blacksmith-16vcpu-ubuntu-2404`, the unit tests on GitHub's hosted `ubuntu-24.04`, and the scenario shards on
+`blacksmith-16vcpu-ubuntu-2404`, the unit tests on `blacksmith-4vcpu-ubuntu-2404`, and the scenario shards on
 `blacksmith-8vcpu-ubuntu-2404`, whose 32 GB give each of its 24 slots the memory that runner gave
 each of 48. Each of the three shards keeps every product and harness deadline on 8 CPUs and 24
 slots, half the slots a 16-CPU shard held, so a shard takes about twice as long. The shards left Boat because a Boat
@@ -3369,7 +3385,7 @@ held by a consensus commit delay that only its scenario's cleanup releases.
 ### Scenario Shards
 
 CI runs the suite in shards. The `scenarios-build` job builds the instrumented scenario executable,
-CLI, paced simulation driver, shared binding and report tool once with
+CLI, paced simulation driver, native Python extension and report tool once with
 `just test-scenarios-coverage-build`, and packs them with the generated inputs a run reads into one
 archive with `just test-scenarios-coverage-pack`, before it builds the
 [unit tests](#unit-test-archive) in the same target directory and publishes its cache. Cargo holds a target directory

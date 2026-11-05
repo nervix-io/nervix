@@ -215,7 +215,9 @@ current connection, retry and deadline limits.
   coincide. They declare `MODE STRICT|LOOSE` after their names, and a mode-only change uses `ALTER
   WIRE <format> SCHEMA <wire_schema> MODE STRICT|LOOSE`. SYSLOG is a predefined singleton wire
   schema referenced directly with `FROM SYSLOG`; it has no name or model lifecycle.
-- Every codec explicitly handles any wire/internal datetime or shape difference. Every JAQ-backed
+- Every codec explicitly declares text interchange with `ENCODE field AS RFC3339` for datetimes
+  and `ENCODE field AS BASE64` for bytes in JSON or AVRO strings. Read `Schemas And Codecs` for
+  the exact binding matrix and native byte representations. Every JAQ-backed
   codec uses `WITH JAQ TRANSFORMATIONS` and declares `ON INGESTION`, `ON EMITTING`, or both in that
   order; `ON EMITTING BATCH` may follow `ON EMITTING` and yields exactly one value per batch. Every `ON INGESTION` output is an object that fits the internal schema, and a payload that
   unfolds into several messages is decoded, acknowledged, and redelivered as a whole.

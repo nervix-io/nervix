@@ -221,18 +221,18 @@ the independent interoperation with Rust in both encoding directions.
 
 [Client I/O 05](https://app.clickup.com/t/86bc8bj8d) added
 `examples/paced-simulation/python/paced_simulation.py`, a runnable application rather than a probe.
-It reaches the binding's C ABI through `ctypes`, with nothing but the standard library: it
-follows the domain clock and projects every wait and admission check through
-`nx_domain_clock_*`, builds its batches with `nx_batch_builder_*`, reads deliveries with
-`nx_batch_*`, and runs its producer, consumers, clock and inspection loops on one session from
-several threads. `paced_simulation.feature` runs it with `just test-scenarios` beside the Rust
-driver, on one and three nodes, against the published example graph; `just tests-deps` builds the
-binding it loads.
+It uses the native `nervix_client` package over the Rust client. Its `DomainClock` projects every
+wait and admission check, `BatchBuilder` constructs the input columns, and typed batches expose
+the delivery columns. Producer, consumer, clock and inspection loops share one session across
+Python threads; blocking calls release the GIL and Python owns each object's lifetime.
+`paced_simulation.feature` runs it with `just test-scenarios` beside the Rust driver, on one and
+three nodes, against the published example graph. `just tests-deps` builds and installs the wheel
+into the interpreter the scenario harness starts.
 The contract-change outline alters both emitters and the ingestor within one START generation and
 checks reopening, completed outcomes, and each ledger reading's exact effect. Separate one- and
 three-node cases check refusal after endpoint removal, schema change, and an unusable consumer
-credit request. Outcome threads retain the Python producer handle and its credit independently
-of the replacement, so neither a late outcome nor handle cleanup affects the replacement.
+credit request. Outcome threads retain the Python producer object and its credit independently
+of the replacement, so neither a late outcome nor object collection affects the replacement.
 The credit-wait outline changes the ingestor while a tick waits for the first batch's outcome,
 checks that its refusal leaves that reading unapplied, and explicitly replays it exactly once.
 A delayed consumer refusal after the last submitted tick also exits promptly instead of waiting

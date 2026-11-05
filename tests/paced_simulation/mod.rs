@@ -4,8 +4,8 @@
 //! - **Owns.** Running a published driver as its own process against a node of the scenario's
 //!   cluster, the ledger and effect files the driver's runs in one scenario share, the report each
 //!   run prints, and holding the files and the report to the behavior a scenario expects.
-//! - **Depends on.** The Rust driver binary `tests-deps` builds, the Python driver with the shared
-//!   binding it loads, the published example graph, and the scenario's cluster.
+//! - **Depends on.** The Rust driver binary `tests-deps` builds, the Python driver with the native
+//!   package it imports, the published example graph, and the scenario's cluster.
 //! - **Must not know.** How either driver talks to the server. Both drivers print the same report
 //!   and write the same files, so one set of checks holds both to the same contract.
 
@@ -31,8 +31,8 @@ const PYTHON_DRIVER: &str = "examples/paced-simulation/python/paced_simulation.p
 /// The instrumented Rust driver a coverage run builds, when the run builds one.
 const RUST_DRIVER_ENV: &str = "NERVIX_PACED_SIMULATION_PATH";
 
-/// The shared Rust binding the Python driver loads.
-const LIBRARY_ENV: &str = "NERVIX_CLIENT_LIBRARY";
+/// The CPython interpreter with the native package installed before scenarios start.
+const PYTHON_ENV: &str = "NERVIX_PACED_SIMULATION_PYTHON";
 
 /// The admission error a reading stamped outside every reached tick window is rejected with.
 const OUTSIDE_WINDOW: &str = "outside any reached logical tick window";
@@ -51,7 +51,7 @@ pub(crate) struct PacedSimulation {
 enum Driver {
     /// The Rust driver, built on the Rust client library.
     Rust,
-    /// The Python driver, built on the shared C binding through ctypes.
+    /// The Python driver, built on the native Python package over the Rust client.
     Python,
 }
 
@@ -86,19 +86,20 @@ impl Driver {
                 ProcessCommand::new(program)
             }
             Self::Python => {
-                let library = match std::env::var_os(LIBRARY_ENV) {
+                let python = match std::env::var_os(PYTHON_ENV) {
                     Some(path) => PathBuf::from(path),
-                    None => build_directory().join("libnervix_client_ffi.so"),
+                    None => build_directory()
+                        .with_file_name("paced-simulation")
+                        .join("python/bin/python"),
                 };
                 assert!(
-                    library.exists(),
-                    "the shared binding the Python paced simulation driver loads is missing at \
-                     {}; `just tests-deps` builds it",
-                    library.display()
+                    python.exists(),
+                    "the Python paced simulation environment is missing at {}; `just tests-deps` \
+                     installs the native package before scenarios start",
+                    python.display()
                 );
-                let mut command = ProcessCommand::new("python3");
+                let mut command = ProcessCommand::new(python);
                 command.arg(repository.join(PYTHON_DRIVER));
-                command.env(LIBRARY_ENV, library);
                 command
             }
         }

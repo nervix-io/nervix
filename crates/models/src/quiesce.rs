@@ -410,8 +410,10 @@ impl Model {
                     ModelChangeAspects::replaced()
                 }
             }
-            (Self::WireJsonSchema(base), Self::WireJsonSchema(candidate))
-            | (Self::WireCborSchema(base), Self::WireCborSchema(candidate)) => {
+            (Self::WireJsonSchema(base), Self::WireJsonSchema(candidate)) => {
+                wire_schema_change_aspects(base, candidate)
+            }
+            (Self::WireCborSchema(base), Self::WireCborSchema(candidate)) => {
                 wire_schema_change_aspects(base, candidate)
             }
             (Self::WireAvroSchema(base), Self::WireAvroSchema(candidate)) => {

@@ -1150,7 +1150,7 @@ class LaneTests(unittest.TestCase):
         self.assertEqual([(stage["name"], stage["duration_seconds"]) for stage in stages], [("build", 630.0), ("workloads", 0.0)])
         self.assertTrue(all(stage["verdict"] == "complete" for stage in stages))
 
-    def test_the_paced_driver_build_uses_the_build_stage_and_keeps_its_binding_path(self) -> None:
+    def test_the_paced_driver_build_uses_the_build_stage_and_keeps_its_python_interpreter(self) -> None:
         fixture = Fixture(self, INVENTORY.replace('tags = ["@lane"]', 'tags = ["@lane"]\ndriver = "nervix-paced-simulation"'))
         processes = ScriptedProcesses(fixture.root)
         lane = fixture.lane(processes)
@@ -1159,7 +1159,7 @@ class LaneTests(unittest.TestCase):
         self.assertLess(names.index("nervix-paced-simulation-build"), names.index("probes"))
         scenario = processes.launches[-1]
         self.assertEqual(scenario.environment["NERVIX_PACED_SIMULATION_PATH"], str(processes.executable("driver")))
-        self.assertEqual(scenario.environment["NERVIX_CLIENT_LIBRARY"], str(fixture.target / "debug/libnervix_client_ffi.so"))
+        self.assertEqual(scenario.environment["NERVIX_PACED_SIMULATION_PYTHON"], str(fixture.target / "paced-simulation/python/bin/python"))
 
     def test_a_build_measurement_runs_no_workload_and_cannot_qualify_as_one(self) -> None:
         processes = ScriptedProcesses(self.fixture.root)
