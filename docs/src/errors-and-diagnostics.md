@@ -41,6 +41,13 @@ RabbitMQ's TLS file keys declare `amqps` as their permitted address scheme. The 
 and commit, naming the key, `addr` and `amqps` without the configured values. The existing
 certificate/key pairing refusal remains independent of the scheme check.
 
+NATS authentication retains the maintained NKey codec's typed refusal beneath the existing
+length, encoding, user-kind or checksum context, including the original base32 decoding source.
+User-kind validation precedes the checksum, preserving the refusal when both are invalid.
+Credentials parsing retains the driver's typed missing/incomplete-section cause. Neither chain
+renders the JWT or seed. Signing, filesystem admission and retryable no-work refusals keep their
+existing owners and outcomes; the [Connector Contract](connector-contract.md) owns preparation.
+
 NATS stream metadata is decoded where a program requests it. A malformed acknowledgement
 subject retains the driver's parsing cause; a nonpositive sequence or delivery count and an
 out-of-range publication timestamp have distinct typed field causes. `IngestMetadataFailure`

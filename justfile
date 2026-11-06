@@ -349,6 +349,13 @@ test-inferencer-state *args: build-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/inferencer_state.feature {{ quote(args) }}
 
+# Exercise NATS authentication through real brokers and one-/three-node public graphs.
+test-nats-authentication *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/nats_authentication.feature {{ quote(args) }}
+
 # Run the native-client and CLI foreign-reference witnesses with only the tools they start.
 test-client-foreign-execution: (test-client-recovery-witnesses "client-foreign-execution" "(A native command|The CLI) recovers its own execution after a foreign command reply")
 
@@ -695,6 +702,13 @@ test-cluster-duration-scenarios: build-web-console wasm-processor-guests downloa
         --input tests/features/cluster/cluster_parameters.feature \
         --tags @multi_span_cluster_duration --concurrency 2 --retry 0
 
+# Exercise cluster parameter completion and the refusal of a repeated parameter through the
+# session protocol and the Rust client, with only the in-process server's prerequisites.
+test-cluster-parameter-completion-scenarios: build-web-console wasm-processor-guests download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/cluster/cluster_parameters.feature \
+        --tags @cluster_parameter_completion --concurrency 2 --retry 0
+
 # Check external dependency startup and observation, including fresh Pulsar namespace readiness.
 test-environment *args:
     cargo test --package nervix-test-environment {{ args }}
@@ -782,6 +796,18 @@ fmt-nats-driver checkout:
 # Qualify the pinned NATS driver's flush, ordered headers and borrowed delivery metadata parser.
 test-nats-driver checkout *args:
     CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/nats-driver") }} cargo test --manifest-path {{ quote(checkout + "/async-nats/Cargo.toml") }} --package async-nats --no-default-features --features aws-lc-rs,jetstream,server_2_10,server_2_11 --lib -- {{ args }}
+
+# Format the maintained NKey codec package in its checkout.
+fmt-nkeys-codec checkout:
+    cargo +nightly fmt --manifest-path {{ quote(checkout + "/Cargo.toml") }}
+
+# Qualify the maintained NKey format boundary without enabling its signing backend.
+test-nkeys-codec checkout *args:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/nkeys-codec") }} cargo test --manifest-path {{ quote(checkout + "/Cargo.toml") }} --no-default-features --lib -- {{ args }}
+
+# Preserve the upstream NKey signing API alongside the independent format-only graph.
+test-nkeys-signing checkout *args:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/nkeys-codec") }} cargo test --manifest-path {{ quote(checkout + "/Cargo.toml") }} --features xkeys --lib -- {{ args }}
 
 # Qualify the pinned Pulsar driver's metadata boundary with the product's enabled features.
 test-pulsar-driver checkout *args:

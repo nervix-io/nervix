@@ -690,14 +690,14 @@ dependencies = [
 [[package]]
 name = "async-nats"
 version = "0.49.1"
-source = "git+https://github.com/glebpom/nats.rs.git?rev=649282d58fb5248ea24e620385c5dabf1bdaa813#649282d58fb5248ea24e620385c5dabf1bdaa813"
+source = "git+https://github.com/nervix-io/nats.rs.git?rev=572ef042d3afaeb2eff67896843599cd7ee5c6f7#572ef042d3afaeb2eff67896843599cd7ee5c6f7"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
  "bytes",
  "futures-util",
  "memchr",
- "nkeys",
+ "nkeys 0.4.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "pin-project",
  "portable-atomic",
  "rand 0.10.3",
@@ -7222,7 +7222,8 @@ dependencies = [
  "nervix-models",
  "nervix-primitives",
  "nervix-recovery",
- "nkeys",
+ "nkeys 0.4.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nkeys 0.4.5 (git+https://github.com/nervix-io/nkeys.git?rev=248dc49a1a8d4ebc47504358cc011f5c26583dfe)",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
@@ -8377,6 +8378,16 @@ dependencies = [
  "log",
  "rand 0.8.8",
  "signatory",
+]
+
+[[package]]
+name = "nkeys"
+version = "0.4.5"
+source = "git+https://github.com/nervix-io/nkeys.git?rev=248dc49a1a8d4ebc47504358cc011f5c26583dfe#248dc49a1a8d4ebc47504358cc011f5c26583dfe"
+dependencies = [
+ "data-encoding",
+ "log",
+ "zeroize",
 ]
 
 [[package]]
