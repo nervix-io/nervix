@@ -2843,11 +2843,11 @@ the whole server, so no build has to produce another file and no launch has to f
 `nervix-server`, and `main` reads `arg0` before it does anything else. A process of that name calls
 `run_server_process`, the entry point the `nervix-server` executable's own `main` calls, and none of
 the suite runs. Clap takes the program's name from the same `arg0`, so the command line a scenario
-reads is the product's. The dependency lifecycle helper is selected the same way. The launches of
-another file are the client protocol's measurements, whose subject is a release build:
-`just client-wire-baseline` and `just client-wire-tls-cost` build that server and name it to the
-suite. The transport cost starts two such processes that differ only in their session listener: one
-serves plaintext gRPC, and the other serves TLS on the port a plaintext listener would use,
+reads is the product's. The dependency lifecycle helper is selected the same way. The remaining
+measurement that launches another file is `just client-wire-tls-cost`, whose subject is a release
+build. It builds that server and names it to the suite. The transport cost starts two such
+processes that differ only in their session listener: one serves plaintext gRPC, and the other
+serves TLS on the port a plaintext listener would use,
 presenting the development certificate in-process TLS nodes present. The process's readiness probe
 and the clients the fixture opens follow the listener's transport.
 
