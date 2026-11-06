@@ -2,24 +2,30 @@
 //! lose its session connection.
 //!
 //! Layer: test harness.
-//! - **Owns.** Starting a console page with its connection recorder and optional bounded initial
-//!   frame gate, reading the page's record, releasing the gate, closing the session connection the
+//! - **Owns.** Starting a console page with its connection recorder and bounded session frame
+//!   gate, reading the page's record, releasing the gate, closing the session connection the
 //!   page holds, saving its first serving leader, and checking the record against the scenario's
 //!   consoles and reported leaders.
 //! - **Depends on.** The scenario's browser page and cluster, and the console connection record
 //!   and its checks.
 //! - **Must not know.** How the console drives its session, or how a node serves it.
 
+use std::time::Duration;
+
 use cucumber::{then, when};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::websocket::CONSOLE_SESSION_PATH;
+use nervix_models::DomainName;
+use nervix_primitives::time::{Instant, sleep};
+use playwright_rs::{WaitForOptions, WaitForState};
 
 use super::{
     ScenarioWorld, append_cucumber_log_line, assert_graph_probe, current_leader_node,
     expand_placeholders, open_recorded_web_console_page,
 };
-use crate::common::console_connections::{
-    ConsoleAddress, ConsoleConnectionRecord, ReportedLeaders,
+use crate::common::{
+    console_connections::{ConsoleAddress, ConsoleConnectionRecord, ReportedLeaders},
+    stallable_tcp_proxy::StallableTcpProxy,
 };
 
 /// What a console page runs before any script of its own.
@@ -49,24 +55,89 @@ pub(super) async fn record_console_connections(
     page: &playwright_rs::Page,
     initial_session: InitialSession,
 ) -> playwright_rs::Result<()> {
+    let initial_hold = match initial_session {
+        InitialSession::Deliver
+        | InitialSession::ObserveRequests
+        | InitialSession::UnreadableReplies => "false",
+        InitialSession::Hold => "true",
+    };
+    let path = serde_json::to_string(CONSOLE_SESSION_PATH)
+        .assured("the public session path serializes as JavaScript text");
+    let gate = HOLD_INITIAL_SESSION
+        .replace("__NERVIX_CONSOLE_SESSION_PATH__", &path)
+        .replace("__NERVIX_HOLD_INITIAL_SESSION__", initial_hold);
+    let script = format!("{RECORDER}\n{gate}");
     let script = match initial_session {
-        InitialSession::Deliver => RECORDER.to_string(),
+        InitialSession::Deliver | InitialSession::Hold => script,
         InitialSession::UnreadableReplies => {
             let fixture = super::web_console_unreadable::fixture_script();
-            format!("{RECORDER}\n{fixture}")
+            format!("{script}\n{fixture}")
         }
         InitialSession::ObserveRequests => {
             let observer = super::web_console_request_window::observer_script();
-            format!("{RECORDER}\n{observer}")
-        }
-        InitialSession::Hold => {
-            let path = serde_json::to_string(CONSOLE_SESSION_PATH)
-                .assured("the public session path serializes as JavaScript text");
-            let gate = HOLD_INITIAL_SESSION.replace("__NERVIX_CONSOLE_SESSION_PATH__", &path);
-            format!("{RECORDER}\n{gate}")
+            format!("{script}\n{observer}")
         }
     };
     page.add_init_script(&script).await
+}
+
+#[when(expr = "the web console is opened on node {string} through resettable endpoint {string}")]
+async fn open_console_through_resettable_endpoint(
+    world: &mut ScenarioWorld,
+    node: String,
+    endpoint: String,
+) {
+    super::close_browser(world).await;
+    world.last_command_error = None;
+    world.last_command_output = None;
+    world.last_server_error = None;
+    let node = expand_placeholders(world, &node);
+    let original = world
+        .cluster()
+        .web_console_url(&node)
+        .assured("the started node serves its console");
+    let mut url = url::Url::parse(&original).assured("the node's console is a URL");
+    let host = url.host_str().assured("the console has a host").to_string();
+    let port = url
+        .port_or_known_default()
+        .assured("the console has a port");
+    assert!(
+        !world.stallable_tcp_proxies.contains_key(&endpoint),
+        "the endpoint is configured once"
+    );
+    let proxy = StallableTcpProxy::start(host, port)
+        .await
+        .assured("the existing TCP proxy can front the console");
+    url.set_ip_host(proxy.local_addr().ip())
+        .assured("the console URL accepts loopback");
+    url.set_port(Some(proxy.local_port()))
+        .assured("the console URL accepts a local port");
+    world.stallable_tcp_proxies.insert(endpoint, proxy);
+    open_recorded_web_console_page(world, url.as_str(), InitialSession::Deliver)
+        .await
+        .assured("the browser reaches the actual console through the resettable connection");
+}
+
+#[when("the next web console session frames are held")]
+async fn hold_next_console_session(world: &mut ScenarioWorld) {
+    browser_page(world)
+        .evaluate::<(), ()>(
+            "() => window.__nervixInitialSession.holdNext()",
+            None::<&()>,
+        )
+        .await
+        .assured("the browser arms one bounded replacement-session frame gate");
+}
+
+#[then("the replacement web console session frames are held")]
+async fn replacement_session_is_held(world: &mut ScenarioWorld) {
+    assert_graph_probe(
+        browser_page(world),
+        "() => window.__nervixInitialSession.pending() > 0 ? 'OK' : 'no replacement session frame \
+         reached the gate'",
+        "the replacement session frames to reach the browser gate",
+    )
+    .await;
 }
 
 #[when("the web console is opened on the leader node with its initial session frames held")]
@@ -90,16 +161,31 @@ async fn when_web_console_opens_with_held_initial_session(world: &mut ScenarioWo
 }
 
 #[when("the held initial web console session frames are released")]
-async fn when_initial_web_console_session_is_released(world: &mut ScenarioWorld) {
+#[when("the held replacement web console session frames are released")]
+async fn when_web_console_session_is_released(world: &mut ScenarioWorld) {
     let released = browser_page(world)
         .evaluate::<(), usize>("() => window.__nervixInitialSession.release()", None::<&()>)
         .await
-        .assured("the bounded initial session gate releases every frame in receive order");
+        .assured("the bounded session gate releases every frame in receive order");
     assert!(released > 0, "the gate must hold an actual session frame");
     append_cucumber_log_line(&format!(
-        "initial console session: released {released} frames for domain={}",
+        "console session frame gate: released {released} frames for domain={}",
         world.domain
     ));
+}
+
+#[then("the web console prompt is ready for input")]
+async fn prompt_is_ready_for_input(world: &mut ScenarioWorld) {
+    browser_page(world)
+        .locator(".prompt-row input:enabled")
+        .wait_for(Some(
+            WaitForOptions::builder()
+                .state(WaitForState::Visible)
+                .timeout(10_000.0)
+                .build(),
+        ))
+        .await
+        .assured("the visible input becomes enabled within its existing action bound");
 }
 
 fn browser_page(world: &ScenarioWorld) -> &playwright_rs::Page {
@@ -113,6 +199,82 @@ async fn read_record(page: &playwright_rs::Page) -> ConsoleConnectionRecord {
     page.evaluate::<(), ConsoleConnectionRecord>(READ_RECORD, None::<&()>)
         .await
         .assured("every console page starts with the connection recorder")
+}
+
+#[then(
+    expr = "the web console reports each acknowledged clock attachment for domain {string} \
+            exactly once per session after at least {int} sessions"
+)]
+async fn clock_attachments_are_reported_by_session(
+    world: &mut ScenarioWorld,
+    domain: String,
+    minimum_sessions: usize,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = DomainName::parse(&domain).assured("a valid scenario domain");
+    let page = browser_page(world);
+    let deadline = Instant::now() + super::WEB_CONSOLE_ASSERTION_TIMEOUT;
+    let expected = format!("domain clock [{domain}] attached");
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let record = read_record(page).await;
+        let acknowledged = record
+            .clock_attachment_count(&domain)
+            .unwrap_or_else(|error| panic!("{error:#}; connections: {record}"));
+        let text = page
+            .locator(".terminal")
+            .all_inner_texts()
+            .await
+            .assured("the terminal is readable")
+            .join("\n");
+        let reported = text.matches(&expected).count();
+        if acknowledged >= minimum_sessions && reported == acknowledged {
+            append_cucumber_log_line(&format!(
+                "console clock acknowledgements: domain={domain} sessions={acknowledged} \
+                 terminal={reported}; connections:{record}"
+            ));
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "clock '{domain}' has {acknowledged} distinct session acknowledgements and {reported} \
+             terminal notifications; connections:{record}; terminal:{text}"
+        );
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
+pub(super) async fn record_browser_state(world: &ScenarioWorld) {
+    let Some(page) = world.browser_page.as_ref() else {
+        return;
+    };
+    let state = nervix_primitives::time::timeout(
+        super::WEB_CONSOLE_ASSERTION_TIMEOUT,
+        page.evaluate::<(), serde_json::Value>(
+            "() => { const prompt = document.querySelector('.prompt-row'); return {connections: \
+             window.__nervixConsoleConnections.record(), held_frames: \
+             window.__nervixInitialSession.pending(), prompt: {text: prompt?.textContent, \
+             visible: !!prompt?.getClientRects().length, disabled: \
+             prompt?.querySelector('input')?.disabled}, terminal: \
+             document.querySelector('.terminal')?.textContent}; }",
+            None::<&()>,
+        ),
+    )
+    .await;
+    match state {
+        Ok(Ok(state)) => append_cucumber_log_line(&format!(
+            "console restoration observation: domain={} state={state}",
+            world.domain
+        )),
+        Ok(Err(error)) => append_cucumber_log_line(&format!(
+            "console restoration observation failed: domain={} error={error}",
+            world.domain
+        )),
+        Err(error) => append_cucumber_log_line(&format!(
+            "console restoration observation timed out: domain={} error={error}",
+            world.domain
+        )),
+    }
 }
 
 #[then(expr = "the first leader connected by the web console is saved as placeholder {string}")]

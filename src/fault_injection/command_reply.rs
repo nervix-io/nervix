@@ -1,26 +1,23 @@
-//! Controlled substitutions in replies to an already executed session command.
+//! Controlled delivery pauses and substitutions in replies to an executed session command.
 //!
 //! Layer: test harness, outside the product layer order.
-//! - **Owns.** A domain/query's scripted replies, three uncertain ones or one naming another
-//!   execution, and the execution identities the script observed.
+//! - **Owns.** A node's command-reply delivery pause, a domain/query's scripted replies, three
+//!   uncertain ones or one naming another execution, and the identities the script observed.
 //! - **Depends on.** Public session outcomes, vocabulary identities and the shared test injector.
 //! - **Must not know.** Browser state, client retries, consensus implementation or graph execution.
 
 #![cfg_attr(
     nervix_lint,
-    nervix::context(
-        outside,
-        reason = "owns bounded testing-only command reply substitution"
-    )
+    nervix::context(outside, reason = "owns bounded testing-only command reply controls")
 )]
 
 use meticulous::ResultExt as _;
 use nervix_client_wire::{
     CommandDisposition, CommandOutcome, CommandRequest, OutcomeOrigin, UnknownOutcomeCause,
 };
-use nervix_models::{CommandExecutionReference, DomainName};
+use nervix_models::{ClusterNodeName, CommandExecutionReference, DomainName};
 
-use super::FaultInjection;
+use super::{CommandPausePoint, FaultInjection};
 
 /// The message of the failure a foreign-execution script answers with, which belongs to no
 /// command the scenario sent.
@@ -58,6 +55,26 @@ pub struct ForeignExecutionObservation {
 }
 
 impl FaultInjection {
+    /// Holds the next completed command after its result exists but before either public session
+    /// transport can deliver it.
+    pub fn pause_command_response_delivery_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::ResponseDelivery(node_id));
+    }
+
+    pub async fn wait_for_command_response_delivery_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::ResponseDelivery(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_command_response_delivery_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::ResponseDelivery(node_id.clone()));
+    }
+
+    pub(crate) async fn pause_command_response_delivery_if_armed(&self, node_id: &ClusterNodeName) {
+        self.pause_command_if_armed(CommandPausePoint::ResponseDelivery(node_id.clone()))
+            .await;
+    }
+
     /// Replaces three successful replies for exactly this domain and query with the three
     /// current uncertainty causes. Execution and its stored outcome are left intact.
     pub fn make_command_replies_uncertain(&self, domain: DomainName, query: String) {

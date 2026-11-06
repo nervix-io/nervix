@@ -81,7 +81,11 @@
           entry.connected = next();
         }
       });
-      this.addEventListener("message", (event) => keep(frames, event.data));
+      this.addEventListener("message", (event) => {
+        // A bounded frame gate may dispatch a received frame to the application later. That
+        // synthetic event is not another frame from the server; its receipt was recorded here.
+        if (event.isTrusted) keep(frames, event.data);
+      });
       this.addEventListener("close", () => release(entry));
     }
 

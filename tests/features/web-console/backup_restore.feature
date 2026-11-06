@@ -233,6 +233,47 @@ Feature: Web console backup and restore
       | 1            |
       | 3            |
 
+  @console_restore_lost_reply
+  Scenario Outline: A console restore whose reply was lost after it applied stays unknown when a later attempt cannot read the archive
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA item ( id I64 );
+      CREATE RELAY items SCHEMA item UNBRANCHED;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "source.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    When the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".backup-menu-button" is clicked
+    And selector ".backup-tab[data-tab='restore']" is clicked
+    And selector ".restore-file" is given backup archive "source.nvxb"
+    And selector ".restore-domain" is filled with "{{domain}}"
+    And selector ".restore-target" is filled with "{{domain}}_copy"
+    And selector ".restore-dry-run" is clicked
+    Then selector ".restore-status" contains "dry run planned"
+    Given the web console's next restore attempt loses its reply, after which its archive file cannot be read
+    When selector ".restore-submit" is clicked
+    Then the web console's lost restore reply completed the restore, whose execution reference is saved as placeholder "restore_reference"
+    And selector ".restore-status" contains "the outcome of restore '{{restore_reference}}' is unknown"
+    And selector ".restore-error" contains "the browser could not read the archive file"
+    When these Plexus commands are executed on the leader node
+      """
+      LIST DOMAINS;
+      """
+    Then the last command output contains
+      """
+      {{domain}}_copy pace=UNPACED status=STOPPED
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @console_restore_warnings
   Scenario Outline: A console restore lists the archived state it skipped beside its result
     Given a <cluster_size> node nervix cluster is started
