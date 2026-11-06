@@ -12,7 +12,7 @@ use crate::statement::{parse_statement, suggest_statement};
 fn every_parameter_parses_and_renders_its_semantic_literal_family() {
     for parameter in ClusterParameterKey::iter() {
         let value = match parameter.value_kind() {
-            ClusterParameterValueKind::Duration => "250ms",
+            ClusterParameterValueKind::Duration => "13m 49s 1ns",
             ClusterParameterValueKind::Count => "7",
             ClusterParameterValueKind::Bytes => "1KiB",
         };
@@ -27,6 +27,41 @@ fn every_parameter_parses_and_renders_its_semantic_literal_family() {
             statement
         );
     }
+}
+
+#[rstest::rstest]
+#[case("13m 49s", Duration::from_secs(829))]
+#[case("1h 2m 3s 4ms 5us 6ns", Duration::new(3_723, 4_005_006))]
+#[case("1.5s 250ms", Duration::from_millis(1_750))]
+#[case("1 min 30s", Duration::from_secs(90))]
+#[case("0s 1ns", Duration::from_nanos(1))]
+#[case(
+    "4294967295s 999ms 999us 999ns",
+    Duration::new(u64::from(u32::MAX), 999_999_999)
+)]
+fn multi_span_cluster_durations_parse_and_reparse_canonically(
+    #[case] literal: &str,
+    #[case] expected: Duration,
+) {
+    let input = format!("ALTER CLUSTER SET DOMAIN_DRAIN_TIMEOUT = {literal};");
+    let statement = parse_statement(&input).assured("the duration has valid spans");
+    let Statement::AlterCluster(alter) = &statement else {
+        panic!("the statement must be cluster administration");
+    };
+    assert_eq!(
+        alter.parameters.iter().cloned().collect::<Vec<_>>(),
+        vec![nervix_models::ClusterParameterChange::DomainDrainTimeout(
+            expected
+        )]
+    );
+    let canonical = statement
+        .to_canonical_plexus()
+        .assured("the semantic duration has canonical Plexus");
+    assert_eq!(
+        parse_statement(&canonical).assured("canonical multi-span durations parse"),
+        statement,
+        "{canonical}"
+    );
 }
 
 #[test]
@@ -55,12 +90,35 @@ fn malformed_assignments_do_not_escape_into_another_statement_family() {
         "ALTER CLUSTER SET REPLICA_COUNT = -1;",
         "ALTER CLUSTER SET REPLICA_COUNT = 18446744073709551616;",
         "ALTER CLUSTER SET STATE_SNAPSHOT_INTERVAL = 4messages;",
+        "ALTER CLUSTER SET DOMAIN_DRAIN_TIMEOUT = 13m 49;",
+        "ALTER CLUSTER SET DOMAIN_DRAIN_TIMEOUT = 13m 49messages;",
+        "ALTER CLUSTER SET DOMAIN_DRAIN_TIMEOUT = 13m -49s;",
+        "ALTER CLUSTER SET DOMAIN_DRAIN_TIMEOUT = 13m 49s trailing;",
+        "ALTER CLUSTER SET DOMAIN_DRAIN_TIMEOUT = 13m 18446744073709551615years;",
         "ALTER CLUSTER SET UDF_CODE_BYTES = 5s;",
         "ALTER CLUSTER SET RAFT_HEARTBEAT_INTERVAL = 1s;",
         "ALTER CLUSTER SET made_up_parameter = 1;",
         "ALTER DOMAIN SET REPLICA_COUNT = 2;",
     ] {
         assert!(parse_statement(input).is_err(), "{input}");
+    }
+}
+
+#[test]
+fn completion_after_multi_span_durations_stays_in_cluster_assignments() {
+    let prefix = "ALTER CLUSTER SET DOMAIN_DRAIN_TIMEOUT = 13m 49s, ";
+    let suggestions = suggest_statement(prefix, prefix.len());
+    for parameter in ClusterParameterKey::iter() {
+        assert!(
+            suggestions.contains(&parameter.keyword()),
+            "{suggestions:?}"
+        );
+    }
+    for unrelated in ["SCHEMA", "FROM", "CREATE RELAY"] {
+        assert!(
+            !suggestions.contains(&unrelated.to_string()),
+            "{suggestions:?}"
+        );
     }
 }
 
