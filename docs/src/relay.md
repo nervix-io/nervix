@@ -266,6 +266,7 @@ TTL controls:
 - concrete relay-branch presence on the owner
 - materialized-state cleanup when the relay is materialized
 - downstream processor state cleanup for the same concrete branch
+- cleanup of an emitter's held work for each concrete source branch
 
 Expiration semantics:
 
@@ -278,11 +279,11 @@ Expiration semantics:
   upstream delivery holds a branch's input back for longer than the TTL, every relay owner and
   processor that holds the branch releases it at its next scan, and a window processor drops the
   rows it retained for that branch
-- every relay owner, processor, ingestor and reingestor using the branch applies that branch's TTL
+- every relay owner, processor, ingestor, reingestor and emitter using the branch applies its TTL
   to its own branch-local runtime state. Releasing the branch ends only that entity's branch-local
-  state and the relay delivery channels it owns or publishes through for the branch. Another relay
-  or processor that holds a branch with the same key, under this branch or another branch of the
-  same schema, keeps its branch and the deliveries in flight on it
+  state and the relay delivery channels it owns or publishes through for the branch. Other
+  entities and an emitter's other sources keep their own branches and deliveries in flight, even
+  when their branch keys and schemas are equal
 - relay TTL and `MAX INSTANCES ... EVICT LRU` are enforced once by the relay owner across all
   producers in the cluster. A partitioned relay enforces them in each partition owner on the keys
   of that partition, so `MAX INSTANCES` caps each partition

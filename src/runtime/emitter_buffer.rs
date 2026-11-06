@@ -19,7 +19,7 @@
 use error_stack::ResultExt as _;
 use nervix_connector::RecordEnvelope;
 
-use super::*;
+use super::{emitter_task::branch_retention::EmitterBranchRetirements, *};
 
 /// What one emitter still holds: the batches its own buffer collected, and the rows an emitter that
 /// publishes on its commit boundary staged out of that buffer.
@@ -509,6 +509,19 @@ impl EmitterPublishBatch {
         self.batch.merged_acks()
     }
 
+    /// Staged rows already belong to the connector; retirement abandons only host-owned rows.
+    fn retire_unresolved(&self) {
+        for (row, state) in self.rows.iter().enumerate() {
+            if !state.is_resolved() {
+                self.batch
+                    .acks
+                    .get(row)
+                    .verified("a buffered row retains the ACK validated with its source batch")
+                    .no_ack("emitter source branch retired");
+            }
+        }
+    }
+
     /// Resolves `row` as delivered. A row resolves once, so delivering it again changes nothing
     /// and never resolves its acknowledgement a second time.
     pub(super) fn mark_delivered(
@@ -931,6 +944,84 @@ impl EmitterBatchBuffer {
         self.update_buffered_messages();
     }
 
+    /// Ends only the named source branches. Stable in-place compaction keeps carrier order and
+    /// remaps every prepared store before publishing the reduced buffer depth. The task owns
+    /// this operation exclusively; yielding between carriers lets terminal teardown cancel it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the task supplies a synchronous observer of rows already \
+                                   delivered; local observer bodies retain their \
+                                   recurring-execution checks")
+    )]
+    pub(super) async fn retire_branches(
+        &mut self,
+        retired: &EmitterBranchRetirements,
+        observe_sent: &mut impl FnMut(&PublishReport),
+    ) {
+        if retired.is_empty() {
+            return;
+        }
+        let Some(first) = self
+            .pending
+            .iter()
+            .position(|batch| retired.contains(batch.source_relay(), &batch.relay_batch().key))
+        else {
+            return;
+        };
+        let Self {
+            flush_policy: _,
+            pending,
+            payloads,
+            client_payloads,
+            requests,
+            row_requests,
+            pending_messages,
+            pending_bytes,
+            cadence,
+            buffered_messages,
+        } = self;
+        let mut positions = (0..first).map(Some).collect::<Vec<_>>();
+        positions.reserve(
+            pending
+                .len()
+                .checked_sub(first)
+                .verified("first is an index returned by this pending sequence"),
+        );
+        let mut next = first;
+        for index in first..pending.len() {
+            nervix_primitives::task::consume_budget().await;
+            let batch = &pending[index];
+            if retired.contains(batch.source_relay(), &batch.relay_batch().key) {
+                if let Some(report) = batch.delivered_report() {
+                    observe_sent(&report);
+                }
+                batch.retire_unresolved();
+                *pending_messages = pending_messages
+                    .checked_sub(batch.message_count())
+                    .assured("retired messages were included when their batch entered this buffer");
+                *pending_bytes = pending_bytes
+                    .checked_sub(batch.estimated_bytes())
+                    .assured("retired bytes were included when their batch entered this buffer");
+                positions.push(None);
+            } else {
+                positions.push(Some(next));
+                pending.swap(index, next);
+                next = next
+                    .checked_add(1)
+                    .assured("surviving carriers fit in the buffer already allocated");
+            }
+        }
+        pending.truncate(next);
+        payloads.remap_batches(&positions).await;
+        client_payloads.remap_batches(&positions).await;
+        requests.remap_batches(&positions).await;
+        row_requests.remap_batches(&positions).await;
+        if pending.is_empty() {
+            cadence.clear();
+        }
+        buffered_messages.set_buffered((*pending_messages).arch_into());
+    }
+
     /// What a flush that just completed published: every row its emitter delivered while this buffer
     /// held it, over every attempt the flush took, each counted once, and the payload bytes they
     /// carry. Absent when the emitter delivered none of them.
@@ -963,6 +1054,108 @@ mod tests {
         emitter_ordering_group::EvaluatedOrderingGroups,
         test_fixtures::{emitter_context, input_batch, input_batch_with, input_schema, named},
     };
+
+    #[nervix_primitives::test]
+    async fn retiring_one_source_branch_settles_only_its_unresolved_host_rows() {
+        use crate::runtime::test_fixtures::string_branch_key;
+
+        let source: RelayName = named("events");
+        let acme = string_branch_key("tenant", "acme");
+        let beta = string_branch_key("tenant", "beta");
+        let mut buffer = EmitterBatchBuffer::new(
+            &emitter_context(),
+            &FlushPolicy::Immediate,
+            Arc::new(EmitterBufferedMessages::default()),
+        );
+        let mut completions = Vec::new();
+        let mut connector_acks = None;
+        for index in 0..5 {
+            let (acks, completion) = AckSet::root();
+            if index == 4 {
+                connector_acks = Some(acks.clone());
+            }
+            let mut input = input_batch_with(index, index, acks);
+            input.key = if index == 1 {
+                beta.clone()
+            } else {
+                acme.clone()
+            };
+            let mut batch = EmitterPublishBatch::from_input(
+                if index == 2 {
+                    named("independent")
+                } else {
+                    source.clone()
+                },
+                input,
+                Timestamp::from_unix_nanos(index),
+            );
+            if index == 3 {
+                batch
+                    .mark_delivered(0, DeliveredAcknowledgements::Host)
+                    .assured(
+                        "each fixture batch has one pending row before its delivery is marked",
+                    );
+            }
+            if index == 4 {
+                batch
+                    .mark_delivered(0, DeliveredAcknowledgements::Connector)
+                    .assured(
+                        "each fixture batch has one pending row before its delivery is marked",
+                    );
+            }
+            buffer
+                .retain_without_cadence(batch)
+                .assured("the fixture buffer has an initialized immediate flush policy");
+            completions.push(completion);
+        }
+        buffer.report_staged_messages(1);
+        let mut retired = EmitterBranchRetirements::default();
+        retired.insert(source.clone(), acme.clone());
+        let mut sent = 0;
+        buffer
+            .retire_branches(&retired, &mut |report| sent += report.messages)
+            .await;
+        assert_eq!(sent, 1);
+        assert_eq!(buffer.pending_messages, 2);
+        assert_eq!(buffer.pending.len(), 2);
+        assert_eq!(buffer.pending[0].relay_batch().key, beta);
+        assert_eq!(buffer.pending[1].source_relay(), &named("independent"));
+        assert_eq!(buffer.buffered_messages.reported.load(Ordering::Acquire), 3);
+        buffer
+            .retire_branches(&retired, &mut |report| sent += report.messages)
+            .await;
+        assert_eq!(sent, 1, "delivered rows are counted once");
+        let [
+            pending,
+            first_survivor,
+            second_survivor,
+            delivered,
+            mut staged,
+        ] = completions
+            .try_into()
+            .assured("the fixture loop appended exactly five completion handles");
+        assert_eq!(
+            pending.wait().await,
+            AckOutcome::NoAck("emitter source branch retired".to_string())
+        );
+        assert_eq!(delivered.wait().await, AckOutcome::Ack);
+        assert!(
+            nervix_primitives::time::timeout(Duration::from_millis(20), staged.wait_for_progress())
+                .await
+                .is_err()
+        );
+        connector_acks
+            .assured("the fifth fixture row saved its connector acknowledgement above")
+            .ack_success();
+        assert_eq!(staged.wait().await, AckOutcome::Ack);
+        for batch in &mut buffer.pending {
+            batch
+                .mark_delivered(0, DeliveredAcknowledgements::Host)
+                .assured("both surviving fixture batches still have their one pending row");
+        }
+        assert_eq!(first_survivor.wait().await, AckOutcome::Ack);
+        assert_eq!(second_survivor.wait().await, AckOutcome::Ack);
+    }
 
     #[nervix_primitives::test]
     async fn cancelled_message_error_delivery_keeps_the_record_pending() {
