@@ -1940,7 +1940,7 @@ Feature: Plexus transactions
         value string
       );
       CREATE WIRE CBOR SCHEMA transaction_event_wire MODE STRICT (
-        value string
+        value text
       );
       CREATE CODEC transaction_json_codec
         FROM WIRE JSON SCHEMA transaction_event_wire
@@ -1977,7 +1977,7 @@ Feature: Plexus transactions
     Then the last command output contains
       """
       CREATE WIRE CBOR SCHEMA transaction_event_wire MODE STRICT (
-        value STRING
+        value TEXT
       );
       """
 

@@ -18,7 +18,7 @@ use futures_util::StreamExt;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     ClientFrame, ClientMessage, ClientRequest, CommandDisposition, CommandOutcome, CommandRequest,
-    DomainInfo, DomainList, EncodedFrame, InspectTransactionRequest, InspectionOutcome,
+    DomainInfo, DomainList, EncodedFrame, InspectTransactionRequest, InspectionOutcome, NoticeKind,
     NoticeLevel, OutcomeOrigin, Reply, ReplyBody, ReplyDelivery, RequestId, RequestRejected,
     RequestRejection, ServerEvent, ServerFrame, ServerMessage, ServerNotice, SessionLimitSettings,
     SessionLimits, TransferAssembly, UploadChunk, UploadDisposition, UploadFrame, UploadMessage,
@@ -125,6 +125,7 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for Exchange {
             nervix_primitives::task::spawn(async move {
                 let notice = ServerNotice {
                     level: NoticeLevel::Info,
+                    kind: NoticeKind::Leadership,
                     message: "connected to leader 'node-1'".to_string(),
                 }
                 .encode(&limits)
@@ -453,6 +454,7 @@ async fn replies_name_their_requests_and_large_replies_arrive_in_parts() {
         panic!("the unsolicited notice arrives first");
     };
     assert_eq!(notice.level, NoticeLevel::Info);
+    assert_eq!(notice.kind, NoticeKind::Leadership);
 
     let mut transfers = std::collections::BTreeMap::new();
     let mut replies = std::collections::BTreeMap::new();

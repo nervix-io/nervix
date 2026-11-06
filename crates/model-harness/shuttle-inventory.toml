@@ -54,6 +54,8 @@ checks = [
   "consumer::shuttle_tests::shuttle_close_fences_a_consumer_restore_interrupted_by_another_loss",
   "consumer::shuttle_tests::shuttle_close_fences_a_consumer_restore_started_on_the_same_exchange",
   "domain_clock::shuttle_tests::shuttle_a_detach_racing_a_restoration_leaves_no_attachment_of_its_clock",
+  "exchange::shuttle_tests::shuttle_a_closed_request_registry_ends_its_silent_reader",
+  "exchange::shuttle_tests::shuttle_a_foreign_reply_racing_registration_interrupts_every_waiter",
   "producer::shuttle_tests::shuttle_a_submission_racing_its_producers_end_observes_the_end",
   "producer::shuttle_tests::shuttle_close_fences_a_producer_restore_interrupted_by_another_loss",
   "producer::shuttle_tests::shuttle_close_fences_a_producer_restore_started_on_the_same_exchange",

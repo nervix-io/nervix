@@ -81,6 +81,11 @@ required, validates it there, and passes the resulting typed value to the next l
 the registry, execution plans, runtime, clients, and diagnostics from assigning different meanings
 to the same raw value.
 
+The native client's open request-registry variant owns the sender that keeps its exchange reader
+waiting for frames. Closing the registry drops that sender and its pending reply senders together.
+The closed variant owns neither: reader termination follows the typed state's lifetime, without a
+second boolean that can disagree with whether requests are admitted.
+
 The resolved node identity distinguishes a plaintext gRPC transport from an HTTPS transport that
 carries its listen and advertised addresses and both provisioned TLS paths. The CLI edge refuses
 incomplete pairs and TLS material in HTTP mode before constructing that identity. File availability,
@@ -320,17 +325,18 @@ their ownership through publication; neither a cast nor a fabricated range stand
 transport offset conversion. The SDK's indexed authoring and typed-inspection views preserve
 empty JSON value arrays. These driver representations never enter semantic Models or plans.
 
-A NATS ingestor or emitter Model is one of two entities, `NATS SUBJECT` or `NATS STREAM`,
-so a stored declaration holds the archived union of both. The registry's `NERVIX MODEL NSE` archive signature identifies the
-current Model layout, including those unions, the separate JSON and CBOR wire type enums, the AVRO
-representation types, explicit `BASE64` codec encoding, a Pulsar subscription's required type, an
-owned Pulsar subscription's required start position, a Kafka consumer group's required start
-position, the required 16-bit branch partition count, Sentry platform, an ingestor's `TIMESTAMP AT
+A NATS ingestor or emitter Model is one of two entities, `NATS SUBJECT` or `NATS STREAM`, so a stored
+declaration holds the archived union of both. The registry's `NERVIX CBOR NATS` archive
+signature identifies the current Model layout, including those unions, separate JSON and CBOR wire
+type enums (CBOR has six types), AVRO representation types, explicit `BASE64` codec encoding, a
+Pulsar subscription's required type, an owned Pulsar subscription's required start position, a Kafka
+consumer group's required start position, the required 16-bit branch partition count, Sentry
+platform, an ingestor's `TIMESTAMP AT
 metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the receive count an SQS
 QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an MQTT TOPIC
 ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter writes beside
 its publishing mode, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a
-`PATTERN`, and that header state. Consensus's `raft_stream_emit_` keyspaces and current state metadata
+`PATTERN`, and that header state. Consensus's `raft_cbor_nats_` keyspaces and current state metadata
 encoding identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule and the statements a transaction keeps. The runtime state
 store's `unit-labelled-metric-checkpoint-segments` format identifies the checkpoints it keeps,

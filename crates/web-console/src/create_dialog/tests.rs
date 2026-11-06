@@ -1207,21 +1207,24 @@ fn creation_components_render_each_typed_draft_and_accessible_status() {
         assert!(schema_markup.contains("tenant U32 OPTIONAL SENSITIVE"));
         assert!(schema_markup.contains("Wrap in fixed array"));
 
-        for (kind, field_type, format_name) in [
+        for (kind, field_type, format_name, field_type_name) in [
             (
                 CreateKind::WireJsonSchema,
                 WireFieldType::Json(JsonType::String),
                 "JSON",
+                "STRING",
             ),
             (
                 CreateKind::WireCborSchema,
-                WireFieldType::Cbor(CborType::String),
+                WireFieldType::Cbor(CborType::Text),
                 "CBOR",
+                "TEXT",
             ),
             (
                 CreateKind::WireAvroSchema,
                 WireFieldType::Avro(AvroType::String),
                 "AVRO",
+                "STRING",
             ),
         ] {
             signals.structured.update(|drafts| {
@@ -1237,7 +1240,7 @@ fn creation_components_render_each_typed_draft_and_accessible_status() {
             signals.open(kind, Some(scope.clone()), "global-create-button");
             let wire_markup = render();
             assert!(wire_markup.contains(&format!("CREATE WIRE {format_name} SCHEMA visual_wire")));
-            assert!(wire_markup.contains("payload STRING OPTIONAL"));
+            assert!(wire_markup.contains(&format!("payload {field_type_name} OPTIONAL")));
         }
 
         signals.structured.update(|drafts| {

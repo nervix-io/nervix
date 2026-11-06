@@ -143,6 +143,12 @@ class InventoryTests(unittest.TestCase):
     def test_inventory_has_current_targets_and_exact_corpus_paths(self) -> None:
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
+            "typed-runner-lease",
+            "typed-runner-policy",
+            "typed-runner-compilation",
+            "typed-runner-completion",
+            "typed-runner-identity",
+            "typed-runner-matrix",
             "clickhouse-client-tls-pairing",
             "client-config-schema",
             "connector-entity-presentation",
@@ -212,6 +218,7 @@ class InventoryTests(unittest.TestCase):
             "typed-report", "typed-source-contract", "typed-site-union", "typed-source-syntax", "typed-hidden-tunables",
             "typed-non-aws-lc-crypto",
             "nats-user-authentication",
+            "nats-subject-grammar",
             "plexus-statement",
             "plexus-statement-text",
             "plexus-emitter-envelopes",
@@ -347,6 +354,7 @@ class InventoryTests(unittest.TestCase):
             "wasm-generated-pools",
             "wasm-generated-pools-malformed",
             "expiry-map-operations",
+            "authentication-quota-clock",
             "rate-limit-quota-bounds",
             "rate-limit-utc-generations",
             "vm-decimal-rounding-floats",
@@ -440,6 +448,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-vm",
             "nervix-approx-into",
             "nervix-columnar-json",
+            "nervix-ratchet",
             "nervix-bounded-write",
             "nervix-connector",
             "nervix-connector-sqs",
@@ -637,7 +646,17 @@ class DiscoveryTests(unittest.TestCase):
                 found["bolero_new"] = manifest.parent / "src/lib.rs"
             return found
 
-        with mock.patch.object(bolero, "static_targets", side_effect=unregistered):
+        with (
+            mock.patch.object(bolero, "static_targets", side_effect=unregistered),
+            mock.patch.object(bolero, "listed_tests",
+                              side_effect=lambda package, test_target, ignored, features, manifest=None:
+                              [] if ignored else
+                              [item["test_name"] for item in self.compiled(package, test_target)]),
+            mock.patch.object(bolero, "compiled_targets", side_effect=self.compiled),
+            mock.patch.object(bolero, "command", side_effect=AssertionError(
+                "discovery unit tests must not run Cargo"
+            )),
+        ):
             with self.assertRaisesRegex(bolero.BoleroError, "differ from inventory"):
                 bolero.discover(self.inventory)
 

@@ -23,11 +23,11 @@ mirror = "Consumption tracks replayable log offsets and consumer groups; ACK con
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."PULSAR TOPIC"]
-mirror = "Consumption declares subscription ownership and, when ingestor-owned, its EARLIEST or LATEST creation position, and the subscription's type; existing cursors prevail. Publication uses a producer receipt. Both directions use the same quoted, case-preserving Pulsar topic names."
+mirror = "SUBSCRIPTION, TYPE and INSTANCES configure ingestion only: subscription ownership and an owned subscription's EARLIEST or LATEST position govern creation, while existing cursors prevail. TIMESTAMP and DELIVER AFTER are emitter envelope clauses; an ingestor selects a received time with TIMESTAMP AT. Ingestion reads ordered, repeated properties, while publication keeps the last value written for each property name and uses a producer receipt. Both directions use the same quoted, case-preserving local or fully qualified Pulsar topic names and the same client configuration."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."MQTT TOPIC"]
-mirror = "Consumption declares its session, inbound QoS and topic filter, and reads the delivered packet's metadata and ordered, repeated user properties. Publication declares its outbound QoS and completion mode, RETAIN, exact MQTT 5 publish properties and ordered, repeated user properties. Both directions keep the written case of topic names."
+mirror = "Both directions declare QOS 0, 1 or 2 independently of MODE. Consumption alone declares SESSION: NO ACK accepts every session/QoS pairing, while ACK SEQUENTIAL, ACK PARALLEL and SUSPEND require SESSION PERSISTENT with QOS 1 or 2. Every ingestor joins a Nervix-managed shared subscription, so its broker must support shared subscriptions. Publication pairs QOS 0 with NO ACK and QOS 1 or 2 with an ACK mode; its clean or persistent session follows QoS without a SESSION clause. Consumption reads the delivered packet's metadata and ordered, repeated user properties; publication writes RETAIN, exact MQTT 5 publish properties and ordered, repeated user properties. Both directions keep the written case of topic names."
 
 [entity."NATS SUBJECT"]
 mirror = "Subject consumption can join a queue group; Core publication completes after its flush. Both directions use quoted, case-preserving subjects; publication subjects exclude subscription wildcards."
