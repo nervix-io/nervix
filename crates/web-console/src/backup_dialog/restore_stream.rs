@@ -115,13 +115,14 @@ impl RestoreStreamError {
     /// Whether the restore may have been admitted, so its outcome is unknown rather than absent.
     pub(crate) fn leaves_outcome_unknown(&self) -> bool {
         match self {
-            Self::Transport | Self::Stalled | Self::NoReply | Self::Exhausted => true,
-            Self::ReadArchive
-            | Self::EmptyArchive
-            | Self::NoAddress
+            Self::Transport
+            | Self::Stalled
+            | Self::NoReply
+            | Self::Exhausted
             | Self::InvalidReply
             | Self::UnexpectedReply
-            | Self::ReferenceMismatch { .. } => false,
+            | Self::ReferenceMismatch { .. } => true,
+            Self::ReadArchive | Self::EmptyArchive | Self::NoAddress => false,
         }
     }
 }

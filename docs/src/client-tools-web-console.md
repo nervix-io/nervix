@@ -479,7 +479,14 @@ both references, takes nothing from that reply, neither its result nor its redir
 retry, and stops reading the connection. It reconnects as after a lost connection and sends the
 command again in its place under its own reference, so the leader answers with the command's own
 outcome; a Create form shows **Queued until reconnect** until then. The transaction id and
-status are replicated. If the WebSocket closes
+status are replicated. A reply that cannot be decoded or reassembled, or answers with another
+kind of body, also violates the session contract. The console reports why and stops reading that
+connection. Every command still waiting keeps its whole original request and its place in the
+issue order, including its reference, transaction position, preview and uncertain-outcome retry
+history. The next connection restores the session before repeating those commands; a visual Create
+waits for its own recovered outcome.
+
+If the WebSocket closes
 unexpectedly or leadership changes, the console reconnects and attaches that id before resuming a
 pending command. Each append is matched by its reference and expected position, and an outstanding
 commit remains pending through `COMMITTING` until its exact terminal result. A
@@ -673,9 +680,12 @@ message.
 
 A restore runs outside transactions, so the form refuses while the session holds one. Every attempt
 sends the same execution reference, statement, and archive: a lost connection or an unknown outcome
-streams the archive again, from its first byte, until the leader answers. If no answer arrives
-within about ten minutes, the dialog reports the restore's outcome as unknown and names its
-execution reference.
+streams the archive again, from its first byte, until the leader answers. After about ten minutes
+of retry pauses without learning the outcome, the dialog reports it as unknown and names its
+execution reference. An unreadable reply, or a reply naming another request or execution, stops
+that restore call and likewise reports **unknown** under the restore's original reference. It
+cannot establish that the restore was refused or that nothing changed; a foreign outcome is never
+shown as this restore's result.
 
 The console never renders what an archive holds beyond the summary a backup reports and the report
 a restore returns.

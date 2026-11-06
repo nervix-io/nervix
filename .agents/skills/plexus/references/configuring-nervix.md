@@ -69,7 +69,8 @@ For the CLI's `subscribe` and `domain-clock` shell streams and their line format
 documentation version as the selected index; this client chapter is outside the curated Plexus index.
 
 For browser controls waiting behind commands, lookup replacement, uncertain-command recovery on
-the open session, a reply that names another execution, and reconnect behavior, read
+the open session, unreadable replies, replies naming another execution, uncertain restore outcomes,
+and reconnect behavior, read
 [Web Console](https://docs.nervix.io/client-tools-web-console.html#bounded-buffers) and
 [Client Session Protocol](https://docs.nervix.io/client-session-protocol.html#restoration-and-bounded-consumers)
 directly. Follow the same documentation version as the selected index; these client chapters are
