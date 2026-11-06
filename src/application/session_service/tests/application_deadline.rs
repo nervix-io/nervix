@@ -18,7 +18,8 @@
 use meticulous::OptionExt as _;
 use nervix_primitives::sync::CancellationToken;
 
-use super::super::{ApplicationBound, ApplicationWait, RuntimeAdmission};
+use super::super::{ApplicationBound, RuntimeAdmission};
+use crate::runtime::ApplicationWait;
 
 #[nervix_primitives::test(start_paused = true)]
 async fn an_elapsed_application_deadline_refuses_an_available_installation_before_a_timer_tick() {

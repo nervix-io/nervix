@@ -635,6 +635,15 @@ struct ScenarioWorld {
     placeholders: BTreeMap<String, String>,
     saved_healthy_placements: Vec<SavedHealthyPlacement>,
     health_fault_started_at: Option<Instant>,
+    /// When the scenario last released a held application progress path: progress reports or
+    /// revision replies.
+    progress_hold_released_at: Option<Instant>,
+    /// When a client's background Plexus execution finished, which its task records itself.
+    background_plexus_finished_at: Option<StdArc<OnceLock<Instant>>>,
+    /// The process incarnation each node answered its application progress under when the
+    /// scenario saved it.
+    saved_application_progress_incarnations:
+        BTreeMap<String, nervix_models::ClusterNodeIncarnation>,
     /// Human-readable references in scenarios map to UUIDv7 identities so retries retain one
     /// stable creation timestamp while feature text remains legible.
     command_execution_references: BTreeMap<String, String>,
@@ -12650,9 +12659,230 @@ async fn when_application_revision_responses_are_released(
     node_id: String,
 ) {
     let node_id = expand_placeholders(world, &node_id);
+    world.progress_hold_released_at = Some(Instant::now());
     world
         .cluster()
         .release_application_revision_responses_from(&node_id);
+}
+
+#[given(expr = "application progress reports from node {string} pause before sending")]
+async fn given_application_progress_reports_are_paused(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster()
+        .pause_application_progress_reports_from(&node_id);
+}
+
+#[then(expr = "within {string} the application progress report pause on node {string} is reached")]
+async fn then_application_progress_report_pause_is_reached(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let bound = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    nervix_primitives::time::timeout(
+        bound,
+        world
+            .cluster()
+            .wait_for_application_progress_report_pause(&node_id),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "no application progress report from '{node_id}' reached its pause within {duration}: \
+             {error}"
+        )
+    });
+}
+
+#[when(expr = "application progress reports from node {string} are released")]
+async fn when_application_progress_reports_are_released(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world.progress_hold_released_at = Some(Instant::now());
+    world
+        .cluster()
+        .release_application_progress_reports_from(&node_id);
+}
+
+#[then(expr = "within {string} the background Plexus execution succeeds after the release")]
+async fn then_background_plexus_execution_succeeds_after_the_release(
+    world: &mut ScenarioWorld,
+    duration: String,
+) {
+    let bound = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let released_at = world
+        .progress_hold_released_at
+        .verified("a preceding step released a held application progress path");
+    let finished_at = world
+        .background_plexus_finished_at
+        .take()
+        .verified("a preceding step started a timed background Plexus execution");
+    let task = world
+        .background_plexus
+        .take()
+        .verified("a preceding step started a background Plexus execution");
+    let output = nervix_primitives::time::timeout(bound, task)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("the background Plexus execution did not finish within {duration}: {error}")
+        })
+        .assured("the background Plexus task is owned by this scenario")
+        .unwrap_or_else(|error| panic!("the background Plexus execution failed: {error}"));
+    let finished_at = *finished_at
+        .get()
+        .verified("the background task records when it finished before it returns");
+    assert!(
+        finished_at >= released_at,
+        "the background Plexus execution finished {:?} before the held progress path was \
+         released, so something other than the released path completed it",
+        released_at.saturating_duration_since(finished_at)
+    );
+    append_cucumber_log_line(&format!(
+        "background Plexus execution finished {:?} after the held progress path was released",
+        finished_at.saturating_duration_since(released_at)
+    ));
+    world.last_command_output = Some(output);
+}
+
+/// Asks `querier` for the application progress of `target`, as `querier`'s revision barriers
+/// read it.
+async fn query_application_progress(
+    world: &ScenarioWorld,
+    querier: &str,
+    target: &str,
+) -> Result<nervix_interconnect::ApplicationProgress, String> {
+    let querier = crate::common::cluster::node_name(querier);
+    let target = crate::common::cluster::node_name(target);
+    match world
+        .fault_injection
+        .query_application_progress(&querier, target)
+        .await
+    {
+        Ok(answer) => Ok(answer),
+        Err(error) => Err(format!("{error:#}")),
+    }
+}
+
+/// Whether `answer` reports every phase at `revision`, the runtime revision its reference node
+/// made ready, with an authoritative revision at least that runtime revision.
+fn answers_ready_revision(
+    answer: &nervix_interconnect::ApplicationProgress,
+    revision: u64,
+) -> bool {
+    let Some(authoritative) = answer.authoritative else {
+        return false;
+    };
+    authoritative >= revision
+        && answer.runtime_prepared == Some(revision)
+        && answer.runtime_ready == Some(revision)
+}
+
+#[then(
+    expr = "within {string} node {string} answers node {string} the revisions node {string} made \
+            ready"
+)]
+async fn then_node_answers_the_revisions_another_node_made_ready(
+    world: &mut ScenarioWorld,
+    duration: String,
+    target: String,
+    querier: String,
+    reference: String,
+) {
+    let target = expand_placeholders(world, &target);
+    let querier = expand_placeholders(world, &querier);
+    let reference = expand_placeholders(world, &reference);
+    let deadline = Instant::now()
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let reference_answer = query_application_progress(world, &reference, &reference).await;
+        let target_answer = query_application_progress(world, &querier, &target).await;
+        if let (Ok(reference_answer), Ok(target_answer)) = (&reference_answer, &target_answer)
+            && let Some(revision) = reference_answer.runtime_ready
+            && target_answer.identity.node_id().as_str() == target
+            && answers_ready_revision(target_answer, revision)
+        {
+            append_cucumber_log_line(&format!(
+                "node '{target}' answered node '{querier}' {target_answer:?} at the runtime \
+                 revision {revision} node '{reference}' made ready"
+            ));
+            return;
+        }
+        let observation = format!("reference {reference_answer:?}, answer {target_answer:?}");
+        assert!(
+            Instant::now() < deadline,
+            "node '{target}' did not answer node '{querier}' the revisions node '{reference}' \
+             made ready within {duration}; last observation: {observation}"
+        );
+        nervix_primitives::time::sleep(LEADER_POLL_INTERVAL).await;
+    }
+}
+
+#[when(expr = "the application progress incarnation node {string} answers node {string} is saved")]
+async fn when_application_progress_incarnation_is_saved(
+    world: &mut ScenarioWorld,
+    target: String,
+    querier: String,
+) {
+    let target = expand_placeholders(world, &target);
+    let querier = expand_placeholders(world, &querier);
+    let answer = query_application_progress(world, &querier, &target)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("node '{querier}' could not query node '{target}' for its progress: {error}")
+        });
+    world
+        .saved_application_progress_incarnations
+        .insert(target, answer.identity.incarnation());
+}
+
+#[then(
+    expr = "within {string} node {string} answers node {string} a new incarnation that prepared \
+            and readied no runtime revision"
+)]
+async fn then_node_answers_a_new_incarnation_without_runtime_progress(
+    world: &mut ScenarioWorld,
+    duration: String,
+    target: String,
+    querier: String,
+) {
+    let target = expand_placeholders(world, &target);
+    let querier = expand_placeholders(world, &querier);
+    let previous = *world
+        .saved_application_progress_incarnations
+        .get(&target)
+        .unwrap_or_else(|| panic!("a preceding step saved the incarnation of node '{target}'"));
+    let deadline = Instant::now()
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let answer = query_application_progress(world, &querier, &target).await;
+        if let Ok(answer) = &answer
+            && answer.identity.incarnation() != previous
+        {
+            assert_eq!(
+                (answer.runtime_prepared, answer.runtime_ready),
+                (None, None),
+                "node '{target}' answered under its new incarnation {:?} a runtime phase, while \
+                 its runtime preparation is held: {answer:?}",
+                answer.identity.incarnation()
+            );
+            append_cucumber_log_line(&format!(
+                "node '{target}' answered node '{querier}' under its new incarnation: {answer:?}"
+            ));
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node '{target}' did not answer node '{querier}' under a new incarnation within \
+             {duration}; last observation: {answer:?}"
+        );
+        nervix_primitives::time::sleep(LEADER_POLL_INTERVAL).await;
+    }
 }
 
 #[when(expr = "application health probes from node {string} to node {string} fail")]
@@ -17469,21 +17699,28 @@ async fn when_named_client_begins_executing_in_the_background(
         .get(&name)
         .unwrap_or_else(|| panic!("client '{name}' must be connected"))
         .clone();
+    let finished_at = StdArc::new(OnceLock::new());
+    world.background_plexus_finished_at = Some(finished_at.clone());
     world.background_plexus = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
         async move {
-            let mut last_output = String::new();
-            for command in statements {
-                nervix_primitives::task::consume_budget().await;
-                let outcome = client
-                    .execute(command)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                if !outcome.succeeded() {
-                    return Err(outcome.message);
+            let execution = async move {
+                let mut last_output = String::new();
+                for command in statements {
+                    nervix_primitives::task::consume_budget().await;
+                    let outcome = client
+                        .execute(command)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    if !outcome.succeeded() {
+                        return Err(outcome.message);
+                    }
+                    last_output = outcome.message;
                 }
-                last_output = outcome.message;
-            }
-            Ok(last_output)
+                Ok(last_output)
+            };
+            let result = execution.await;
+            finished_at.get_or_init(Instant::now);
+            result
         },
     )));
 }
