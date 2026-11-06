@@ -120,15 +120,15 @@ Feature: Input acknowledgement mode is a Plexus body clause
       """
     And these Plexus commands are executed on the leader node
       """
-      CREATE SCHEMA features (vector ARRAY<F32, 2>);
-      CREATE SCHEMA scored (score ARRAY<F32, 1>);
+      CREATE SCHEMA features (vector <vector_type>);
+      CREATE SCHEMA scored (score <score_type>);
       CREATE RELAY features SCHEMA features UNBRANCHED;
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
       CREATE INFERENCER scoring FROM features COLLECT FOR 10ms MAX BATCH SIZE 1MiB
         DETACHED USING RESOURCE model VERSION 1
         FILE 'models/simple_score.onnx'
-        INPUTS {'features' DENSE TENSOR<F32>[2] = input.vector}
-        OUTPUT SCHEMA {'score' DENSE TENSOR<F32>[1]}
+        INPUTS {'features' <tensor_type>[2] = input.vector}
+        OUTPUT SCHEMA {'score' <tensor_type>[1]}
         UNBRANCHED TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       SHOW CREATE INFERENCER scoring;
       """
@@ -160,6 +160,6 @@ Feature: Input acknowledgement mode is a Plexus body clause
       """
 
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | vector_type   | score_type    | tensor_type       |
+      | 1            | ARRAY<F32, 2> | ARRAY<F32, 1> | DENSE TENSOR<F32> |
+      | 3            | ARRAY<F32, 2> | ARRAY<F32, 1> | DENSE TENSOR<F32> |
