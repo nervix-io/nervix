@@ -455,7 +455,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   schema. Read `Schemas And Codecs` → `Wire Schemas` for each format's vocabulary and exact
   binding matrix. Declare text interchange explicitly: `ENCODE <field> AS RFC3339` for a
   datetime in a JSON or AVRO `string`, and `ENCODE <field> AS BASE64` for bytes in one.
-  Read `Value Fidelity` before relying on non-finite floats or unsigned Avro list elements.
+  An AVRO array names its item type (`array<long>`, `array<array<double>>`); a JSON or CBOR
+  `array` is bare. A list field's `ENCODE` rule governs its innermost elements: read `List Fields`.
+  Read `Value Fidelity` before relying on non-finite floats.
 - For every JAQ-backed codec, use `WITH JAQ TRANSFORMATIONS` and declare `ON INGESTION`,
   `ON EMITTING`, or both in that order. At least one direction is required.
 - An `ON INGESTION` program runs once per value a payload holds, and every object it yields becomes
