@@ -648,7 +648,17 @@ class DiscoveryTests(unittest.TestCase):
                 found["bolero_new"] = manifest.parent / "src/lib.rs"
             return found
 
-        with mock.patch.object(bolero, "static_targets", side_effect=unregistered):
+        with (
+            mock.patch.object(bolero, "static_targets", side_effect=unregistered),
+            mock.patch.object(bolero, "listed_tests",
+                              side_effect=lambda package, test_target, ignored, features, manifest=None:
+                              [] if ignored else
+                              [item["test_name"] for item in self.compiled(package, test_target)]),
+            mock.patch.object(bolero, "compiled_targets", side_effect=self.compiled),
+            mock.patch.object(bolero, "command", side_effect=AssertionError(
+                "discovery unit tests must not run Cargo"
+            )),
+        ):
             with self.assertRaisesRegex(bolero.BoleroError, "differ from inventory"):
                 bolero.discover(self.inventory)
 

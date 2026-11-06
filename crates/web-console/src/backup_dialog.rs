@@ -924,15 +924,14 @@ impl BackupSignals {
         reference: CommandExecutionReference,
         failure: &Report<RestoreStreamError>,
     ) {
-        let error = failure.current_context();
-        if error.leaves_outcome_unknown() {
-            let reason = format!("{error}; the outcome of restore '{reference}' is unknown");
+        if failure.current_context().leaves_outcome_unknown() {
+            let reason = format!("{failure:#}; the outcome of restore '{reference}' is unknown");
             self.line(TermLine::error(reason.clone()));
             self.restore
                 .set(RestoreProgress::Unknown { reference, reason });
             return;
         }
-        let reason = error.to_string();
+        let reason = format!("{failure:#}");
         self.line(TermLine::error(reason.clone()));
         self.restore.set(RestoreProgress::Refused { reason });
     }
