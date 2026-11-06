@@ -143,12 +143,18 @@ class InventoryTests(unittest.TestCase):
     def test_inventory_has_current_targets_and_exact_corpus_paths(self) -> None:
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
+            "runtime-kafka-unit-layouts",
+            "runtime-ingestor-metric-layouts",
+            "models-ingestor-instancing",
+            "interconnect-intake-units",
             "typed-runner-lease",
             "typed-runner-policy",
             "typed-runner-compilation",
             "typed-runner-completion",
             "typed-runner-identity",
             "typed-runner-matrix",
+            "typed-gate-baseline",
+            "typed-gate-product-graph",
             "clickhouse-client-tls-pairing",
             "client-config-schema",
             "connector-entity-presentation",
@@ -482,19 +488,19 @@ class InventoryTests(unittest.TestCase):
             target.id: target.domain_version for target in bolero.load_inventory().targets
         }
         for target, version in {
-            "plexus-model": 47,
-            "plexus-archive-model": 48,
-            "plexus-statement": 47,
-            "plexus-statement-text": 46,
-            "plexus-format-document": 46,
-            "plexus-format-text": 45,
-            "models-archived-models": 45,
-            "registry-archived-models": 38,
-            "consensus-state-records": 38,
-            "consensus-state-corruption": 38,
-            "consensus-raft-records": 37,
-            "registry-stored-models": 35,
-            "registry-stored-models-corruption": 35,
+            "plexus-model": 49,
+            "plexus-archive-model": 51,
+            "plexus-statement": 49,
+            "plexus-statement-text": 48,
+            "plexus-format-document": 48,
+            "plexus-format-text": 47,
+            "models-archived-models": 48,
+            "registry-archived-models": 43,
+            "consensus-state-records": 42,
+            "consensus-state-corruption": 42,
+            "consensus-raft-records": 41,
+            "registry-stored-models": 38,
+            "registry-stored-models-corruption": 38,
             "inferencer-tensor-columns": 1,
         }.items():
             with self.subTest(target=target):
@@ -670,7 +676,17 @@ class DiscoveryTests(unittest.TestCase):
                 found["bolero_new"] = manifest.parent / "src/lib.rs"
             return found
 
-        with mock.patch.object(bolero, "static_targets", side_effect=unregistered):
+        with (
+            mock.patch.object(bolero, "static_targets", side_effect=unregistered),
+            mock.patch.object(bolero, "listed_tests",
+                              side_effect=lambda package, test_target, ignored, features, manifest=None:
+                              [] if ignored else
+                              [item["test_name"] for item in self.compiled(package, test_target)]),
+            mock.patch.object(bolero, "compiled_targets", side_effect=self.compiled),
+            mock.patch.object(bolero, "command", side_effect=AssertionError(
+                "discovery unit tests must not run Cargo"
+            )),
+        ):
             with self.assertRaisesRegex(bolero.BoleroError, "differ from inventory"):
                 bolero.discover(self.inventory)
 

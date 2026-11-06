@@ -15,6 +15,8 @@ use syn::{
     visit::{self, Visit},
 };
 
+pub mod provenance;
+
 #[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SourceInput {
     pub path: String,

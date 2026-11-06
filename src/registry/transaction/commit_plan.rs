@@ -185,7 +185,7 @@ impl PlannedMutations {
 impl EntityGatePlan {
     fn commit_gate_plan(&self) -> TransactionEntityGatePlan {
         TransactionEntityGatePlan {
-            affected_entities: self.affected_entities().to_vec(),
+            targets: self.targets().clone(),
             relays: self.relays().to_vec(),
         }
     }

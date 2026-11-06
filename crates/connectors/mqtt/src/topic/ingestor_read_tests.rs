@@ -338,7 +338,8 @@ fn acknowledged_plan_at(
         instances: vec![vec![ClientConfigEntry {
             key: "addr".to_string(),
             value: addr.to_string(),
-        }]],
+        }]]
+        .into(),
         default_client_id: "client".to_string(),
         share_group: "default~ingestor".to_string(),
         topic: "events".to_string(),
@@ -489,7 +490,8 @@ async fn a_declared_max_packet_size_admits_a_publish_above_the_default_bound() {
             key: "max_packet_size".to_string(),
             value: "32768".to_string(),
         },
-    ]];
+    ]]
+    .into();
     let (mut source, mut connection) = subscribed(&plan, &broker).await;
     // The payload alone fills the default bound, so only the declared one admits its packet.
     let payload = vec![b'x'; default_admission_bytes()];

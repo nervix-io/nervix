@@ -731,7 +731,7 @@ rows. It clones the Arc-backed Arrow batch once per carrier passed to the packer
 acquires a lock or increments an Arc reference count for source identity. The open candidate holds
 at most `BATCH MAX MESSAGES` prepared members and is sealed on metadata or source changes, a failed
 member, or the message-count limit. Each encoding attempt uses the codec's bounded writer under
-`MAX SIZE`. The emitter retains original batch and row positions for acknowledgements and errors.
+`MAX SIZE`. The emitter retains original batch and row membership for acknowledgements and errors.
 
 A record emitter prepares its external bytes once before retention, including when a payload carries
 one row without `BATCH`. A Sentry envelope therefore keeps its event identity and complete bytes
@@ -747,6 +747,23 @@ buffer, and resolving a member is one operation on the lock-free ACK tree. A con
 in the same step that releases the payload, while a rejected payload's members return to pending
 until their message errors are delivered, so an attempt its stop deadline cuts short leaves every
 member either resolved or still owned by the buffer.
+
+The same task owns retention of the branches whose work it holds, with each source relay's typed
+TTL and LRU limits. Retirement removes only that source's matching branch work. Any compaction
+of private storage positions remaps every surviving prepared store together: codec payloads,
+native client payloads, HTTP requests and row requests retain their contents and logical members.
+Rows already delivered remain counted once; unanswered discarded rows are not acknowledged, and
+rows transferred to a staging connector keep that connector's commit and acknowledgement owner.
+A pending materialized-state wait is part of this ownership and cannot resume after its branch
+expires. Retry keepalive retains only surviving host and connector obligations, without moving
+its physical retry deadline. Retention records exist only for held work and are volatile with
+the buffer.
+
+The task also owns one physical keepalive beat for buffered or connector-staged acknowledged
+work. It retains no additional ACK roots, includes new input without copying the growing buffer's
+obligations, and reads the current obligations only on a due beat or branch retirement. Hot input
+does not move the deadline, and a pending materialized-state future stays pinned across beats.
+An active retry uses its existing keepalive owner; an empty host and connector disarm the beat.
 
 Terminal teardown races the whole emitter task against its domain shutdown signal. It can cancel
 an in-flight connector await after the graph drain budget expires, dropping the task's volatile
@@ -1852,6 +1869,9 @@ application calls require a callable/trait contract or `nervix::dispatch(reason 
 owning callable; a cold module default is insufficient. A dispatch contract states the external
 driver or callback boundary; it does not exempt compiler-visible local callback bodies or acquisitions.
 
+Emitter branch retirement carries this contract for its synchronous sent-count observer. The buffer
+reports only rows already delivered, and the compiler still analyzes the task's local observer body.
+
 The NATS stream metadata visitor carries this contract on its field helper: a synchronous callback
 projects the borrowed delivery metadata into the requested scalar sink. Its per-visit `OnceCell`
 is stack-local, and the compiler continues to analyze each local projection body.
@@ -2662,6 +2682,17 @@ leader-change and recovery outcomes directly. The bounded native-client case run
 diagnostic harness and reaches expiry and recovery with tracked client locks. The CLI scenarios
 exercise diagnostic nodes around ordinary subprocesses, whose own locks remain untracked.
 
+The native restore codec rejection workload reaches the pending registry when a bounded gRPC peer
+replaces a real completed restore's reply with a malformed or oversized message. Its four native
+one-/three-node examples are registered for active, order, stress and restore-stress selections and name
+the existing client and exchange owners. The stream captures its channel and generation together;
+interruption uses the existing exchange lifetime owner and is fenced by that generation. A reply
+from it cannot end a subsequently installed exchange. Ordinary owner tests hold
+the reply across installation and require a real request on the replacement or a later session.
+The detector observes pending-registry locking and generation cleanup, while the reply-reading
+phase, async reconnect mutexes and transport buffering remain untracked. The ordinary CLI
+examples separately verify status 3 and original-reference recovery.
+
 The lane's state-store owner test starts its detector in a fresh process before constructing store
 or executor locks and runs the current generation regressions: cancellation before and after pointer publication, snapshot
 readers, queued checkpoint writers, corrupt and incomplete chunks, exact retry after reopen,
@@ -3001,7 +3032,16 @@ update. Every log guard ends before a callback awaits input, cancellation or a s
 These contracts retain the fixture's synchronization under compiler review; production
 connector and host synchronization keeps its own protocol contracts.
 
-### Protocols and their checks
+#Canonical Kafka start selection is source initialization. The connector host's `reset` contract
+marks that admission before recurring polls; normal acknowledgements use the retained originator
+and `commit`. Each offered-body or pending-seed bulk admission resolves its native state and
+layout before retaining charged bytes; streaming those chunks performs no concurrent-map lookup.
+A one-unit source keeps direct native persistence. Distributed initializers share the startup
+mutex with ownership capture and the final offset writer, scoped to one source unit, while
+recorded-partition commits continue through the existing assignment fence. The start request has
+its sixty-second deadline, and bulk bytes retain their existing size, memory and progress bounds.
+
+## Protocols and their checks
 
 The consensus log chunk owner releases its iterator allocation and Commands reservation in the
 same transition that hands out its final entry. Its Shuttle check races that transition with
@@ -3066,8 +3106,10 @@ A family of names means each member runs independently through the recipe.
 | Client ingestors (`src/runtime/client_ingestor_shuttle_tests.rs`) | `shuttle_racing_reservations_never_exceed_the_node_budget_and_return_every_byte` races opens that each need more than half the node's producer budget: at most one holds it at a time and every reservation returns its bytes. `shuttle_a_batch_racing_a_quiesce_is_either_counted_by_its_drain_or_refused_undispatched` races the admission fence against an engagement and its drain: no batch is dispatched after the drain concluded. `shuttle_a_closing_producer_answers_every_admitted_batch_once_before_its_release` and `shuttle_an_ending_endpoint_answers_every_batch_once_and_ends_its_producer_last` race a close or an endpoint end against the worker's admission reports and the batches' acknowledgements: every batch is answered exactly once, a close answers each with its real outcome before the release, and an end reports no admitted batch as not admitted and comes last. `shuttle_a_detach_racing_a_clearance_admits_only_a_cleared_batch_and_returns_its_slot` races a forwarded producer's detach against the clearance of its batch while a local producer waits for the window's one slot: the forwarded batch reaches the worker only after its clearance was recorded, and the local batch is admitted whichever comes first, so no slot leaks. `shuttle_an_end_racing_clearances_reports_a_batch_not_admitted_exactly_when_the_worker_never_took_it` races an endpoint end against the clearance of two batches while the worker holds the first without reporting it: each batch is answered once, not admitted exactly when the worker never took it, whether it was still being cleared or cleared and waiting for the worker, and of unknown outcome when it did. |
 | Rust client submission slots (`crates/client-core/src/producer/slots_shuttle_tests.rs`) | `shuttle_a_wait_racing_its_resolution_takes_the_outcome_once_and_returns_the_credit`, `shuttle_a_cancelled_wait_loses_neither_the_outcome_nor_the_credit`, and `shuttle_a_release_racing_its_resolution_returns_the_credit_exactly_once` race a submission's resolution against the application's wait, an aborted wait followed by a new one, and a release: the outcome is taken at most once, a cancelled wait leaves it retrievable, and the credit comes back exactly once. |
 | Rust client attachment recovery (`crates/client-core/src/producer.rs`, `consumer.rs`) | `shuttle_close_fences_a_producer_restore_started_on_the_same_exchange` and `shuttle_close_fences_a_consumer_restore_started_on_the_same_exchange` race close against beginning restoration. `shuttle_close_fences_a_producer_restore_interrupted_by_another_loss` and `shuttle_close_fences_a_consumer_restore_interrupted_by_another_loss` race close against another loss while restoring. Each check uses the production lifecycle owner and requires the final phase to remain closed, with subsequent restoration refused. `shuttle_a_reply_racing_the_end_of_its_exchange_reports_the_gap_once` races a consumer's reply against the end of its exchange: the interruption is reported once, whichever observes the end first. `shuttle_a_read_parked_while_its_consumer_closes_does_not_outlive_the_close` races a read that parks for delivery against the close: the read ends with the close. `shuttle_a_submission_racing_its_producers_end_observes_the_end` races a submission's wait against its producer's end, and `shuttle_a_reader_racing_a_reported_gap_takes_it_without_another_change` (`subscriptions.rs`) races the application's next read against a subscription event the follower reports: each waiter subscribes before it reads, so neither waits for a later change. |
+| Rust client exchange ending (`crates/client-core/src/exchange.rs`, `exchange/shuttle_tests.rs`) | `shuttle_a_closed_request_registry_ends_its_silent_reader` races the production frame reader and a subscription event waiter against closing the request registry. The open registry alone owns its closure sender. Its reader registers once before waiting for frames, so closure before registration or during a silent transport wait ends the reader and wakes the event waiter without a transport frame. The reader finishes routing before ending that exact generation. No request-registry lookup is added per row or frame; the observer lives with the reader. |
 | Rust client domain clock restoration (`crates/client-core/src/domain_clock.rs`) | `shuttle_a_detach_racing_a_restoration_leaves_no_attachment_of_its_clock` races a detach of an interrupted clock against the production restoration decision, with a modeled session that serves both in the order it receives them and applies each reply through the production owner: once the detach is answered the session holds no attachment of the clock and the client does not follow it, whether the restoration attached first, waited for the detach, or found the clock released. |
 | Relay branch presence (`src/runtime/relay_branch_presence_shuttle_tests.rs`) | `shuttle_an_observer_sees_every_owner_step_whole_and_never_an_older_one` races an owner at capacity one through admission, eviction, recreation and release against an observer that registers and reads throughout: every read is a membership the owner published whole and never older than the step the owner had finished. `shuttle_capacity_and_expiry_publish_whole_memberships` keeps every read within the owner's capacity and drops an expired branch from every read after the expiry. `shuttle_a_replaced_owner_never_publishes_over_its_successor` races a predecessor's admissions, expiry and release against its successor's claim: once the claim is visible no read holds a branch only the predecessor admitted, and the successor's branch survives the predecessor's release. |
+| Kafka canonical starts (`src/runtime/kafka_start.rs`, `src/runtime/kafka_offset_state.rs`) | `shuttle_a_start_racing_ownership_capture_finishes_before_the_cut_or_is_refused` exercises startup admission and capture under the same cold mutex and published ownership freeze. `shuttle_pending_start_seeds_survive_commits_acknowledgements_and_late_candidates` retains another unit's exact seed while the coordinator commits, an adopter releases its slice and a delayed initializer offers a different cut. These checks cover owner interleavings; the mutex and offer publication are outside ordinary record commits. |
 | Checkpoint replication (`src/runtime/kafka_offset_state.rs`, `src/runtime/state_replication/checkpoint_announcement_shuttle_tests.rs`) | `shuttle_a_replica_acknowledgement_racing_the_quorum_wait_is_never_missed` races a Kafka offset commit's replica quorum wait against its replica's acknowledgement: the wait registers before it reads, so it completes without its deadline, which a Shuttle timeout only reaches when a check triggers it. `shuttle_an_offer_racing_the_end_of_an_announcement_is_always_announced` races a second offer against the announcer of the first finding its replica caught up: the second revision is always announced and acknowledged. `shuttle_a_retired_replication_ends_its_announcer` ends an announcer whose replicated state goes away while its replica never acknowledges. `shuttle_an_announcement_racing_the_replica_wait_is_never_missed` races an owner's announcement against the replica task's synchronization and wait: an announcement that lands before the wait is kept as its permit. `shuttle_checkpoint_announcement_close_cancels_pending_dispatch` exercises the production task owner with close racing the first poll and close after dispatch starts: both cancel a dispatch that never becomes ready and release its retained announcer. |
 | Snapshot task and checkpoint writer ownership (`src/runtime/state_replication/tasks_shuttle_tests.rs`) | `shuttle_a_closed_snapshot_task_owner_is_waited_for_until_every_task_has_written` races a runtime closing the production task owner against three branches: one that stops in time, one ended at its stop grace that drops what it held, and one that never tells its snapshot task anything. The wait returns only once every task has made its last write, and a task that waited for its branch alone would hang it, which Shuttle reports as a deadlock. `shuttle_a_stopping_domain_waits_for_its_own_snapshot_tasks_and_keeps_late_ones` races a domain's stop against one branch of it that stops in time, one ended at its grace, a branch of another domain that keeps running until the stop returns, and a branch of the stopping domain that appears and stops while the stop waits and removes the domain's tracker. The stop returns only once both ended branches have written and never waits for the other domain's task, which would hang it; the late task is waited for by that stop or by the next one, which fails if a stop removes a tracker a starting task joined. `shuttle_a_stopping_domain_waits_for_the_checkpoint_writers_it_tells_and_the_ones_dropped` races a domain's stop, which tells one of its placements' checkpoint writers to write, against a placement dropped without its stop, a placement a reassignment aborts, and another domain's writer that keeps running until the runtime closes. The stop returns only once the told and the dropped writers have made their last write, never waits for the other domain's writer, which would hang it, and the aborted writer never writes although its guard goes away after the abort; the closing runtime then has the other domain's writer write. The task body stands in for the write; the trackers, the token and the map's shard locks are all Shuttle's, so registration, removal and cancellation interleave under the exploration. |
 | Resolved state replication (`src/runtime/state_replication/routing_shuttle_tests.rs`) | `shuttle_state_replacement_and_retirement_fence_frames_in_flight` exercises the production routing owner: a frame can complete only on its selected lifetime, never change a successor, and cannot enter a route after retirement. ArcSwap internals remain opaque; this check covers owner use and scheduling, with no new Nervix-owned memory-ordering claim. |
@@ -3264,6 +3306,26 @@ lock, concurrent map or memory-ordering protocol. OTEL entities delegate to one 
 The HTTP and WebSockets endpoint wrappers share an intake owner whose drop still ends the exact
 binding lifetime. Their existing host Shuttle checks and lifecycle Deloxide lanes remain the
 concurrency evidence; moving these owners requires current inventory paths, not a new protocol model.
+
+## Independent Ingestor Units
+
+Source, quiesce, status, readiness and ACK-root registries are keyed by `DomainNodeUnitRef`. A host
+resolves its exact entries during preparation and retains its handles on record paths. Each
+quiesce control owns one bounded scalar retained-payload buffer; no per-instance shared map is
+reached by intake. Route runtimes and branch checkpoints carry their `NodeUnitRef` owner.
+
+A handoff's `Units` target freezes and drains only the selected units. A whole-model `Entities`
+target expands the installed unit declaration together with retained counters and ACK roots, so
+work remains visible across publication. Release retains the original controls and lease identity;
+late source teardown cannot retire a sibling or a replacement readiness handle.
+
+The fake-connector Shuttle check
+`shuttle_an_instance_handoff_leaves_a_sibling_running_and_cannot_release_its_replacement` explores
+intake, one unit's handoff/stop, continued sibling delivery and replacement admission. Deloxide
+workloads exercise real start, stop, drain and failover beside the unit-local tracked buffer and
+checkpoint locks. These are lifecycle and interleaving claims; no new cross-location memory-ordering
+protocol is introduced. The concurrent-map ledger records preparation, observation and retirement
+frequency for each affected registry, including the execution-owned immutable MQTT client cache.
 
 ## Live Cluster Policy
 

@@ -140,6 +140,12 @@ impl DomainState {
                     .transpose()?,
             };
             let node = ActiveNode {
+                ingestor_units: match model {
+                    Model::Ingestor(ingestor) => Some(
+                        super::ingestor_units::IngestorUnits::decide(domain, ingestor, models)?,
+                    ),
+                    _ => None,
+                },
                 identifier: key.identifier.clone(),
                 kind: key.kind,
                 config: Arc::new(model.clone()),

@@ -28,7 +28,7 @@ use meticulous::ResultExt as _;
 use nervix_client_wire::{
     EncodedFrame, RequestId, RestoreChunk, RestoreDisposition, RestoreFrame, RestoreReply,
     RestoreReplyFrame, RestoreStart, VerifiedFrame,
-    grpc::{ClientRestoreCodec, RESTORE_BACKUP_PATH},
+    grpc::{ClientRestoreCodec, FrameRejection, RESTORE_BACKUP_PATH},
 };
 use nervix_models::{ArchiveDigest, CommandExecutionReference, Restore, RestoreArchive};
 use nervix_primitives::{
@@ -217,6 +217,17 @@ impl Client {
                 Err(AttemptFailure::Transport(status)) => {
                     return Err(Report::new(ClientError::Restore(status)));
                 }
+                Err(AttemptFailure::Reply(status)) => {
+                    let mut exchange = self.inner.exchange.lock().await;
+                    if Arc::ptr_eq(&exchange.generation, &generation) {
+                        exchange.interrupt(ExchangeEnd::Closed).await;
+                    }
+                    return Err(Report::new(*status)
+                        .change_context(ClientError::InvalidRestoreReply)
+                        .change_context(ClientError::UncertainCommand {
+                            reference: reference.clone(),
+                        }));
+                }
             };
             let reply = self
                 .validate_restore_reply(response.get_ref(), &generation, reference)
@@ -303,6 +314,26 @@ enum AttemptFailure {
     Read(io::ErrorKind),
     /// The call failed, or a frame or the reply did not arrive in time.
     Transport(Box<Status>),
+    /// The response began, but its reply could not establish the restore's outcome.
+    Reply(Box<Status>),
+}
+
+impl AttemptFailure {
+    /// Preserve retryable transport failures and known authentication refusals even after headers.
+    /// Other failures reading an admitted response cannot establish a definitive restore refusal.
+    fn reading_reply(status: Status) -> Self {
+        if FrameRejection::find_in(&status).is_none()
+            && (upload_status_is_retryable(&status)
+                || matches!(
+                    status.code(),
+                    tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
+                ))
+        {
+            Self::Transport(Box::new(status))
+        } else {
+            Self::Reply(Box::new(status))
+        }
+    }
 }
 
 /// How the task that feeds one attempt's frames ended.
@@ -356,15 +387,51 @@ impl RestoreStreamAttempt {
         }
         let mut request = Request::new(ReceiverStream::new(outbound));
         connector.authorize(&mut request);
-        let call = client.client_streaming(
-            request,
-            PathAndQuery::from_static(RESTORE_BACKUP_PATH),
-            ClientRestoreCodec::new(SESSION_LIMITS),
-        );
+        // Retain tonic's client-streaming response semantics, but keep the response-read phase
+        // visible: its local decoder and bounded receiver failures are not remote refusals.
+        let call = async {
+            let (metadata, mut body, extensions) = client
+                .streaming(
+                    request,
+                    PathAndQuery::from_static(RESTORE_BACKUP_PATH),
+                    ClientRestoreCodec::new(SESSION_LIMITS),
+                )
+                .await
+                .map_err(|status| AttemptFailure::Transport(Box::new(status)))?
+                .into_parts();
+            let mut headers = metadata.into_headers();
+            let message = match body.message().await {
+                Ok(Some(message)) => message,
+                Ok(None) => {
+                    return Err(AttemptFailure::reading_reply(Status::internal(
+                        "Missing response message.",
+                    )));
+                }
+                Err(mut status) => {
+                    let mut failure_headers = std::mem::take(status.metadata_mut()).into_headers();
+                    failure_headers.extend(headers.clone());
+                    *status.metadata_mut() =
+                        tonic::metadata::MetadataMap::from_headers(failure_headers);
+                    return Err(AttemptFailure::reading_reply(status));
+                }
+            };
+            if let Some(trailers) = body
+                .trailers()
+                .await
+                .map_err(AttemptFailure::reading_reply)?
+            {
+                headers.extend(trailers.into_headers());
+            }
+            Ok(Response::from_parts(
+                tonic::metadata::MetadataMap::from_headers(headers),
+                message,
+                extensions,
+            ))
+        };
         tokio::pin!(call);
         tokio::pin!(feeder);
         let fed = nervix_primitives::select! {
-            reply = &mut call => return reply.map_err(|status| AttemptFailure::Transport(Box::new(status))),
+            reply = &mut call => return reply,
             fed = &mut feeder => fed,
         };
         let feeding = match fed {
@@ -376,16 +443,14 @@ impl RestoreStreamAttempt {
         };
         match feeding {
             Feeding::Sent => match nervix_primitives::time::timeout(frame_timeout, call).await {
-                Ok(reply) => reply.map_err(|status| AttemptFailure::Transport(Box::new(status))),
+                Ok(reply) => reply,
                 Err(_) => Err(AttemptFailure::Transport(Box::new(
                     Status::deadline_exceeded(
                         "the restore reply did not arrive within the request timeout",
                     ),
                 ))),
             },
-            Feeding::CallEnded => call
-                .await
-                .map_err(|status| AttemptFailure::Transport(Box::new(status))),
+            Feeding::CallEnded => call.await,
             Feeding::Stalled => Err(AttemptFailure::Transport(Box::new(
                 Status::deadline_exceeded(
                     "a restore frame did not reach the transport within the request timeout",

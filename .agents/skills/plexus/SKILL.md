@@ -40,17 +40,28 @@ owner change. Its acknowledgement section distinguishes QoS 0 overflow, acknowle
 keep-alive during downstream stalls and the refusal of a broker grant below the declared QoS.
 For MQTT retained publication, typed publish properties and user-property headers, read
 [Emitters → MQTT](../../../docs/src/emitters.md#mqtt) for their exact types, limits and retry contract.
-For Pulsar source identity, keys, redelivery and event-time windows, read
-[Ingestors → Pulsar](../../../docs/src/ingestors.md#pulsar) and its metadata table. Choose
+For Pulsar topic names, subscription ownership, creation position, TYPE and instances, read
+[Ingestors → Pulsar](../../../docs/src/ingestors.md#pulsar) before choosing the source. Its client
+reference owns the shared authentication and TLS keys, and its metadata table owns source identity,
+keys, redelivery and event-time windows. Choose
 `TIMESTAMP AT metadata.event_time` or `TIMESTAMP AT metadata.publish_time` deliberately: an absent
 event time stays null, while an explicit epoch time is preserved.
+For Pulsar receipt deadlines, event times and delayed delivery, read
+[Emitters → Pulsar](../../../docs/src/emitters.md#pulsar). Check the generated capability mirror
+before carrying an option from one direction to the other.
 
+For NATS consumption, choose `NATS SUBJECT INGESTOR` for a Core NATS queue subscription, which
+reads in `MODE NO ACK` with a required `QUEUE GROUP` and `INSTANCES` and never sees what is
+published while it is not subscribed, or `NATS STREAM INGESTOR` for a JetStream stream and durable
+pull consumer an operator provisioned, which acknowledges each delivery. Read
+[Ingestors → NATS](../../../docs/src/ingestors.md#nats) for the client's authentication and TLS
+keys, the consumer checks, redelivery and what a stream keeps.
 For NATS publication, choose `NATS SUBJECT EMITTER` with `MODE NO ACK` for Core NATS, or
 `NATS STREAM EMITTER` with a provisioned `STREAM`, a literal `SUBJECT` captured by that stream,
 and `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX <n>` for a JetStream PubAck. The stream
-emitter may set `MESSAGE ID <expression>` for server deduplication across retries. Read
-[Emitters → NATS](../../../docs/src/emitters.md#nats) for the complete clause order, failure
-outcomes and retry boundary.
+emitter may set `MESSAGE ID <expression>`, which JetStream deduplicates across retries within the
+stream's duplicate window. Read [Emitters → NATS](../../../docs/src/emitters.md#nats) for both
+entities' complete clause order, failure outcomes and retry boundary.
 
 For RabbitMQ consumption choose `MODE NO ACK`, `MODE ACK SEQUENTIAL`, or
 `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
@@ -119,6 +130,10 @@ does not restart on progress. The configuring reference routes the status, signa
 contracts.
 For Kafka domain offsets, retain the documented native checkpoint quorum budget and at-least-once
 retry boundary when explaining source recovery.
+For intake parallelism, read [Ingestors → Instancing](../../../docs/src/ingestors.md#instancing).
+Check the entity's instancing capability, Pulsar subscription type, Kafka offset mode and constructing
+routes before setting a count or following branch partitions. Use `DESCRIBE INGESTOR` to verify
+the planned instance placement.
 
 ## Assemble the graph
 
@@ -260,6 +275,9 @@ For storage failures or uncertain administrative outcomes, consult `Control Plan
 and recovery` before suggesting a retry, and
 [Exact Recovery](https://docs.nervix.io/client-session-protocol.html#exact-recovery) for how a retry
 under the same execution reference recovers the recorded outcome instead of repeating the effect.
+An unreadable restore reply leaves its original execution uncertain, even after the server
+completed it. Keep the same statement, archive and execution reference for recovery; CLI status 3
+names that uncertainty. Follow `Client Library` → `Restoring` for the native-client contract.
 
 For model evolution, read the `Altering Schemas` section of `Schemas And Codecs` and the transaction
 and quiesce semantics in `Control Plane`. Put every interdependent `CREATE`, supported `ALTER`, and
@@ -481,17 +499,18 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   `SUGGEST SEPARATION` are soft, `NEUTRAL` leaves scheduler heuristics active, and no hard
   separation policy exists. Lower `RANK` values are stronger, unranked rules are the weakest rule
   tier, and equal-rank different-policy claims conflict.
-- Treat every relay as a scheduled runtime node with one owner. `CAPACITY` bounds its one owner
-  buffer cluster-wide, while each producer node and remote consumer node contributes one fixed
-  in-flight dispatch slot. Materialized state adds state replicas to that relay; it does not add a
+- Treat every relay unit as scheduled work with one owner. A direct branch's `PARTITIONS n`
+  gives its relay one unit per partition. `CAPACITY` bounds each unit's owner buffer, while each
+  producer node and remote consumer node contributes one fixed in-flight dispatch slot. Materialized
+  state adds state replicas to that relay; it does not add a
   separate runtime-node kind. All relays are valid placement members and corridor hops.
   On native 64-bit targets, `CAPACITY` accepts positive integers through `18446744073709551615`;
   creation and alteration preserve the exact capacity through storage, replay, and restart.
 - Treat `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER` ingestors as cluster-wide
   listeners and exclude them from placement members. Every other ingestor, a `WEBSOCKETS CONNECTION`
-  included, is single-owner and keeps its live assignment across ordinary schedule recomputation;
-  use drain, `RELOCATE`, or a hard
-  colocation requirement when it must move.
+  included, keeps its existing live unit assignments across ordinary schedule recomputation.
+  Instance-capable sources can have several independent owners. Current `RELOCATE` refuses a
+  member with several execution units; automatic drain and failover preserve unit identity.
 - Use `RELOCATE <selection> ONTO NODE <node_id> FOLLOW PREFERENCES | IGNORE PREFERENCES;` to move
   chosen work onto a named cluster node. The selection is a kind-qualified list or a
   `FROM ... TO ...` corridor, hard colocation groups always move whole, and the whole unit moves in
@@ -500,7 +519,8 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   same payload schema. Unlike ordinary processors, those inputs may use differently named
   branches. Keep collection separate per source relay and concrete branch, and remember that one
   node-wide materialized dependency or message-error relay must be exact-branch compatible with
-  every source.
+  every source. Check [emitter retention](../../../docs/src/emitters.md#branch-semantics) when
+  combining inputs, long flush intervals or required materialized-state waits.
 - Give every emitter an explicit transport-supported `MODE` as the final emitter subclause before
   `ENCODE USING`. Include every required variable: all modes declare `RETRY POLICY BACKOFF <d> MAX
   <d>`; asynchronous confirming modes also declare `ACK SEQUENTIAL` or `ACK PARALLEL MAX <n>` and

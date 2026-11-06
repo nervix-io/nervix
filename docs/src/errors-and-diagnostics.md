@@ -127,6 +127,15 @@ flow. Expanding an error projection into an explicit Result branch preserves its
 context and recovery disposition. The source parser reports malformed authored Rust through a
 typed path/location context over the original parse cause; rendering includes that cause once.
 
+Emitter branch TTL/LRU retirement is a normal lifetime outcome. It NoACKs only unresolved
+host-owned rows, releases their prepared content and parked materialized-state wait, and
+preserves acknowledgements transferred to a connector. `EmitterBranchRetentionError` retains
+typed domain-clock and physical-deadline causes; a branched input without its concrete key has
+a distinct failure. An unavailable clock postpones a maintenance scan and records a transient
+failure; it never turns held rows into decode rejections or blocks a physical retry or stop
+deadline. New input whose retention activity cannot be established follows the emitter's
+general error policy.
+
 Nervix gives a failure its meaning at the boundary that can decide what went wrong. That meaning
 travels through the graph as a semantic error and an `error-stack` report. A public edge renders a
 diagnostic only after it has made the decision the error permits. Ordinary control outcomes, such
@@ -683,6 +692,28 @@ or the optional applied-start generation. A mismatched signature retains the typ
 `KafkaOffsetCheckpointError::FormatSignature` cause beneath `RuntimePersistenceError::DecodeState`.
 Loading, replica conversion and backup capture all use that owning decoder; no missing marker is
 filled from domain metadata.
+
+Kafka's canonical-start coordination retains its typed offer, encoding, allocation and transfer
+causes beneath `StateReplicationError::KafkaStart`. A capture freeze reports `KafkaStartFrozen`;
+the shared checkpoint-transfer deadline reports `KafkaStartDeadline`. Changed lifecycle or
+assignment authority reports `Superseded`. The interconnect handler rejects a source node that
+does not match its authenticated peer before reading or changing state. Runtime admission also
+checks the current membership incarnation. These failures end that initialization attempt; the
+host retries through its existing source lifecycle without polling from substitute positions.
+
+An ingestor layout preparation retains invalid selections, source or checkpoint inventories,
+component kinds and allocation bounds beneath `OwnershipHandoffError::IngestorUnitLayout`.
+Offset and metric decoding keep their owning typed causes. Preparation fails before publishing
+the replacement layout; it never installs only the source cuts that happened to succeed.
+Membership-incarnation refusals name the affected node and its source or destination role.
+Replicas receiving prepared state are destinations of that transfer, so a layout's additional
+participants retain the same diagnostic precision as a single-unit handoff.
+
+Fixed ingestor counts are checked for native conversion and execution-unit layout before
+placement allocates their units. A conversion or layout failure remains beneath
+`IngestorInstancingError::UnaddressableCount` and `RegistryError::IngestorInstancing`; the report
+names the complete declared count, ingestor and domain. It is refused at model admission rather
+than ending the session's ordered task while materializing an impossible unit map.
 
 The vocabulary's `ArchivedCountError` reports a fixed-width archived count that the receiving
 target's `usize` cannot represent. Archive decoding retains it beneath the owning storage or
@@ -2314,6 +2345,13 @@ replica diagnostic prints that cause chain. Cancellation or failed conversion pu
 partial table, and an assignment-token refusal keeps a delayed transfer from overwriting a
 promoted owner. A commit that lacks its required replica acknowledgement still reports the
 existing quorum deadline; catch-up retries do not turn that deadline into a successful commit.
+Kafka start coordination preserves typed admission, native conversion, memory and bulk-transfer
+causes through its reporting boundary. A frozen unit reports its exact placement, and a
+coordination deadline names the domain, source and unit. The current node incarnation, ownership
+fingerprint and originating assignment fence stale work. A count transition refuses incomplete
+source inventories, foreign partition ownership and repeated metric identities before preparing
+target state; a failed preparation cannot publish a partial layout.
+
 A stopping node's `stopping_node_drain` request answers with outcomes of its own instead, because
 its only subject is the authenticated sender: completed or failed, each with the leader's report for
 the sender's log, or not the leader, which sends the sender to the leader it observes next. A node
@@ -2648,6 +2686,12 @@ cases emits an early tick or silently clamps the interval.
 
 ### Rust Client, CLI And C Binding
 
+A native request deadline ends the exchange's request registry and wakes its frame reader. An
+unanswered subscription reopening therefore ends that session, with its normal interruption and
+recovery behavior; it does not report `RestorationFailed` on that ended session. A waiting event
+reader that knows no server for recovery returns `ClientError::SessionClosed`. Clock readers follow
+the same exchange ending even when another restoration's retry delay is still pending.
+
 Every call of the Rust client returns an `error_stack::Report<ClientError>`. Its current context is
 the failure a caller acts on, and the frames beneath keep the cause: a call's transport status, the
 wire codec's report beneath `EncodeRequest`, `InvalidUploadReply` or `InvalidRestoreReply`, the
@@ -2907,8 +2951,14 @@ completed backup's archive was not downloaded, never as a failure of the backup.
 failure names an archive file the browser could not read or that is empty, a transport failure, a
 stall, a missing reply, a reply that does not decode or answers another request or reference, or a
 restore whose outcome stayed unknown through its repetitions, which the dialog reports naming the
-execution reference. A refusal of the stream is shown as `restore refused (<failure>): <message>`,
-and the restore's own outcome as the dispatcher renders any command's. A session reply whose
+execution reference. Once an attempt has sent the whole archive without learning the outcome, or
+the leader has answered that the outcome is unknown, the restore may have been admitted. A failure
+that then ends it, a refusal of a later stream, and an execution reference the leader no longer
+holds all sit beneath `the console stopped before learning the outcome of a restore the leader may
+have admitted`, and the dialog reports the outcome as unknown naming the execution reference. The
+dialog renders a restore stream failure's whole report. A refusal of the stream when no attempt
+could have had the restore admitted is shown as `restore refused (<failure>): <message>`, and the
+restore's own outcome as the dispatcher renders any command's. A session reply whose
 command outcome names another execution reference than its command's is a protocol violation: the
 dispatcher reports `protocol violation: the reply to command execution '<own>' names execution
 '<other>'` in the terminal, shows nothing of that outcome as the command's, stops reading the
@@ -3051,8 +3101,19 @@ reply cannot establish whether the node applied the restore. The client ends tha
 session and interrupts its pending requests; a replacement session remains usable. The shared host
 reports `FailureKind::Uncertain`, the C binding reports `NX_ERROR_UNCERTAIN`, and the CLI exits with
 status `3` and the original execution reference. Other errors that may hide an admitted restore
-likewise retain their cause beneath `UncertainCommand`. An unreadable or empty archive remains
-`NX_ERROR_INVALID_ARGUMENT`; a valid stream refusal is a definitive failed outcome.
+likewise retain their cause beneath `UncertainCommand`. A pre-admission unreadable or empty archive
+is `NX_ERROR_INVALID_ARGUMENT`; a valid stream refusal is a definitive failed outcome if no earlier
+attempt could have been admitted.
+
+A structurally rejected native restore reply retains the complete frame-verification report
+through tonic's standard-error source, where its typed rejection can be inspected. Tonic's own
+receive-size failure happens before frame verification and retains its status instead. The
+restore receive phase distinguishes either from a server refusal received before the response;
+no classification reads a status message. After ending only the session selected for that stream,
+the client reports `UncertainCommand` under the original execution reference above
+`InvalidRestoreReply` and the receive failure. The shared binding exposes `NX_ERROR_UNCERTAIN`
+with that reference, and the CLI reports status 3. A replacement session and definitive local,
+authentication and declared stream refusals retain their meanings.
 
 ## Sensitive Data And Observability
 
@@ -3626,3 +3687,20 @@ renders the property value. The publisher projects these reports into the record
 outcome before transport and continues with representable neighbours. A wrong property name or
 type at this connector boundary remains a typed contract refusal; normal statements are already
 checked against the entity's declaration and exact types at `CREATE` and `ALTER`.
+
+## Ingestor Instancing Boundaries
+
+The registry owns typed `IngestorInstancingError` causes for unsupported instancing, missing or
+different construction partition structures and Kafka's required domain-offset mode. The
+surrounding report identifies the domain and ingestor. Correct the declaration before activation.
+A count change uses the ownership-handoff preparation boundary to preserve the offset lifetime.
+Start planning separately validates the complete resolved unit declaration.
+`AlreadyRunning` and `IngestorNotRunning` name the exact source unit, allowing a sibling instance
+to start or stop independently.
+Per-unit DESCRIBE requests and status records preserve the unit selected by their caller.
+`UnitIndexError` is the vocabulary's pure refusal for an instance ordinal outside its compact
+identity range. Semantic JSON validates that bound during deserialization. The client wire decoder
+preserves the cause under `WireDecodeError::InvalidValue`, and a stored tagged key preserves it
+under `StoredStateIssue::KeyUnitInvalid` and `RuntimePersistenceError::DecodeState`.
+Allocation-layout validation rejects unaddressable count declarations before materializing units;
+every addressable index fits the identity range.

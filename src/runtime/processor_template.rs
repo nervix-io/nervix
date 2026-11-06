@@ -875,20 +875,20 @@ impl BranchInstanceTemplate {
                 .inner
                 .metrics
                 .resolve_node_batch_metrics(NodeBatchMetricsSpec {
+                    unit: self.owner.unit,
                     domain,
-                    kind: self.entity_kind,
-                    node: &ModelName::from(&self.source),
+                    kind: self.owner.node.kind,
+                    node: &ModelName::from(&self.owner.node.identifier),
                     relay: &self.root_relay,
                     physical_node_id,
                     direction: "sent",
                     branch,
                 });
         let source_input_metrics = match branch {
-            Some(branch) if self.entity_kind == ModelKind::Ingestor => {
-                Some(runtime.inner.metrics.resolve_branch_node_message_metrics(
+            Some(branch) if self.owner.node.kind == ModelKind::Ingestor => {
+                Some(runtime.inner.metrics.resolve_unit_branch_message_metrics(
                     domain,
-                    self.entity_kind,
-                    &ModelName::from(&self.source),
+                    &self.owner,
                     physical_node_id,
                     "received",
                     branch,
@@ -928,6 +928,7 @@ impl BranchInstanceTemplate {
                     .map(|output| {
                         let metrics = runtime.inner.metrics.resolve_node_batch_metrics(
                             NodeBatchMetricsSpec {
+                                unit: Unit::SINGLE,
                                 domain,
                                 kind: processor.kind,
                                 node: &processor.processor,
@@ -960,8 +961,7 @@ impl BranchInstanceTemplate {
             routing: runtime.domain_routing_cache(domain),
             routing_snapshot: None,
             domain_clock,
-            entity_kind: self.entity_kind,
-            source: self.source.clone(),
+            owner: self.owner.clone(),
             root_relay: self.root_relay.clone(),
             relays,
             materialized_states,
@@ -969,7 +969,7 @@ impl BranchInstanceTemplate {
             processors,
             error_policies: self.error_policies.clone(),
             metrics: BranchRuntimeMetrics {
-                source_dirty: runtime.branch_metrics_mark(domain, self.entity_kind, &self.source),
+                source_dirty: runtime.unit_branch_metrics_mark(domain, &self.owner),
                 processor_dirty,
                 source: source_metrics,
                 source_input: source_input_metrics,

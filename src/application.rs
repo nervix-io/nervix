@@ -201,6 +201,7 @@ mod session_service;
 mod shutdown;
 mod startup;
 mod state_replication_requests;
+mod statement_grammar;
 mod statement_routing;
 mod subscription;
 mod termination_signals;
@@ -2040,7 +2041,7 @@ impl Application {
                                 &request.coordination,
                                 &request.domain,
                                 &request.relays,
-                                &request.affected_entities,
+                                &request.targets,
                                 request.purpose,
                                 EntityGateLease {
                                     deadline,
@@ -2081,7 +2082,7 @@ impl Application {
                         &request.coordination,
                         &request.domain,
                         &request.relays,
-                        &request.affected_entities,
+                        &request.targets,
                         request.purpose,
                     );
                     if let Ok(status) = &result
@@ -2258,7 +2259,9 @@ impl Application {
                                 .map_err(|failure| {
                                     OwnershipHandoffError::participant(failure.to_string())
                                 })?;
-                            if !scheduled.is_primary_on(service.inner.consensus.local_node_id()) {
+                            if !scheduled.unit(request.unit).is_some_and(|unit| {
+                                unit.is_primary_on(service.inner.consensus.local_node_id())
+                            }) {
                                 return Err(OwnershipHandoffError::participant(format!(
                                     "{} '{}' is not owned by this source node",
                                     request.entity.kind.as_str(),
@@ -2268,12 +2271,13 @@ impl Application {
                             service
                                 .inner
                                 .runtime
-                                .capture_ownership_handoff_state(
+                                .capture_selected_ownership_handoff_state(
                                     &request.coordination,
                                     &request.domain,
                                     &request.entity,
                                     request.unit,
                                     request.base_schedule_fingerprint,
+                                    request.selection,
                                 )
                                 .await
                         }

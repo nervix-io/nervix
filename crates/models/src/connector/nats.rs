@@ -152,7 +152,7 @@ pub struct NatsSubjectIngestor {
     pub client: ClientName,
     pub subject: NatsSubjectName,
     pub queue_group: NatsQueueGroupName,
-    pub instances: NonZeroU64,
+    pub instances: crate::IngestorInstances,
     pub mode: NatsIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
@@ -259,6 +259,7 @@ const NATS_STREAM_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for NatsSubjectIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::PerPartition,
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         metadata: IngestorMetadataDeclaration::new(&[
             IngestorMetadataField::new("subject", IngestorMetadataType::String),
@@ -294,6 +295,10 @@ impl IngestorDeclaration for NatsSubjectIngestor {
 }
 
 impl IngestorEntityBody for NatsSubjectIngestor {
+    fn instances(&self) -> Option<crate::IngestorInstances> {
+        Some(self.instances)
+    }
+
     fn reference(&self) -> IngestorReference<'_> {
         IngestorReference::Client(&self.client)
     }
@@ -427,6 +432,7 @@ const NATS_STREAM_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for NatsStreamIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::Single,
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         metadata: IngestorMetadataDeclaration::new(&[
             IngestorMetadataField::new("subject", IngestorMetadataType::String),

@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{ExecutionStepImpactReport, TransactionOperationNumber, TransactionPreviewIdentity};
 use crate::{
-    ClusterNodeIdentity, DomainClockState, DomainSchedule, DomainStartPoint, Model, NodeRef,
-    RelayName, ResourceName,
+    ClusterNodeIdentity, DomainClockState, DomainSchedule, DomainStartPoint, Model, RelayName,
+    ResourceName,
 };
 
 /// One exact Model transition captured by commit admission.
@@ -41,7 +41,7 @@ pub enum TransactionModelTransition {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct TransactionEntityGatePlan {
-    pub affected_entities: Vec<NodeRef>,
+    pub targets: crate::EntityGateTargets,
     pub relays: Vec<RelayName>,
 }
 

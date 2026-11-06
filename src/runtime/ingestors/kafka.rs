@@ -27,10 +27,7 @@ use nervix_connector_kafka::{
 use super::{
     super::*,
     IngestorConnectorStartError, IngestorStartError,
-    connector::{
-        BrokerIngestorInstance, BrokerIngestorPolicy, IngestorCompanion, IngestorInstance,
-        IngestorStart,
-    },
+    connector::{BrokerIngestorInstance, BrokerIngestorPolicy, IngestorCompanion, IngestorStart},
 };
 
 struct RuntimeKafkaDomainOffsets {
@@ -39,6 +36,9 @@ struct RuntimeKafkaDomainOffsets {
     domain: DomainName,
     ingestor: IngestorName,
     topic: String,
+    /// Fixed for this source lifetime; a count change joins this source before installing its
+    /// replacement. One unit initializes directly through its native owner.
+    instances: NonZeroU64,
     /// The originator this ingestor instance acts under, which schedule application replaces when
     /// a reassignment keeps the instance running.
     state: StdArc<KafkaOffsetOriginatorSlot>,
@@ -79,6 +79,12 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
             None
         };
         let state = self.state.current();
+        if self.instances.get() > 1 {
+            self.runtime
+                .synchronize_kafka_start(&state, generation)
+                .await
+                .change_context(KafkaDomainOffsetError::Read)?;
+        }
         let missing_partition_timestamp = match last_start {
             nervix_models::DomainStartPoint::Resume => self
                 .runtime
@@ -94,21 +100,6 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
                         schedule,
                     });
                 }
-                // A failed first initialization may have published the start in memory before
-                // its persistence or replica wait failed. Retry that durability boundary before
-                // any instance resumes, including when another instance applied the start.
-                let checkpoint = state
-                    .read()
-                    .latest_snapshot()
-                    .change_context(KafkaDomainOffsetError::Read)?;
-                self.runtime
-                    .persist_kafka_offset_snapshot(
-                        &state.persistence(),
-                        checkpoint.lsm,
-                        &checkpoint.payload,
-                    )
-                    .await
-                    .change_context(KafkaDomainOffsetError::Read)?;
                 Some(timestamp)
             }
             nervix_models::DomainStartPoint::Now { .. } => {
@@ -151,8 +142,15 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
             ));
         }
         let state = self.state.current();
+        if self.instances.get() == 1 {
+            return self
+                .runtime
+                .start_single_kafka_unit(&state, generation, positions)
+                .await
+                .change_context(KafkaDomainOffsetError::Reset);
+        }
         self.runtime
-            .reset_domain_kafka_offsets(&state, generation, positions)
+            .propose_kafka_start(&state, generation, positions)
             .await
             .change_context(KafkaDomainOffsetError::Reset)
     }
@@ -194,12 +192,16 @@ impl Runtime {
         &self,
         domain: &DomainName,
         ingestor: &NodeRef,
+        unit: Unit,
         originator: KafkaOffsetStateOriginator,
     ) {
-        let key = DomainNodeRef {
-            domain: domain.clone(),
-            node: ingestor.clone(),
-        };
+        let key = DomainNodeUnitRef::new(
+            DomainNodeRef {
+                domain: domain.clone(),
+                node: ingestor.clone(),
+            },
+            unit,
+        );
         let Some(running) = self.inner.ingestors.get(&key) else {
             return;
         };
@@ -217,7 +219,7 @@ impl IngestorSpec {
             state: RuntimeState::KafkaOffset,
             kind: ModelKind::Ingestor,
             identifier: ModelName::from(&self.name),
-            unit: nervix_models::Unit::Single,
+            unit: self.unit,
             branch_key: None,
         }
     }
@@ -374,6 +376,7 @@ impl KafkaTopicIngestorStartPlan {
                     domain: domain.clone(),
                     ingestor: ingestor.name.clone(),
                     topic: topic.as_str().to_string(),
+                    instances,
                     state,
                 });
                 KafkaTopicIngestorOffsetMode::Domain {
@@ -403,17 +406,12 @@ impl KafkaTopicIngestorStartPlan {
 
         let policy =
             BrokerIngestorPolicy::new(acknowledgement, source_plan.capabilities.position_class());
-        let mut opened: Vec<Box<dyn IngestorInstance>> =
-            Vec::with_capacity(source_plan.capabilities.instances().get().arch_into());
-        for instance_index in 0..source_plan.capabilities.instances().get() {
-            nervix_primitives::task::consume_budget().await;
-            let source = KafkaTopicIngestor::open(&source_plan.connector, instance_index)
-                .await
-                .change_context_lazy(|| ingestor.initialize_failure())?;
-            opened.push(Box::new(BrokerIngestorInstance { source, policy }));
-        }
+        let source = KafkaTopicIngestor::open(&source_plan.connector, ingestor.instance_index())
+            .await
+            .change_context_lazy(|| ingestor.initialize_failure())?;
+        let instance = Box::new(BrokerIngestorInstance { source, policy });
         Ok(IngestorStart {
-            instances: opened,
+            instance,
             companions,
             buffered_intake: false,
             flush_each_intake: false,

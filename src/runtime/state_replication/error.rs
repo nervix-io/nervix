@@ -14,6 +14,20 @@ use super::*;
 
 #[derive(Debug, Error)]
 pub(crate) enum StateReplicationError {
+    #[error("Kafka start for ingestor '{ingestor}' in domain '{domain}'{suffix} exceeded its coordination deadline", suffix = .unit.label_suffix())]
+    KafkaStartDeadline {
+        domain: DomainName,
+        ingestor: ModelName,
+        unit: Unit,
+    },
+    #[error("Kafka start for {placement} is paused by ownership capture")]
+    KafkaStartFrozen { placement: RuntimeStatePlacement },
+    #[error("failed to coordinate Kafka start for ingestor '{ingestor}' in domain '{domain}'{suffix}", suffix = .unit.label_suffix())]
+    KafkaStart {
+        domain: DomainName,
+        ingestor: ModelName,
+        unit: Unit,
+    },
     #[error("failed to capture {placement}")]
     Capture { placement: RuntimeStatePlacement },
     #[error("the remote dispatcher is unavailable while synchronizing {placement} from '{target}'")]

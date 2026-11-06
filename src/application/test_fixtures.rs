@@ -372,7 +372,7 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
                     client: named("kafka_main"),
                     topic: named("notifications"),
                     offset_mode: KafkaOffsetMode::Domain,
-                    instances: nonzero!(1u64),
+                    instances: nervix_models::IngestorInstances::Count(nonzero!(1u64)),
                     mode: nervix_models::KafkaIngestMode::AckSequential {
                         timeout: "5s".to_string(),
                         retry_policy: nervix_models::RetryPolicy {
@@ -502,8 +502,10 @@ pub(in crate::application) fn placement_group(
     primary_node: &ClusterNodeName,
 ) -> PlacementGroupSchedule {
     PlacementGroupSchedule {
-        unit: nervix_models::Unit::Single,
-        members,
+        members: members
+            .into_iter()
+            .map(|node| nervix_models::NodeUnitRef::new(node, nervix_models::Unit::SINGLE))
+            .collect(),
         primary_node: Some(primary_node.clone()),
     }
 }
