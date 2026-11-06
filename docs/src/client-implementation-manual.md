@@ -759,7 +759,10 @@ payload, infinity, and nullable and sensitive branch key fields.
   known. Every attempt MUST send all three unchanged, and the digest MUST be computed over exactly
   the bytes the client streams.
 - **W-3.** A client MUST check that the reply's `request_id`, when present, equals the start's, and
-  that a `CommandOutcome` names the execution reference it sent.
+  that a `CommandOutcome` names the execution reference it sent. A reply that cannot be decoded
+  or names another request is a protocol violation: F-8 and D-6 apply to the session used by that
+  attempt, and the restore remains uncertain under its own execution reference. A replacement
+  session MUST NOT be ended because an earlier attempt received an invalid reply.
 - **W-4.** A client MUST act on the reply:
   - `RestoreUploadFailed` with `InvalidStream`, `InvalidStatement`, `SizeMismatch`, or
     `DigestMismatch` changed nothing on that stream (W-5 says what it settles after an earlier
@@ -777,18 +780,19 @@ payload, infinity, and nullable and sensitive branch key fields.
     `DomainInfo` from domain lists and domain-change events, and MUST reject missing required
     generation or status fields rather than supply a default.
 - **W-5.** When a call fails in transport, or a frame or the reply does not arrive in time, the
-  restore's outcome is uncertain. A client MUST stream the whole archive again, from its first
-  byte, under the same reference to learn it, and MUST NOT create a new reference for it. It MUST
-  NOT bound a call by the command's request deadline, and SHOULD bound each frame, and the wait
-  for the reply once the last frame was sent, instead. Once an attempt has sent the whole archive
-  without learning the outcome, or a reply has answered `OutcomeUnknown`, only a `CommandOutcome`
-  that gives the restore's outcome under its reference settles it. A later attempt the client
-  cannot complete, such as one whose archive it can no longer read, a reply it cannot accept, a
-  `RestoreUploadFailed` of a later stream, and `ExecutionReferenceExpired` settle nothing: a client
-  that stops then MUST report the outcome as uncertain under the reference, never that the restore
-  changed nothing. A leader refuses some streams before it looks the restore up, and stages the
-  archive again for a restore it finds admitted without it, so a refusal of a later stream says
-  nothing about an earlier one.
+  restore's outcome is uncertain. The same holds when the reply fails W-3 validation; an invalid
+  reply cannot establish that the restore changed nothing. A client MUST stream the whole archive
+  again, from its first byte, under the same reference to learn it, and MUST NOT create a new
+  reference for it. It MUST NOT bound a call by the command's request deadline, and SHOULD bound
+  each frame, and the wait for the reply once the last frame was sent, instead. Once an attempt has
+  sent the whole archive without learning the outcome, or a reply has answered `OutcomeUnknown`,
+  only a `CommandOutcome` that gives the restore's outcome under its reference settles it. A later
+  attempt the client cannot complete, such as one whose archive it can no longer read, a reply it
+  cannot accept, a `RestoreUploadFailed` of a later stream, and `ExecutionReferenceExpired` settle
+  nothing: a client that stops then MUST report the outcome as uncertain under the reference, never
+  that the restore changed nothing. A leader refuses some streams before it looks the restore up,
+  and stages the archive again for a restore it finds admitted without it, so a refusal of a later
+  stream says nothing about an earlier one.
 
 ## Using The Shared Binding
 
@@ -1059,7 +1063,7 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | B-12 to B-16 | `A <runtime> client publishes typed batches through a client ingestor and acknowledges their output through a client emitter` in `client_conformance.feature` for the C ABI in process, C, C++, Java, and Ruby; `a_producer_reports_its_description_and_takes_every_outcome_class`, `a_refused_open_names_its_refusal_and_a_host_argument_is_checked_first`, `a_consumer_reads_and_settles_a_delivery_and_a_lost_confirmation_is_uncertain`, `a_reconnect_interrupts_a_consumer_expires_its_deliveries_and_restores_only_open_handles`, `every_kind_of_column_reads_back_from_the_batch_and_from_its_stream`, `a_builder_refuses_what_a_column_cannot_hold`, and `bolero_host_columns_round_trip_through_builder_and_stream` in `nervix-client-ffi` |
 | N-1 to N-5 | The three outlines of `client_conformance.feature` for CPython over the Python package, on one and three nodes, whose probe also checks a retained frame view, a wait cancelled from another thread and Arrow data pyarrow builds and reads; `a_wait_releases_the_gil_and_another_python_thread_cancels_it`, `every_failure_kind_raises_its_exception`, `a_frame_view_keeps_its_event_alive`, `a_producer_outlives_its_session` and `a_pycapsule_round_trip_keeps_every_column_kind_at_its_bounds` in `nervix-client-python`; `bolero_host_columns_round_trip_through_the_arrow_c_data_interface` and `bolero_typed_field_descriptions_round_trip` in `nervix-client-host` |
 | J-1 to J-5 | Java 21's three one-/three-node conformance outlines; `BoundaryTests` checks columns, Cleaner release and cancellation from another Java thread; `nervix-client-jvm` embeds the JVM to check every host failure kind, restoration messages/waits, and registered complete JNI field/column properties. The Java row probe checks native Cleaner release and derived-buffer retention after its session closes. |
-| W-1 to W-5, B-10 | Every scenario of `restore.feature`, including `An interrupted restore upload is sent again under its execution reference`, `A restore repeated under its execution reference joins it or returns its recorded outcome`, and `A leader change while a restore applies resumes it on the new leader`; the console's restore scenarios in `backup_restore.feature`, including `A console restore whose reply was lost after it applied stays unknown when a later attempt cannot read the archive`; the console's restore driver tests in `nervix-web-console`, including `a_restore_whose_reply_was_lost_stays_unknown_when_the_next_attempt_cannot_read_the_archive` and `a_restore_whose_reply_was_lost_stays_unknown_when_the_leader_refuses_a_later_stream`; `Ctrl-C during a CLI RESTORE leaves it to recover under its execution reference` in `cli_session.feature`; `a_restore_start_round_trips`, `every_restore_chunk_round_trips_and_an_empty_one_is_refused`, and `every_restore_reply_round_trips` in `nervix-client-wire`; `a_foreign_restore_reply_ends_its_session_and_reports_its_own_reference_uncertain` in `nervix-client-core`; the `restore_*` conformance frames; `a_restore_outcome_reports_its_steps` in `nervix-client-ffi` |
+| W-1 to W-5, B-10 | `A <client> recovers a completed restore after <reply> on <cluster_size> nodes` in `client_restore_reply_validation.feature` (native client and CLI, both invalid replies, one and three nodes), the `restore_reply` owner tests in `nervix-client-core` (typed uncertainty, exact-session interruption, replacement preservation, local failures and known refusals); every scenario of `restore.feature`, including `An interrupted restore upload is sent again under its execution reference`, `A restore repeated under its execution reference joins it or returns its recorded outcome`, and `A leader change while a restore applies resumes it on the new leader`; the console's restore scenarios in `backup_restore.feature`, including `A console restore whose reply was lost after it applied stays unknown when a later attempt cannot read the archive`; the console's restore driver tests in `nervix-web-console`, including `a_restore_whose_reply_was_lost_stays_unknown_when_the_next_attempt_cannot_read_the_archive` and `a_restore_whose_reply_was_lost_stays_unknown_when_the_leader_refuses_a_later_stream`; `Ctrl-C during a CLI RESTORE leaves it to recover under its execution reference` in `cli_session.feature`; `a_restore_start_round_trips`, `every_restore_chunk_round_trips_and_an_empty_one_is_refused`, and `every_restore_reply_round_trips` in `nervix-client-wire`; `a_foreign_restore_reply_ends_its_session_and_reports_its_own_reference_uncertain` in `nervix-client-core`; the `restore_*` conformance frames; `a_restore_outcome_reports_its_steps` in `nervix-client-ffi` |
 
 The [client representation properties](https://github.com/nervix-io/nervix/blob/main/tests/client-representation-coverage.md)
 add complete generated-value evidence for F-1 to F-7, R-1 to R-5 and B-1 to B-7. They preserve
