@@ -100,7 +100,7 @@ impl RelayPartitioning {
     /// The units such a relay is scheduled as, in partition order.
     pub(crate) fn units(self) -> Vec<Unit> {
         match self {
-            Self::Whole => vec![Unit::Single],
+            Self::Whole => vec![Unit::SINGLE],
             Self::Partitioned(partitions) => partitions.units(),
         }
     }
@@ -112,7 +112,7 @@ impl RelayPartitioning {
         key: &Option<BranchKey>,
     ) -> error_stack::Result<Unit, RelayPartitionError> {
         match (self, key) {
-            (Self::Whole, _) => Ok(Unit::Single),
+            (Self::Whole, _) => Ok(Unit::SINGLE),
             (Self::Partitioned(partitions), Some(key)) => {
                 Ok(partitions.unit_of(key.partition_seed()))
             }

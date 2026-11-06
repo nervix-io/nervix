@@ -6,8 +6,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     Assignment, AssignmentTarget, BranchName, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
     ErrorPolicies, FieldName, InferencerTensorDeclaration, InferencerTensorMapping,
-    MessageErrorOperation, MessageErrorPolicy, ModelKind, ModelName, RelayName, ResourceName,
-    RouteConstruction, StructuredMessageError, Timestamp,
+    MessageErrorOperation, MessageErrorPolicy, ModelKind, ModelName, NodeUnitRef, RelayName,
+    ResourceName, RouteConstruction, StructuredMessageError, Timestamp,
 };
 use nervix_primitives::sync::{Arc, StdArc};
 use nervix_roto::UdfExecutor;
@@ -82,8 +82,7 @@ pub(super) struct WasmAckContext {
 #[derive(Debug, Clone)]
 pub(super) struct BranchInstanceTemplate {
     pub(super) revision: ProcessorPlanRevision,
-    pub(super) entity_kind: ModelKind,
-    pub(super) source: RelayName,
+    pub(super) owner: NodeUnitRef,
     pub(super) root_relay: RelayName,
     pub(super) branch: Option<BranchName>,
     pub(super) branch_ttl: Option<Duration>,

@@ -130,7 +130,7 @@ pub(crate) enum ConnectorDeclarationIssue {
     )]
     PulsarSingleConsumerType {
         kind: nervix_models::PulsarSubscriptionType,
-        instances: std::num::NonZeroU64,
+        instances: nervix_models::IngestorInstances,
     },
     #[error("VALUES requires at least one mapping")]
     EmptyValues,
@@ -260,6 +260,11 @@ impl fmt::Display for OtelMappingIssue {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum RegistryError {
+    #[error("ingestor '{ingestor}' has invalid instancing in domain '{domain}'")]
+    IngestorInstancing {
+        domain: DomainName,
+        ingestor: nervix_models::IngestorName,
+    },
     #[error("{parameter} limit {maximum} is below {actual} required by resource {resource:?}")]
     ResourceParameterLimit {
         resource: nervix_models::ResourceId,

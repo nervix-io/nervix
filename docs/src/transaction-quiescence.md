@@ -446,3 +446,17 @@ without carrying sensitive payload values. Per-record details and hot-path buffe
 this inspection contract. Ingestor quiesce buffer metrics and current live observations remain in
 [Metrics And Observability](./metrics-and-observability.md); retained impact is the source for
 what this transaction required and actually engaged.
+
+## Unit-Qualified Intake Scope
+
+Persisted gate plans retain `EntityGateTargets`. A model mutation selects complete entities and
+expands every current instance, including retained work during publication. A schedule handoff
+selects the exact moved units and expands their exact placement component. Source instance `p`
+and relay partition `p` can therefore share one gate without selecting a sibling instance.
+Engagement, drain counters, ACK roots, capture authorization and release all preserve that unit
+selection. Logical entity names remain the inspection projection; they do not replace the stored
+selection or widen an ownership handoff. A change to an ingestor's declared unit set selects the
+union of preceding and target units. Its state transition consumes every preceding unit's cut,
+so an unchanged physical owner participates in that capture and receives a prepared target cut.
+Source confirmation checks the units the source actually owned; a newly introduced target
+instance is never treated as an existing source instance.

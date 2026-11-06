@@ -9,7 +9,7 @@ that `pull_request_section` renders from the JSON for the files a pull request c
 
 Owns: the scope of the analysis, its vacuity verdict, the score above which the report lists a
 function, and the report's JSON, Markdown and pull-request section.
-May depend on: the pinned analyzer and its walk (`scripts/cargo_crap.py`), the merge's tracked files
+May depend on: the pinned analyzer and its walk (`nervix-ratchet crap`), the merge's tracked files
 and merge record (`scripts/coverage_merge.py`), and LCOV records (`scripts/native_coverage.py`).
 Must not know: how the producers collect coverage, how the merge maps their reports, or how the
 pull-request comment is published.
@@ -37,14 +37,14 @@ import argparse
 import enum
 import html
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
-from scripts import cargo_crap
 from scripts import native_coverage as native
 from scripts.coverage_merge import Checkout, MergeError, display, git
 
@@ -60,6 +60,67 @@ MARKDOWN_REPORT = "crap.md"
 SECTION_LIMIT = 50
 # The files a failure message names before it gives the rest as a count.
 NAMED_LIMIT = 10
+
+
+class AnalyzerError(Exception):
+    """The Rust-owned analyzer could not complete a requested analysis."""
+
+
+@dataclass(frozen=True, order=True)
+class Function:
+    path: str
+    name: str
+    line: int
+    complexity: float
+
+
+@dataclass(frozen=True)
+class Scored:
+    function: Function
+    coverage: float
+    crap: float
+
+
+@dataclass(frozen=True)
+class Scores:
+    scored: tuple[Scored, ...]
+    unmeasured: tuple[Function, ...]
+
+
+def analyzer(root: Path, target: Path, *arguments: str) -> object:
+    """Ask the Rust owner to run the pinned analyzer and return its JSON."""
+
+    executable = target / "typed-ratchet/source/debug/nervix-ratchet"
+    completed = subprocess.run([str(executable), "crap", *arguments], cwd=root,
+                               capture_output=True, text=True)
+    if completed.returncode:
+        raise AnalyzerError(completed.stderr.strip() or f"nervix-ratchet crap exited {completed.returncode}")
+    return json.loads(completed.stdout)
+
+
+def analyzer_version(root: Path, target: Path) -> str:
+    return str(subprocess.run([str(target / "typed-ratchet/source/debug/nervix-ratchet"), "crap", "version"],
+                              cwd=root, capture_output=True, text=True, check=True).stdout.strip())
+
+
+def unreachable_sources(root: Path, target: Path, paths: Sequence[str]) -> list[str]:
+    return analyzer(root, target, "unreachable", "--root", str(root),
+                    *(argument for path in paths for argument in ("--path", path)))
+
+
+def score(root: Path, target: Path, report: Path) -> Scores:
+    document = analyzer(root, target, "score", "--root", str(root), "--target-dir", str(target),
+                        "--lcov", str(report))
+    entries = document["entries"]
+    scored = []
+    unmeasured = []
+    for entry in entries:
+        function = Function(PurePosixPath(entry["file"]).as_posix(), entry["function"], entry["line"], entry["cyclomatic"])
+        if entry["coverage"] is None:
+            unmeasured.append(function)
+        else:
+            scored.append(Scored(function, entry["coverage"], entry["crap"]))
+    return Scores(tuple(scored), tuple(unmeasured))
 
 
 class Verdict(enum.StrEnum):
@@ -156,9 +217,9 @@ class Analysis:
     matched: tuple[str, ...]
     # Report Rust files the analyzer read without finding a function it scores.
     unscored: tuple[str, ...]
-    scored: tuple[cargo_crap.Scored, ...]
+    scored: tuple[Scored, ...]
     # Functions in files that the report holds no record of.
-    unmeasured: tuple[cargo_crap.Function, ...]
+    unmeasured: tuple[Function, ...]
 
     @classmethod
     def run(cls, root: Path, target: Path, report: Path, record: Path) -> Analysis:
@@ -176,7 +237,7 @@ class Analysis:
                 untracked,
             )
         rust = [source for source in sources if source.endswith(".rs")]
-        unreadable = cargo_crap.unreachable_sources(root, rust)
+        unreadable = unreachable_sources(root, target, rust)
         if unreadable:
             raise VacuousAnalysis(
                 Mismatch.UNREADABLE,
@@ -184,7 +245,7 @@ class Analysis:
                 "symbolic links or ignored by Git",
                 unreadable,
             )
-        scores = cargo_crap.score(root, target, (), report)
+        scores = score(root, target, report)
         scored_files = {item.function.path for item in scores.scored}
         unmeasured_files = {function.path for function in scores.unmeasured}
         matched = []
@@ -215,7 +276,7 @@ class Analysis:
             matched=tuple(matched), unscored=tuple(unscored), scored=tuple(scored), unmeasured=tuple(unmeasured),
         )
 
-    def describe(self, report: str) -> dict[str, object]:
+    def describe(self, report: str, analyzer_name: str) -> dict[str, object]:
         """The JSON report: the verdict, the scope, the totals and every function the analysis measured."""
 
         functions = []
@@ -234,7 +295,7 @@ class Analysis:
             "verdict": str(Verdict.COMPLETE),
             "report": report,
             "revision": self.revision,
-            "analyzer": f"{cargo_crap.CRATE} {cargo_crap.VERSION}",
+            "analyzer": analyzer_name,
             "threshold": THRESHOLD,
             "scope": {
                 "report_files": self.report_files,
@@ -478,18 +539,20 @@ def main(arguments: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
     output = root / options.output
     # The reports name the analysed report by its file name, so that a run over a retained artifact
     # writes the same reports wherever the artifact was downloaded.
-    content: dict[str, object] = {"report": report.name, "analyzer": f"{cargo_crap.CRATE} {cargo_crap.VERSION}", "threshold": THRESHOLD}
+    target = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+    content: dict[str, object] = {"report": report.name, "analyzer": "cargo-crap", "threshold": THRESHOLD}
     status = 1
     try:
-        analysis = Analysis.run(root, cargo_crap.default_target(), report, record)
-        content = analysis.describe(report.name)
+        content["analyzer"] = analyzer_version(ROOT, target)
+        analysis = Analysis.run(root, target, report, record)
+        content = analysis.describe(report.name, content["analyzer"])
         status = 0
     except VacuousAnalysis as error:
         content.update({
             "verdict": str(Verdict.VACUOUS), "failure": str(error),
             "mismatch": {"kind": str(error.mismatch), "files": list(error.files)},
         })
-    except (cargo_crap.AnalyzerError, MergeError, native.RunnerError, OSError, ValueError, KeyError,
+    except (AnalyzerError, MergeError, native.RunnerError, OSError, ValueError, KeyError,
             subprocess.SubprocessError) as error:
         content.update({"verdict": str(Verdict.FAILED), "failure": str(error)})
     output.mkdir(parents=True, exist_ok=True)

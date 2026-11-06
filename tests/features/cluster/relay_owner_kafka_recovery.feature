@@ -50,7 +50,7 @@ Feature: Kafka acknowledgements across relay-owner recovery
       """
     Then the last command output contains
       """
-      - domain={{domain}} kind=ingestor name=relay_handoff_source owner=node-1
+      - domain={{domain}} kind=ingestor name=relay_handoff_source unit=instance:0 owner=node-1
       """
     And the last command output contains
       """

@@ -72,6 +72,7 @@ impl RestorableBranchLifecycle {
 
 mod handoff;
 mod handoff_capture;
+mod ingestor_unit_layout;
 mod preparation;
 mod published_branch_state;
 
@@ -1086,6 +1087,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         entity: &NodeRef,
+        unit: Unit,
     ) -> OwnershipHandoffResult<Option<PersistedRuntimeStateEntry>> {
         if !matches!(entity.kind, ModelKind::Ingestor | ModelKind::Reingestor) {
             return Ok(None);
@@ -1104,11 +1106,7 @@ impl Runtime {
             }
             if entity.kind == ModelKind::Ingestor {
                 drop(execution);
-                let key = DomainNodeRef::node_in(
-                    domain.clone(),
-                    ModelKind::Ingestor,
-                    entity.identifier.clone(),
-                );
+                let key = DomainNodeUnitRef::new(entity.in_domain(domain), unit);
                 if let Some(ingestor) = self.inner.ingestors.get(&key) {
                     ingestor
                         .branched
@@ -1323,15 +1321,14 @@ impl Runtime {
             unit,
             base_schedule_fingerprint,
             target_schedule_fingerprint,
-            checkpoints,
+            input,
         } = request;
         let domain = &domain;
         let entity = &entity;
         if !self.entity_gate_operation_owns_unit(
             &coordination,
             domain,
-            entity,
-            unit,
+            &NodeUnitRef::new(entity.clone(), unit),
             EntityGatePurpose::OwnershipHandoff,
         ) {
             return Err(OwnershipHandoffError::participant(format!(
@@ -1342,76 +1339,10 @@ impl Runtime {
             )));
         }
         self.verify_local_handoff_schedule(domain, base_schedule_fingerprint)?;
-        let mut decoded = Vec::with_capacity(checkpoints.len());
-        let mut placements = HashSet::default();
-        for checkpoint in checkpoints {
-            let placement = RuntimeStatePlacement::from_remote(checkpoint.placement)
-                .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
-            if placement.domain != *domain
-                || placement.kind != entity.kind
-                || placement.identifier != entity.identifier
-                || placement.unit != unit
-            {
-                return Err(OwnershipHandoffError::state(format!(
-                    "checkpoint scope does not match {} '{}' in domain '{}'",
-                    entity.kind.as_str(),
-                    entity.identifier.as_str(),
-                    domain.as_str()
-                )));
-            }
-            if !placements.insert(placement.clone()) {
-                return Err(OwnershipHandoffError::state(format!(
-                    "handoff contains duplicate {:?} state for {} '{}'",
-                    placement.state,
-                    entity.kind.as_str(),
-                    entity.identifier.as_str()
-                )));
-            }
-            if !self.runtime_state_placement_is_current(&placement) {
-                return Err(OwnershipHandoffError::state(format!(
-                    "checkpoint for {:?} state has a stale model or schema fingerprint",
-                    placement.state
-                )));
-            }
-            let snapshot = self
-                .fetch_state_checkpoint(
-                    &source,
-                    &placement,
-                    &checkpoint.snapshot,
-                    nervix_interconnect::StateCheckpointRead::HandoffCapture,
-                )
-                .await
-                .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
-            self.validate_ownership_handoff_snapshot(&placement, &snapshot)?;
-            decoded.push((placement, snapshot));
-        }
+        let mut decoded = self
+            .decode_ownership_handoff_input(domain, entity, unit, &source, input)
+            .await?;
         let scheduled = self.ownership_handoff_scheduled_node(domain, entity)?;
-        let expected =
-            self.expected_ownership_handoff_placements(domain, &scheduled, unit, &decoded)?;
-        if placements != expected {
-            let missing = expected
-                .difference(&placements)
-                .map(|placement| format!("{:?}", placement.state))
-                .collect::<Vec<_>>();
-            let unexpected = placements
-                .difference(&expected)
-                .map(|placement| format!("{:?}", placement.state))
-                .collect::<Vec<_>>();
-            return Err(OwnershipHandoffError::state(format!(
-                "ownership handoff checkpoint inventory is incomplete or invalid (missing: {}; \
-                 unexpected: {})",
-                if missing.is_empty() {
-                    "-".to_string()
-                } else {
-                    missing.join(",")
-                },
-                if unexpected.is_empty() {
-                    "-".to_string()
-                } else {
-                    unexpected.join(",")
-                }
-            )));
-        }
         self.prepare_ownership_handoff_wasm_guests(domain, &scheduled, &decoded)
             .await?;
         decoded.sort_by(|(left, _), (right, _)| {
@@ -1466,8 +1397,7 @@ impl Runtime {
                 let existing_gate_is_held = self.entity_gate_operation_owns_unit(
                     &existing.coordination,
                     domain,
-                    entity,
-                    existing.unit,
+                    &NodeUnitRef::new(entity.clone(), existing.unit),
                     EntityGatePurpose::OwnershipHandoff,
                 );
                 if existing_gate_is_held {
@@ -1586,14 +1516,14 @@ impl Runtime {
         instantiate_now: bool,
     ) -> Result<(), Report<RuntimePersistenceError>> {
         for (unit, placement) in &node.units {
-            if placement.primary_node.as_ref() == Some(local_node_id) {
+            if placement.assigned_nodes.contains(local_node_id) {
                 self.activate_prepared_ownership_handoff_unit(
                     domain,
                     node,
                     *unit,
                     local_node_id,
                     schedule_fingerprint,
-                    instantiate_now,
+                    instantiate_now && placement.primary_node.as_ref() == Some(local_node_id),
                 )?;
             }
         }
@@ -1619,7 +1549,11 @@ impl Runtime {
         else {
             return Ok(());
         };
-        if prepared.destination != *local_node_id || prepared.source == *local_node_id {
+        if !node
+            .units
+            .get(&unit)
+            .is_some_and(|placement| placement.assigned_nodes.contains(local_node_id))
+        {
             return Ok(());
         }
         if prepared.target_schedule_fingerprint != schedule_fingerprint {
@@ -1906,8 +1840,7 @@ impl Runtime {
         if !self.entity_gate_operation_owns_unit(
             transition.coordination,
             transition.domain,
-            transition.entity,
-            transition.unit,
+            &NodeUnitRef::new(transition.entity.clone(), transition.unit),
             EntityGatePurpose::OwnershipHandoff,
         ) {
             return Err(OwnershipHandoffError::participant(format!(
@@ -1997,6 +1930,13 @@ impl Runtime {
     fn remove_runtime_state_for_unit(&self, unit: &DomainNodeUnitRef) {
         self.inner.state_replication_routing.retire_unit(unit);
         let matches_entity = |placement: &RuntimeStatePlacement| placement.unit_ref() == *unit;
+        if unit.entity.kind() == ModelKind::Ingestor {
+            self.withdraw_ingestor_unit_metrics(
+                &unit.entity.domain,
+                &IngestorName::from(&unit.entity.node.identifier),
+                unit.unit,
+            );
+        }
         self.inner
             .replicated_deduplicator_states
             .retain(|placement, _| !matches_entity(placement));
@@ -2066,7 +2006,7 @@ impl Runtime {
         None
     }
 
-    fn stored_runtime_state_snapshot(
+    pub(super) fn stored_runtime_state_snapshot(
         &self,
         placement: &RuntimeStatePlacement,
     ) -> Result<Option<PersistedRuntimeStateEntry>, Report<RuntimePersistenceError>> {
@@ -2414,11 +2354,19 @@ impl Runtime {
         state: &KafkaOffsetStateOriginator,
         generation: u64,
         offsets: Vec<KafkaOffsetPosition>,
+        application: super::kafka_offset_state::KafkaStartApplication,
     ) -> error_stack::Result<(), StateReplicationError> {
         let _publication = self.backup_publication(&state.placement().domain);
-        let (lsm, payload) = state
-            .apply_start(generation, offsets)
-            .change_context_lazy(|| StateReplicationError::ReplaceKafkaOffsets {
+        let applied = match application {
+            super::kafka_offset_state::KafkaStartApplication::Canonical => {
+                state.apply_canonical_start(generation, offsets)
+            }
+            super::kafka_offset_state::KafkaStartApplication::Unit => {
+                state.apply_start(generation, offsets)
+            }
+        };
+        let (lsm, payload) =
+            applied.change_context_lazy(|| StateReplicationError::ReplaceKafkaOffsets {
                 placement: state.placement().clone(),
             })?;
         self.persist_kafka_offset_snapshot(&state.persistence(), lsm, &payload)
@@ -2731,7 +2679,6 @@ impl Runtime {
         &self,
         placement: RuntimeStatePlacement,
         primary_node: Option<ClusterNodeName>,
-        physical_node_id: ClusterNodeName,
     ) -> error_stack::Result<Arc<ReplicatedBranchAggregatedState>, RuntimePersistenceError> {
         let transferred = self.take_transferred_runtime_state_snapshot(&placement);
         if transferred.is_none()
@@ -2760,7 +2707,6 @@ impl Runtime {
         let state = Arc::new(ReplicatedBranchAggregatedState::new(
             placement.clone(),
             primary_node,
-            physical_node_id,
             &self.inner.metrics,
             initial,
         )?);

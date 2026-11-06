@@ -378,6 +378,13 @@ impl RemoteDispatcher {
         self.cluster.local_incarnation()
     }
 
+    pub(super) fn is_live_node_identity(&self, identity: &ClusterNodeIdentity) -> bool {
+        if identity.node_id() == self.local_node_id() {
+            return identity.incarnation() == self.local_node_incarnation();
+        }
+        self.cluster.live_node_incarnation(identity.node_id()) == Some(identity.incarnation())
+    }
+
     /// A registration numbered in this process that names this run of the node, so its resolution
     /// can only ever resolve the entry registered under it here.
     fn registration(&self, ack_id: u64) -> RemoteAckRegistration {
@@ -2576,7 +2583,7 @@ mod tests {
                     &domain("default"),
                     &named("orders"),
                     &quiesce_test_batch(),
-                    Unit::Single,
+                    Unit::SINGLE,
                 )
                 .await
         });
@@ -2617,7 +2624,7 @@ mod tests {
             .fanout_owner_batch(
                 &domain,
                 &relay,
-                Unit::Single,
+                Unit::SINGLE,
                 &batch,
                 &ConfiguredFaultInjection::default(),
             )

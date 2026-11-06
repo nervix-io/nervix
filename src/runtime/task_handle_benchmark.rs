@@ -118,18 +118,14 @@ impl TaskHandleBenchmark {
             state: RuntimeState::BranchAggregated,
             kind: ModelKind::Ingestor,
             identifier: ModelName::from(&ingestor),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         };
         runtime
-            .replicated_branch_aggregated_state(
-                placement,
-                None,
-                ClusterNodeName::parse("benchmark").assured("the node is valid"),
-            )
+            .replicated_branch_aggregated_state(placement, None)
             .assured("empty metric state is valid");
         let ingest = runtime
-            .ingest_task_handles(&domain, &ingestor)
+            .ingest_task_handles(&domain, &ingestor, nervix_models::Unit::SINGLE)
             .assured("the fixture domain is installed");
         let lifecycle = runtime
             .domain_clock_lifecycle(&domain)
@@ -154,7 +150,7 @@ impl TaskHandleBenchmark {
                 domain: domain.clone(),
                 kind: ModelKind::WasmProcessor,
                 identifier: wasm_node,
-                unit: nervix_models::Unit::Single,
+                unit: nervix_models::Unit::SINGLE,
                 branch_key: None,
                 state: RuntimeState::WasmProcessor {
                     schema,
@@ -173,9 +169,12 @@ impl TaskHandleBenchmark {
         let metrics = runtime.branch_metrics_mark(&domain, ModelKind::Ingestor, &ingestor);
         let freeze = OwnershipHandoffFreezeWatch::new(&runtime, entity);
         let client_metrics = runtime.metrics().client_ingestor_series(&domain, &ingestor);
-        let quiesce_metrics = runtime
-            .metrics()
-            .register_ingestor_quiesce(&domain, &ingestor, None);
+        let quiesce_metrics = runtime.metrics().register_ingestor_quiesce(
+            &domain,
+            &ingestor,
+            nervix_models::Unit::SINGLE,
+            None,
+        );
         let dropped = runtime.metrics().session_subscription_dropped_rows(
             &domain,
             &RelayName::parse("events").assured("the relay is valid"),

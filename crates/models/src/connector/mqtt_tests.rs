@@ -148,7 +148,7 @@ fn an_unacknowledged_source_reports_the_session_and_quality_of_service_it_wrote(
 
     assert_eq!(source.chosen("SESSION"), Some(session.keyword()));
     assert_eq!(source.chosen("QOS"), Some(qos.spelling()));
-    assert_eq!(source.chosen("INSTANCES"), None);
+    assert_eq!(source.chosen("INSTANCES"), Some(source.instances.choice()));
     assert_eq!(
         source.acknowledgement(),
         IngestAcknowledgement::Unacknowledged
@@ -296,7 +296,7 @@ fn topic_source(session: MqttSession, qos: MqttQos, mode: MqttIngestMode) -> Mqt
     MqttTopicIngestor {
         client: ClientName::try_from("mqtt_main").assured("a lowercase identifier is a name"),
         topic: MqttTopicFilter::try_from("devices/+").assured("one wildcard level is a filter"),
-        instances: NonZeroU64::MIN,
+        instances: crate::IngestorInstances::ONE,
         session,
         qos,
         mode,
