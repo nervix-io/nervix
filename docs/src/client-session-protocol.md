@@ -1005,8 +1005,20 @@ has established, or no leader is known. Selecting a domain with `SelectDomainReq
 session into that domain's observations as well: a `ClusterObserved` summary and a
 `DomainSnapshotObserved` carrying the domain's live graph as a JSON document and its declared
 entities, at once and then every 500 milliseconds. A session that selects no domain receives
-neither. Server notices report runtime and control-plane errors and cluster events as text for
-display. A session that falls behind the node's notice bus skips the notices it missed; the node
+neither. A server notice is text for display with a level and a kind. The kind says what the notice
+reports, so a client routes notices by kind and never by their text:
+
+| Kind | What it reports | Level |
+| --- | --- | --- |
+| `Membership` | A change of the serving node's live set: a node joined, a node left, or a node restarted as a new incarnation; a join and a restart name the incarnation now live | `Info` |
+| `Leadership` | The serving node's consensus: a Raft transition of that node, or a membership operation it proposes as leader | `Info` |
+| `ClusterParameters` | A committed cluster-parameter revision the serving node installed | `Info` |
+| `Runtime` | A failure the runtime of the serving node, or of another node, recovered from | `Error` |
+| `ControlPlane` | A control-plane failure the serving node recovered from | `Error` |
+
+A membership notice reports only a change of the live set. Model changes, subscriptions opening or
+closing and domain starts change what members publish through gossip, not which members are live,
+so none of them produces one. A session that falls behind the node's notice bus skips the notices it missed; the node
 logs how many. The Rust client holds at most 128 notices and 1 MiB its caller has not read. A
 notice that does not fit drops the ones held, and the caller's next read reports that gap before
 the notices that follow it. Notices end with the session that delivered them, and the client's
@@ -2406,7 +2418,7 @@ These internal ownership rules change neither session framing nor client recover
 ## Committed Cluster Policy
 
 `ALTER CLUSTER SET` is an administrative command on the ordinary command and execution-reference
-path. Existing informational notices announce a committed parameter revision after local
+path. A `ClusterParameters` notice announces a committed parameter revision after local
 installation; notices retain their ordinary best-effort delivery contract. No frame or correlation
 shape changes. Cluster inspection reports committed and per-node installed values.
 

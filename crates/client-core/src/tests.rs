@@ -42,9 +42,9 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     AttachDisposition, AttachOutcome, ClientFrame, ClientMessage, ClientRequest,
     CommandDisposition, Diagnostic, DomainInfo, DomainList, DomainsObserved, EncodedFrame,
-    LeaderRedirect, Leadership, LeadershipObserved, NodeEndpoints, NoticeLevel, OutcomeOrigin,
-    Reply, ReplyBody, ReplyDelivery, RequestId, RequestRejected, RequestRejection, RowSchema,
-    ServerFrame, ServerNotice, SessionEndReason, SessionEnding, SessionLimitSettings,
+    LeaderRedirect, Leadership, LeadershipObserved, NodeEndpoints, NoticeKind, NoticeLevel,
+    OutcomeOrigin, Reply, ReplyBody, ReplyDelivery, RequestId, RequestRejected, RequestRejection,
+    RowSchema, ServerFrame, ServerNotice, SessionEndReason, SessionEnding, SessionLimitSettings,
     SessionLimits, SourceSpan, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
     SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRowsEncoder,
     SubscriptionType, UnknownOutcomeCause, UnsubscribeDisposition, UnsubscribeOutcome,
@@ -243,6 +243,7 @@ fn notice_frame(message: &str) -> VerifiedFrame<ServerFrame> {
     verified(
         ServerNotice {
             level: NoticeLevel::Info,
+            kind: NoticeKind::Membership,
             message: message.to_string(),
         }
         .encode(&SESSION_LIMITS)
@@ -1060,6 +1061,7 @@ async fn event_queue_counts_retained_bytes_as_well_as_records() {
         &generation,
         ServerEvent {
             level: NoticeLevel::Info,
+            kind: NoticeKind::Leadership,
             message: "oversized".to_string(),
         },
         129,
@@ -1623,12 +1625,14 @@ fn wire_outcomes_convert_into_public_outcomes() {
 
     let server = ServerEvent::from(ServerNotice {
         level: NoticeLevel::Warning,
+        kind: NoticeKind::ControlPlane,
         message: "watch out".to_string(),
     });
     assert_eq!(
         server,
         ServerEvent {
             level: NoticeLevel::Warning,
+            kind: NoticeKind::ControlPlane,
             message: "watch out".to_string(),
         }
     );
@@ -2869,6 +2873,7 @@ async fn the_client_reports_a_notice_gap_once_and_returns_the_notices_after_it()
     let generation = client.inner.exchange.lock().await.generation.clone();
     let notice = |message: &str| ServerEvent {
         level: NoticeLevel::Warning,
+        kind: NoticeKind::Runtime,
         message: message.to_string(),
     };
     let notices = &client.inner.events.emitters.notices;

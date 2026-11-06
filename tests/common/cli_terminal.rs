@@ -219,6 +219,11 @@ impl CliTerminal {
     pub(crate) fn transcript(&self) -> String {
         self.display.lock().transcript()
     }
+
+    /// How many times the retained display holds `expected`.
+    pub(crate) fn occurrences(&self, expected: &str) -> usize {
+        self.display.lock().occurrences(expected)
+    }
 }
 
 /// What the terminal displayed, newest last, bounded by [`DISPLAY_RETAINED_BYTES`].
@@ -237,6 +242,12 @@ impl TerminalDisplay {
 
     fn contains(&self, expected: &str) -> bool {
         String::from_utf8_lossy(&self.retained).contains(expected)
+    }
+
+    fn occurrences(&self, expected: &str) -> usize {
+        String::from_utf8_lossy(&self.retained)
+            .matches(expected)
+            .count()
     }
 
     /// The newest [`TRANSCRIPT_LINES`] lines as text, one per line: control sequences and carriage

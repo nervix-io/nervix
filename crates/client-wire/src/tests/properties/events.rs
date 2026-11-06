@@ -44,13 +44,16 @@ pub(super) fn check(bytes: &[u8]) -> BTreeSet<wire::ServerBody> {
         }};
     }
     for &level in crate::event::ALL_NOTICE_LEVELS {
-        event!(
-            Notice,
-            ServerNotice {
-                level,
-                message: values.arbitrary.string()
-            }
-        );
+        for &kind in crate::event::ALL_NOTICE_KINDS {
+            event!(
+                Notice,
+                ServerNotice {
+                    level,
+                    kind,
+                    message: values.arbitrary.string()
+                }
+            );
+        }
     }
     for leadership in [
         Leadership::ServingNode(values.arbitrary.name()),
