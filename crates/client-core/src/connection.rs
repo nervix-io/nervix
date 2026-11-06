@@ -96,7 +96,7 @@ pub enum ConnectDns {
 }
 
 impl ConnectOptions {
-    /// The most additional endpoints a caller may configure for connection and recovery.
+    /// The per-list bound for configured seeds and learned endpoints in a client's directory.
     pub const MAX_SEED_SERVERS: usize = 32;
 
     pub fn with_basic_auth(
@@ -251,8 +251,6 @@ pub(crate) struct ServerDirectory {
 }
 
 impl ServerDirectory {
-    const MAX_DISCOVERED_ENDPOINTS: usize = 32;
-
     /// A directory whose only server is the one the first exchange runs on, when it is known.
     pub(crate) fn connected_to(server: Option<Url>) -> Self {
         let mut directory = Self::default();
@@ -276,7 +274,7 @@ impl ServerDirectory {
         if self.seeds.contains(server) || self.discovered.contains(server) {
             return;
         }
-        if self.discovered.len() == Self::MAX_DISCOVERED_ENDPOINTS {
+        if self.discovered.len() == ConnectOptions::MAX_SEED_SERVERS {
             self.discovered
                 .shift_remove_index(0)
                 .discarded("the oldest discovered endpoint gives way to a fresh one");
