@@ -100,6 +100,62 @@ class ScenarioArgumentTests(unittest.TestCase):
             ),
         ))
 
+    def test_restore_codec_recipe_executes_all_eight_cases_and_preserves_failures(self) -> None:
+        dumped = subprocess.run(
+            ["just", "--dump", "--dump-format", "json"],
+            cwd=ROOT, capture_output=True, text=True, check=True, timeout=30,
+        )
+        recipe = json.loads(dumped.stdout)["recipes"]["test-restore-codec-replies"]
+        self.assertEqual([item["recipe"] for item in recipe["dependencies"]], [
+            "build-deps", "build-test-cli", "build-deadlock-report",
+        ])
+        with tempfile.TemporaryDirectory(prefix="restore codec arguments ") as directory:
+            root = Path(directory)
+            capture = root / "arguments.json"
+            cargo = root / "cargo"
+            cargo.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os, pathlib, sys\n"
+                "pathlib.Path(os.environ['SCENARIO_ARGUMENT_CAPTURE']).write_text(\n"
+                "    json.dumps(sys.argv[1:]))\n"
+                "print(os.environ['SCENARIO_SUMMARY'])\n"
+                "sys.exit(int(os.environ['SCENARIO_EXIT']))\n"
+            )
+            cargo.chmod(0o755)
+            environment = os.environ.copy()
+            # This recipe must also work on the book runner, which has no ripgrep. Keep the
+            # real shell/core tools and Python while excluding undeclared host executables.
+            for name in ("just", "bash", "sh", "mkdir", "mktemp", "tee", "uname"):
+                executable = shutil.which(name)
+                self.assertIsNotNone(executable, name)
+                (root / name).symlink_to(executable)
+            (root / "python3").symlink_to(sys.executable)
+            environment["PATH"] = str(root)
+            self.assertIsNone(shutil.which("rg", path=environment["PATH"]))
+            environment["SCENARIO_ARGUMENT_CAPTURE"] = str(capture)
+            arguments = ("--concurrency", "2", "--retry", "0", "two words", "$PATH")
+            for summary, cargo_exit, succeeds in (
+                ("8 scenarios (8 passed)", 0, True),
+                ("\x1b[32m8 scenarios (8 passed)\x1b[0m", 0, True),
+                ("0 scenarios", 0, False),
+                ("4 scenarios (4 passed)", 0, False),
+                ("8 scenarios (8 passed)\n4 scenarios (4 passed)", 0, False),
+                ("8 scenarios (8 failed)", 101, False),
+            ):
+                with self.subTest(summary=summary, cargo_exit=cargo_exit):
+                    environment["SCENARIO_SUMMARY"] = summary
+                    environment["SCENARIO_EXIT"] = str(cargo_exit)
+                    completed = subprocess.run(
+                        ["just", "--no-deps", "--set", "cargo_target_dir", str(root / "target"),
+                         "test-restore-codec-replies", *arguments],
+                        cwd=ROOT, env=environment, capture_output=True, text=True, timeout=30,
+                    )
+                    self.assertEqual(completed.returncode == 0, succeeds, completed.stderr)
+                    self.assertEqual(json.loads(capture.read_text()), [
+                        "test", "--package", "nervix-scenarios", "--test", "scenarios", "--",
+                        "--tags", "@client_restore_codec_rejection", *arguments,
+                    ])
+
     def test_coverage_arguments_remain_literal(self) -> None:
         self.assert_coverage_arguments((
             (),
