@@ -13,6 +13,16 @@
 //! transport streams it again from its first byte. No attempt is bounded as a whole: the connection
 //! must take each chunk within the frame timeout, and the reply must arrive within it once the
 //! last chunk was sent. A reply that arrives as that timeout ends still counts.
+//!
+//! The leader admits a restore only once it holds the whole archive. An attempt that handed its
+//! connection the archive's last byte and learned no outcome, or a reply that leaves the outcome
+//! unknown, therefore leaves the restore possibly admitted, and only a reply that gives its
+//! outcome settles that. Until one does, whatever ends the restore without its outcome leaves that
+//! outcome unknown: an archive file the browser can no longer read, a console address the console
+//! lacks, a reply it cannot read, a stream the leader refuses, or an execution reference the leader
+//! no longer holds. The leader refuses some streams before it looks the restore up, and stages the
+//! archive of a restore it admitted but does not hold again, so a refusal of a later stream says
+//! nothing about an earlier attempt.
 
 use std::{num::NonZeroU64, pin::pin, time::Duration};
 
@@ -95,6 +105,25 @@ pub(crate) enum RestoreStreamError {
          console waits"
     )]
     Exhausted,
+    /// The leader refused one stream of the restore before it ran anything from that stream. It
+    /// is the cause beneath an unresolved admission: a refusal that ends the restore on its own is
+    /// the restore's end, not a failure.
+    #[error("the leader refused a stream of the restore ({failure:?}): {message}")]
+    StreamRefused {
+        failure: RestoreUploadFailure,
+        message: String,
+    },
+    /// The leader no longer holds the restore's execution reference, so it can give no outcome
+    /// under it. It is the cause beneath an unresolved admission: when no attempt can have had the
+    /// restore admitted, the answer is the restore's outcome.
+    #[error("the leader no longer holds the restore's execution reference: {message}")]
+    ReferenceExpired { message: String },
+    /// An attempt may have had the restore admitted, and the stream ended before any reply gave
+    /// its outcome. What ended it is beneath.
+    #[error(
+        "the console stopped before learning the outcome of a restore the leader may have admitted"
+    )]
+    UnresolvedAdmission,
 }
 
 impl RestoreStreamError {
@@ -108,20 +137,128 @@ impl RestoreStreamError {
             | Self::InvalidReply
             | Self::UnexpectedReply
             | Self::ReferenceMismatch { .. }
-            | Self::Exhausted => false,
+            | Self::Exhausted
+            | Self::StreamRefused { .. }
+            | Self::ReferenceExpired { .. }
+            | Self::UnresolvedAdmission => false,
         }
     }
 
     /// Whether the restore may have been admitted, so its outcome is unknown rather than absent.
     pub(crate) fn leaves_outcome_unknown(&self) -> bool {
         match self {
-            Self::Transport | Self::Stalled | Self::NoReply | Self::Exhausted => true,
+            Self::Transport
+            | Self::Stalled
+            | Self::NoReply
+            | Self::Exhausted
+            | Self::InvalidReply
+            | Self::UnexpectedReply
+            | Self::ReferenceMismatch { .. }
+            | Self::UnresolvedAdmission => true,
             Self::ReadArchive
             | Self::EmptyArchive
             | Self::NoAddress
-            | Self::InvalidReply
-            | Self::UnexpectedReply
-            | Self::ReferenceMismatch { .. } => false,
+            | Self::StreamRefused { .. }
+            | Self::ReferenceExpired { .. } => false,
+        }
+    }
+}
+
+/// How much of the archive one attempt handed to its connection before it ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Streamed {
+    /// The attempt ended before it handed over the archive's last byte, so the leader cannot have
+    /// admitted the restore from it.
+    Partly,
+    /// The attempt handed over every byte of the archive, so the leader may have admitted the
+    /// restore from it.
+    Whole,
+}
+
+/// How one attempt ended: the reply that answered it, or why none was learned, and how much of
+/// the archive it handed over first.
+struct AttemptEnd {
+    streamed: Streamed,
+    reply: Result<RestoreReply, Report<RestoreStreamError>>,
+}
+
+/// How handing one attempt's archive to its connection ended.
+enum Sending<S> {
+    /// The leader answered before the archive's last byte was handed over, and nothing more was
+    /// sent.
+    Answered(RestoreReply),
+    /// The connection took the whole archive, and the reply is awaited on it.
+    Sent(S),
+}
+
+/// Whether the leader may have admitted the restore on an attempt whose outcome the console has
+/// not learned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admission {
+    /// No attempt handed over the whole archive, and no reply said the restore's outcome is
+    /// unknown, so the leader has not admitted the restore.
+    Impossible,
+    /// An attempt handed over the whole archive, or a reply said the restore's outcome is
+    /// unknown, and no reply has given the outcome since: the leader may have admitted the
+    /// restore, and only its outcome settles that.
+    Possible,
+}
+
+impl Admission {
+    /// What is known once an attempt that handed over `streamed` of the archive ended without the
+    /// restore's outcome.
+    fn after(self, streamed: Streamed) -> Self {
+        match streamed {
+            Streamed::Whole => Self::Possible,
+            Streamed::Partly => self,
+        }
+    }
+
+    /// The failure that ends the restore, which leaves its outcome unknown when the leader may
+    /// have admitted it, whatever the failure says on its own.
+    fn ending(self, failure: Report<RestoreStreamError>) -> Report<RestoreStreamError> {
+        let Self::Possible = self else {
+            return failure;
+        };
+        if failure.current_context().leaves_outcome_unknown() {
+            return failure;
+        }
+        failure.change_context(RestoreStreamError::UnresolvedAdmission)
+    }
+
+    /// How the leader's refusal of the current attempt's stream ends the restore: it changed
+    /// nothing when no attempt can have had the restore admitted, and otherwise leaves the
+    /// outcome of the earlier admission unknown.
+    fn refused(
+        self,
+        failure: RestoreUploadFailure,
+        message: String,
+    ) -> Result<RestoreEnd, Report<RestoreStreamError>> {
+        match self {
+            Self::Impossible => Ok(RestoreEnd::Refused { failure, message }),
+            Self::Possible => {
+                let refused = Report::new(RestoreStreamError::StreamRefused { failure, message });
+                Err(refused.change_context(RestoreStreamError::UnresolvedAdmission))
+            }
+        }
+    }
+
+    /// How an answer that the leader no longer holds the restore's execution reference ends the
+    /// restore: it is the restore's outcome when no attempt can have had the restore admitted,
+    /// since the leader then admitted nothing under the reference, and otherwise leaves the outcome
+    /// of the earlier admission unknown, which the leader can no longer give.
+    fn expired(
+        self,
+        outcome: Box<CommandOutcome>,
+    ) -> Result<RestoreEnd, Report<RestoreStreamError>> {
+        match self {
+            Self::Impossible => Ok(RestoreEnd::Outcome(outcome)),
+            Self::Possible => {
+                let expired = Report::new(RestoreStreamError::ReferenceExpired {
+                    message: outcome.message,
+                });
+                Err(expired.change_context(RestoreStreamError::UnresolvedAdmission))
+            }
         }
     }
 }
@@ -145,8 +282,14 @@ pub(crate) enum ReplyStep {
     End(RestoreEnd),
     /// The node is not the leader: stream the restore again to the leader's console.
     Redirect(Url),
-    /// Stream the restore again after a pause: its outcome is not known yet, or no leader is.
-    Retry,
+    /// No leader is known, or it advertises no console: stream the restore again after a pause.
+    AwaitElection,
+    /// The restore's outcome is not known yet, so the leader may have admitted it: stream it again
+    /// after a pause.
+    AwaitOutcome,
+    /// The leader no longer holds the restore's execution reference: the restore ends, with this
+    /// answer as its outcome unless an earlier attempt may have had it admitted.
+    ReferenceExpired(Box<CommandOutcome>),
 }
 
 /// Reads the reply to the restore under `reference`.
@@ -174,15 +317,15 @@ pub(crate) fn reply_step(
     match &outcome.disposition {
         CommandDisposition::NotLeader(redirect) => match redirect_console(redirect) {
             Some(console) => Ok(ReplyStep::Redirect(console)),
-            None => Ok(ReplyStep::Retry),
+            None => Ok(ReplyStep::AwaitElection),
         },
-        CommandDisposition::OutcomeUnknown(_) => Ok(ReplyStep::Retry),
+        CommandDisposition::OutcomeUnknown(_) => Ok(ReplyStep::AwaitOutcome),
+        CommandDisposition::ExecutionReferenceExpired => Ok(ReplyStep::ReferenceExpired(outcome)),
         CommandDisposition::Completed { .. }
         | CommandDisposition::Failed
         | CommandDisposition::TransactionDetached { .. }
         | CommandDisposition::TransactionTakenOver { .. }
         | CommandDisposition::ExecutionReferenceConflict(_)
-        | CommandDisposition::ExecutionReferenceExpired
         | CommandDisposition::PreviewStale { .. } => {
             Ok(ReplyStep::End(RestoreEnd::Outcome(outcome)))
         }
@@ -256,45 +399,95 @@ impl<F: ArchiveFile> RestoreUpload<F> {
         browser: &B,
         progress: impl Fn(u64, u64) + Copy,
     ) -> Result<RestoreEnd, Report<RestoreStreamError>> {
+        let mut admission = Admission::Impossible;
         let mut last_failure = Report::new(RestoreStreamError::Exhausted);
         for _ in 0..MAX_RESTORE_ATTEMPTS {
             progress(0, self.archive.total_bytes.get());
-            let reply = match self.attempt(browser, progress).await {
+            let attempt = self.attempt(browser, progress).await;
+            let reply = match attempt.reply {
                 Ok(reply) => reply,
                 Err(failure) => {
+                    admission = admission.after(attempt.streamed);
                     if !failure.current_context().is_retryable() {
-                        return Err(failure);
+                        return Err(admission.ending(failure));
                     }
                     last_failure = failure;
                     browser.wait(RETRY_DELAY).await;
                     continue;
                 }
             };
-            match reply_step(reply, &self.reference)? {
+            let step = match reply_step(reply, &self.reference) {
+                Ok(step) => step,
+                Err(failure) => return Err(admission.after(attempt.streamed).ending(failure)),
+            };
+            match step {
+                // The leader refused this attempt's stream before it ran anything from it, which
+                // settles nothing an earlier attempt may have had admitted.
+                ReplyStep::End(RestoreEnd::Refused { failure, message }) => {
+                    return admission.refused(failure, message);
+                }
                 ReplyStep::End(end) => return Ok(end),
                 ReplyStep::Redirect(console) => {
+                    // A leader that loses its leadership while the restore applies redirects too.
+                    admission = admission.after(attempt.streamed);
                     self.base_url = Some(console.to_string());
                     last_failure = Report::new(RestoreStreamError::Exhausted);
                 }
-                ReplyStep::Retry => {
+                ReplyStep::AwaitElection => {
+                    admission = admission.after(attempt.streamed);
                     last_failure = Report::new(RestoreStreamError::Exhausted);
                     browser.wait(RETRY_DELAY).await;
                 }
+                ReplyStep::AwaitOutcome => {
+                    admission = Admission::Possible;
+                    last_failure = Report::new(RestoreStreamError::Exhausted);
+                    browser.wait(RETRY_DELAY).await;
+                }
+                // The leader admits nothing under a reference it no longer holds, so only an
+                // earlier attempt can have had the restore admitted.
+                ReplyStep::ReferenceExpired(outcome) => return admission.expired(outcome),
             }
         }
-        Err(last_failure)
+        Err(admission.ending(last_failure))
     }
 
     /// Streams the restore once and waits for the reply that answers it.
-    async fn attempt<B: Browser>(
+    async fn attempt<B: Browser>(&self, browser: &B, progress: impl Fn(u64, u64)) -> AttemptEnd {
+        let codec = ClientRestoreWebSocketCodec::new(SESSION_LIMITS);
+        let sending = self.send_archive(browser, &codec, progress).await;
+        let mut socket = match sending {
+            Ok(Sending::Sent(socket)) => socket,
+            Ok(Sending::Answered(reply)) => {
+                return AttemptEnd {
+                    streamed: Streamed::Partly,
+                    reply: Ok(reply),
+                };
+            }
+            Err(failure) => {
+                return AttemptEnd {
+                    streamed: Streamed::Partly,
+                    reply: Err(failure),
+                };
+            }
+        };
+        let reply = next_reply(browser, &mut socket, &codec).await;
+        AttemptEnd {
+            streamed: Streamed::Whole,
+            reply,
+        }
+    }
+
+    /// Opens one attempt's connection and hands it the start and every chunk of the archive,
+    /// unless the leader answers first.
+    async fn send_archive<B: Browser>(
         &self,
         browser: &B,
+        codec: &ClientRestoreWebSocketCodec,
         progress: impl Fn(u64, u64),
-    ) -> Result<RestoreReply, Report<RestoreStreamError>> {
+    ) -> Result<Sending<B::Socket>, Report<RestoreStreamError>> {
         let Some(url) = self.socket_url() else {
             return Err(Report::new(RestoreStreamError::NoAddress));
         };
-        let codec = ClientRestoreWebSocketCodec::new(SESSION_LIMITS);
         let start = RestoreStart {
             request_id: RESTORE_REQUEST_ID,
             execution_reference: self.reference.clone(),
@@ -318,8 +511,8 @@ impl<F: ArchiveFile> RestoreUpload<F> {
         while sent < total {
             // The leader may answer before every byte arrived, as when it refuses the restore or
             // recovers the outcome of one it already ran; nothing more is sent then.
-            if let Some(reply) = wait_for_room(browser, &mut socket, &codec).await? {
-                return Ok(reply);
+            if let Some(reply) = wait_for_room(browser, &mut socket, codec).await? {
+                return Ok(Sending::Answered(reply));
             }
             let remaining = total
                 .checked_sub(sent)
@@ -347,7 +540,7 @@ impl<F: ArchiveFile> RestoreUpload<F> {
                 .verified("the bytes sent stay within the declared size, which is a u64");
             progress(sent, total);
         }
-        next_reply(browser, &mut socket, &codec).await
+        Ok(Sending::Sent(socket))
     }
 
     fn socket_url(&self) -> Option<String> {

@@ -350,7 +350,7 @@ pub(super) mod tests {
             state: RuntimeState::MaterializedRelay {
                 schema: nervix_models::SchemaFingerprint::from_digest([7; 32]).materialized_at(37),
             },
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         }
     }

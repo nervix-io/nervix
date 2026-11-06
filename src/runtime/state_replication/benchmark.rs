@@ -57,7 +57,7 @@ impl StateReplicationBenchmark {
             state: RuntimeState::KafkaOffset,
             kind: ModelKind::Ingestor,
             identifier: ModelName::parse("source").assured("the benchmark ingestor name is valid"),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         };
         runtime.publish_state_assignment(

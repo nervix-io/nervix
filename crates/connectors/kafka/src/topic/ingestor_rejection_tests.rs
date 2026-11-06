@@ -33,15 +33,51 @@ use rdkafka::{
 };
 
 use super::{
-    KafkaDomainOffsetHost, KafkaDomainOffsetInitialization, KafkaDomainOffsetResult,
+    DomainStart, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization, KafkaDomainOffsetResult,
     KafkaDomainOffsetServices, KafkaDomainOffsetStart, KafkaGroupCommit, KafkaOffsetPosition,
     KafkaTopicIngestor, KafkaTopicIngestorError, KafkaTopicIngestorOffsetMode,
-    KafkaTopicIngestorPlan,
+    KafkaTopicIngestorPlan, ScheduledPartitions,
     commit_tests::{READ_DEADLINE, cluster, plan as group_plan, publish, read_positions},
     rejection::RejectionFloors,
 };
 
 const TOPIC: &str = "orders";
+
+#[nervix_primitives::test]
+async fn an_explicit_start_resolves_the_whole_topic_before_any_instance_polls() {
+    let broker = MockCluster::new(1).assured("the mock cluster has one broker");
+    broker
+        .create_topic(TOPIC, 3, 1)
+        .assured("the test topic has three partitions");
+    let domain = domain_source(
+        &broker,
+        ScriptedStart::At(Timestamp::from_unix_nanos(i64::MAX / 2)),
+    )
+    .await;
+    let offsets = domain
+        .source
+        .control
+        .run(&domain.source.consumer, |consumer, budget| {
+            let scheduled = ScheduledPartitions {
+                topic: TOPIC,
+                partitions: &[0, 1, 2],
+                assigned: std::collections::BTreeSet::from([0]),
+            };
+            let start = DomainStart::resolve(
+                consumer,
+                &scheduled,
+                KafkaDomainOffsetStart::At(Timestamp::from_unix_nanos(i64::MAX / 2)),
+                budget,
+            )?;
+            Ok(start.offsets().clone())
+        })
+        .await
+        .assured("the broker resolves a future start to each empty partition's end");
+    assert_eq!(
+        offsets,
+        std::collections::BTreeMap::from([(0, 0), (1, 0), (2, 0)])
+    );
+}
 
 /// How long one read waits for a record before the test publishes another.
 const PUBLISH_INTERVAL: Duration = Duration::from_secs(2);

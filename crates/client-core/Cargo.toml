@@ -80,8 +80,9 @@ tokio = { workspace = true, features = [
   "time",
 ] }
 
-# Measures each stage a native client runs before it sends a command. `just client-wire-command-cost`
-# runs it in the release and debug profiles.
+# Measures each stage a native client runs before it sends a command, and a completion read with a
+# held grammar and with one built for it. `just client-wire-command-cost` runs it in the release and
+# debug profiles.
 [[bench]]
 harness = false
 name = "command_preparation"

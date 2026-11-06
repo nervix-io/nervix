@@ -436,6 +436,12 @@ remains: no relay batch, no runtime-node work item, no emitter buffer or active 
 admitted acknowledgement root. A stopped or extremely slow domain clock cannot hold rows out of the
 drain, because the force flush does not wait for a logical cadence to come due.
 
+An emitter force flush publishes a partial batch without waiting for either batching limit to be
+filled. Prepared attempts keep their original bytes and source members through the drain. A
+batch-policy change drains that work before activating the replacement policy, and a failed
+pre-commit drain leaves the previous task responsible for it. These buffers and member maps are
+volatile; terminal cancellation never treats an unanswered member as delivered.
+
 Window processors are the one exception to that release. A force flush purges timed-out aggregate
 state but emits only windows that have met their declared `WIDTH`. A partially filled window is not
 emitted early by a shutdown, so its rows do not reach the emitter. A row's acknowledgement completes
@@ -823,10 +829,12 @@ batch's positions on its transport, so the drain waits for that confirmation as 
 other acknowledgement root, within the drain timeout. What a source's confirmation means is the
 acknowledgement confirmation its entity declares; see
 [Confirmed acknowledgements](./connector-contract.md#confirmed-acknowledgements). An SQS deletion,
-a Kafka offset commit and a Pulsar acknowledgement in an `ACK` mode are answered, and a RabbitMQ
-acknowledgement and an MQTT `PUBACK` are written to the connection, before the drain moves on. A
-Pulsar acknowledgement the broker does not answer within the client's 30-second operation timeout
-fails, and the host rejects the positions, so the drain timeout bounds it as well. A Kafka consumer
+a Kafka offset commit, a Pulsar acknowledgement and a NATS STREAM acknowledgement in an `ACK` mode
+are answered, and a RabbitMQ acknowledgement and an MQTT `PUBACK` are written to the connection,
+before the drain moves on. A Pulsar acknowledgement the broker does not answer within the client's
+30-second operation timeout fails, and the host rejects the positions, so the drain timeout bounds
+it as well; a NATS STREAM acknowledgement the server does not answer within the client's
+10-second request timeout fails the same way. A Kafka consumer
 group in `MODE NO ACK` acknowledges nothing: when intake stops, its source commits the positions its
 driver delivered since the driver's last commit, and waits for the answer before the consumer
 leaves the group, and a Pulsar subscription in `MODE NO ACK` only queues its acknowledgements.
@@ -855,9 +863,9 @@ What that contract is depends on the source, and three groups differ sharply:
 
 | Source | Source acknowledgement | Admitted work when a drain does not finish |
 | --- | --- | --- |
-| Kafka, Pulsar, RabbitMQ, SQS, and MQTT in an `ACK` mode | The offset is committed, the broker acknowledged, or the message deleted only after the record is acknowledged through the graph | Redelivered after the restart |
+| Kafka, Pulsar, RabbitMQ, SQS, MQTT, and NATS STREAM in an `ACK` mode | The offset is committed, the broker acknowledged, or the message deleted only after the record is acknowledged through the graph | Redelivered after the restart |
 | HTTP polling, Prometheus | None; the poller re-reads its source each cadence | Read again by a later poll |
-| NATS, Redis Pub/Sub, ZeroMQ, WebSocket clients, Syslog | None exists; these sources offer no acknowledged mode | Lost, with nothing to redeliver it |
+| NATS SUBJECT, Redis Pub/Sub, ZeroMQ, WebSocket clients, Syslog | None exists; these sources offer no acknowledged mode | Lost, with nothing to redeliver it |
 | HTTP and WebSocket endpoints | `MODE NO ACK` confirms admission; `MODE ACK` holds its reply through the graph root | Held ACK replies report unavailable on intake stop; only the sender can retry, and admitted effects may duplicate |
 | Client ingestors | The producer receives each batch's outcome once its acknowledgement root resolves | Reported to its producer as of unknown outcome, or not at all when the producer's session ended first; the application decides whether to submit it again |
 
@@ -1528,6 +1536,26 @@ released claim becomes available again. Task teardown removes its confirmation/s
 and pooled emitter teardown removes its wait registration; cancellation clears a pending borrow's
 wait through its guard. Handoff watches register before reading their unit's retained freeze
 publication, and release publishes thaw before waking them.
+
+## Stopping Spread Intake
+
+A source instance is stopped under its exact `DomainNodeUnitRef`. Node drain suspends intake for
+the units whose primaries it owns, waits for their admitted ACK roots and transport confirmation,
+and transfers their unit-qualified offsets and branch checkpoints. A sibling whose owner remains
+live retains its host task, readiness and ACK roots. Per-partition intake moves with its exact
+relay partition component. Whole-domain shutdown still selects every current unit, including
+retained work from a source whose live registration has already ended.
+
+Kafka initialization shares cold admission with the exact unit's ownership capture and final
+offset write. Stopping refuses new initialization; the final writer waits for an initialization
+already admitted to finish or reach its deadline before capturing the final state. Pending
+canonical positions survive in the same native checkpoint as the explicit-start generation. A
+plain resume transfers a delayed unit's pending positions before it begins polling.
+
+The ending loop closes its transport before its readiness is retired. MQTT input retirement
+compares the logical input once and selects only the global indices ending on this node. Forced
+node loss retains the transport's declared replay and duplicate limits; instance placement does
+not strengthen broker acknowledgement guarantees.
 
 ## Live Domain Policy
 

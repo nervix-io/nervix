@@ -148,7 +148,7 @@ impl RemoteGenerationFixture {
         let routing = DomainRouting::new(DomainRoutingSnapshot {
             materialized_stream_owner_nodes: [(
                 relay.clone(),
-                RelayOwnerRoutes::new(BTreeMap::from([(Unit::Single, owner_name.clone())])),
+                RelayOwnerRoutes::new(BTreeMap::from([(Unit::SINGLE, owner_name.clone())])),
             )]
             .into_iter()
             .collect(),
@@ -505,7 +505,7 @@ async fn unchanged_remote_generations_transfer_once_and_replaced_contents_are_re
     let available = fixture.read(&mut routing, &mut cache).await;
     fixture.assert_records(&available, &expected);
     assert!(
-        cache.remote.contains_key(&Unit::Single),
+        cache.remote.contains_key(&Unit::SINGLE),
         "a later read can retain the generation when room returns"
     );
     let expected = fixture.replace_generation(40, 2);

@@ -99,6 +99,10 @@ client, binding and browser; those build choices change no wire contract.
 
 ## Wire Format
 
+An instance placement identity carries an unsigned 64-bit index in the `PlacementUnit` union;
+partition indices remain unsigned 32-bit values. Client encoders and decoders preserve the full
+instance index when reporting transaction impact and execution placement.
+
 ### One Schema, Eight Frame Roots
 
 `crates/client-wire/schema/session.fbs` declares every shape of the public boundary, once. Eight
@@ -1132,6 +1136,14 @@ session starts again from one second. An attach answered `DomainClockAlreadyAtta
 session already holds the attachment, so the client follows the clock on that session and reads its
 frames from then on.
 
+Closing the native client's request registry also wakes its exchange reader, even while the
+transport remains live and silent. The reader stops routing frames before it interrupts that
+generation's attachments and event queues. A subscription or clock reader already waiting there
+can therefore open the next session; it does not need another command, a later back-off timer, or
+a transport failure to make progress. An unanswered reopening ends its session; the
+`RestorationFailed` event reports attempts that failed while the session stays open, including
+server refusals and local encoding failures.
+
 The client's event streams outlive the session. A caller reading subscription events, clock events,
 or notices keeps reading across the replacement: the interruptions mark the gap, and events of the
 new session follow them. Reading subscription or clock events opens a new session
@@ -1435,6 +1447,12 @@ Its text and partial reply are released immediately, and later parts are discard
 reassembly; the final part releases its place. Waiting connection-local requests end with that
 connection, while ordered commands retain their issue order and execution references. A request
 past either outstanding bound is not sent, and the control that issued it reports why.
+
+A reply the console cannot decode or reassemble, or whose body does not answer its request kind,
+ends that session as a protocol violation. The unanswered commands retain their complete requests,
+issue order, execution references and uncertain-outcome retry delays. Recovery restores the
+session before sending them again through the same bounded window; an unreadable reply never
+settles a command as failed.
 
 A tab whose generation the server ended with `SubscriptionEnded` turns ended in the web console. It
 keeps its rows and the reason, and it is not restored on a later connection, which would not change
@@ -1976,7 +1994,11 @@ under the restore's own execution reference with the typed validation cause bene
 installed while the restore was in flight remains usable. Keep the statement, archive bytes and
 reference unchanged when repeating the restore to recover its outcome.
 
-A refusal of the stream is not recorded; sending the stream again stages the archive again. Every
+A refusal of the stream is not recorded; sending the stream again stages the archive again. A
+refusal answers the one stream it ends, not the restore: a leader refuses a stream whose start or
+statement it cannot read, or while its cluster parameters are unavailable, before it looks the
+restore up, and stages the archive again for a restore it finds admitted without it, so a refusal
+of a repeated stream says nothing about whether an earlier stream had the restore admitted. Every
 other answer is a `CommandOutcome` under the start's execution reference:
 
 - A follower reads the start, answers `LeaderRedirect`, and reads no chunk.
@@ -2015,6 +2037,14 @@ no longer tied to the call: a client that goes away does not stop it, and repeat
 under the same reference returns its outcome. A call that ends before the whole archive arrived
 changes nothing and releases what the leader staged for it.
 
+A reply that fails frame verification or exceeds the native transport's receive limit cannot
+establish a restore outcome. The native client ends the exact session whose channel carried that
+attempt, leaving a replacement session intact, and reports the original restore reference as
+uncertain. Repeating the same statement and archive under that reference recovers the outcome.
+If no earlier attempt could have been admitted, authentication or other server refusals received
+before a response, a declared `RestoreUploadFailed`, and local archive refusals keep their
+definitive meaning. An unreadable reply is no evidence of refusal.
+
 Only the leader the archive was streamed to holds it, until the restore finishes or the retry
 validity of its reference ends. If leadership moves, or that leader restarts, while the restore
 applies, the reply is a `LeaderRedirect` or the call fails, and repeating the stream on the new
@@ -2027,7 +2057,11 @@ it before the start, and again as it streams. The stream ends with the chunk tha
 declared size instead of a half-close, and the console watches for a reply that arrives before
 every chunk was sent. It repeats a redirected, interrupted, or still-applying restore under the
 same reference, statement and archive, and reports the outcome as unknown, naming the reference,
-when ten minutes of repetitions leave it unknown.
+when ten minutes of repetitions leave it unknown. It reports the outcome as unknown as well when
+the restore ends without it after an attempt may have had the restore admitted, by sending the
+whole archive without learning the outcome or by an `OutcomeUnknown` answer: when the file can no
+longer be read, a reply cannot be accepted, the leader refuses a later stream, or the leader no
+longer holds the reference.
 
 ## Node Stop And Restart As A Client Observes Them
 
@@ -2258,21 +2292,31 @@ they cover, and how to run them.
 ## Measured Costs
 
 [Client Wire 16](https://app.clickup.com/t/86bc1ahz3) retains the performance report, raw samples,
-reproduction commands, tested revisions and regression alarms, and
+reproduction commands, tested revisions and regression alarms,
 [Client Wire 18](https://app.clickup.com/t/86bc8cx3h) the command preparation and transport report
-with its paired samples. Measurements qualify their recorded workload, build profile and host; they
-do not establish throughput guarantees for another revision.
+with its paired samples, and [Client Wire 61](https://app.clickup.com/t/86bcx1uz6) the reports from
+before and after the server held its grammar. Measurements qualify their recorded workload, build
+profile and host; they do not establish throughput guarantees for another revision.
+
+The broad baseline instrument used by those reports is retired. Its archived commands reproduce
+only the recorded revisions; current measurements use the focused instruments below. The original
+measurements, budgets and conclusions remain on their ClickUp tasks.
 
 Before it sends a command, a native client classifies the statements by parsing them with the
 client statement grammar. Building that grammar constructs the parser of every Plexus statement
-and allocates about a megabyte and a half, which costs far more than parsing a command with it,
-and releasing it costs about as much again. The Rust client therefore builds the grammar once on
-each thread that prepares a command and keeps it for the life of the thread. The execution
-identity and the request frame cost little beside the parse. `just client-wire-command-cost`
-measures each of these stages, and `just client-wire-tls-cost` compares the same command and fresh
-connections over plaintext and TLS in alternating pairs against two release servers. A TLS session
-pays most of what TLS costs in its handshake, when it connects; an established TLS session adds a
-few percent to a command's round trip.
+and allocates about 1.7 MB, which costs far more than parsing a command with it, and releasing it
+costs about as much again. The Rust client therefore builds the grammar once on each thread that
+prepares a command and keeps it for the life of the thread. The server reads every command,
+subscription, restore and completion request with the same grammar, held the same way: each worker
+thread of the node's runtime builds it for the first request it reads and keeps it between
+requests, so a node holds at most one grammar on each of its runtime's worker threads. A completion
+request reads both the grammar's expectations and the local path being written with that one
+grammar. The execution identity and the request frame cost little beside the parse.
+`just client-wire-command-cost` measures each of these stages, and a completion read with a held
+grammar and with one built for it, and `just client-wire-tls-cost` compares the same command and
+fresh connections over plaintext and TLS in alternating pairs against two release servers. A TLS
+session pays most of what TLS costs in its handshake, when it connects; an established TLS session
+adds a few percent to a command's round trip.
 
 The cost model follows the protocol boundaries: the server writes Arrow column values directly
 into FlatBuffers tables, verification runs once per frame, and later views borrow that frame.

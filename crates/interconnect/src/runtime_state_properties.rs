@@ -12,7 +12,7 @@
 
 use std::fmt::Debug;
 
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain, assert_remote_keys_eq};
 use nervix_execution::Executor;
 use nervix_models::{
@@ -22,9 +22,10 @@ use nervix_models::{
 
 use super::*;
 use crate::{
-    CaptureOwnershipHandoffStateRequest, OwnershipHandoffFailure, OwnershipHandoffResponse,
-    PrepareOwnershipHandoffStateRequest, RemoteOperationSubject, TransportError,
-    request::RkyvMessage,
+    CaptureOwnershipHandoffStateRequest, ConfirmOwnershipHandoffStateRequest,
+    DescribeIngestorRequest, EntityDrainStatusRequest, EntityGatePurpose, EntityGateRequest,
+    OwnershipHandoffFailure, OwnershipHandoffResponse, PrepareOwnershipHandoffStateRequest,
+    RemoteOperationSubject, TransportError, request::RkyvMessage,
 };
 
 const CASE_BYTES: usize = 2048;
@@ -46,6 +47,9 @@ enum Message {
     Prepare(PrepareOwnershipHandoffStateRequest),
     Capture(CaptureOwnershipHandoffStateRequest),
     CaptureResponse(OwnershipHandoffResponse<Vec<OwnershipHandoffCheckpoint>>),
+    Confirm(ConfirmOwnershipHandoffStateRequest),
+    KafkaStart(crate::KafkaStartRequest),
+    KafkaStartResponse(Result<crate::KafkaStartResponse, RemoteOperationFailure>),
 }
 
 struct Messages<'a> {
@@ -91,19 +95,72 @@ impl<'a> Messages<'a> {
 
     fn unit(&mut self) -> nervix_models::Unit {
         match self.arbitrary.entropy().byte() % 3 {
-            0 => nervix_models::Unit::Single,
-            variant => {
-                let ordinal = u32::try_from(
+            0 => nervix_models::Unit::SINGLE,
+            1 => nervix_models::Unit::partition(
+                u32::try_from(
                     self.arbitrary
                         .entropy()
                         .boundary_biased(0..=u64::from(u32::MAX)),
                 )
-                .assured("the generated unit ordinal is bounded by u32::MAX");
-                if variant == 1 {
-                    nervix_models::Unit::Partition(ordinal)
-                } else {
-                    nervix_models::Unit::Instance(ordinal)
-                }
+                .assured("partition indices fit u32"),
+            ),
+            _ => nervix_models::Unit::try_instance(
+                self.arbitrary
+                    .entropy()
+                    .boundary_biased(0..=nervix_models::Unit::MAX_INSTANCE_INDEX),
+            )
+            .assured("the fixture index fits the execution-unit range"),
+        }
+    }
+
+    fn ingestor_selection(&mut self) -> crate::IngestorUnitSelection {
+        let count = self.arbitrary.positive_u64();
+        let last_declared_index = count
+            .get()
+            .checked_sub(1)
+            .assured("a positive instance count has a final index");
+        // Counts retain their full width; selected indices also fit the packed unit.
+        let maximum_index = last_declared_index.min(nervix_models::Unit::MAX_INSTANCE_INDEX);
+        crate::IngestorUnitSelection {
+            unit: nervix_models::Unit::try_instance(
+                self.arbitrary.entropy().boundary_biased(0..=maximum_index),
+            )
+            .assured("the generated index fits both the count and packed unit range"),
+            count,
+        }
+    }
+
+    fn handoff_selection(&mut self) -> crate::OwnershipHandoffSelection {
+        if self.arbitrary.entropy().flag() {
+            crate::OwnershipHandoffSelection::Unit
+        } else {
+            crate::OwnershipHandoffSelection::IngestorUnits {
+                selection: self.ingestor_selection(),
+                checkpoints: self.checkpoints(),
+            }
+        }
+    }
+
+    fn handoff_input(&mut self) -> crate::OwnershipHandoffInput {
+        if self.arbitrary.entropy().flag() {
+            crate::OwnershipHandoffInput::Unit(self.checkpoints())
+        } else {
+            let mut sources = Vec::new();
+            for _ in 0..self.arbitrary.entropy().count(3) {
+                sources.push(crate::OwnershipHandoffSource {
+                    node: self.arbitrary.cluster_node(),
+                    incarnation: ClusterNodeIncarnation::new(self.number()),
+                    unit: self.unit(),
+                    checkpoints: self.checkpoints(),
+                });
+            }
+            crate::OwnershipHandoffInput::IngestorUnits {
+                selection: self.ingestor_selection(),
+                schema_fingerprint: SchemaFingerprint::from_digest(self.digest()),
+                kafka_offsets: self.arbitrary.entropy().flag(),
+                recipient: self.arbitrary.cluster_node(),
+                recipient_incarnation: ClusterNodeIncarnation::new(self.number()),
+                sources,
             }
         }
     }
@@ -230,10 +287,16 @@ impl<'a> Messages<'a> {
                 Message::ListingResponse(BranchCheckpointListingResponse { result })
             }
             2 => {
-                let read = self.arbitrary.entropy().pick([
-                    StateCheckpointRead::Published,
-                    StateCheckpointRead::HandoffCapture,
-                ]);
+                let read = match self.arbitrary.entropy().byte() % 5 {
+                    0 => StateCheckpointRead::Published,
+                    1 => StateCheckpointRead::HandoffCapture,
+                    2 => StateCheckpointRead::IngestorUnits(self.ingestor_selection()),
+                    3 => StateCheckpointRead::KafkaStartOffer,
+                    _ => StateCheckpointRead::KafkaStartSeed {
+                        generation: self.number(),
+                        selection: self.ingestor_selection(),
+                    },
+                };
                 Message::Fetch(FetchStateCheckpoint {
                     placement: self.placement(),
                     lsm: self.number(),
@@ -311,7 +374,7 @@ impl<'a> Messages<'a> {
                     ),
                     base_schedule_fingerprint: self.digest(),
                     target_schedule_fingerprint: self.digest(),
-                    checkpoints: self.checkpoints(),
+                    input: self.handoff_input(),
                 })
             }
             11 => {
@@ -332,15 +395,85 @@ impl<'a> Messages<'a> {
                         self.arbitrary.rule_name::<ModelName>(),
                     ),
                     base_schedule_fingerprint: self.digest(),
+                    selection: self.handoff_selection(),
                 })
             }
-            _ => {
+            12 => {
                 let response = if self.arbitrary.entropy().flag() {
                     Ok(self.checkpoints())
                 } else {
                     Err(OwnershipHandoffFailure::rejected(self.arbitrary.string()))
                 };
                 Message::CaptureResponse(response)
+            }
+            13 => {
+                let participant = if self.arbitrary.entropy().flag() {
+                    let count = self.arbitrary.entropy().count(4);
+                    let units = (0..count).map(|_| self.unit()).collect();
+                    crate::OwnershipHandoffParticipant::Source {
+                        node: self.arbitrary.cluster_node(),
+                        incarnation: ClusterNodeIncarnation::new(self.number()),
+                        units,
+                    }
+                } else {
+                    crate::OwnershipHandoffParticipant::Destination
+                };
+                Message::Confirm(ConfirmOwnershipHandoffStateRequest {
+                    coordination: CoordinationIdentity::new(
+                        self.arbitrary.cluster_node(),
+                        self.number(),
+                        self.number(),
+                    ),
+                    operation_id: self.arbitrary.string(),
+                    source: self.arbitrary.cluster_node(),
+                    destination: self.arbitrary.cluster_node(),
+                    source_incarnation: ClusterNodeIncarnation::new(self.number()),
+                    destination_incarnation: ClusterNodeIncarnation::new(self.number()),
+                    domain: self.arbitrary.rule_name(),
+                    entity: NodeRef::new(
+                        self.arbitrary.model_kind(),
+                        self.arbitrary.rule_name::<ModelName>(),
+                    ),
+                    unit: self.unit(),
+                    base_schedule_fingerprint: self.digest(),
+                    target_schedule_fingerprint: self.digest(),
+                    participant,
+                })
+            }
+            14 => {
+                let action = match self.arbitrary.entropy().byte() % 3 {
+                    0 => crate::KafkaStartAction::Read,
+                    1 => crate::KafkaStartAction::Propose {
+                        snapshot: self.snapshot(),
+                    },
+                    _ => crate::KafkaStartAction::Acknowledge {
+                        start_generation: self.number(),
+                    },
+                };
+                Message::KafkaStart(crate::KafkaStartRequest {
+                    placement: self.placement(),
+                    source: ClusterNodeIdentity::new(
+                        self.arbitrary.cluster_node(),
+                        ClusterNodeIncarnation::new(self.number()),
+                    ),
+                    generation: self.number(),
+                    ownership_fingerprint: self.digest(),
+                    action,
+                })
+            }
+            _ => {
+                let result = match self.arbitrary.entropy().byte() % 4 {
+                    0 => Ok(crate::KafkaStartResponse::Unresolved),
+                    1 => Ok(crate::KafkaStartResponse::Current {
+                        generation: self.number(),
+                    }),
+                    2 => Ok(crate::KafkaStartResponse::Seed {
+                        generation: self.number(),
+                        snapshot: self.snapshot(),
+                    }),
+                    _ => Err(self.failure()),
+                };
+                Message::KafkaStartResponse(result)
             }
         }
     }
@@ -393,6 +526,31 @@ fn assert_checkpoint_keys(
     }
 }
 
+fn assert_handoff_input_keys(
+    actual: &crate::OwnershipHandoffInput,
+    expected: &crate::OwnershipHandoffInput,
+) {
+    match (actual, expected) {
+        (
+            crate::OwnershipHandoffInput::Unit(actual),
+            crate::OwnershipHandoffInput::Unit(expected),
+        ) => assert_checkpoint_keys(actual, expected),
+        (
+            crate::OwnershipHandoffInput::IngestorUnits {
+                sources: actual, ..
+            },
+            crate::OwnershipHandoffInput::IngestorUnits {
+                sources: expected, ..
+            },
+        ) => {
+            for (actual, expected) in actual.iter().zip(expected) {
+                assert_checkpoint_keys(&actual.checkpoints, &expected.checkpoints);
+            }
+        }
+        _ => panic!("the complete round-trip assertion preserves the input variant"),
+    }
+}
+
 impl Message {
     async fn check(&self, executor: &Executor) {
         macro_rules! placement {
@@ -412,6 +570,10 @@ impl Message {
             Self::Fetch(m) => placement!(m, FetchStateCheckpoint::CLASS, placement),
             Self::KafkaSync(m) => placement!(m, SyncKafkaOffsets::CLASS, placement),
             Self::KafkaDescribe(m) => placement!(m, DescribeKafkaOffsets::CLASS, placement),
+            Self::KafkaStart(m) => placement!(m, crate::KafkaStartRequest::CLASS, placement),
+            Self::KafkaStartResponse(m) => {
+                drop(round_trip(executor, crate::KafkaStartRequest::CLASS, m).await);
+            }
             Self::KafkaResponse(m) => {
                 drop(round_trip(executor, DescribeKafkaOffsets::CLASS, m).await);
             }
@@ -424,8 +586,14 @@ impl Message {
             Self::Prepare(m) => {
                 let decoded =
                     round_trip(executor, PrepareOwnershipHandoffStateRequest::CLASS, m).await;
-                assert_checkpoint_keys(&decoded.checkpoints, &m.checkpoints);
-                let reply: OwnershipHandoffResponse<()> = match &m.checkpoints.first() {
+                assert_handoff_input_keys(&decoded.input, &m.input);
+                let first = match &m.input {
+                    crate::OwnershipHandoffInput::Unit(checkpoints) => checkpoints.first(),
+                    crate::OwnershipHandoffInput::IngestorUnits { sources, .. } => {
+                        sources.iter().find_map(|source| source.checkpoints.first())
+                    }
+                };
+                let reply: OwnershipHandoffResponse<()> = match first {
                     Some(_) => Ok(()),
                     None => Err(OwnershipHandoffFailure::rejected(m.operation_id.clone())),
                 };
@@ -435,6 +603,9 @@ impl Message {
             }
             Self::Capture(m) => {
                 round_trip(executor, CaptureOwnershipHandoffStateRequest::CLASS, m).await;
+            }
+            Self::Confirm(m) => {
+                round_trip(executor, ConfirmOwnershipHandoffStateRequest::CLASS, m).await;
             }
             Self::CaptureResponse(m) => {
                 let decoded =
@@ -458,6 +629,8 @@ impl Message {
             Self::Fetch(m) => damaged!(m, FetchStateCheckpoint::CLASS),
             Self::KafkaSync(m) => damaged!(m, SyncKafkaOffsets::CLASS),
             Self::KafkaDescribe(m) => damaged!(m, DescribeKafkaOffsets::CLASS),
+            Self::KafkaStart(m) => damaged!(m, crate::KafkaStartRequest::CLASS),
+            Self::KafkaStartResponse(m) => damaged!(m, crate::KafkaStartRequest::CLASS),
             Self::KafkaResponse(m) => damaged!(m, DescribeKafkaOffsets::CLASS),
             Self::SyncRequest(m) => damaged!(m, StateSyncRequest::CLASS),
             Self::SyncResponse(m) => damaged!(m, StateSyncRequest::CLASS),
@@ -465,6 +638,7 @@ impl Message {
             Self::Available(m) => damaged!(m, PoolClass::Replication),
             Self::Prepare(m) => damaged!(m, PrepareOwnershipHandoffStateRequest::CLASS),
             Self::Capture(m) => damaged!(m, CaptureOwnershipHandoffStateRequest::CLASS),
+            Self::Confirm(m) => damaged!(m, ConfirmOwnershipHandoffStateRequest::CLASS),
             Self::CaptureResponse(m) => damaged!(m, CaptureOwnershipHandoffStateRequest::CLASS),
         }
     }
@@ -631,7 +805,7 @@ fn runtime_state_wire_variant_boundaries() {
                         kind,
                         identifier: ModelName::parse("checkpoint")
                             .assured("a fixed valid model name"),
-                        unit: nervix_models::Unit::Single,
+                        unit: nervix_models::Unit::SINGLE,
                         branch_key,
                     };
                     Message::SyncRequest(StateSyncRequest {
@@ -717,4 +891,61 @@ fn runtime_state_wire_variant_boundaries() {
         }
     });
     assert_no_charge(&executor);
+}
+
+#[test]
+fn bolero_intake_unit_requests_preserve_their_selection() {
+    let runtime = runtime();
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(128)
+        .for_each(|bytes: &[u8]| {
+            let mut messages = Messages::new(bytes);
+            let domain: nervix_models::DomainName = messages.arbitrary.rule_name();
+            let coordination = CoordinationIdentity::new(
+                messages.arbitrary.cluster_node(),
+                messages.number(),
+                messages.number(),
+            );
+            let plan = messages.arbitrary.transaction_entity_gate_plan();
+            let purpose = match &plan.targets {
+                nervix_models::EntityGateTargets::Entities(_) => EntityGatePurpose::ModelAlteration,
+                nervix_models::EntityGateTargets::Units(_) => EntityGatePurpose::OwnershipHandoff,
+            };
+            let gate = EntityGateRequest {
+                coordination: coordination.clone(),
+                domain: domain.clone(),
+                relays: plan.relays,
+                targets: plan.targets,
+                purpose,
+                deadline_millis: messages.number(),
+                reason: messages.arbitrary.string(),
+            };
+            let status = EntityDrainStatusRequest {
+                coordination,
+                domain: domain.clone(),
+                relays: gate.relays.clone(),
+                targets: gate.targets.clone(),
+                purpose,
+            };
+            let describe = DescribeIngestorRequest {
+                domain,
+                name: messages.arbitrary.rule_name(),
+                unit: if messages.arbitrary.entropy().flag() {
+                    nervix_models::Unit::SINGLE
+                } else {
+                    nervix_models::Unit::try_instance(u64::from(
+                        messages.arbitrary.entropy().byte(),
+                    ))
+                    .assured("the fixture index fits the execution-unit range")
+                },
+            };
+            let executor = Executor::default();
+            runtime.block_on(async {
+                round_trip(&executor, EntityGateRequest::CLASS, &gate).await;
+                round_trip(&executor, EntityDrainStatusRequest::CLASS, &status).await;
+                round_trip(&executor, DescribeIngestorRequest::CLASS, &describe).await;
+            });
+            assert_no_charge(&executor);
+        });
 }

@@ -38,7 +38,7 @@ pub(super) fn topic_body<'src>()
         .then_ignore(kw(Identifier::Topic))
         .then(external_name::<PulsarTopicName>())
         .then(subscription())
-        .then(optional_instances())
+        .then(optional_instances::<PulsarTopicIngestor>())
         .then_ignore(kw(Identifier::Mode))
         .then(mode())
         .then(suspend_only_quiesce_clause())
@@ -554,7 +554,10 @@ mod tests {
         let source = created_source(&statement(topic, OWNED, "NO ACK"));
 
         assert_eq!(source.topic.as_str(), topic);
-        assert_eq!(source.instances.get(), 2);
+        assert_eq!(
+            source.instances,
+            nervix_models::IngestorInstances::Count(nonzero_ext::nonzero!(2u64))
+        );
     }
 
     #[rstest]

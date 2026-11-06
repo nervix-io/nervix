@@ -81,6 +81,11 @@ required, validates it there, and passes the resulting typed value to the next l
 the registry, execution plans, runtime, clients, and diagnostics from assigning different meanings
 to the same raw value.
 
+The native client's open request-registry variant owns the sender that keeps its exchange reader
+waiting for frames. Closing the registry drops that sender and its pending reply senders together.
+The closed variant owns neither: reader termination follows the typed state's lifetime, without a
+second boolean that can disagree with whether requests are admitted.
+
 The resolved node identity distinguishes a plaintext gRPC transport from an HTTPS transport that
 carries its listen and advertised addresses and both provisioned TLS paths. The CLI edge refuses
 incomplete pairs and TLS material in HTTP mode before constructing that identity. File availability,
@@ -313,31 +318,39 @@ platform string; connector preparation uses it only when the codec's event omits
 A polled HTTP request's header holds a literal or names a client secret as two states of one enum,
 so a value cannot be both or neither, and the Model that names a secret holds its key and never its
 value.
-
 The NATS driver's ordered transport header projection owns either validated frame bytes with
 checked compact ranges or the emitter's owned ordered pairs. Names, values and payloads keep
 their ownership through publication; neither a cast nor a fabricated range stands for a failed
 transport offset conversion. The SDK's indexed authoring and typed-inspection views preserve
 empty JSON value arrays. These driver representations never enter semantic Models or plans.
 
-A NATS ingestor or emitter Model is one of two entities, `NATS SUBJECT` or `NATS STREAM`, so a stored
-declaration holds the archived union of both. The registry's `NERVIX CBOR NATS` archive
-signature identifies the current Model layout, including those unions, separate JSON and CBOR wire
-type enums (CBOR has six types), AVRO representation types, explicit `BASE64` codec encoding, a
-Pulsar subscription's required type, an owned Pulsar subscription's required start position, a Kafka
-consumer group's required start position, the required 16-bit branch partition count, Sentry
-platform, an ingestor's `TIMESTAMP AT
-metadata.<field>` source, an SQS QUEUE emitter's `SEND` request shape, the receive count an SQS
-QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of service an MQTT TOPIC
-ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter writes beside
-its publishing mode, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a
-`PATTERN`, and that header state. Consensus's `raft_cbor_nats_` keyspaces and current state metadata
-encoding identify its stored shapes, including the partition count of every resolved branch
-declaration in the committed schedule and the statements a transaction keeps. The runtime state
-store's `unit-labelled-metric-checkpoint-segments` format identifies the checkpoints it keeps,
-including the unit every branch-aggregated metric series carries. An unrecognized signature,
-namespace or encoding fails with the owning storage error and requires the stored data to be
-recreated.
+A NATS ingestor or emitter Model distinguishes `NATS SUBJECT` and `NATS STREAM` entities in its archived union.
+The registry's `NERVIX UNIT CBOR` archive signature identifies the current Model layout, including
+the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types, explicit `BASE64` codec
+encoding, a Pulsar subscription's required type and an owned subscription's required start position,
+a Kafka consumer group's required start position, the required 16-bit branch partition count,
+typed ingestor instancing, Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source,
+an SQS QUEUE emitter's `SEND` request shape,
+the receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of
+service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC
+emitter writes beside its publishing mode, its retained-publication flag and MQTT 5 property
+mappings, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`,
+and that header state. Consensus's `raft_intake_cbor_` keyspaces and current `ClusterState`
+metadata encoding, 14, identify its stored shapes, including the partition count of every resolved branch
+declaration in the committed schedule and the statements a transaction keeps, including per-entity
+`ALTER INGESTOR` and `ALTER EMITTER` operations. The runtime state store's
+`ranked-intake-unit-checkpoint-segments` format identifies the checkpoints it keeps, including the
+unsigned 64-bit instance identity and the unit every branch-aggregated metric series carries.
+Fixed intake counts remain `NonZeroU64`; branch partition counts remain `NonZeroU16`. The
+registry's instancing boundary checks native count conversion and the layout of the scheduled
+unit entries before materialization. An unaddressable declaration is a typed validation failure;
+its full-width Model remains representable independently of the target's execution capacity. The
+client placement union carries an instance index as an unsigned 64-bit value. Backup format
+major `5` and its unit-bearing record versions own an eight-byte primitive unit rank. The native
+`NervixKafkaState` checkpoint contains
+positions and an optional applied explicit-start generation. Pending canonical starts and
+subsequent unit-owned progress use that current shape. An unrecognized signature, namespace or
+encoding fails with the owning storage error and requires the stored data to be recreated.
 
 ## Absence And Distinct States
 
@@ -1314,3 +1327,30 @@ defers native release until an admitted short call returns; it refuses nested ac
 borrow cannot overlap itself. Blocking calls own independent leases. A `Fields` lease is a
 complete validated description snapshot, while a mutable builder has no shared lease. Direct
 read-only buffers retain the native allocation through their root rather than a raw unowned address.
+
+## Intake Unit And Gate Identity
+
+An instancing declaration is `Count(NonZeroU64)` or `PerPartition`; entity capabilities admit the
+forms before placement. Its native and archived representations occupy eight bytes. The archive
+encodes `PerPartition` as zero and each positive count as its exact unsigned 64-bit value; semantic
+JSON retains the tagged forms. A resolved source unit uses the shared `NodeUnitRef` and
+`DomainNodeUnitRef` identities throughout plans, runtime registrations and durable state placement.
+There is no node-local index conversion. A source's readiness is one scalar whose retirement ends
+that exact lifetime.
+The shared `Unit` identity occupies eight bytes with four-byte archive alignment. Its private rank
+orders `Single`, all 32-bit partitions, and then instance indices. `UnitKind` is its semantic view;
+JSON uses that tagged view and validates an instance index through `Unit::try_instance`.
+Every rank is valid. The maximum instance index is `u64::MAX - (2^32 + 1)`, above every vector
+position on supported targets; this representation therefore admits every materializable source
+unit while preserving the full-width count declaration. Archive and transport records retain the
+same footprint for single, partition and instance units. Stored tagged key segments and the client
+placement union validate their 64-bit instance value before constructing the identity.
+Singleton placement inspection selects by cardinality: one `Instance(0)` has one owner just as one
+`Single` does. Several instances have separate placements and no entity-wide execution node.
+
+`EntityGateTargets` distinguishes whole `Entities(Vec<NodeRef>)` from exact
+`Units(Vec<NodeUnitRef>)`. Model operations select the former; ownership handoffs select the latter.
+Normalization sorts and deduplicates within the selected form. Persisted transaction gate plans,
+interconnect requests and runtime holds retain that choice. A held lease must contain the exact
+unit and its exact freeze before it authorizes a handoff checkpoint. Placement groups also carry
+exact unit members, allowing a source instance and a relay partition in the same component.

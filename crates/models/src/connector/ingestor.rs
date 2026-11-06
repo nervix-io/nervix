@@ -23,7 +23,11 @@ use std::{
     num::{NonZeroU16, NonZeroU64},
 };
 
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use meticulous::OptionExt as _;
+use rkyv::{
+    Archive, Deserialize as RkyvDeserialize, Place, Serialize as RkyvSerialize,
+    primitive::ArchivedU64, rancor::Fallible,
+};
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, EnumIter};
 
@@ -46,6 +50,94 @@ use crate::{
     AlterIngestorError, ClientName, ConnectorKind, EndpointName, EndpointType, IngestorInput,
     IngestorMetadataDeclaration, Model, ModelKind, ModelName, RetryPolicy,
 };
+
+/// How an entity may instantiate its intake. Partition-following entities also accept a fixed
+/// count; a single source has no `INSTANCES` clause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum IngestorInstancingCapability {
+    Single,
+    Instances,
+    PerPartition,
+}
+
+impl IngestorInstancingCapability {
+    pub const fn permits(self, instances: IngestorInstances) -> bool {
+        matches!(
+            (self, instances),
+            (
+                Self::Instances | Self::PerPartition,
+                IngestorInstances::Count(_)
+            ) | (Self::PerPartition, IngestorInstances::PerPartition)
+        )
+    }
+}
+
+/// The intake units an instance-capable source declares. Fixed counts retain their full-width
+/// positive count; a partition declaration takes the constructed branch's cardinality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IngestorInstances {
+    Count(NonZeroU64),
+    PerPartition,
+}
+
+impl IngestorInstances {
+    pub const ONE: Self = Self::Count(NonZeroU64::MIN);
+
+    pub const fn choice(self) -> &'static str {
+        match self {
+            Self::Count(_) => "<count>",
+            Self::PerPartition => "PER PARTITION",
+        }
+    }
+
+    /// Zero encodes the partition-following form; every positive value encodes its exact count.
+    fn archive_count(self) -> u64 {
+        match self {
+            Self::Count(count) => count.get(),
+            Self::PerPartition => 0,
+        }
+    }
+}
+
+impl Archive for IngestorInstances {
+    type Archived = ArchivedU64;
+    type Resolver = <u64 as Archive>::Resolver;
+
+    fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
+        self.archive_count().resolve(resolver, out);
+    }
+}
+
+impl<S: Fallible + ?Sized> RkyvSerialize<S> for IngestorInstances
+where
+    u64: RkyvSerialize<S>,
+{
+    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        RkyvSerialize::serialize(&self.archive_count(), serializer)
+    }
+}
+
+impl<D: Fallible + ?Sized> RkyvDeserialize<IngestorInstances, D> for ArchivedU64 {
+    fn deserialize(&self, _deserializer: &mut D) -> Result<IngestorInstances, D::Error> {
+        let count = self.to_native();
+        Ok(match count {
+            0 => IngestorInstances::PerPartition,
+            _ => IngestorInstances::Count(
+                NonZeroU64::new(count).verified("the partition-following zero case returned above"),
+            ),
+        })
+    }
+}
+
+impl Display for IngestorInstances {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Count(count) => count.fmt(f),
+            Self::PerPartition => f.write_str("PER PARTITION"),
+        }
+    }
+}
 
 #[derive(
     Debug,
@@ -456,6 +548,8 @@ pub enum AcknowledgementConfirmation {
 /// documentation and the generated conformance tests read the same declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IngestorEntityCapabilities {
+    /// The instancing forms its intake can honor.
+    pub instancing: IngestorInstancingCapability,
     /// How its messages carry the transport headers that `read_header` and `read_headers` read,
     /// or `None` where they carry none.
     pub headers: Option<HeaderModel>,
@@ -540,10 +634,18 @@ impl IngestorEntityCapabilities {
         quiesce: &IngestQuiesceMode,
         body: &dyn IngestorEntityBody,
     ) -> bool {
-        if !body.acknowledgement().kind().allows_quiesce(quiesce.kind()) {
+        self.honors_quiesce_kind(quiesce.kind(), body)
+    }
+
+    pub fn honors_quiesce_kind(
+        &self,
+        kind: IngestQuiesceKind,
+        body: &dyn IngestorEntityBody,
+    ) -> bool {
+        if !body.acknowledgement().kind().allows_quiesce(kind) {
             return false;
         }
-        let Some(declared) = self.declared_quiesce(quiesce.kind()) else {
+        let Some(declared) = self.declared_quiesce(kind) else {
             return false;
         };
         ChoiceRequirement::all_met(declared.requires, &|option| body.chosen(option))
@@ -633,6 +735,11 @@ pub trait IngestorDeclaration {
 /// What the body of one transport source statement states: what it reads through, how it behaves
 /// while its ingestor is quiesced, and what its delivery mode acknowledges.
 pub trait IngestorEntityBody {
+    /// The declared instance units, absent for an entity that executes as one source.
+    fn instances(&self) -> Option<IngestorInstances> {
+        None
+    }
+
     /// The client or endpoint the body names.
     fn reference(&self) -> IngestorReference<'_>;
 
@@ -647,8 +754,11 @@ pub trait IngestorEntityBody {
     /// The name of the choice this body makes, or holds by default, for the declared option its
     /// entity opens with `option`. A body answers for the options a declared requirement names;
     /// its entity's declaration states which those are.
-    fn chosen(&self, _option: &str) -> Option<&'static str> {
-        None
+    fn chosen(&self, option: &str) -> Option<&'static str> {
+        match option {
+            "INSTANCES" => self.instances().map(IngestorInstances::choice),
+            _ => None,
+        }
     }
 
     /// The client the body reads through, for an entity that reads through one: what
@@ -842,6 +952,10 @@ impl IngestorEntityKind {
 }
 
 impl IngestorEntity {
+    pub fn instances(&self) -> Option<IngestorInstances> {
+        self.body().instances()
+    }
+
     /// The connector that serves this source.
     pub fn connector(&self) -> ConnectorKind {
         self.kind().connector()
@@ -888,6 +1002,12 @@ impl IngestorEntity {
         self.kind()
             .capabilities()
             .honors_quiesce(quiesce, self.body())
+    }
+
+    pub fn supports_quiesce_kind(&self, kind: IngestQuiesceKind) -> bool {
+        self.kind()
+            .capabilities()
+            .honors_quiesce_kind(kind, self.body())
     }
 
     /// The requirement of this source's delivery mode its statement leaves unmet: its entity
