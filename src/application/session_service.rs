@@ -31,10 +31,7 @@ use nervix_models::{
 };
 use nervix_plexus::{
     Token, Word,
-    client_statement::{
-        ClientStatement, CompletionExpectation, local_path_fragment,
-        parse_client_statement_sources, suggest_client_expectations,
-    },
+    client_statement::{ClientStatement, CompletionExpectation},
     lex,
     schema::{Diagnostic as ParseDiagnostic, ParseFromSourceError},
 };
@@ -69,6 +66,7 @@ use super::{
     runtime_admission::RuntimeAdmission,
     service_tasks::ServiceTasks,
     session::admission::{CancelledBeforeAdmission, RequestAdmission},
+    statement_grammar::with_statement_grammar,
     subscription::{
         SessionCommandOperation, SessionSubscriptions, SessionView, SubscriptionInterests,
         SubscriptionSampler,
@@ -1249,11 +1247,13 @@ impl SessionServiceImpl {
         };
 
         let context = completion_context(req.input(), cursor);
-        let grammar = suggest_client_expectations(&context.grammar_input, context.grammar_cursor);
+        let expectations = with_statement_grammar(|grammar| {
+            grammar.suggest_expectations(&context.grammar_input, context.grammar_cursor)
+        });
 
         let mut suggestions = Vec::new();
         let mut references = Vec::new();
-        for item in grammar {
+        for item in expectations {
             match item {
                 CompletionExpectation::Semantic(reference) => references.push(reference),
                 CompletionExpectation::Literal(item) => {
@@ -1357,7 +1357,9 @@ impl SessionServiceImpl {
             })
             .collect::<Vec<_>>();
 
-        if let Some(local_path) = local_path_fragment(req.input(), cursor) {
+        let local_path =
+            with_statement_grammar(|grammar| grammar.local_path_fragment(req.input(), cursor));
+        if let Some(local_path) = local_path {
             response_suggestions.push(Suggestion {
                 value: local_path.fragment.to_string(),
                 kind: SuggestionKind::LocalDirectoryLookup,
@@ -1419,7 +1421,8 @@ impl SessionServiceImpl {
         let expected_transaction_position = req
             .expected_transaction_position
             .map(TransactionPosition::accepted_operations);
-        let client_statements = match parse_client_statement_sources(&req.query) {
+        let parsed = with_statement_grammar(|grammar| grammar.parse_sources(&req.query));
+        let client_statements = match parsed {
             Ok(statements) => statements,
             Err(report) => {
                 let result = self
@@ -1742,6 +1745,7 @@ pub(in crate::application) fn conflicting_reference(
 )]
 mod tests {
     mod application_deadline;
+    mod completion_context;
 
     use std::time::Duration;
 
@@ -1932,87 +1936,6 @@ mod tests {
             String::new(),
         );
         assert_eq!(choices_for(&pace), Err(ChoiceStatus::MissingContext));
-    }
-
-    #[test]
-    fn completion_context_preserves_prefix_for_post_filtering() {
-        let input = "CREATE SCHE";
-        let CompletionContext {
-            grammar_input,
-            grammar_cursor,
-            prefix,
-            ..
-        } = completion_context(input, input.len());
-
-        assert_eq!(grammar_input, "CREATE ");
-        assert_eq!(grammar_cursor, "CREATE ".len());
-        assert_eq!(prefix, "sche");
-
-        let input = "SHOW CLUSTR;";
-        let CompletionContext {
-            grammar_input,
-            grammar_cursor,
-            prefix,
-            ..
-        } = completion_context(input, "SHOW CLU".len());
-        assert_eq!(grammar_input, "SHOW ;");
-        assert_eq!(grammar_cursor, "SHOW ".len());
-        assert_eq!(prefix, "clu");
-        assert_eq!(word_end(input, "SHOW CLU".len()), "SHOW CLUSTR".len());
-    }
-
-    #[test]
-    fn keyword_completion_is_filtered_by_original_prefix() {
-        let input = "CREATE SCHE";
-        let context = completion_context(input, input.len());
-        let filtered = suggest_client_expectations(&context.grammar_input, context.grammar_cursor)
-            .into_iter()
-            .filter_map(|item| {
-                let CompletionExpectation::Literal(item) = item else {
-                    return None;
-                };
-                context.literal_range(input, &item).map(|_| item)
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(filtered, vec!["SCHEMA".to_string()]);
-    }
-
-    #[test]
-    fn phrase_completion_replaces_matching_words_around_the_cursor() {
-        let input = "TIME RA";
-        let context = completion_context(input, input.len());
-        assert_eq!(
-            context.literal_range(input, "TIME RATE"),
-            Some(0..input.len())
-        );
-
-        let input = "TIME RATE;";
-        let context = completion_context(input, 2);
-        assert_eq!(context.literal_range(input, "TIME RATE"), Some(0..9));
-
-        let input = "OTHER RA";
-        let context = completion_context(input, input.len());
-        assert_eq!(context.literal_range(input, "TIME RATE"), None);
-    }
-
-    #[test]
-    fn rebind_member_completion_finds_the_resource_across_whitespace() {
-        for input in [
-            "REBIND RESOURCE bundle TO VERSION 2 FOR HASH MAP ",
-            "REBIND\nRESOURCE\tbundle\nTO\tVERSION 2\nFOR\tHASH MAP ",
-        ] {
-            assert_eq!(
-                rebind_resource_before_for(input, input.len())
-                    .as_ref()
-                    .map(ResourceName::as_str),
-                Some("bundle")
-            );
-        }
-        assert_eq!(
-            rebind_resource_before_for("REBIND RESOURCE bundle TO VERSION 2 ", 36),
-            None
-        );
     }
 
     #[test]

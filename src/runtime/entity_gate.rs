@@ -31,7 +31,7 @@ pub(in crate::runtime) const OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL: Duration
 pub(super) struct EntityGateScope {
     domain: DomainName,
     relays: SortedSet<RelayName>,
-    affected_entities: SortedSet<NodeRef>,
+    targets: EntityGateTargets,
     purpose: EntityGatePurpose,
 }
 
@@ -39,13 +39,13 @@ impl EntityGateScope {
     fn new(
         domain: &DomainName,
         relays: &[RelayName],
-        affected_entities: &[NodeRef],
+        targets: &EntityGateTargets,
         purpose: EntityGatePurpose,
     ) -> Self {
         Self {
             domain: domain.clone(),
             relays: SortedSet::from_unsorted(relays.to_vec()),
-            affected_entities: SortedSet::from_unsorted(affected_entities.to_vec()),
+            targets: targets.normalized(),
             purpose,
         }
     }
@@ -312,7 +312,7 @@ pub(crate) struct EntityGateLease<'a> {
 pub(super) struct EntityAlterHold {
     pub(super) coordination: CoordinationIdentity,
     pub(super) gates: EntityGateHold,
-    pub(super) affected_entities: Vec<NodeRef>,
+    pub(super) targets: EntityGateTargets,
     pub(super) purpose: EntityGatePurpose,
     /// The quiesce this hold engaged, holding the control it engaged rather than a name to look
     /// up again. An ingestor that is dropped and rebuilt gets a fresh control with zero counts,
@@ -321,6 +321,7 @@ pub(super) struct EntityAlterHold {
 }
 
 pub(super) struct QuiescedIngestorHold {
+    pub(super) unit: Unit,
     pub(super) ingestor: IngestorName,
     pub(super) cause: IngestorQuiesceCause,
     pub(super) control: Arc<IngestorQuiesceControl>,
@@ -772,6 +773,13 @@ impl OwnershipHandoffFreezeWatch {
         Self::for_unit(runtime, DomainNodeUnitRef::single(entity))
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "resolve the exact unit freeze watch before admitted execution"
+        )
+    )]
     pub(in crate::runtime) fn for_unit(runtime: &Runtime, unit: DomainNodeUnitRef) -> Self {
         let state = runtime
             .inner
@@ -855,12 +863,13 @@ impl Runtime {
     pub(crate) fn entity_pause_relays(
         &self,
         domain: &DomainName,
-        affected_entities: &[NodeRef],
+        targets: &EntityGateTargets,
     ) -> Vec<RelayName> {
         let Some(execution) = self.inner.executions.get(domain) else {
             return Vec::new();
         };
-        let mut relays = affected_entities
+        let mut relays = targets
+            .entities()
             .iter()
             .filter_map(|entity| execution.revision.nodes.get(entity))
             .flat_map(|node| node.gate_relays.iter().cloned())
@@ -933,7 +942,7 @@ impl Runtime {
         coordination: &CoordinationIdentity,
         domain: &DomainName,
         relays: &[RelayName],
-        affected_entities: &[NodeRef],
+        targets: &EntityGateTargets,
         purpose: EntityGatePurpose,
         lease: EntityGateLease<'_>,
     ) -> Result<(), Report<EntityGateOperationError>> {
@@ -945,7 +954,7 @@ impl Runtime {
                 domain: domain.clone(),
             }));
         }
-        let scope = EntityGateScope::new(domain, relays, affected_entities, purpose);
+        let scope = EntityGateScope::new(domain, relays, targets, purpose);
         let operation = match self.inner.entity_gate_holds.entry(coordination.clone()) {
             nervix_primitives::collections::dash_map::Entry::Occupied(entry) => {
                 let operation = entry.get().clone();
@@ -1051,11 +1060,18 @@ impl Runtime {
                 .remove_if(&coordination, |_, current| Arc::ptr_eq(current, &operation));
             return;
         }
-        let ingestors = scope
-            .affected_entities
+        let ingestors = self
+            .inner
+            .ingestors
             .iter()
-            .filter(|entity| entity.kind == ModelKind::Ingestor)
-            .map(|entity| entity.identifier.clone())
+            .filter(|entry| {
+                entry.key().entity.domain == *domain
+                    && scope.targets.contains(&NodeUnitRef::new(
+                        entry.key().entity.node.clone(),
+                        entry.key().unit,
+                    ))
+            })
+            .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         let quiesce_cause = match purpose {
             EntityGatePurpose::ModelAlteration => IngestorQuiesceCause::EntityHold,
@@ -1063,17 +1079,15 @@ impl Runtime {
             EntityGatePurpose::WasmStateReset(_) => IngestorQuiesceCause::EntityHold,
         };
         let mut quiesced_ingestors = Vec::new();
-        for ingestor in &ingestors {
+        for key in &ingestors {
             nervix_primitives::task::consume_budget().await;
-            let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-            if !self.inner.ingestors.contains_key(&key) {
-                continue;
-            }
+            let ingestor = IngestorName::from(key.entity.identifier());
             if let Some(control) =
-                self.engage_ingestor_quiesce(domain, &IngestorName::from(ingestor), quiesce_cause)
+                self.engage_ingestor_quiesce(domain, &ingestor, key.unit, quiesce_cause)
             {
                 quiesced_ingestors.push(QuiescedIngestorHold {
-                    ingestor: IngestorName::from(ingestor),
+                    ingestor,
+                    unit: key.unit,
                     cause: quiesce_cause,
                     control,
                 });
@@ -1082,7 +1096,7 @@ impl Runtime {
         let hold = EntityAlterHold {
             coordination: coordination.clone(),
             gates,
-            affected_entities: scope.affected_entities.to_vec(),
+            targets: scope.targets.clone(),
             purpose,
             quiesced_ingestors,
         };
@@ -1160,30 +1174,20 @@ impl Runtime {
         coordination: &CoordinationIdentity,
         domain: &DomainName,
         relays: &[RelayName],
-        affected_entities: &[NodeRef],
+        targets: &EntityGateTargets,
     ) -> EntityDrainStatus {
-        let status = self.entity_drain_status(
-            domain,
-            relays,
-            affected_entities,
-            EntityGatePurpose::OwnershipHandoff,
-        );
+        let status =
+            self.entity_drain_status(domain, relays, targets, EntityGatePurpose::OwnershipHandoff);
         if status.is_drained() {
-            for entity in affected_entities {
-                let units = if let Some(execution) = self.inner.executions.get(domain)
-                    && let Some(node) = execution.revision.nodes.get(entity)
-                {
-                    node.units.keys().copied().collect::<Vec<_>>()
-                } else {
-                    vec![nervix_models::Unit::Single]
-                };
-                for unit in units {
-                    self.inner
-                        .frozen_ownership_handoff_entities
-                        .entry(DomainNodeUnitRef::new(entity.in_domain(domain), unit))
-                        .or_default()
-                        .insert(coordination.clone());
-                }
+            for member in self.entity_gate_units(domain, targets) {
+                self.inner
+                    .frozen_ownership_handoff_entities
+                    .entry(DomainNodeUnitRef::new(
+                        member.node.in_domain(domain),
+                        member.unit,
+                    ))
+                    .or_default()
+                    .insert(coordination.clone());
             }
         }
         status
@@ -1194,10 +1198,10 @@ impl Runtime {
         coordination: &CoordinationIdentity,
         domain: &DomainName,
         relays: &[RelayName],
-        affected_entities: &[NodeRef],
+        targets: &EntityGateTargets,
         purpose: EntityGatePurpose,
     ) -> Result<EntityDrainStatus, Report<EntityGateOperationError>> {
-        let requested_scope = EntityGateScope::new(domain, relays, affected_entities, purpose);
+        let requested_scope = EntityGateScope::new(domain, relays, targets, purpose);
         let Some(operation) = self.inner.entity_gate_holds.get(coordination) else {
             return Err(Report::new(EntityGateOperationError::NotHeld {
                 coordination: coordination.clone(),
@@ -1223,27 +1227,19 @@ impl Runtime {
                 coordination,
                 &scope.domain,
                 &scope.relays,
-                &scope.affected_entities,
+                &scope.targets,
             )
         } else {
-            self.entity_drain_status(
-                &scope.domain,
-                &scope.relays,
-                &scope.affected_entities,
-                scope.purpose,
-            )
+            self.entity_drain_status(&scope.domain, &scope.relays, &scope.targets, scope.purpose)
         };
         Ok(status)
     }
 
-    /// Whether `coordination` holds the gate of `purpose` over `entity`. An ownership handoff moves
-    /// one `unit` of it, and the freeze it took is held per unit.
     pub(crate) fn entity_gate_operation_owns_unit(
         &self,
         coordination: &CoordinationIdentity,
         domain: &DomainName,
-        entity: &NodeRef,
-        unit: Unit,
+        member: &NodeUnitRef,
         purpose: EntityGatePurpose,
     ) -> bool {
         let Some(operation) = self.inner.entity_gate_holds.get(coordination) else {
@@ -1253,12 +1249,62 @@ impl Runtime {
         operation.is_held()
             && &scope.domain == domain
             && scope.purpose == purpose
-            && scope.affected_entities.binary_search(entity).is_ok()
+            && scope.targets.contains(member)
             && (purpose != EntityGatePurpose::OwnershipHandoff
-                || self.ownership_handoff_unit_is_frozen_by(
-                    &DomainNodeUnitRef::new(entity.in_domain(domain), unit),
-                    coordination,
-                ))
+                || self
+                    .inner
+                    .frozen_ownership_handoff_entities
+                    .get(&DomainNodeUnitRef::new(
+                        member.node.in_domain(domain),
+                        member.unit,
+                    ))
+                    .is_some_and(|freeze| freeze.contains(coordination)))
+    }
+
+    fn entity_gate_units(
+        &self,
+        domain: &DomainName,
+        targets: &EntityGateTargets,
+    ) -> Vec<NodeUnitRef> {
+        let entities = match targets {
+            EntityGateTargets::Entities(entities) => entities,
+            EntityGateTargets::Units(units) => return units.clone(),
+        };
+        let mut units = BTreeSet::new();
+        if let Some(execution) = self.inner.executions.get(domain) {
+            for entity in entities {
+                if let Some(node) = execution.revision.nodes.get(entity) {
+                    units.extend(
+                        node.units
+                            .keys()
+                            .map(|unit| NodeUnitRef::new(entity.clone(), *unit)),
+                    );
+                }
+            }
+        }
+        for key in self
+            .inner
+            .node_quiesce_counters
+            .iter()
+            .map(|entry| entry.key().clone())
+            .chain(
+                self.inner
+                    .in_flight_by_ingestor
+                    .iter()
+                    .map(|entry| entry.key().clone()),
+            )
+            .chain(self.inner.ingestors.iter().map(|entry| entry.key().clone()))
+        {
+            if key.entity.domain == *domain && entities.contains(&key.entity.node) {
+                units.insert(NodeUnitRef::new(key.entity.node, key.unit));
+            }
+        }
+        for entry in self.inner.emitter_buffers.iter() {
+            if entry.key().domain == *domain && entities.contains(&entry.key().node) {
+                units.insert(NodeUnitRef::new(entry.key().node.clone(), Unit::SINGLE));
+            }
+        }
+        units.into_iter().collect()
     }
 
     pub(crate) async fn release_entity_gate_operation(
@@ -1306,8 +1352,8 @@ impl Runtime {
 
     async fn release_entity_gate_operation_from_state(
         entity_gate_holds: &DashMap<CoordinationIdentity, Arc<EntityGateOperation>, RandomState>,
-        ingestors: &DashMap<DomainNodeRef, IngestorRuntime, RandomState>,
-        ingestor_quiescence: &DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>,
+        ingestors: &DashMap<DomainNodeUnitRef, IngestorRuntime, RandomState>,
+        ingestor_quiescence: &DashMap<DomainNodeUnitRef, Arc<IngestorQuiesceControl>, RandomState>,
         frozen_ownership_handoff_entities: &DashMap<
             DomainNodeUnitRef,
             Arc<OwnershipHandoffFreezeState>,
@@ -1338,8 +1384,8 @@ impl Runtime {
     }
 
     async fn release_entity_alter_hold(
-        ingestors: &DashMap<DomainNodeRef, IngestorRuntime, RandomState>,
-        ingestor_quiescence: &DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>,
+        ingestors: &DashMap<DomainNodeUnitRef, IngestorRuntime, RandomState>,
+        ingestor_quiescence: &DashMap<DomainNodeUnitRef, Arc<IngestorQuiesceControl>, RandomState>,
         frozen_ownership_handoff_entities: &DashMap<
             DomainNodeUnitRef,
             Arc<OwnershipHandoffFreezeState>,
@@ -1351,13 +1397,14 @@ impl Runtime {
         if hold.purpose == EntityGatePurpose::OwnershipHandoff {
             // The freeze is lifted before the wake, because a waiter that rereads a freeze this
             // release has not lifted yet parks again on a change that has already happened.
-            for entity in &hold.affected_entities {
-                let identity =
-                    DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone());
-                for entry in frozen_ownership_handoff_entities.iter() {
-                    if entry.key().entity == identity {
-                        entry.value().remove(&hold.coordination);
-                    }
+            for entry in frozen_ownership_handoff_entities.iter() {
+                if entry.key().entity.domain == *domain
+                    && hold.targets.contains(&NodeUnitRef::new(
+                        entry.key().entity.node.clone(),
+                        entry.key().unit,
+                    ))
+                {
+                    entry.value().remove(&hold.coordination);
                 }
             }
             // Each retained entity slot publishes and wakes its own observers.
@@ -1371,13 +1418,17 @@ impl Runtime {
                 cause = quiesced.cause.as_str(),
                 "ingestor left quiesce"
             );
-            let key = DomainNodeRef::node_in(
-                domain.clone(),
-                ModelKind::Ingestor,
-                quiesced.ingestor.clone(),
+            let key = DomainNodeUnitRef::new(
+                DomainNodeRef::node_in(
+                    domain.clone(),
+                    ModelKind::Ingestor,
+                    quiesced.ingestor.clone(),
+                ),
+                quiesced.unit,
             );
             if !ingestors.contains_key(&key)
-                && let Some((_, control)) = ingestor_quiescence.remove(&key)
+                && let Some((_, control)) = ingestor_quiescence
+                    .remove_if(&key, |_, current| Arc::ptr_eq(current, &quiesced.control))
             {
                 control.terminate();
             }
@@ -1400,7 +1451,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         relays: &[RelayName],
-        affected_entities: &[NodeRef],
+        targets: &EntityGateTargets,
         purpose: EntityGatePurpose,
     ) -> EntityDrainStatus {
         let buffered_relay_batches = relays
@@ -1433,49 +1484,57 @@ impl Runtime {
             } else {
                 buffered_relay_batches
             };
-        let node_work_items = affected_entities
+        let units = self.entity_gate_units(domain, targets);
+        let node_work_items = units
             .iter()
-            .map(|entity| {
-                let quiesce_work = match self
+            .map(|member| {
+                let work = match self
                     .inner
                     .node_quiesce_counters
-                    .get(&entity.in_domain(domain))
-                {
+                    .get(&DomainNodeUnitRef::new(
+                        member.node.in_domain(domain),
+                        member.unit,
+                    )) {
                     Some(counters) => counters.outstanding_work_for(purpose),
                     None => 0,
                 };
-                let emitter_work = if entity.kind == ModelKind::Emitter {
-                    match self.inner.emitter_buffers.get(&entity.in_domain(domain)) {
-                        Some(buffered) => buffered.load(Ordering::Acquire),
+                let emitter_work = if member.node.kind == ModelKind::Emitter {
+                    match self
+                        .inner
+                        .emitter_buffers
+                        .get(&member.node.in_domain(domain))
+                    {
+                        Some(buffer) => buffer.load(Ordering::Acquire),
                         None => 0,
                     }
                 } else {
                     0
                 };
-                quiesce_work
-                    .checked_add(emitter_work)
-                    .assured("both counts total work items this node already holds in memory")
+                work.checked_add(emitter_work)
+                    .assured("counts total work held in memory")
             })
             .sum();
-        let mut outstanding_acks = 0;
-        for entity in affected_entities {
-            if entity.kind != ModelKind::Ingestor {
-                continue;
-            }
-            let Some(tracker) = self
-                .inner
-                .in_flight_by_ingestor
-                .get(&entity.in_domain(domain))
-            else {
-                continue;
-            };
-            outstanding_acks += if purpose == EntityGatePurpose::OwnershipHandoff {
-                tracker.outstanding_for_ownership_handoff()
-            } else {
-                tracker.outstanding()
-            };
-        }
-        let mut emitter_publishing = affected_entities
+        let outstanding_acks = units
+            .iter()
+            .filter(|member| member.node.kind == ModelKind::Ingestor)
+            .filter_map(|member| {
+                self.inner
+                    .in_flight_by_ingestor
+                    .get(&DomainNodeUnitRef::new(
+                        member.node.in_domain(domain),
+                        member.unit,
+                    ))
+            })
+            .map(|tracker| {
+                if purpose == EntityGatePurpose::OwnershipHandoff {
+                    tracker.outstanding_for_ownership_handoff()
+                } else {
+                    tracker.outstanding()
+                }
+            })
+            .sum();
+        let mut emitter_publishing = targets
+            .entities()
             .iter()
             .filter(|entity| entity.kind == ModelKind::Emitter)
             .filter_map(|entity| self.emitter_publishing_drain_status(&entity.in_domain(domain)))
@@ -1544,9 +1603,20 @@ impl Runtime {
         domain: &DomainName,
         node: NodeRef,
     ) -> Arc<NodeQuiesceCounters> {
+        self.unit_quiesce_counters(domain, NodeUnitRef::new(node, Unit::SINGLE))
+    }
+
+    pub(super) fn unit_quiesce_counters(
+        &self,
+        domain: &DomainName,
+        member: NodeUnitRef,
+    ) -> Arc<NodeQuiesceCounters> {
         self.inner
             .node_quiesce_counters
-            .entry(DomainNodeRef::new(domain.clone(), node))
+            .entry(DomainNodeUnitRef::new(
+                member.node.in_domain(domain),
+                member.unit,
+            ))
             .or_insert_with(|| Arc::new(NodeQuiesceCounters::default()))
             .clone()
     }
@@ -1594,7 +1664,7 @@ impl Runtime {
             .ingestors
             .iter()
             .filter(|entry| {
-                &entry.key().domain == domain
+                &entry.key().entity.domain == domain
                     && self
                         .inner
                         .ingestor_quiescence
@@ -1723,6 +1793,83 @@ mod tests {
         CoordinationIdentity::new(named(coordinator), process_epoch, sequence)
     }
 
+    #[nervix_primitives::test]
+    async fn releasing_an_ended_unit_leaves_its_prepared_replacement_and_sibling_installed() {
+        let runtime = Runtime::default();
+        let domain = domain("instances");
+        let ingestor = named::<IngestorName>("source");
+        let control = |unit| {
+            Arc::new(IngestorQuiesceControl::new(
+                IngestQuiesceMode::Suspend,
+                runtime.inner.metrics.clone(),
+                runtime
+                    .inner
+                    .metrics
+                    .register_ingestor_quiesce(&domain, &ingestor, unit, None),
+            ))
+        };
+        let ending = control(Unit::FIRST_INSTANCE);
+        ending.engage(IngestorQuiesceCause::OwnershipHandoff);
+        let replacement = control(Unit::FIRST_INSTANCE);
+        let sibling = control(
+            Unit::try_instance(2).assured("the fixture index fits the execution-unit range"),
+        );
+        replacement.engage(IngestorQuiesceCause::EntityHold);
+        let key = |unit| {
+            DomainNodeUnitRef::new(
+                DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
+                unit,
+            )
+        };
+        runtime
+            .inner
+            .ingestor_quiescence
+            .insert(key(Unit::FIRST_INSTANCE), replacement.clone());
+        runtime.inner.ingestor_quiescence.insert(
+            key(Unit::try_instance(2).assured("the fixture index fits the execution-unit range")),
+            sibling.clone(),
+        );
+        Runtime::release_entity_alter_hold(
+            &runtime.inner.ingestors,
+            &runtime.inner.ingestor_quiescence,
+            &runtime.inner.frozen_ownership_handoff_entities,
+            &domain,
+            EntityAlterHold {
+                coordination: coordination("coordinator", 1, 1),
+                gates: EntityGateHold {
+                    gates: Vec::new(),
+                    branch_gates: Vec::new(),
+                },
+                targets: EntityGateTargets::Units(vec![NodeUnitRef::new(
+                    NodeRef::new(ModelKind::Ingestor, &ingestor),
+                    Unit::FIRST_INSTANCE,
+                )]),
+                purpose: EntityGatePurpose::OwnershipHandoff,
+                quiesced_ingestors: vec![QuiescedIngestorHold {
+                    unit: Unit::FIRST_INSTANCE,
+                    ingestor: ingestor.clone(),
+                    cause: IngestorQuiesceCause::OwnershipHandoff,
+                    control: ending.clone(),
+                }],
+            },
+        )
+        .await;
+        assert!(!ending.is_quiesced());
+        assert!(replacement.is_quiesced());
+        for (unit, expected) in [
+            (Unit::FIRST_INSTANCE, &replacement),
+            (
+                Unit::try_instance(2).assured("the fixture index fits the execution-unit range"),
+                &sibling,
+            ),
+        ] {
+            let current = runtime
+                .ingestor_quiesce_control(&domain, &ingestor, unit)
+                .expect("each current unit keeps its own control");
+            assert!(Arc::ptr_eq(&current, expected));
+        }
+    }
+
     #[test]
     fn bolero_freeze_sequences_publish_exact_coordination_owners() {
         bolero::check!().with_type::<[u8; 64]>().for_each(|steps| {
@@ -1832,7 +1979,7 @@ mod tests {
             .entity_drain_status(
                 &domain,
                 &[],
-                &affected_emitters,
+                &nervix_models::EntityGateTargets::Entities(affected_emitters.to_vec()),
                 EntityGatePurpose::ModelAlteration,
             )
             .emitter_publishing;
@@ -1871,7 +2018,10 @@ mod tests {
             fanout,
         );
 
-        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        let key = DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
+            Unit::SINGLE,
+        );
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let stopped = StdArc::new(AtomicBool::new(false));
         let task_stopped = stopped.clone();
@@ -1902,7 +2052,9 @@ mod tests {
                 &coordination,
                 &domain,
                 std::slice::from_ref(&relay),
-                std::slice::from_ref(&affected),
+                &nervix_models::EntityGateTargets::Entities(
+                    (std::slice::from_ref(&affected)).to_vec(),
+                ),
                 EntityGatePurpose::ModelAlteration,
                 EntityGateLease {
                     deadline: Instant::now() + Duration::from_secs(5),
@@ -1966,7 +2118,7 @@ mod tests {
                 &coordination,
                 &domain,
                 std::slice::from_ref(&relay),
-                &[],
+                &nervix_models::EntityGateTargets::Entities(Vec::new()),
                 EntityGatePurpose::OwnershipHandoff,
                 EntityGateLease {
                     deadline: Instant::now() + Duration::from_millis(25),
@@ -2005,7 +2157,10 @@ mod tests {
             DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
             fanout,
         );
-        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        let key = DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
+            Unit::SINGLE,
+        );
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let task = nervix_primitives::task::spawn(async move {
             let _ = shutdown_rx.wait_for(|shutdown| *shutdown).await;
@@ -2032,7 +2187,9 @@ mod tests {
                 &coordination,
                 &domain,
                 std::slice::from_ref(&relay),
-                std::slice::from_ref(&affected),
+                &nervix_models::EntityGateTargets::Entities(
+                    (std::slice::from_ref(&affected)).to_vec(),
+                ),
                 EntityGatePurpose::OwnershipHandoff,
                 EntityGateLease {
                     deadline: Instant::now() + Duration::from_secs(3600),
@@ -2102,7 +2259,7 @@ mod tests {
                         &coordination,
                         &domain,
                         &[relay],
-                        &[],
+                        &nervix_models::EntityGateTargets::Entities(Vec::new()),
                         EntityGatePurpose::ModelAlteration,
                         EntityGateLease {
                             deadline: Instant::now() + Duration::from_secs(3600),
@@ -2151,7 +2308,7 @@ mod tests {
                 &coordination,
                 &domain,
                 &[],
-                &[],
+                &nervix_models::EntityGateTargets::Entities(Vec::new()),
                 EntityGatePurpose::OwnershipHandoff,
                 EntityGateLease {
                     deadline: Instant::now() + Duration::from_secs(5),
@@ -2203,7 +2360,7 @@ mod tests {
                 &first_coordination,
                 &domain,
                 std::slice::from_ref(&first_relay),
-                &[],
+                &nervix_models::EntityGateTargets::Entities(Vec::new()),
                 EntityGatePurpose::ModelAlteration,
                 EntityGateLease {
                     deadline: Instant::now() + Duration::from_secs(5),
@@ -2217,7 +2374,7 @@ mod tests {
                 &second_coordination,
                 &domain,
                 std::slice::from_ref(&second_relay),
-                &[],
+                &nervix_models::EntityGateTargets::Entities(Vec::new()),
                 EntityGatePurpose::ModelAlteration,
                 EntityGateLease {
                     deadline: Instant::now() + Duration::from_secs(5),
@@ -2252,11 +2409,12 @@ mod tests {
             second_fanout,
         );
 
+        let targets = EntityGateTargets::default();
         let first = runtime.engage_entity_gate_operation(
             &first_coordination,
             &domain,
             std::slice::from_ref(&first_relay),
-            &[],
+            &targets,
             EntityGatePurpose::ModelAlteration,
             EntityGateLease {
                 deadline: Instant::now() + Duration::from_secs(5),
@@ -2267,7 +2425,7 @@ mod tests {
             &second_coordination,
             &domain,
             std::slice::from_ref(&second_relay),
-            &[],
+            &targets,
             EntityGatePurpose::ModelAlteration,
             EntityGateLease {
                 deadline: Instant::now() + Duration::from_secs(5),
@@ -2306,7 +2464,7 @@ mod tests {
                         &coordination,
                         &domain,
                         &[relay],
-                        &[],
+                        &nervix_models::EntityGateTargets::Entities(Vec::new()),
                         EntityGatePurpose::ModelAlteration,
                         EntityGateLease {
                             deadline: Instant::now() + Duration::from_secs(5),
@@ -2336,7 +2494,7 @@ mod tests {
                 &coordination,
                 &domain,
                 std::slice::from_ref(&relay),
-                &[],
+                &nervix_models::EntityGateTargets::Entities(Vec::new()),
                 EntityGatePurpose::ModelAlteration,
                 EntityGateLease {
                     deadline: Instant::now() + Duration::from_secs(5),
@@ -2381,7 +2539,7 @@ mod tests {
                 &current,
                 &domain,
                 std::slice::from_ref(&held_relay),
-                &[],
+                &nervix_models::EntityGateTargets::Entities(Vec::new()),
                 EntityGatePurpose::ModelAlteration,
                 lease(),
             )
@@ -2392,7 +2550,7 @@ mod tests {
                 &current,
                 &domain,
                 &[held_relay.clone(), held_relay.clone()],
-                &[],
+                &nervix_models::EntityGateTargets::Entities(Vec::new()),
                 EntityGatePurpose::ModelAlteration,
                 lease(),
             )
@@ -2404,7 +2562,7 @@ mod tests {
                 &current,
                 &domain,
                 std::slice::from_ref(&conflicting_relay),
-                &[],
+                &nervix_models::EntityGateTargets::Entities(Vec::new()),
                 EntityGatePurpose::ModelAlteration,
                 lease(),
             )
@@ -2416,7 +2574,7 @@ mod tests {
                 &current,
                 &domain,
                 std::slice::from_ref(&held_relay),
-                &[],
+                &nervix_models::EntityGateTargets::Entities(Vec::new()),
                 EntityGatePurpose::ModelAlteration,
             )
             .expect("the exact operation and scope should report status");
@@ -2426,7 +2584,7 @@ mod tests {
                     &prior_incarnation,
                     &domain,
                     std::slice::from_ref(&held_relay),
-                    &[],
+                    &nervix_models::EntityGateTargets::Entities(Vec::new()),
                     EntityGatePurpose::ModelAlteration,
                 )
                 .is_err()
@@ -2454,6 +2612,7 @@ mod tests {
             identifier: named("deduplicate_events"),
         };
         let entity = affected.clone().in_domain(&domain);
+        let targets = EntityGateTargets::Units(vec![NodeUnitRef::new(affected, Unit::SINGLE)]);
         let first = coordination("leader-a", 10, 1);
         let second = coordination("leader-b", 20, 1);
         let lease = || EntityGateLease {
@@ -2466,7 +2625,7 @@ mod tests {
                 &first,
                 &domain,
                 &[],
-                std::slice::from_ref(&affected),
+                &targets,
                 EntityGatePurpose::OwnershipHandoff,
                 lease(),
             )
@@ -2477,7 +2636,7 @@ mod tests {
                 &second,
                 &domain,
                 &[],
-                std::slice::from_ref(&affected),
+                &targets,
                 EntityGatePurpose::OwnershipHandoff,
                 lease(),
             )
@@ -2491,7 +2650,7 @@ mod tests {
                         coordination,
                         &domain,
                         &[],
-                        std::slice::from_ref(&affected),
+                        &targets,
                         EntityGatePurpose::OwnershipHandoff,
                     )
                     .expect("each exact hold reports its drain and installs its freeze")
@@ -2532,7 +2691,7 @@ mod tests {
                 &coordination,
                 &domain,
                 std::slice::from_ref(&relay),
-                &[],
+                &nervix_models::EntityGateTargets::Entities(Vec::new()),
                 EntityGatePurpose::ModelAlteration,
                 EntityGateLease {
                     deadline: Instant::now() + Duration::from_millis(10),
@@ -2550,7 +2709,7 @@ mod tests {
                 &coordination,
                 &domain,
                 std::slice::from_ref(&relay),
-                &[],
+                &nervix_models::EntityGateTargets::Entities(Vec::new()),
                 EntityGatePurpose::ModelAlteration,
                 EntityGateLease {
                     deadline: Instant::now() + Duration::from_secs(1),
@@ -2769,7 +2928,9 @@ mod tests {
                 &coordination,
                 &domain,
                 std::slice::from_ref(&relay),
-                std::slice::from_ref(&entity),
+                &nervix_models::EntityGateTargets::Entities(
+                    (std::slice::from_ref(&entity)).to_vec(),
+                ),
                 EntityGatePurpose::OwnershipHandoff,
                 EntityGateLease {
                     deadline: Instant::now() + Duration::from_secs(5),
@@ -2785,7 +2946,9 @@ mod tests {
                 &coordination,
                 &domain,
                 std::slice::from_ref(&relay),
-                std::slice::from_ref(&entity),
+                &nervix_models::EntityGateTargets::Entities(
+                    (std::slice::from_ref(&entity)).to_vec(),
+                ),
                 EntityGatePurpose::OwnershipHandoff,
             )
             .expect("the engaged operation reports its pending flush");
@@ -2793,8 +2956,7 @@ mod tests {
         assert!(!runtime.entity_gate_operation_owns_unit(
             &coordination,
             &domain,
-            &entity,
-            Unit::Single,
+            &NodeUnitRef::new(entity.clone(), Unit::SINGLE),
             EntityGatePurpose::OwnershipHandoff,
         ));
         let freeze = OwnershipHandoffFreezeWatch::new(&runtime, entity.in_domain(&domain));

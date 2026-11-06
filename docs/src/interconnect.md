@@ -477,6 +477,11 @@ native decoding; an unrepresentable count fails decoding. Window processor state
 runtime-state kind tag `8`, and its bulk snapshot codec validates the `NVXWIN64` frame signature
 before decoding histogram delayed-removal bucket indices in the same count representation.
 
+Execution-unit identities use an eight-byte rank with four-byte archive alignment. Single and
+partition relay grants retain that bounded footprint when other entities declare external
+instances. Grant admission charges the exact encoded metadata size, body, decoded batch and
+scratch; the unit representation does not add alignment padding to unrelated relay traffic.
+
 Control records use bounded `rkyv` archives. The receiver validates an archive, including its shape
 and nesting depth, before exposing it to an operation handler. Encoded and decoded memory is charged
 to the traffic class before decoding begins. Unknown operations, a pool mismatch, malformed
@@ -1622,6 +1627,26 @@ round trips rather than 640. Each side admits the whole captured or received all
 `restore_metadata`, up to a 256 MiB checkpoint transfer bound. The replica checks the stream's
 declared length, received length and digest before the checkpoint can reach its assignment-fenced
 installation and stable-storage acknowledgement.
+An ingestor layout handoff captures each preceding unit once. Later projection requests carry
+that frozen cut's descriptors; the source verifies their scope, revision, length and digest before
+describing the target slice. Receivers fetch the slice through the same bounded bulk path.
+
+Kafka start coordination uses a Commands request bounded to sixty seconds. It carries the
+source's node incarnation, lifecycle generation and complete ownership fingerprint, with a
+descriptor for a retained candidate. The handler binds the source node to the authenticated
+connection before admitting any read, proposal or acknowledgement; runtime admission separately
+checks its live membership incarnation. The current local run is checked against its installed
+incarnation directly, including before membership is first published; remote runs use the
+membership publication. Candidate revisions belong to the offered body. Candidate
+and pending-seed bytes travel through the Snapshot bulk subquota under the existing transfer
+limit and memory admission. Instance zero selects and persists one canonical start before
+answering another unit. A recipient persists and replicates its slice before acknowledging it.
+Pending seed descriptions carry the coordinator's conservative native revision and explicit-start
+generation. An unchanged slice remains readable across newer commits to the coordinator's own
+partitions; its generation, length and digest must still match. Admission checks the current unit
+layout and originating assignment before and after capture. An ended offer, changed generation,
+changed body or superseded assignment fails the transfer.
+
 Debug events name the placement, revision and declared length when streaming and after verification,
 without logging checkpoint bytes. A branch checkpoint listing request names the entity's branch
 lifecycle placement and the cursor the replica's previous listing
@@ -2263,6 +2288,20 @@ undelivered batch and branch field values stay out of that diagnostic.
 Per-batch and payload-bearing logs use debug or trace levels and do not expose sensitive field
 values. See [Metrics And Observability](./metrics-and-observability.md) for the metric and logging
 contract.
+
+## Ingestor Instance Observation And Intake Gates
+
+An ingestor describe request carries its exact `Unit`. The receiver resolves the current owner
+for that unit and reports only its source lifetime, readiness and transient state. The control
+plane composes the logical description from all scheduled unit owners.
+
+Entity-gate engagement and drain-status requests carry `EntityGateTargets`: complete logical
+entities for model changes, or exact `NodeUnitRef` units for ownership transfer. Lease identity
+includes the normalized selection form. Handoff authorization checks both selection membership and
+the freeze of that same unit. A sibling instance's control or ACK count cannot authorize or hold
+back the selected handoff. The current wire fingerprint identifies this required request shape;
+peers must use the same current contract. Its fingerprint also includes the required committed
+cluster-parameter publication.
 
 ## Cluster Parameter Observations
 

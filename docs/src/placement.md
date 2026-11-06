@@ -597,3 +597,21 @@ never applies a unit in part.
 
 Use `SUGGEST SEPARATION` as a performance hint only. Security, tenant isolation, and failure-domain
 requirements need controls outside placement policies.
+
+## Ingestor Instance Units
+
+An instance-capable ingestor with `INSTANCES n` has one `Instance(i)` placement per global index.
+Every unit has its own primary, replicas and ownership transition. The scheduler balances primary
+counts across eligible nodes before comparing ordinary assignment load, so replica slots do not
+make one primary appear to be several active consumers. Existing live assignments remain sticky.
+
+`INSTANCES PER PARTITION` introduces an exact colocation component for each index: source instance
+`p` and partition `p` of every relay whose branch it constructs. These components move independently.
+An explicit `REQUIRE COLOCATION` corridor expands logical members to all their units and joins the
+components it captures. Placement groups therefore store exact `NodeUnitRef` members, including
+different unit kinds within one component. Shared group drain and failover update only those members;
+ordinary relay members need no state replica in order to move with a stateful source.
+
+Current `RELOCATE` selection accepts only members with one execution unit. A multi-instance source
+is refused there rather than treating one instance as the logical ingestor. Automatic scheduling,
+drain and failover retain exact unit ownership. See [Instancing](ingestors.md#instancing).

@@ -27,7 +27,7 @@ async fn a_foreign_command_reply_interrupts_every_waiter_and_leaves_its_own_refe
                 async move { client.execute_prepared(&execution).await },
             );
         let request = loopback.next_request().await;
-        let other = register(&loopback.pending).await;
+        let other = register(&loopback.pending, &ClientRequest::ListDomains).await;
         let events = loopback.client.inner.events.emitters.clone();
         let generation = loopback
             .client
@@ -100,7 +100,7 @@ async fn an_aborted_reader_interrupts_its_waiters_and_ends_its_generation() {
     use nervix_primitives::sync::oneshot::error::TryRecvError;
 
     let fixture = reader_fixture(4);
-    let mut waiting = register(&fixture.pending).await;
+    let mut waiting = register(&fixture.pending, &ClientRequest::ListDomains).await;
     let task =
         nervix_primitives::task::spawn(fixture.reader.run(nervix_primitives::stream::pending()));
     task.abort();

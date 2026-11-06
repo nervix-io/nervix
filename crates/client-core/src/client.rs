@@ -1380,11 +1380,9 @@ impl Client {
                                     request: kind,
                                 }))
                             }
-                            failure @ ClientError::ExecutionReferenceMismatch { .. } => {
-                                Err(Report::new(failure).change_context(
-                                    ClientError::RequestInterrupted { request: kind },
-                                ))
-                            }
+                            failure @ (ClientError::ExecutionReferenceMismatch { .. }
+                            | ClientError::ReplyKindMismatch { .. }) => Err(Report::new(failure)
+                                .change_context(ClientError::RequestInterrupted { request: kind })),
                             failure => Err(Report::new(failure)),
                         },
                     }

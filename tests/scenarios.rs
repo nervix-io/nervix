@@ -212,6 +212,7 @@ mod clickhouse_connections;
 mod client_consumers;
 mod client_foreign_execution;
 mod client_producers;
+mod client_reply_kind;
 mod client_traffic;
 mod common;
 mod database_batches;
@@ -227,6 +228,7 @@ mod generated_http_payloads;
 mod http_transport;
 mod iceberg_delivery;
 mod ingestion_time;
+mod ingestor_instances;
 mod kafka_metadata;
 mod materialized_state_inspection;
 mod mqtt_fixtures;
@@ -260,6 +262,7 @@ mod web_console_command_retry;
 mod web_console_connections;
 mod web_console_request_window;
 mod web_console_restore_faults;
+mod web_console_unreadable;
 mod websocket_lifecycle;
 mod wide_row_intake;
 
@@ -508,6 +511,8 @@ struct ScenarioWorld {
     saved_resource_details: BTreeMap<String, BTreeMap<u64, String>>,
     /// How the last restore stream a scenario shaped itself ended.
     last_restore_end: Option<crate::backup::restore::RestoreStreamEnd>,
+    /// The real restore whose reply a bounded gRPC peer made unreadable to its client.
+    restore_codec_result: Option<crate::backup::restore_codec::Observation>,
     /// A real restore whose test peer substituted its reply, and its exact-reference recovery.
     restore_reply_validation: Option<Box<backup::restore_reply_validation::RestoreValidation>>,
     /// A restore stream a scenario sent in the background.
@@ -10552,7 +10557,7 @@ async fn given_node_has_large_resource_file(
 }
 
 /// The generated ONNX models a fixture resource directory carries under `models/`.
-const ONNX_FIXTURE_MODELS: [&str; 7] = [
+const ONNX_FIXTURE_MODELS: [&str; 9] = [
     "simple_score.onnx",
     "alternate_score.onnx",
     "batch_score.onnx",
@@ -10560,6 +10565,8 @@ const ONNX_FIXTURE_MODELS: [&str; 7] = [
     "matrix_identity.onnx",
     "scalar_identity.onnx",
     "f64_score.onnx",
+    "running_sum.onnx",
+    "checked_running_sum.onnx",
 ];
 
 fn onnx_fixture_path(fixture: &str) -> PathBuf {
@@ -10581,6 +10588,14 @@ async fn place_onnx_fixture_resource_directory(
         .cluster()
         .node_base_dir(node_id)
         .expect("node base dir should exist");
+    place_onnx_fixture_resource_directory_at(world, base_dir, placeholder).await
+}
+
+async fn place_onnx_fixture_resource_directory_at(
+    world: &mut ScenarioWorld,
+    base_dir: PathBuf,
+    placeholder: &str,
+) -> PathBuf {
     let resource_dir = base_dir.join("fixtures").join(placeholder);
     let resource_dir = crate::common::runner_offload::off_the_runner(move || {
         ensure_onnx_runtime_loaded();
@@ -10608,6 +10623,31 @@ async fn place_onnx_fixture_resource_directory(
         .placeholders
         .insert(placeholder.to_string(), resource_dir.display().to_string());
     resource_dir
+}
+
+#[given(expr = "an ONNX fixture resource directory {string} exists")]
+async fn given_onnx_fixture_resource_directory_exists(
+    world: &mut ScenarioWorld,
+    placeholder: String,
+) {
+    if world.temp_root.is_none() {
+        world.temp_root = Some(
+            crate::common::runner_offload::off_the_runner(|| {
+                tempfile::Builder::new()
+                    .prefix("nervix-inference-fixtures-")
+                    .tempdir()
+                    .expect("the scenario owns its fixture root")
+            })
+            .await,
+        );
+    }
+    let base_dir = world
+        .temp_root
+        .as_ref()
+        .expect("the fixture root was initialized")
+        .path()
+        .to_path_buf();
+    place_onnx_fixture_resource_directory_at(world, base_dir, &placeholder).await;
 }
 
 #[given(expr = "node {string} has ONNX fixture resource directory {string}")]
@@ -14280,6 +14320,73 @@ async fn given_transaction_commit_pause(
         crate::common::cluster::node_name(&node_id),
         world.domain.clone(),
         completed_statements,
+    );
+}
+
+#[given(
+    expr = "explicit COMMIT for transaction {string} on node {string} pauses after an execution \
+            error"
+)]
+async fn given_explicit_commit_failure_pause(
+    world: &mut ScenarioWorld,
+    transaction_id: String,
+    node_id: String,
+) {
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_explicit_commit_failure(crate::common::cluster::node_name(&node_id), transaction_id);
+}
+
+#[then(
+    expr = "the explicit COMMIT failure pause for transaction {string} on node {string} is reached"
+)]
+async fn then_explicit_commit_failure_pause_is_reached(
+    world: &mut ScenarioWorld,
+    transaction_id: String,
+    node_id: String,
+) {
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let node_id = expand_placeholders(world, &node_id);
+    nervix_primitives::time::timeout(
+        TRANSACTION_COMMIT_PAUSE_TIMEOUT,
+        world.fault_injection.wait_for_explicit_commit_failure(
+            &crate::common::cluster::node_name(&node_id),
+            &transaction_id,
+        ),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "explicit COMMIT for transaction '{transaction_id}' did not reach its failed attempt \
+             boundary on '{node_id}': {error}"
+        )
+    });
+    let background = world
+        .background_plexus
+        .as_ref()
+        .verified("the preceding step started the COMMIT in the background");
+    assert!(
+        !background.is_finished(),
+        "the held COMMIT returned before its failed attempt was released"
+    );
+}
+
+#[when(
+    expr = "the explicit COMMIT failure pause for transaction {string} on node {string} is \
+            released"
+)]
+async fn when_explicit_commit_failure_pause_is_released(
+    world: &mut ScenarioWorld,
+    transaction_id: String,
+    node_id: String,
+) {
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let node_id = expand_placeholders(world, &node_id);
+    world.fault_injection.release_explicit_commit_failure(
+        &crate::common::cluster::node_name(&node_id),
+        &transaction_id,
     );
 }
 
@@ -21499,6 +21606,58 @@ async fn then_show_create_emitter_renders_these_clauses(
     }
 }
 
+#[then(
+    expr = "inferencer {string} is recreated from SHOW CREATE as {string} with its state \
+            declaration intact"
+)]
+async fn then_inferencer_is_recreated_from_show_create(
+    world: &mut ScenarioWorld,
+    name: String,
+    copy: String,
+) {
+    let leader = current_leader_node(world).await;
+    let canonical = world
+        .cluster()
+        .run_command(
+            &leader,
+            &world.domain,
+            &format!("SHOW CREATE INFERENCER {name};"),
+        )
+        .await
+        .expect("SHOW CREATE returns the inferencer's public declaration");
+    assert!(
+        canonical.contains("STATE"),
+        "the declaration retains STATE: {canonical}"
+    );
+    let statements = nervix_plexus::client_statement::parse_client_statements(&canonical)
+        .expect("the public declaration is executable Plexus");
+    assert_eq!(statements.len(), 1, "SHOW CREATE returns one declaration");
+    let recreated = canonical.replacen(
+        &format!("INFERENCER {name}"),
+        &format!("INFERENCER {copy}"),
+        1,
+    );
+    assert_ne!(canonical, recreated, "the copy has a distinct name");
+    world
+        .cluster()
+        .run_command(&leader, &world.domain, &recreated)
+        .await
+        .expect("the server accepts its complete stateful declaration under a new name");
+    let rendered_copy = world
+        .cluster()
+        .run_command(
+            &leader,
+            &world.domain,
+            &format!("SHOW CREATE INFERENCER {copy};"),
+        )
+        .await
+        .expect("SHOW CREATE returns the recreated declaration");
+    assert_eq!(
+        rendered_copy, recreated,
+        "recreation preserves the complete declaration"
+    );
+}
+
 #[then("the last command output is saved as the relocation plan")]
 async fn then_last_command_output_is_saved_as_the_relocation_plan(world: &mut ScenarioWorld) {
     let output = world
@@ -24905,6 +25064,10 @@ async fn then_last_command_output_metric_on_any_physical_node_has_numeric_values
     let direction = expand_placeholders(world, &direction);
     let relay = expand_placeholders(world, &relay);
     let prefix = format!("{metric} {direction} relay={relay} physical_node=");
+    assert_numeric_metric_lines(world, step, &prefix, output);
+}
+
+fn assert_numeric_metric_lines(world: &ScenarioWorld, step: &Step, prefix: &str, output: &str) {
     let assertions = expand_placeholders(world, docstring(step))
         .lines()
         .map(str::trim)
@@ -24914,7 +25077,7 @@ async fn then_last_command_output_metric_on_any_physical_node_has_numeric_values
     let lines = output
         .lines()
         .map(str::trim)
-        .filter(|line| line.starts_with(&prefix))
+        .filter(|line| line.starts_with(prefix))
         .collect::<Vec<_>>();
 
     assert!(

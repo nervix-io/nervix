@@ -11,8 +11,8 @@ use std::fs;
 
 use nervix_models::{
     AckMode, BranchSelection, CreateJunction, CreateReingestor, CreateWireSchema,
-    InputCollectPolicy, JsonType, MessageErrorPolicy, Model, OutputBranch, ParseAsType,
-    ProcessorInputs, WireSchemaField, WireSchemaName,
+    InferencerTensorSchemaError, InputCollectPolicy, JsonType, MessageErrorPolicy, Model,
+    OutputBranch, ParseAsType, ProcessorInputs, WireSchemaField, WireSchemaName,
 };
 
 use super::*;
@@ -91,7 +91,12 @@ fn apply_batch_rejects_mixed_inferencer_execution_modes() {
     let error = registry
         .apply_batch(&domain, models)
         .expect_err("mixed inferencer execution modes must fail");
-    assert!(error.to_string().contains("mixes batched and per-message"));
+    assert_eq!(
+        error.downcast_ref::<InferencerTensorSchemaError>(),
+        Some(&InferencerTensorSchemaError::MixedExecutionModes),
+        "{error:#}"
+    );
+    assert!(format!("{error:#}").contains("mixes batched and per-message"));
 
     let _ = fs::remove_dir_all(path);
 }
@@ -120,11 +125,14 @@ fn apply_batch_rejects_multiple_batch_axes_in_one_tensor() {
     let error = registry
         .apply_batch(&domain, models)
         .expect_err("multiple BATCH axes must fail");
-    assert!(
-        error
-            .to_string()
-            .contains("contains more than one BATCH axis")
+    assert_eq!(
+        error.downcast_ref::<InferencerTensorSchemaError>(),
+        Some(&InferencerTensorSchemaError::MultipleBatchAxes {
+            tensor: "features".to_owned(),
+        }),
+        "{error:#}"
     );
+    assert!(format!("{error:#}").contains("contains more than one BATCH axis"));
 
     let _ = fs::remove_dir_all(path);
 }

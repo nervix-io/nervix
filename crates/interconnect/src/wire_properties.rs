@@ -822,7 +822,7 @@ fn a_grant_request_refused_for_a_registrar_frees_the_registrations_read_before_i
             kind: RelayPayloadKind::Routed,
             domain: DomainName::parse("orders").assured("a literal domain name"),
             relay: RelayName::parse("accepted").assured("a literal relay name"),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             key: None,
             metadata: Vec::new(),
             acks: vec![

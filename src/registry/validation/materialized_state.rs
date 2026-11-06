@@ -201,7 +201,7 @@ fn validate_materialized_state_default(
     Ok(())
 }
 
-fn expression_contains_nondeterministic_or_side_effect_call(
+pub(super) fn expression_contains_nondeterministic_or_side_effect_call(
     expression: &Expression,
     models: &ModelIndex,
 ) -> bool {

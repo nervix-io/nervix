@@ -43,9 +43,11 @@ ingestor operations. The Model, registry and consensus properties preserve those
 
 Wire-schema generators carry each format's declared types, and codec generators carry explicit
 `BASE64` byte-text rules alongside `RFC3339` datetime-text rules. JSON, CBOR and AVRO retain their
-own wire type enums. The Model/archive, registry and consensus properties preserve those complete
-values. The `NERVIX CBOR NATS` registry signature and `raft_cbor_nats_` consensus namespace identify
-the current Model layout before decoding.
+own wire type enums; CBOR carries its six native representation types. The Model/archive, registry
+and consensus properties preserve those complete
+values, including inferencer state bindings and their initial expressions.
+The `NERVIX MODEL ITS` registry signature and `raft_intake_inference_` consensus namespace
+identify the current Model layout before decoding.
 
 `ALTER INGESTOR` and `ALTER EMITTER` statement generators draw, for every entity, each change its
 own grammar writes: a locator, a declared option and the `DROP` of an optional one, `SET MODE`,
@@ -53,8 +55,17 @@ Kafka's and Pulsar's `SET START AT`, a declared quiesce mode and `SET CLIENT` wh
 or writes through a client. They mix them with the shared operations, the in-place construction
 changes of a route or an emitter, and an emitter's envelope clauses and properties. The
 Model/archive, consensus and canonical Plexus properties preserve the complete operations in order,
-and the `raft_cbor_nats_` consensus namespace identifies the statement layout the transactions it
-keeps are stored in before decoding.
+and the `raft_intake_inference_` consensus namespace identifies the statement layout the
+transactions it keeps are stored in before decoding.
+
+Ingestor count declarations retain their full positive 64-bit range. Compact execution-unit ranks
+retain every instance ordinal a supported target can materialize, including ordinals above `u32::MAX`.
+`models-ingestor-instancing` covers the declaration through JSON and archive encoding; the
+scheduled-unit, physical-key, handoff-record, client-reply and backup-record generators carry
+boundary instance identities. Native and archived units occupy eight bytes with four-byte archive
+alignment. Semantic JSON and tagged physical keys validate the current ordinal bound. The backup
+crate owns its eight-byte primitive `UnitWire` representation; its current unit-bearing record
+versions convert the complete identity both ways.
 
 MQTT TOPIC ingestor generators draw either session at QoS 0, 1 or 2 beside `NO ACK`, and the
 persistent session at QoS 1 or 2 beside an acknowledged mode, so every pairing the declaration
@@ -81,7 +92,7 @@ contain synthetic data and describe the current shapes.
 | Stored representation | Target | Complete oracle |
 | --- | --- | --- |
 | Committed cluster parameters | `cluster-parameters` | All 22 class-typed parameter values, duration nanoseconds, byte limits, counts and revision identities survive validated archive and JSON round trips with complete equality |
-| Domain schedule units in control-plane storage | `scheduled-units` | The complete schedule, including each unit kind, ordinal, primary, assigned nodes and ownership state, survives archive encoding unchanged |
+| Domain schedule units in control-plane storage | `scheduled-units` | The complete schedule, including each unit kind, full-width ordinal, primary, assigned nodes and ownership state, survives archive encoding unchanged |
 | Execution revision built from a scheduled domain | `execution-revision-units` | Every scheduled unit retains its placement and the handoff fingerprint changes with it; moving one unit names that exact unit in the reassignment |
 | Consensus state records: unit-keyed schedules, domains with their clock mappings and authorities, users, resource versions, node statuses and uploads, cordons, admission fences, mutation leases, restore installations, transactions, commit plans, impact reports, command executions and the metadata with its retry fence and required cluster parameters | `consensus-state-records` | The recovered `StateMachineData` equals the stored one, records, derived indexes and metadata alike, for a revision written into an empty keyspace and for a second revision written as the changes from it, with records replaced and removed |
 | Damaged consensus state | `consensus-state-corruption` | Recovery fails with `StorageFailure::InvalidState`, or recovers a state in which every record that names its key is stored under it, each resource version has at most one upload, and every transaction counts its pending and completed operations and numbers a failing one within those it accepted, and which stores and recovers again unchanged |
@@ -96,10 +107,12 @@ contain synthetic data and describe the current shapes.
 | Malformed keys under restore maintenance | `runtime-state-staging-namespaces-malformed` | The domain decoder fails with `InvalidStorageFormat` or names a domain whose text and separator open what it reads; a walk stops with `InvalidStorageFormat` at the first key whose namespace does not decode, and otherwise visits the namespace and domain the key's leading bytes spell exactly, resuming where that namespace ends |
 | Handoff preparations, forced-recovery preparations and completions | `runtime-state-identity-records` | Every coordination identity, operation, node, incarnation, entity, unit and fingerprint, and every checkpoint with its placement compared by archived bits; two transitions share a key exactly when they name the same handoff or recovered unit |
 | Malformed identity records | `runtime-state-identity-records-malformed` | Arbitrary bytes fail with the typed decode failure, or decode to a record whose placements convert back and which stores back unchanged |
-| Kafka offset, branch lifecycle, deduplicator and branch-aggregated metrics snapshots in the inline checkpoint envelope | `runtime-state-snapshots` | Each owner's complete oracle: offsets with their exact optional applied-start generation and topic schedules, lifecycle keys with activity and incarnations, keyspace parts bit for bit in arrival order, and every metrics series |
+| Kafka offset, branch lifecycle, deduplicator and branch-aggregated metrics snapshots in the inline checkpoint envelope | `runtime-state-snapshots` | Each owner's complete oracle: offsets with their exact optional applied-start generation, lifecycle keys with activity and incarnations, keyspace parts bit for bit in arrival order, and every metrics series |
 | Malformed snapshot payloads | `runtime-state-snapshots-malformed` | Each kind's typed decode failure, or a value that stores back to the same payload |
 | Inline, chunked and restored checkpoints in the runtime-state store, and a backup cut's listing of them | `runtime-state-store-checkpoints` | The exact payload at its revision through the latest-snapshot read and the streaming reader; a cut of the domain lists exactly its checkpoints in key order, filtered by kind and ignoring an unpublished generation and another domain, each with its stored size: a whole inline value or a chunked payload, and its exact payload and revision through the aligned, entry and bounded readers; before and after the database reopens, at, beside and between the chunk boundaries |
-| Native Kafka offset checkpoints a capture writes for a replica, with their topic schedules | `runtime-kafka-offset-captures` | Every partition offset, optional applied-start generation and topic schedule the replica's cancellable reader restores, a written length within the bound the capture reserves, and a check before every native entry that stops the read wherever it refuses |
+| Native Kafka offset checkpoints and the retained capture used by canonical-start coordination | `runtime-kafka-offset-captures` | Every partition offset and optional applied-start generation, the captured revision, written lengths within the retained topology's bound, and cancellation before every encoded and decoded entry |
+| Canonical Kafka start candidates, pending seeds and redistributed instance offsets | `runtime-kafka-unit-layouts` | The complete candidate positions and generation; newest-generation owner progress wins over an unclaimed seed, and repeated grow/shrink retains every position exactly once |
+| Historical ingestor metric series under repeated instance layouts | `runtime-ingestor-metric-layouts` | Every original label, counter, float bit, timestamp, rate and histogram bucket occurs exactly once; a repeated source history is refused |
 | The Kafka offset transfer header: the checkpoint's little-endian revision and BLAKE3 digest ahead of its payload | `runtime-kafka-offset-transfer-headers` | The exact revision, digest and payload from a stream cut at every position and into generated chunks with empty ones between them |
 | Short, stale and arbitrary Kafka offset transfer streams | `runtime-kafka-offset-transfer-headers-malformed` | `HeaderLength` for a stream that ends inside its header, `Revision` for one whose revision does not advance the held one or precedes the described one, and otherwise the revision and digest the header spells; every stream forwards exactly the bytes behind its header, at every split |
 | Sealed window processor state | `runtime-window-snapshots` | Every retained row's sequence, ingestion time, branch bits and input and argument values, the next sequence, the branch lifetime and every aggregate's typed state; another branch lifetime restores nothing |

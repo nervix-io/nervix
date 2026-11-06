@@ -19,6 +19,10 @@ use super::{DomainResumeBoundary, StandaloneTransactionBoundary};
 /// The command boundary a test controls without racing an election against a request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum CommandPausePoint {
+    ExplicitCommitFailure {
+        node: ClusterNodeName,
+        transaction_id: String,
+    },
     TransactionCleanup {
         node: ClusterNodeName,
         domain: DomainName,

@@ -2,6 +2,12 @@
 
 *Plexus, the Nervix graph definition language.*
 
+`just test-cluster-duration-scenarios` selects the one- and three-node multi-span cluster
+duration regression. It prepares the console assets, WASM processor guests and ONNX runtime
+that the in-process server loads, and needs no external transport or client-tool build.
+`just test-unit-binary <executable> <filters>` replays a compiled unit-test executable without
+rebuilding it; its evidence applies only to the source inputs that produced that executable.
+
 The HTTPS console fixture uses the console's reserved port for its TLS listener and lets the
 system assign the accompanying plaintext listener's port. It advertises the reserved HTTPS
 address explicitly and presents the node's fixture certificate. The redirect scenario launches a
@@ -19,23 +25,27 @@ name, and the console recorder checks an opened WSS connection to the advertised
 ## Focused Native Command Recovery
 
 `just test-client-foreign-execution` runs exactly the native-client and CLI foreign-reference
-outlines on one and three nodes, with retries disabled. It builds the server's console assets,
-loads the ONNX runtime and builds the CLI before starting the scenario runner. These cases start
-no paced simulation or Python driver, so the focused recipe does not build those tools. The
-ordinary scenario runner and its startup, execution, parallelism and teardown budgets are
-unchanged. Broad `just test-scenarios` and CI keep their complete tool prerequisites.
-The recipe checks that all four cases execute and keeps its output under
-`target/client-foreign-execution`.
+outlines on one and three nodes, and `just test-client-reply-kind` the native-client and CLI
+outlines whose command is answered with a reply of another kind, each with retries disabled. Both
+run through `just test-client-recovery-witnesses <witnesses> <name>`, which builds the server's
+console assets, loads the ONNX runtime and builds the CLI before starting the scenario runner with
+`name` as its scenario filter. These cases start no paced simulation or Python driver, so the
+focused recipes do not build those tools. The ordinary scenario runner and its startup, execution,
+parallelism and teardown budgets are unchanged. Broad `just test-scenarios` and CI keep their
+complete tool prerequisites. Each recipe checks that all four of its cases execute and keeps its
+output under its own `target/<witnesses>` directory: `target/client-foreign-execution` or
+`target/client-reply-kind`.
 
 The focused client owner can be explored with
-`just test-client-shuttle exchange::shuttle_tests::shuttle_a_foreign_reply_racing_registration_interrupts_every_waiter`.
+`just test-client-shuttle exchange::shuttle_tests::shuttle_a_foreign_reply_racing_registration_interrupts_every_waiter`
+or `just test-client-shuttle exchange::shuttle_tests::shuttle_a_reply_of_another_kind_racing_registration_interrupts_every_waiter`.
 It runs that production owner's declared exploration and its nondeterminism check in a separate
 Shuttle build directory, retaining failing schedules. The canonical `just test-shuttle` inventory
 and package-wide discovery still qualify the full selection in CI.
 
 `just test-client-recovery-diagnostic <selection>` uses the canonical Deloxide runner for each of
 `deloxide`, `deloxide-order`, `deloxide-stress` and `deloxide-stress-restore`. It validates the full
-register first, then retains all registered workloads in the four feature files reached by the
+register first, then retains all registered workloads in every feature file reached by the
 client request and exchange owners. Their existing tags, invocations, bounds, supervision and
 accounting remain in force. Each record declares its selected owners and features and sets
 `whole_workspace` to false; this scope cannot enter a whole-workspace coverage collection.
@@ -168,6 +178,19 @@ expressions containing spaces, and brace input globs, are single arguments when 
 caller; the recipe does not expand their contents as shell code. The reuse recipe also sets
 `NERVIX_TESTCONTAINERS_MODE=reusable`. [Developing Nervix](./developing-nervix.md#validation-and-tests)
 shows a named selection and the focused argument-forwarding check.
+
+`just test-restore-codec-replies` prepares the server assets, CLI and diagnostic reporter and runs
+only the restore reply rejection feature with the ordinary scenario runner. It forwards caller
+arguments by the same quoting rule. The bounded peer forwards the original upload to a real node,
+waits for its completed restore outcome and replaces only the reply; native and CLI cases then
+recover that outcome under the original execution reference on one- and three-node clusters.
+
+`just test-restore-attempt-history` uses the same prerequisites and quoting rule and requires all
+four native/CLI one-/three-node examples in `client_restore_uncertainty.feature`. Its peer waits
+for a real completed restore, removes the local archive and loses the answer with a retryable
+transport failure. The original restore call must remain uncertain when its next attempt cannot
+open the archive. The fixture restores the exact bytes only after that call ends, then recovers
+the completed outcome under the original statement and reference. No product fault hook is used.
 
 ## What Runs Where
 

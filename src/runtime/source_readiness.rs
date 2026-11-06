@@ -50,7 +50,7 @@ impl IngestorInstanceReadiness {
         self.publish(0);
     }
 
-    pub(super) fn is_ready(&self) -> bool {
+    pub(in crate::runtime) fn is_ready(&self) -> bool {
         self.inner.state.load(Ordering::Relaxed) == 1
     }
 

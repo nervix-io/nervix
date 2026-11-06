@@ -21,8 +21,8 @@ use nervix_models::{
 };
 
 use super::delivery::{
-    ParallelAck, SequentialAck, ack_parallel, ack_sequential, flexible_quiesce_clause,
-    instance_count, no_ack, push_quiesce_clause,
+    ParallelAck, SequentialAck, ack_parallel, ack_sequential, flexible_quiesce_clause, instances,
+    no_ack, push_quiesce_clause,
 };
 use crate::{
     lexer::{Identifier, Token},
@@ -39,7 +39,7 @@ pub(super) fn subject_body<'src>()
         .then_ignore(kw_phrase2(Identifier::Queue, Identifier::Group))
         .then(external_name::<NatsQueueGroupName>())
         .then_ignore(kw(Identifier::Instances))
-        .then(instance_count())
+        .then(instances::<NatsSubjectIngestor>())
         .then_ignore(kw(Identifier::Mode))
         .then(no_ack().to(NatsIngestMode::NoAck))
         .then(push_quiesce_clause())
@@ -185,7 +185,10 @@ mod tests {
         };
         assert_eq!(source.subject.as_str(), subject);
         assert_eq!(source.queue_group.as_str(), "Readers-EU");
-        assert_eq!(source.instances.get(), 2);
+        assert_eq!(
+            source.instances,
+            nervix_models::IngestorInstances::Count(nonzero_ext::nonzero!(2u64))
+        );
     }
 
     #[test]

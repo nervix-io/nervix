@@ -27,6 +27,7 @@ mod error;
 mod execution_revision;
 mod graph;
 mod ingestor_plan;
+mod ingestor_units;
 mod message_error_plan;
 mod mutation;
 mod placement;
@@ -37,6 +38,7 @@ mod resource_plan;
 mod restore_plan;
 mod schedule_delta;
 mod scheduler;
+mod unit_placement;
 pub(crate) use scheduler::assign_server_listener_nodes;
 mod storage;
 #[cfg(test)]
@@ -100,9 +102,12 @@ pub(crate) use placement::{
 pub(crate) use processor_plan::{
     BranchedNodeSpecs, BranchedProcessorNodeSpec, BranchedProcessorOperationSpec,
     BranchedProcessorOutputSpec, BranchedProcessorOutputsSpec, BranchedProcessorSpec,
+    InferencerStatePlan,
 };
 #[cfg(test)]
-pub(crate) use processor_plan::{PlannedModel, branched_node_specs_from_models};
+pub(crate) use processor_plan::{
+    InferencerStatePortPlan, PlannedModel, branched_node_specs_from_models,
+};
 pub(crate) use reingestor_plan::{ReingestorInputPlan, ReingestorPlan};
 pub(crate) use relocation::{RelocationCoverage, RelocationMemberReason, RelocationUnit};
 pub(crate) use resource_plan::{
