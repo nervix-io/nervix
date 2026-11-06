@@ -70,7 +70,7 @@ impl Corruption {
 }
 
 enum ClientResult {
-    Native(error_stack::Result<CommandOutcome, ClientError>),
+    Native(error_stack::Result<Box<CommandOutcome>, ClientError>),
     Cli(Output),
 }
 
@@ -348,7 +348,7 @@ async fn when_restore_reply_is_unreadable(
             .await
             .assured("the bounded restore attempt ends");
             drop(client);
-            ClientResult::Native(result)
+            ClientResult::Native(result.map(Box::new))
         }
         "CLI" => {
             let mut command = tokio::process::Command::new(scenario_cli_binary());

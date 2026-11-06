@@ -650,13 +650,26 @@ async fn assert_retry_preserves_the_original_archive(reply: ScriptedReply) {
     assert_eq!(retried.archive, archive);
     let reply = RestoreReply {
         request_id: Some(retried.start.request_id),
-        disposition: RestoreDisposition::UploadFailed {
-            failure: RestoreUploadFailure::QuotaExceeded,
-            message: "the server definitively refused the stream".to_string(),
-        },
+        disposition: RestoreDisposition::Outcome(Box::new(nervix_client_wire::CommandOutcome {
+            execution_reference: retried.start.execution_reference.clone(),
+            origin: nervix_client_wire::OutcomeOrigin::Recovered,
+            disposition: nervix_client_wire::CommandDisposition::Completed {
+                already_existed: false,
+            },
+            message: "the original restore completed".to_string(),
+            diagnostics: Vec::new(),
+            statements: Vec::new(),
+            transaction: None,
+            transaction_admission: None,
+            inspection: None,
+            wasm_state: None,
+            resource: None,
+            backup: None,
+            restore: None,
+        })),
     }
     .encode(&limits())
-    .assured("the declared refusal fits one frame");
+    .assured("the authoritative outcome fits one frame");
     retried
         .answer
         .send(ScriptedReply::Message(reply.into_bytes()))
@@ -664,8 +677,16 @@ async fn assert_retry_preserves_the_original_archive(reply: ScriptedReply) {
     let outcome = within_deadline(call)
         .await
         .assured("the restore task completes")
-        .assured("the declared refusal establishes an outcome");
-    assert!(!outcome.succeeded(), "{outcome:?}");
+        .assured("the original execution's outcome is recovered");
+    assert!(outcome.succeeded(), "{outcome:?}");
+    assert_eq!(
+        outcome.execution_reference.as_ref(),
+        Some(&retried.start.execution_reference)
+    );
+    assert_eq!(
+        outcome.origin,
+        Some(nervix_client_wire::OutcomeOrigin::Recovered)
+    );
 }
 
 #[nervix_primitives::test]

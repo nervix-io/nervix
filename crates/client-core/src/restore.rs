@@ -370,19 +370,21 @@ impl RestoreStreamAttempt {
                 .map_err(|status| AttemptFailure::Transport(Box::new(status)))?
                 .into_parts();
             let mut headers = metadata.into_headers();
-            let message = body
-                .message()
-                .await
-                .map_err(|mut status| {
+            let message = match body.message().await {
+                Ok(Some(message)) => message,
+                Ok(None) => {
+                    return Err(AttemptFailure::reading_reply(Status::internal(
+                        "Missing response message.",
+                    )));
+                }
+                Err(mut status) => {
                     let mut failure_headers = std::mem::take(status.metadata_mut()).into_headers();
                     failure_headers.extend(headers.clone());
                     *status.metadata_mut() =
                         tonic::metadata::MetadataMap::from_headers(failure_headers);
-                    AttemptFailure::reading_reply(status)
-                })?
-                .ok_or_else(|| {
-                    AttemptFailure::reading_reply(Status::internal("Missing response message."))
-                })?;
+                    return Err(AttemptFailure::reading_reply(status));
+                }
+            };
             if let Some(trailers) = body
                 .trailers()
                 .await
