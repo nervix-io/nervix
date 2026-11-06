@@ -1136,7 +1136,10 @@ declaration scenarios qualify these facts together.
 `.`-separated tokens, none empty, without whitespace or control characters, kept exactly as
 written. A subscription may write `*` for one token and `>` for every remaining token, each only
 as a whole token and `>` only last; a publication subject admits neither, since a message is
-published to one literal subject. The ingestor declares `NO ACK` with a required `QUEUE GROUP` and
+published to one literal subject. The vocabulary owns the isolated parser for this NATS server
+2.11 subject contract; its 1,024-byte bound and refusal of embedded wildcard characters are
+Nervix restrictions, rather than server limits. The queue-group name has a separate rule because
+it has no subject-token grammar. The ingestor declares `NO ACK` with a required `QUEUE GROUP` and
 `INSTANCES`, and `BUFFER`/`DROP` for intake, because Core NATS keeps no backlog, position or
 acknowledgement for a subscriber. Both directions retain every header pair in wire order, including
 interleaved repeated names, and match names exactly. The ingestor declares `metadata.subject` and
@@ -1717,7 +1720,7 @@ when its transport stays connected with bounded memory while nothing reads it:
 | Source | Unacknowledged admission | The transport while its loop is held |
 | --- | --- | --- |
 | HTTP polling, Prometheus | Waits for a place | Nothing is read. The next poll is delayed, and the domain cadence coalesces the occurrences it missed. |
-| NATS | Waits for a place | The client's connection task keeps reading and answering the server, and holds at most the subscription's 65,536 messages before it drops the newest as a slow consumer. |
+| NATS SUBJECT | Waits for a place | The client's connection task keeps reading and answering the server, and holds at most the subscription's 65,536 messages before it drops the newest as a slow consumer. |
 | ZeroMQ | Waits for a place | `PULL` messages stay in the kernel buffers, and then the pushing peers' sends wait. |
 | Syslog | Waits for a place | The kernel drops UDP datagrams beyond the socket's receive buffer; TCP and TLS connections fill the listener's 64-frame queue and then push back on their senders. |
 | MQTT | Refused and counted | The connection's driver task keeps the event loop, and with it the keep-alive, running while the loop is held, but under `NO ACK` reads only 64 publishes ahead of it. Once those fill, the driver stops reading, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from the client. |
@@ -3061,14 +3064,17 @@ sequenceDiagram
   The one retry left in the driver is a partitioned topic's: a consumer of one partition whose
   single reconnect fails ends, and the multi-topic consumer resubscribes it at its 30-second topic
   refresh while the other partitions keep flowing.
-- **NATS source.** Each source instance owns one client and its queue subscription. The client
-  reports a lost connection through its event callback, and the instance ends the subscription
-  with a read failure once it has handed over every message the client received before the loss,
-  so the host shows the loss as a transient error and resumes the instance on its reconnect
-  cadence, which connects and subscribes again. The client never reconnects in the background:
-  the driver cannot be told to make no attempt of its own, so it makes one, which only lets its
-  connection task end. Core NATS retains nothing for a subscription that is not connected, so
-  messages published while the instance reconnects never reach it.
+- **NATS sources.** Each source instance owns one client and its queue subscription or its pull
+  of a durable consumer. The client reports a lost connection through its event callback, and the
+  instance ends the subscription or pull with a read failure once it has handed over every message
+  the client received before the loss, so the host shows the loss as a transient error and resumes
+  the instance: a `NATS SUBJECT` instance on its reconnect cadence, which connects and subscribes
+  again, and a `NATS STREAM` instance on its `RETRY POLICY`, which connects, looks its consumer up
+  and pulls again. The client never reconnects in the background: the driver cannot be told to
+  make no attempt of its own, so it makes one, which only lets its connection task end. Core NATS
+  retains nothing for a subscription that is not connected, so messages published while a
+  `NATS SUBJECT` instance reconnects never reach it, while a stream keeps them for its consumer as
+  long as its retention and limits allow.
 - **Syslog stream listener.** Each accepted TCP or TLS connection has one task that owns its frame
   buffer and reads into it directly, at most 8 KiB per read and never beyond the connection's
   frame bound of `max_message_size` plus the eleven bytes of the longest octet count and its

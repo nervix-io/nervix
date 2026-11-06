@@ -321,7 +321,7 @@ async fn then_named_request_reaches_durable_admission(
 
 #[when(expr = "the active session sends request {string} listing domains")]
 async fn when_active_session_lists_domains(world: &mut ScenarioWorld, name: String) {
-    let (request_id, _) = active_session(world)
+    let request_id = active_session(world)
         .send_request(ClientRequest::ListDomains)
         .await
         .unwrap_or_else(|error| panic!("failed to send request '{name}': {error}"));
@@ -354,7 +354,7 @@ async fn when_active_session_requests_completions(
     let domain = session.domain().cloned();
     let request = SuggestRequest::new(input, cursor, domain)
         .unwrap_or_else(|error| panic!("request '{name}' has an invalid cursor: {error}"));
-    let (request_id, _) = session
+    let request_id = session
         .send_request(ClientRequest::Suggest(request))
         .await
         .unwrap_or_else(|error| panic!("failed to send request '{name}': {error}"));
@@ -401,7 +401,7 @@ async fn when_active_session_collects_completion_pages(
             .assured("scenario cursor is a character boundary")
             .with_page(page_size, continuation.take())
             .assured("scenario page size is valid");
-        let (request_id, _) = active_session(world)
+        let request_id = active_session(world)
             .send_request(ClientRequest::Suggest(request))
             .await
             .assured("the connected scenario session sends the completion page");
@@ -1009,7 +1009,7 @@ async fn when_active_session_inspects_attached_transaction(
         target: TransactionInspectionTarget::Attached,
         operation: None,
     };
-    let (request_id, _) = active_session(world)
+    let request_id = active_session(world)
         .send_request(ClientRequest::InspectTransaction(request))
         .await
         .unwrap_or_else(|error| panic!("failed to send request '{name}': {error}"));

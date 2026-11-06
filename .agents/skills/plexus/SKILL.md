@@ -40,17 +40,28 @@ owner change. Its acknowledgement section distinguishes QoS 0 overflow, acknowle
 keep-alive during downstream stalls and the refusal of a broker grant below the declared QoS.
 For MQTT retained publication, typed publish properties and user-property headers, read
 [Emitters → MQTT](../../../docs/src/emitters.md#mqtt) for their exact types, limits and retry contract.
-For Pulsar source identity, keys, redelivery and event-time windows, read
-[Ingestors → Pulsar](../../../docs/src/ingestors.md#pulsar) and its metadata table. Choose
+For Pulsar topic names, subscription ownership, creation position, TYPE and instances, read
+[Ingestors → Pulsar](../../../docs/src/ingestors.md#pulsar) before choosing the source. Its client
+reference owns the shared authentication and TLS keys, and its metadata table owns source identity,
+keys, redelivery and event-time windows. Choose
 `TIMESTAMP AT metadata.event_time` or `TIMESTAMP AT metadata.publish_time` deliberately: an absent
 event time stays null, while an explicit epoch time is preserved.
+For Pulsar receipt deadlines, event times and delayed delivery, read
+[Emitters → Pulsar](../../../docs/src/emitters.md#pulsar). Check the generated capability mirror
+before carrying an option from one direction to the other.
 
+For NATS consumption, choose `NATS SUBJECT INGESTOR` for a Core NATS queue subscription, which
+reads in `MODE NO ACK` with a required `QUEUE GROUP` and `INSTANCES` and never sees what is
+published while it is not subscribed, or `NATS STREAM INGESTOR` for a JetStream stream and durable
+pull consumer an operator provisioned, which acknowledges each delivery. Read
+[Ingestors → NATS](../../../docs/src/ingestors.md#nats) for the client's authentication and TLS
+keys, the consumer checks, redelivery and what a stream keeps.
 For NATS publication, choose `NATS SUBJECT EMITTER` with `MODE NO ACK` for Core NATS, or
 `NATS STREAM EMITTER` with a provisioned `STREAM`, a literal `SUBJECT` captured by that stream,
 and `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX <n>` for a JetStream PubAck. The stream
-emitter may set `MESSAGE ID <expression>` for server deduplication across retries. Read
-[Emitters → NATS](../../../docs/src/emitters.md#nats) for the complete clause order, failure
-outcomes and retry boundary.
+emitter may set `MESSAGE ID <expression>`, which JetStream deduplicates across retries within the
+stream's duplicate window. Read [Emitters → NATS](../../../docs/src/emitters.md#nats) for both
+entities' complete clause order, failure outcomes and retry boundary.
 
 For RabbitMQ consumption choose `MODE NO ACK`, `MODE ACK SEQUENTIAL`, or
 `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
@@ -127,6 +138,9 @@ completed, `1` failed, `3` outcome not known, `130` cancelled before admission. 
 same command again with the `--execution-reference` or `--upload-identity` the CLI printed, which
 recovers the outcome; a fresh submission could apply it twice. The CLI guide's Exit Status section
 defines each status.
+For `RESTORE`, retain the same archive bytes as well as the statement and execution reference after
+status `3`, including an invalid reply after upload. Follow the Rust client guide's
+[Restoring](https://docs.nervix.io/client-library.html#restoring) contract when recovering it.
 For a native CLI or Rust-client session addressed by hostname, Hickory resolves the selected
 server, seeds, and redirects on connection. Keep the hostname in the `http://` or `https://` server
 URL so HTTPS verifies that name. The CLI normally reads the system resolver and hosts files; use
@@ -259,6 +273,9 @@ For storage failures or uncertain administrative outcomes, consult `Control Plan
 and recovery` before suggesting a retry, and
 [Exact Recovery](https://docs.nervix.io/client-session-protocol.html#exact-recovery) for how a retry
 under the same execution reference recovers the recorded outcome instead of repeating the effect.
+An unreadable restore reply leaves its original execution uncertain, even after the server
+completed it. Keep the same statement, archive and execution reference for recovery; CLI status 3
+names that uncertainty. Follow `Client Library` → `Restoring` for the native-client contract.
 
 For model evolution, read the `Altering Schemas` section of `Schemas And Codecs` and the transaction
 and quiesce semantics in `Control Plane`. Put every interdependent `CREATE`, supported `ALTER`, and
