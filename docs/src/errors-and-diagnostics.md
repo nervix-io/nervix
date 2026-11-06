@@ -3023,12 +3023,17 @@ warnings in text and JSON reports.
 
 The client reports an archive it cannot read as `ClientError::ReadRestoreArchive` with the path and
 the I/O error kind, above the I/O error when the client read the file itself, an empty file as
-`ClientError::EmptyRestoreArchive`, a failed call as `ClientError::Restore` with its status, and a
-reply that does not decode as `ClientError::InvalidRestoreReply` above the codec's report; an error
-that may hide an admitted restore is `ClientError::UncertainCommand` with its execution reference,
-above the failure that left the outcome unknown. The C binding classifies an unreadable or empty
-archive as `NX_ERROR_INVALID_ARGUMENT`, a failed call as `NX_ERROR_TRANSPORT`, and an undecodable
-reply as `NX_ERROR_PROTOCOL`.
+`ClientError::EmptyRestoreArchive`, and a failed call as `ClientError::Restore` with its status.
+A verified restore reply that fails semantic decoding retains `ClientError::InvalidRestoreReply`
+above the wire decoder's typed report; a reply naming another transport request retains
+`ClientError::UnexpectedReply { request: Restore }`. Both are beneath
+`ClientError::UncertainCommand` with the restore's own execution reference, because the invalid
+reply cannot establish whether the node applied the restore. The client ends that attempt's exact
+session and interrupts its pending requests; a replacement session remains usable. The shared host
+reports `FailureKind::Uncertain`, the C binding reports `NX_ERROR_UNCERTAIN`, and the CLI exits with
+status `3` and the original execution reference. Other errors that may hide an admitted restore
+likewise retain their cause beneath `UncertainCommand`. An unreadable or empty archive remains
+`NX_ERROR_INVALID_ARGUMENT`; a valid stream refusal is a definitive failed outcome.
 
 ## Sensitive Data And Observability
 
