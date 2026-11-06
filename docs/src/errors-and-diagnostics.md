@@ -617,6 +617,11 @@ codec, and the field when one is at fault, and the typed reason stays beneath it
 wire field or `ON INGESTION` program; a `FieldDecodeError` or `FieldEncodeError` for a value that
 does not fit its field; a `SyslogDecodeError` or `SyslogEncodeError` for a syslog frame; the Arrow
 builder's `RuntimeSchemaError`; or the CBOR, Avro, simd-json, protobuf or UTF-8 error that failed.
+Schemaful CBOR rejects a tagged item, a non-text map key, and a duplicate map key with a typed
+`FieldDecodeError` beneath the codec and field context. A CBOR value that cannot fit an internal
+Arrow field carries `RuntimeSchemaError::CborValueTypeMismatch` with its CBOR kind and expected
+internal type. CBOR header inspection retains a typed read, syntax or depth cause if it cannot
+finish on a payload the value decoder otherwise accepts.
 An unfolding payload keeps the report of the message that failed and names its zero-based input and
 output position after it. The ingest group returns that report unchanged. A source host and an HTTP
 or WebSocket endpoint render the whole chain once as the message of the decode rejection that
@@ -2532,7 +2537,10 @@ describes impact inspection.
 The session service's own edges report the same way. A gRPC call whose credentials do not
 authenticate it fails as a `GrpcAuthenticationError` report, `Required`, `Failed` or `Busy`, and the
 call ends with `UNAUTHENTICATED`, or with `UNAVAILABLE` when the node could not verify the
-credentials now; the status names only the refusal. A command on a transaction its session is no
+credentials now; the status names only the refusal. Known, unknown and invalid names use the same
+per-name pacing and generic rejection; the delay never carries a separate user-existence outcome.
+An unavailable verification establishes no failure bucket and preserves any existing pacing.
+A command on a transaction its session is no
 longer bound to fails as a `SessionTransactionBindingError` report, whose current context selects
 the `TransactionTakenOver` or `TransactionDetached` disposition and whose chain is the command's
 message. A domain snapshot that cannot be encoded for a session is `SnapshotEncodingError::Graph`
@@ -2608,7 +2616,7 @@ On the serving node, a state, tick or end frame that does not fit the session's 
 sent and is logged as a warning: delivery waits for the next state or tick, and an end it could not
 send still ends the attachment. Accepting clock progress fails only for a domain the node does not
 hold, and a report that does not match the committed fence, or is not newer than the accepted tick,
-is ignored without an error. That failure reaches the node's sessions as the error notice
+is ignored without an error. That failure reaches the node's sessions as the `ControlPlane` error notice
 `failed to apply domain clock progress for '<domain>'` with its whole chain, and its log as a
 warning.
 
@@ -2648,7 +2656,14 @@ through `execute_prepared_with_cancellation` ends with
 the server's `RequestCancelled` at `BeforeAdmission` for a command that never ran,
 `UncertainCommand` above `RequestCancelled` at `AfterAdmission` for one that keeps running, or
 `CallCancelled` when no request of the call waited for a reply, beneath `UncertainCommand` or
-`UncertainUpload` where the call may already have taken effect. The client decides retries, session
+`UncertainUpload` where the call may already have taken effect. A command reply whose execution reference differs from its request's is reported as a protocol
+violation at the exchange reader, which ends that session before reading another frame. The call
+recovers under its own reference through the ordinary session-loss path, or reports
+`UncertainCommand` if recovery cannot finish. A restore's reference mismatch ends the session
+used by its stream and returns `UncertainCommand` above `ExecutionReferenceMismatch`. Hosts read
+`FailureKind::Uncertain` and the original execution reference from that outer context; the CLI
+reports an unknown outcome with exit status `3` when recovery did not complete.
+The client decides retries, session
 recovery and uncertainty from those typed contexts and never from text, and a context names its own
 operation without repeating its transport status, which the next frame shows. The CLI adds the
 operation it ran above the client's report, `failed to connect to the server` or `the request to
@@ -3019,12 +3034,17 @@ warnings in text and JSON reports.
 
 The client reports an archive it cannot read as `ClientError::ReadRestoreArchive` with the path and
 the I/O error kind, above the I/O error when the client read the file itself, an empty file as
-`ClientError::EmptyRestoreArchive`, a failed call as `ClientError::Restore` with its status, and a
-reply that does not decode as `ClientError::InvalidRestoreReply` above the codec's report; an error
-that may hide an admitted restore is `ClientError::UncertainCommand` with its execution reference,
-above the failure that left the outcome unknown. The C binding classifies an unreadable or empty
-archive as `NX_ERROR_INVALID_ARGUMENT`, a failed call as `NX_ERROR_TRANSPORT`, and an undecodable
-reply as `NX_ERROR_PROTOCOL`.
+`ClientError::EmptyRestoreArchive`, and a failed call as `ClientError::Restore` with its status.
+A verified restore reply that fails semantic decoding retains `ClientError::InvalidRestoreReply`
+above the wire decoder's typed report; a reply naming another transport request retains
+`ClientError::UnexpectedReply { request: Restore }`. Both are beneath
+`ClientError::UncertainCommand` with the restore's own execution reference, because the invalid
+reply cannot establish whether the node applied the restore. The client ends that attempt's exact
+session and interrupts its pending requests; a replacement session remains usable. The shared host
+reports `FailureKind::Uncertain`, the C binding reports `NX_ERROR_UNCERTAIN`, and the CLI exits with
+status `3` and the original execution reference. Other errors that may hide an admitted restore
+likewise retain their cause beneath `UncertainCommand`. An unreadable or empty archive remains
+`NX_ERROR_INVALID_ARGUMENT`; a valid stream refusal is a definitive failed outcome.
 
 ## Sensitive Data And Observability
 

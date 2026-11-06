@@ -69,10 +69,13 @@ use tracing::{debug, info, warn};
 use crate::runtime::AdvertisedSubscriptionInterest;
 use crate::runtime::SubscriptionInterestIndex;
 
+mod membership;
 mod parameters;
 mod peer_health_watcher;
 mod prerequisites;
 mod settings;
+use membership::LiveMembers;
+pub(crate) use membership::MembershipChange;
 use peer_health_watcher::PeerHealthStateWatcher;
 pub use prerequisites::{ClockSkew, PrerequisitesView, register_clock_probe_handler};
 pub use settings::{
@@ -167,12 +170,7 @@ impl SubscriptionInterestPublication {
     fn publish(&self, nodes: &BTreeMap<ChitchatId, NodeState>) {
         let index = subscription_interests_from_live_nodes(nodes);
         self.index.store(StdArc::new(index));
-        let mut runs = BTreeMap::new();
-        for node in nodes.keys() {
-            if let Some(identity) = cluster_node_identity(node) {
-                runs.insert(identity.node_id().clone(), identity.incarnation());
-            }
-        }
+        let runs = membership::live_incarnations(nodes);
         self.live_runs.store(StdArc::new(runs));
         self.changed.send_replace(());
     }
@@ -205,17 +203,17 @@ impl SubscriptionInterestPublication {
     }
 }
 
-/// The gossip event bus, and the one way a membership or peer-connectivity change reaches a
-/// session attached to this node.
+/// The gossip event bus, and the one way a change of this node's live set reaches a session
+/// attached to it.
 ///
-/// Offering goes through [`Self::offer`] rather than through the sender directly. Each caller
-/// records the change in its own `info` line first, with the node and address as fields, and that
-/// line is the record: it is written whether or not anyone is attached. Subscribers here are live
-/// sessions only, so a node serving none is the ordinary case rather than a failure, and an
-/// undelivered offer costs the operator nothing.
+/// Offering goes through [`Self::offer`] rather than through the sender directly. The membership
+/// task records each change in its own `info` line first, with the node and its incarnation as
+/// fields, and that line is the record: it is written whether or not anyone is attached.
+/// Subscribers here are live sessions only, so a node serving none is the ordinary case rather than
+/// a failure, and an undelivered offer costs the operator nothing.
 #[derive(Clone)]
 struct ClusterEvents {
-    sender: broadcast::Sender<String>,
+    sender: broadcast::Sender<MembershipChange>,
 }
 
 impl ClusterEvents {
@@ -224,14 +222,14 @@ impl ClusterEvents {
         Self { sender }
     }
 
-    /// Offer an already-recorded change in this node's view of the cluster to attached sessions.
-    fn offer(&self, message: String) {
+    /// Offer an already-recorded change of this node's live set to attached sessions.
+    fn offer(&self, change: MembershipChange) {
         self.sender
-            .send(message)
-            .discarded("the caller logged this change before offering it to attached sessions");
+            .send(change)
+            .discarded("the membership task logged this change before offering it to sessions");
     }
 
-    fn subscribe(&self) -> broadcast::Receiver<String> {
+    fn subscribe(&self) -> broadcast::Receiver<MembershipChange> {
         self.sender.subscribe()
     }
 }
@@ -1409,15 +1407,22 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
     let prerequisites_publisher = prerequisites.clone();
     let event_tx = events.clone();
     let route_transport = transport.clone();
+    let mut members = LiveMembers::of_local_run(&ClusterNodeIdentity::new(
+        node_id.clone(),
+        ClusterNodeIncarnation::new(generation_id),
+    ));
     let membership_task = nervix_primitives::task::spawn(async move {
         while let Some(nodes) = live_nodes.next().await {
             nervix_primitives::task::consume_budget().await;
             subscription_interest_publisher.publish(&nodes);
             prerequisites_publisher.publish(&nodes);
             route_transport.refresh_routes(&nodes);
-            let report = membership_report(&nodes);
-            info!(members = ?report, "cluster membership updated");
-            event_tx.offer(format!("cluster membership updated: {}", report.join(", ")));
+            // Chitchat wakes this task for every change of a member's published keys; only a
+            // change of who is live is a membership event.
+            for change in members.observe(&nodes) {
+                change.record();
+                event_tx.offer(change);
+            }
         }
     });
 
@@ -1463,7 +1468,7 @@ impl ClusterHandle {
         result
     }
 
-    pub fn subscribe_events(&self) -> broadcast::Receiver<String> {
+    pub(crate) fn subscribe_events(&self) -> broadcast::Receiver<MembershipChange> {
         self.events.subscribe()
     }
 
@@ -2016,16 +2021,6 @@ fn render_node_state_lines(node_id: &ChitchatId, state: &NodeState) -> Vec<Strin
             }
         ),
     ]
-}
-
-fn membership_report(nodes: &BTreeMap<ChitchatId, NodeState>) -> Vec<String> {
-    nodes
-        .iter()
-        .map(|(id, state)| {
-            let grpc_addr = state.get(KEY_GRPC_ADVERTISE_ADDR).unwrap_or("<unknown>");
-            format!("{}@{}", id.node_id, grpc_addr)
-        })
-        .collect()
 }
 
 /// The peer `state` describes, or `None` when this build does not accept its node identity.

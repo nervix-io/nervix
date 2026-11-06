@@ -498,6 +498,68 @@ button {
   display: block;
 }
 
+.node-panel-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 21px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-c);
+  background: var(--surface);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.node-event-count {
+  color: var(--cyan);
+}
+
+.node-panel {
+  top: 29px;
+  right: 0;
+  width: min(460px, 80vw);
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.node-panel-empty {
+  padding: 6px 8px;
+  color: var(--text-d);
+  font-size: 11px;
+}
+
+.node-event {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  color: var(--text-c);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
+
+.node-event[data-kind="leadership"] {
+  color: var(--purple);
+}
+
+.node-event[data-level="warning"],
+.node-event[data-level="error"] {
+  color: #f87171;
+}
+
+.node-event-repeats {
+  flex: none;
+  color: var(--cyan);
+  font-weight: 700;
+}
+
 .theme-option {
   min-height: 32px;
   display: flex;

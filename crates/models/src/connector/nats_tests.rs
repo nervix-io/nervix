@@ -446,6 +446,10 @@ fn client_schema_requires_both_halves_of_a_tls_identity() {
 #[case::every_token(">")]
 #[case::system_prefix("$JS.API.STREAM.INFO.Orders")]
 #[case::utf8("telemetry.Événements.東京")]
+// Examples from https://docs.nats.io/concepts/subjects (Core subject hierarchy and wildcards).
+#[case::nats_docs_literal("orders.retail.placed")]
+#[case::nats_docs_one_token("orders.*.placed")]
+#[case::nats_docs_tail("sensor.>")]
 fn subscription_subjects_keep_their_spelling_and_whole_token_wildcards(#[case] raw: &str) {
     let subject = NatsSubjectName::try_from(raw)
         .assured("each fixture has nonempty tokens and wildcards only as whole tokens");
@@ -464,11 +468,75 @@ fn subscription_subjects_keep_their_spelling_and_whole_token_wildcards(#[case] r
 #[case::space("orders created", ExternalNameError::InvalidChar { ch: ' ' })]
 #[case::tab("orders\tcreated", ExternalNameError::InvalidChar { ch: '\t' })]
 #[case::control("orders.\u{7}", ExternalNameError::InvalidChar { ch: '\u{7}' })]
+#[case::partial_wildcard("time.New*.east", ExternalNameError::WildcardInsideLevel { wildcard: '*' })]
+#[case::leading_tail(">.created", ExternalNameError::WildcardBeforeLastLevel { wildcard: '>' })]
 fn subscription_subjects_refuse_what_the_subject_rule_excludes(
     #[case] raw: &str,
     #[case] expected: ExternalNameError,
 ) {
     assert_eq!(NatsSubjectName::try_from(raw), Err(expected));
+}
+
+#[test]
+fn publication_subjects_report_malformed_patterns_before_a_wildcard() {
+    assert_eq!(
+        NatsPublishSubjectName::try_from("orders.*..created"),
+        Err(ExternalNameError::EmptyLevel { separator: '.' })
+    );
+    assert_eq!(
+        NatsPublishSubjectName::try_from("orders.>.created"),
+        Err(ExternalNameError::WildcardBeforeLastLevel { wildcard: '>' })
+    );
+    assert_eq!(
+        NatsPublishSubjectName::try_from("orders.*.created"),
+        Err(ExternalNameError::InvalidChar { ch: '*' })
+    );
+}
+
+#[test]
+fn bolero_nats_subjects_preserve_subscription_and_publication_bounds() {
+    // Corpus bytes '0' through ';' map in order to these grammar and refusal characters.
+    const SYMBOLS: [char; 12] = [
+        'a', 'Z', '.', '*', '>', '$', '_', '-', ' ', '\t', '\u{7}', 'é',
+    ];
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(1152)
+        .for_each(|bytes: &[u8]| {
+            let raw: String = bytes
+                .iter()
+                .map(|byte| SYMBOLS[usize::from(*byte) % SYMBOLS.len()])
+                .collect();
+            let subscribed = NatsSubjectName::try_from(raw.as_str());
+            let published = NatsPublishSubjectName::try_from(raw.as_str());
+
+            if let Ok(subject) = &subscribed {
+                assert_eq!(subject.as_str(), raw);
+                assert!((1..=1024).contains(&raw.len()));
+                assert!(!raw.chars().any(char::is_whitespace));
+                assert!(!raw.chars().any(char::is_control));
+                let tokens: Vec<_> = raw.split('.').collect();
+                assert!(tokens.iter().all(|token| !token.is_empty()));
+                for (position, token) in tokens.iter().enumerate() {
+                    assert!(
+                        !token.chars().any(|ch| matches!(ch, '*' | '>'))
+                            || matches!(*token, "*" | ">"),
+                        "wildcards must occupy a whole token: {raw:?}"
+                    );
+                    if *token == ">" {
+                        assert_eq!(position + 1, tokens.len(), "tail wildcard: {raw:?}");
+                    }
+                }
+            }
+            if let Ok(subject) = &published {
+                assert_eq!(subject.as_str(), raw);
+                assert!(
+                    subscribed.is_ok(),
+                    "a literal subject is also a subscription"
+                );
+                assert!(!raw.chars().any(|ch| matches!(ch, '*' | '>')));
+            }
+        });
 }
 
 #[test]

@@ -583,31 +583,18 @@ fn cbor_type_matches_parse_as(
     ty: &ParseAsType,
     encoding: Option<CodecEncoding>,
 ) -> bool {
-    let encodes_datetime_as_rfc3339 = encoding == Some(CodecEncoding::Rfc3339);
     match wire {
-        CborType::String => {
-            *ty == ParseAsType::String
-                || encodes_datetime_as_rfc3339 && *ty == ParseAsType::Datetime
-        }
+        CborType::Text => matches!(
+            (ty, encoding),
+            (ParseAsType::String, None) | (ParseAsType::Datetime, Some(CodecEncoding::Rfc3339))
+        ),
         CborType::Bytes => *ty == ParseAsType::Bytes && encoding.is_none(),
-        CborType::Number => *ty == ParseAsType::F32 || *ty == ParseAsType::F64,
-        CborType::Integer => parse_as_is_integer(ty),
-        CborType::Boolean => *ty == ParseAsType::Bool,
-        CborType::Array => parse_as_is_list(ty),
-        // An exact wire type names the one internal type it binds, so a DATETIME wire field needs
-        // no text encoding rule: its RFC 3339 text is the wire type itself.
-        CborType::U8 => *ty == ParseAsType::U8,
-        CborType::I8 => *ty == ParseAsType::I8,
-        CborType::U16 => *ty == ParseAsType::U16,
-        CborType::I16 => *ty == ParseAsType::I16,
-        CborType::U32 => *ty == ParseAsType::U32,
-        CborType::I32 => *ty == ParseAsType::I32,
-        CborType::U64 => *ty == ParseAsType::U64,
-        CborType::I64 => *ty == ParseAsType::I64,
-        CborType::F32 => *ty == ParseAsType::F32,
-        CborType::F64 => *ty == ParseAsType::F64,
-        CborType::Datetime => *ty == ParseAsType::Datetime,
-        CborType::Object | CborType::Null => false,
+        CborType::Float => {
+            (*ty == ParseAsType::F32 || *ty == ParseAsType::F64) && encoding.is_none()
+        }
+        CborType::Integer => parse_as_is_integer(ty) && encoding.is_none(),
+        CborType::Boolean => *ty == ParseAsType::Bool && encoding.is_none(),
+        CborType::Array => parse_as_is_list(ty) && encoding.is_none(),
     }
 }
 

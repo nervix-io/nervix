@@ -241,11 +241,20 @@ independently of the prompt and are printed above it:
 
 ```text
 [events] subscription [watch] from [orders]: {"order_id":"o-1001","amount":1500}
-[events] server ERROR: emitter 'redis_orders' publish failed
-[events] topology INFO: raft transition: node-2 became leader
+[events] runtime ERROR: emitter 'redis_orders' publish failed
+[events] leadership INFO: raft transition: state=Follower leader=node-2 term=3 last_log_index=41 last_applied=41
+[events] membership INFO: node 'node-3' left
+[events] membership INFO: node 'node-3' joined (incarnation 1793845627114630656)
 [events] domain clock [simulation]: generation 2, stopped
 [events] domain clock [simulation] tick: generation 3, id 12, boundary 2030-01-01T00:00:01.100Z, authority UTC 2026-09-27T00:00:00Z, node logical 2030-01-01T00:00:01.120Z
 ```
+
+A server notice prints as `[events] <kind> <level>: <message>`, labelled by the kind the server
+sent with it: `membership` when the connected node sees a node join, leave or restart as a new
+incarnation, `leadership` for that node's Raft transitions and the membership operations it
+proposes, `cluster parameters` when it installs a committed parameter revision, `runtime` for a
+runtime failure of any node and `control plane` for a control-plane failure of the connected node.
+The level is `INFO`, `WARN` or `ERROR`.
 
 A domain clock line follows each newer state or accepted tick after the attach reply. A state or
 tick that changes again before it is delivered or read is replaced by the newest one, so a slow

@@ -212,8 +212,8 @@ mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_client_wire::{
         ClientFrame, ClientMessage, CommandDisposition, CommandOutcome, Diagnostic, EncodedFrame,
-        NoticeLevel, OutcomeOrigin, Reply, ReplyBody, ReplyDelivery, ServerFrame, ServerNotice,
-        SessionLimits, VerifiedFrame,
+        NoticeKind, NoticeLevel, OutcomeOrigin, Reply, ReplyBody, ReplyDelivery, ServerFrame,
+        ServerNotice, SessionLimits, VerifiedFrame,
         grpc::{EXCHANGE_PATH, SERVICE_NAME, ServerExchangeCodec},
     };
     use nervix_models::{ClusterNodeName, CommandExecutionReference};
@@ -1543,6 +1543,7 @@ mod tests {
                     nervix_primitives::task::consume_budget().await;
                     let notice = ServerNotice {
                         level: NoticeLevel::Info,
+                        kind: NoticeKind::Leadership,
                         message: "an event unrelated to the status request".to_string(),
                     }
                     .encode(&SessionLimits::DEFAULT)

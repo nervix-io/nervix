@@ -74,6 +74,7 @@ use futures_util::{
 use http_endpoint::{serve_http, serve_https};
 use interconnect_relay::InterconnectRelayPayloadLane;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_client_wire::NoticeKind;
 use nervix_consensus::{ConsensusSettings, TransactionState};
 use nervix_interconnect::{
     ActivateOwnershipHandoffStateRequest as RemoteActivateOwnershipHandoffStateRequest,
@@ -1013,8 +1014,7 @@ impl Application {
                     consensus.proposer().local_node_id().clone(),
                 ),
                 service_tasks: ServiceTasks::default(),
-                auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
-                failed_auth_rate_limit_keys: DashMap::with_hasher(RandomState::new()),
+                authentication_pacing: SessionServiceImpl::new_authentication_pacing(),
                 traffic: client_traffic::ClientTraffic::new(runtime.metrics().client_traffic()),
                 transaction_bindings: DashMap::with_hasher(RandomState::new()),
                 command_executions: Default::default(),
@@ -2709,7 +2709,10 @@ impl Application {
                                     );
                             }
                             Envelope::Control(ControlEnvelope::RuntimeErrorEvent(event)) => {
-                                service_for_interconnect.broadcast_error(event.message);
+                                service_for_interconnect
+                                    .inner
+                                    .events
+                                    .report_error(NoticeKind::Runtime, event.message);
                             }
                         }
                     }
@@ -2725,7 +2728,9 @@ impl Application {
                 nervix_primitives::select! {
                     _ = cluster_events_shutdown.cancelled() => break,
                     received = cluster_event_rx.recv() => match received {
-                        Ok(message) => cluster_events.relay_info(message),
+                        Ok(change) => {
+                            cluster_events.relay_info(NoticeKind::Membership, change.to_string());
+                        }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             warn!(skipped, "cluster event relay fell behind the event bus");
                         }
@@ -2743,7 +2748,9 @@ impl Application {
                 nervix_primitives::select! {
                     _ = consensus_events_shutdown.cancelled() => break,
                     received = consensus_event_rx.recv() => match received {
-                        Ok(message) => consensus_events.relay_info(message),
+                        Ok(message) => {
+                            consensus_events.relay_info(NoticeKind::Leadership, message);
+                        }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             warn!(skipped, "consensus event relay fell behind the event bus");
                         }
