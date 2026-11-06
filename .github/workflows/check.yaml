@@ -1266,7 +1266,7 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
-      # The CRAP report runs the cargo-crap version scripts/cargo_crap.py pins, built through kache.
+      # The CRAP report runs the cargo-crap version nervix-ratchet crap pins, built through kache.
       - name: Runner diagnostics before Install the pinned complexity analyzer
         uses: ./.github/actions/runner-diagnostics
         with:
