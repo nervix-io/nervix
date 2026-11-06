@@ -23,7 +23,7 @@ use error_stack::ResultExt as _;
 use nervix_connector::{
     PropertyValue, RecordDestination, RecordEnvelope, RecordKey, RecordProperty,
 };
-use nervix_models::{EnvelopeClauseKind, EnvelopeValueType, PropertyType, Unit};
+use nervix_models::{EnvelopeClauseKind, EnvelopeValueType, PropertyType, Unit, UnitKind};
 use nervix_vm::infer_set_expr_types_for_bindings_with_udfs;
 
 use super::*;
@@ -428,10 +428,10 @@ impl CompiledEnvelope {
             }
         };
         let source_partition = match partitioning {
-            Some(partitioning) => match partitioning.unit_of(&published.key) {
-                Ok(Unit::Single) => Some(0),
-                Ok(Unit::Partition(partition)) => Some(u64::from(partition)),
-                Ok(Unit::Instance(_)) => {
+            Some(partitioning) => match partitioning.unit_of(&published.key).map(Unit::kind) {
+                Ok(UnitKind::Single) => Some(0),
+                Ok(UnitKind::Partition(partition)) => Some(u64::from(partition)),
+                Ok(UnitKind::Instance(_)) => {
                     unreachable!("relay partitioning never selects an instance")
                 }
                 Err(error) => {
