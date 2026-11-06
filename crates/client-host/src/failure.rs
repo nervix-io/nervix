@@ -148,6 +148,7 @@ impl Failure {
                 FailureKind::Deadline
             }
             ClientError::LastUnresolvedAnswer { .. }
+            | ClientError::RestoreStreamRefused { .. }
             | ClientError::UncertainCommand { .. }
             | ClientError::UncertainUpload { .. }
             | ClientError::SettlementUnknown { .. } => FailureKind::Uncertain,
@@ -365,6 +366,30 @@ mod call_cancellation_tests {
         assert_eq!(failure.kind(), FailureKind::Uncertain);
         assert_eq!(failure.execution_reference(), Some(&expected));
         assert!(failure.message().contains("foreign-command"));
+    }
+
+    #[test]
+    fn a_later_restore_refusal_keeps_its_uncertainty_and_execution_reference() {
+        let refusal = || ClientError::RestoreStreamRefused {
+            failure: nervix_client_core::wire::RestoreUploadFailure::StagingFailed,
+            message: "the later stream could not be staged".to_string(),
+        };
+        assert_eq!(Failure::from(refusal()).kind(), FailureKind::Uncertain);
+        let reference = CommandExecutionReference::parse("restore-history")
+            .assured("the test execution reference is valid");
+        let failure = Failure::from(Report::new(refusal()).change_context(
+            ClientError::UncertainCommand {
+                reference: reference.clone(),
+            },
+        ));
+        assert_eq!(failure.kind(), FailureKind::Uncertain);
+        assert_eq!(failure.execution_reference(), Some(&reference));
+        assert!(failure.message().contains("StagingFailed"));
+        assert!(
+            failure
+                .message()
+                .contains("the later stream could not be staged")
+        );
     }
 
     #[test]

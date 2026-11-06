@@ -264,13 +264,23 @@ the exact statement and archive and pass their original reference to `restore_wi
 recover the outcome. The report retains the typed validation cause or tonic's bounded receive
 failure. Missing or empty local archives, authentication refusals and valid declared stream
 refusals remain definitive if no earlier attempt could have been admitted. The shared bindings
-classify uncertainty as `NX_ERROR_UNCERTAIN`;
-the CLI exits with status 3 and prints the execution reference.
+classify uncertainty as `NX_ERROR_UNCERTAIN`; the CLI exits with status 3 and prints the execution
+reference.
+
+Uncertainty survives a later attempt. After the client handed over a whole archive without
+learning its outcome, or received `OutcomeUnknown`, a later archive-open/read error, refusal
+before admission, or expired execution reference cannot establish what that earlier attempt did.
+The client returns `UncertainCommand` with the original reference and retains the typed later
+cause beneath it. Restore the original file if needed and repeat the same statement and archive
+under that reference to recover the outcome. An outcome recovered from the command record, or a
+failure carrying the restore's report, still establishes the result, including any steps applied
+before a recorded failure.
 
 The outcome's `restore` field carries the typed `RestoreReport`: the mode, the archive's size and
 digest, the capture time, what the users step did, each restored domain, and each step's outcome.
-A stream the leader refused before the restore ran is a failed outcome whose message names the
-typed failure. The C binding runs `RESTORE` through `nx_session_execute` and reports the report's
+With no earlier uncertain attempt, a stream the leader refused before the restore ran is a failed
+outcome whose message names the typed failure. The C binding runs `RESTORE` through
+`nx_session_execute` and reports the report's
 counts, whether it was a dry run, and whether a step failed through `nx_outcome_restore`.
 
 ## Uploading A Resource
