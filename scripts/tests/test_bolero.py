@@ -222,6 +222,7 @@ class InventoryTests(unittest.TestCase):
             "typed-report", "typed-source-contract", "typed-site-union", "typed-source-syntax", "typed-hidden-tunables",
             "typed-non-aws-lc-crypto",
             "nats-user-authentication",
+            "nats-subject-grammar",
             "plexus-statement",
             "plexus-statement-text",
             "plexus-emitter-envelopes",

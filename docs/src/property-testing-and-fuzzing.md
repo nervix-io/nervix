@@ -58,6 +58,7 @@ records their scope without treating a passing qualification as a completed camp
 
 | ID | Package and invariant | Domain | Ordinary cases | Input limit |
 | --- | --- | --- | ---: | ---: |
+| `nats-subject-grammar` | `nervix-models` accepted subscription names obey Nervix's byte, character and token bounds; accepted publication names are literal subscription names | bounded malformed subject text with separators, wildcards, whitespace, controls and UTF-8, v1 | 256 | 1152 bytes |
 | `nats-user-authentication` | `nervix-connector-nats` decodes an SDK user seed to the same public key, preserves its credentials JWT and signs nonces that the independent SDK verifies | 32-byte user seeds and nonces up to 64 bytes, directly and in decorated credentials, v1 | 256 | 128 bytes |
 | `client-emitter-wire` | `nervix-client-wire` native emitter frame round-trip equality | all current request, reply, refusal and settlement variants with bounded exact schema, window, identity, branch and batch fields, v1 | 256 | 128 bytes |
 | `client-requests` | `nervix-client-wire` complete client request equality | every current request family, identities, positions, schemas and opaque I/O payloads, v4 | 128 | 2048 bytes |

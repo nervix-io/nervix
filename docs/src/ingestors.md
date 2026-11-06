@@ -1023,7 +1023,7 @@ applies, by the external system's own rule where it has one:
 | `SQS QUEUE` | `QUEUE` | 1 to 80 ASCII letters, digits, `-`, and `_`, and a FIFO queue's name ends in `.fifo`: SQS's own rule |
 | `REDIS PUBSUB` | `CHANNEL` | 1 to 1,024 bytes of any text; a `*` is the character itself |
 | `REDIS PUBSUB` | `PATTERN` | 1 to 1,024 bytes of any text, which Redis matches against channel names as a glob; see [Redis Pub/Sub](#redis-pubsub) |
-| `NATS SUBJECT` | `SUBJECT` | At most 1,024 bytes of `.`-separated tokens, none empty, without whitespace or control characters; `*` stands for one token and `>` for the rest, each only as a whole token, and `>` only last |
+| `NATS SUBJECT` | `SUBJECT` | At most 1,024 UTF-8 bytes of `.`-separated tokens, none empty, without whitespace or control characters; `*` stands for one token and `>` for the rest, each only as a whole token, and `>` only last. The byte bound and embedded-wildcard refusal are Nervix restrictions, not NATS server limits |
 | `NATS SUBJECT` | `QUEUE GROUP` | 1 to 255 bytes without whitespace or control characters |
 | `NATS STREAM` | `STREAM` | 1 to 255 bytes without whitespace, control characters, `.`, `*`, `>`, `/` or `\`: the JetStream server's rule, stricter only in refusing every whitespace and control character |
 | `NATS STREAM` | `CONSUMER` | The rule of a stream name |
