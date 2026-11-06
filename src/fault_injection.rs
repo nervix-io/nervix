@@ -46,6 +46,7 @@ use nervix_recovery::NoReceiver as _;
 
 use crate::registry::SchedulerMode;
 
+mod application_progress;
 mod backup_cut;
 #[cfg(test)]
 mod backup_cut_tests;
@@ -100,6 +101,8 @@ mod syslog_tests;
 mod transaction_cleanup;
 mod wasm_reset_publication;
 
+pub(crate) use application_progress::ApplicationProgressQuery;
+pub use application_progress::ApplicationProgressQueryError;
 pub use backup_cut::BackupCutBoundary;
 use backup_cut::{BackupCutGate, BackupCutGateKey};
 use command_pause_point::CommandPausePoint;
@@ -376,6 +379,9 @@ struct FaultInjectionState {
     leadership_transfers: broadcast::Sender<LeadershipTransferRequest>,
     wasm_state_reset_coordinators:
         DashMap<ClusterNodeName, mpsc::Sender<WasmStateResetRequest>, RandomState>,
+    /// Each running node's responder to the scenario's application progress queries.
+    application_progress_queries:
+        DashMap<ClusterNodeName, mpsc::Sender<ApplicationProgressQuery>, RandomState>,
 }
 
 pub(crate) struct WasmStateResetRequest {
@@ -590,6 +596,7 @@ impl Default for FaultInjection {
                 scheduler_mode: RwLock::new(SchedulerMode::default()),
                 leadership_transfers,
                 wasm_state_reset_coordinators: DashMap::default(),
+                application_progress_queries: DashMap::default(),
             }),
         }
     }
@@ -1266,42 +1273,6 @@ impl FaultInjection {
             },
             Arc::new(TestPause::default()),
         );
-    }
-
-    /// Holds every revision-query reply from this node until the scenario releases it. Local
-    /// revision publication and gossip continue while the replies retain their sampled values.
-    pub fn pause_application_revision_responses_from(&self, node_id: ClusterNodeName) {
-        self.arm_command_pause(CommandPausePoint::ApplicationRevisionResponse(node_id));
-    }
-
-    pub async fn wait_for_application_revision_response_pause(&self, node_id: &ClusterNodeName) {
-        self.wait_for_command_pause(&CommandPausePoint::ApplicationRevisionResponse(
-            node_id.clone(),
-        ))
-        .await;
-    }
-
-    pub fn release_application_revision_responses_from(&self, node_id: &ClusterNodeName) {
-        self.release_command_pause(&CommandPausePoint::ApplicationRevisionResponse(
-            node_id.clone(),
-        ));
-    }
-
-    pub(crate) async fn pause_application_revision_response_if_armed(
-        &self,
-        node_id: &ClusterNodeName,
-    ) {
-        let point = CommandPausePoint::ApplicationRevisionResponse(node_id.clone());
-        let Some(pause) = self
-            .inner
-            .command_pauses
-            .get(&point)
-            .map(|pause| pause.value().clone())
-        else {
-            return;
-        };
-        pause.reach();
-        pause.wait_until_released().await;
     }
 
     pub fn fail_health_responses_from(&self, responding_node: ClusterNodeName) {

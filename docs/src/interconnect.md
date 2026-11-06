@@ -2038,39 +2038,75 @@ been observed live keeps scheduling in that bounded wait even when Chitchat list
 current voters have been observed or the grace expires, ordinary effective availability governs
 automatic failover. See [Whole-Cluster Restart Keeps Ownership](./shutdown.md#whole-cluster-restart-keeps-ownership).
 
-Command completion reads the leader's effective availability view through the
-`application_completion_peers` management progress request. The response names the leader's
-incarnation, Raft term, and required process incarnations. A follower uses it only while its own
-Raft leader and term still match, and includes its own incarnation in the barrier. Failure to reach
-the leader leaves the command pending. This avoids conflicting completion sets when application
-health is asymmetric: a connected follower may still probe an unreachable peer successfully after
-the leader has retired that peer. Revision and HTTPS listener progress requests remain bound to the
-reported incarnation.
-
-An `application_revision` progress query samples the answering incarnation's authoritative,
-runtime-prepared and runtime-ready revisions. These direct observations supplement gossip. A
-completion barrier keeps observing published progress and availability while its query batch is
-pending; a reply is unnecessary once valid publications satisfy the barrier. The batch is retained
-across state changes, rather than restarted on each publication. Its owned runtime task keeps
-polling queries while the barrier reads the leader's participant view, so a probe granted an
-executor permit keeps progressing while that view request waits. Ending the barrier aborts its
-probe task. Queries retain their transport deadlines, and the barrier retains its command deadline
-and leader-tenure and incarnation checks.
-
-The public gossip-completion qualification holds the two followers' revision replies after
-sampling and a peer's health reply. One client connects before those faults, then creates a user,
-creates a relay and reads cluster status in order within one twenty-second harness budget. That
-budget includes margin over the measured multi-stage gossip propagation under parallel bulk load;
-it is not a product deadline. The retained client status must name the new relay's owner before
-releasing any reply. A separate direct status request to node-1 checks that node-3 is connected
-while the replies remain held, so a client redirect cannot substitute another node's peer table.
-A controlled leader-transfer case checks that a probe redirected to node-3 identifies node-3 and
-reports its connected node-1 peer. The adjacent health-only qualification keeps its nine-second
-sequential probe.
-
 `SHOW CLUSTER STATUS` exposes the interconnect address, endpoint generation, observation age,
 observation outcome, and derived availability. Its `connected` status means the latest application
 probe is healthy, rather than merely that a transport pool exists.
+
+## Application Progress
+
+Command completion reads the leader's effective availability view through the
+`application_completion_peers` management progress request. The response names the leader's
+incarnation, Raft term, the required process incarnations, and the application progress the leader
+holds for them: its own record and the latest report each other required incarnation sent it. A
+follower uses the response only while its own Raft leader and term still match, and includes its own
+incarnation, with its own record, in the barrier. Failure to reach the leader leaves the command
+pending. This avoids conflicting completion sets when application health is asymmetric: a
+connected follower may still probe an unreachable peer successfully after the leader has retired
+that peer. Revision and HTTPS listener progress requests remain bound to the reported incarnation.
+
+Application progress is one record per process incarnation: the authoritative revision it applied,
+the runtime revisions it prepared and made ready, and the runtime revision through which its
+domain clocks match the committed ones. A phase is absent until the incarnation reaches a revision
+in it and only advances, and a new incarnation starts with every phase absent. The consensus
+applied revision, the runtime applicator and the domain clock installer are the record's only
+writers, and no gossip key carries it. Domain clock delivery still selects its targets from the
+installed-clock gossip advertisement; the record's clock phase is not read for it.
+
+Each node reports its record to the Raft leader it observes in an `application_progress`
+management progress request whenever a phase advances or the leadership it observes changes. The
+report carries the record and the leader and term it addressed. One report is in flight at a time
+and carries the newest record, so a burst of advances costs one report per round trip. The leader
+holds a report only when the connection's authenticated node is the node the report names and the
+leader leads the addressed term, and answers `Accepted`, `NotLeader` or `ForeignReporter`. It keeps
+the latest report of each incarnation, merges a late report without moving a phase back, and keeps
+reports only from the incarnations its availability view holds live, besides the reporter. A
+barrier reads a report only for an incarnation its leader view names, so a late report from an
+earlier incarnation of that node completes nothing. A
+report the leader did not hold, or one that failed, is logged at debug level and not repeated,
+because a barrier queries a node whose report it lacks. A held report wakes the leader's barriers
+at once.
+
+An `application_revision` progress query answers the answering incarnation's record, with every
+phase it has not reached absent. A completion barrier queries the required incarnations whose
+progress it has not received. It keeps observing reports and availability while its query batch is
+pending; a reply is unnecessary once received reports satisfy the barrier. A follower's barrier
+reads the reports the leader holds through its participant view and reads that view again every
+250 milliseconds while it waits, so it completes a revision whose other followers' query replies
+are held as long as their reports reach the leader. The batch is retained across state changes,
+rather than restarted on each report. Its owned runtime task keeps polling queries while the
+barrier reads the leader's participant view, so a probe granted an executor permit keeps
+progressing while that view request waits. Ending the barrier aborts its probe task. Queries and
+reports retain their transport deadlines, and the barrier retains its command deadline and
+leader-tenure and incarnation checks.
+
+These progress shapes are part of the [wire contract](#wire-contract-and-payloads). A node of
+another wire contract is refused at join, so a cluster moves to them through a coordinated stop and
+start with every node on the same version, never a rolling restart.
+
+The public progress-report qualification holds the two followers' revision replies after sampling
+and a peer's health reply. One client connects before those faults, then creates a user, creates a
+relay and reads cluster status in order within one twenty-second harness budget, through the
+reports the followers send the leader. The budget includes margin over the measured multi-stage
+completion under parallel bulk load; it is not a product deadline. The retained client status must
+name the new relay's owner before releasing any reply. A separate direct status request to node-1
+checks that node-3 is connected while the replies remain held, so a client redirect cannot
+substitute another node's peer table. A controlled leader-transfer case checks that a probe
+redirected to node-3 identifies node-3 and reports its connected node-1 peer. The adjacent
+health-only qualification keeps its nine-second sequential probe.
+
+A second qualification holds both the followers' reports and their revision replies: a relay
+creation waits, and completes once either path is released, measured from the release rather than
+inferred from silence.
 
 ## Connection And Credential Lifecycle
 

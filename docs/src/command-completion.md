@@ -122,10 +122,12 @@ stateDiagram-v2
 ```
 
 The control plane owns command identity, durable effect progress, terminal outcomes, and recovery.
-The registry and scheduling decisions validate and produce authoritative state. Each runtime owner
-reports preparation and readiness for the exact revision it applied. Gossip carries acknowledgements
-with the process incarnation, so a restarted process cannot inherit its predecessor's readiness.
-Sessions and clients route requests and wait; they do not decide completion.
+The registry and scheduling decisions validate and produce authoritative state. Each node records
+the authoritative revision it applied and the runtime revisions it prepared and made ready in one
+record bound to its process incarnation, so a restarted process cannot inherit its predecessor's
+readiness. It reports that record to the leader over the interconnect, and a barrier queries a node
+whose report it lacks; gossip carries no progress. Sessions and clients route requests and wait;
+they do not decide completion.
 
 ```mermaid
 flowchart LR
@@ -135,9 +137,9 @@ flowchart LR
     Decision --> Raft[Durable authoritative state]
     Raft --> Runtime[Per-node runtime application]
     Raft --> Resources[Per-node resource installation]
-    Runtime --> Gossip[Revision + incarnation acknowledgements]
+    Runtime --> Progress[Incarnation-bound progress reports and queries]
     Resources --> Replicas[Replicated per-incarnation replica records]
-    Gossip --> Barrier[Command-scoped completion barrier]
+    Progress --> Barrier[Command-scoped completion barrier]
     Replicas --> Barrier
     Barrier --> Outcome[Replicated terminal outcome]
     Outcome --> Client
@@ -206,14 +208,18 @@ This shared view lets a connected follower finish control commands even when its
 still see another follower that the leader has already retired. The retired process catches up on
 reconnection before it can participate again.
 
-While direct revision queries are outstanding, the barrier continues observing discovery and
-availability changes. A valid publication can satisfy the required phase without waiting for an
+A barrier learns each required incarnation's progress from its report or from a direct query.
+Every node reports its record to the leader it observes whenever a phase advances, and the leader's
+barrier wakes as each report arrives. A follower's barrier reads the reports the leader holds
+through the same leader view that names its participants, and reads that view again every 250
+milliseconds while it waits. A barrier queries the required incarnations whose progress it has not
+received. While those queries are outstanding, the barrier continues observing reports, discovery
+and availability changes, and a report can satisfy the required phase without waiting for an
 earlier query to return its sampled revision. The query batch stays in flight across those changes,
-so frequent publications cannot starve queries by repeatedly cancelling them. An owned runtime
-task polls the batch while the barrier reads the leader's participant view: a probe can already
-hold the executor permit that the view request needs. Ending the barrier aborts that task. Every
-wake still checks the current leader tenure, required process incarnations, fixed revision and
-deadline.
+so frequent reports cannot starve queries by repeatedly cancelling them. An owned runtime task
+polls the batch while the barrier reads the leader's participant view: a probe can already hold the
+executor permit that the view request needs. Ending the barrier aborts that task. Every wake still
+checks the current leader tenure, required process incarnations, fixed revision and deadline.
 
 Runtime activation has two explicit phases. First, every required node applies the authoritative
 models, schedules, clocks, resource bindings, and stopped or running lifecycle state and reports

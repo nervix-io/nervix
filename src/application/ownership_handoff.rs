@@ -2579,9 +2579,7 @@ impl SessionServiceImpl {
     ) -> Result<(), Report<crate::runtime::RuntimeError>> {
         let revision = self.inner.consensus.current_runtime_revision().await;
         wait_for_application_revision(
-            &self.inner.cluster,
-            &self.inner.consensus,
-            &self.inner.interconnect,
+            self.barrier_node(),
             revision,
             ApplicationRevisionPhase::RuntimePrepared,
             ApplicationRevisionParticipants::LiveAmong(&handoff.participants),
