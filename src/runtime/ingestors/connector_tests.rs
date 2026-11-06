@@ -192,15 +192,15 @@ impl IngestorHostServices for FakeHost {
         self.observations.lock().reported_errors.push(reason);
     }
     fn record_transport_redeliveries(&self, positions: usize) {
-        panic!("a replayable test source discarded {positions} positions after a reconnect");
+        panic!("a replayable test ingestor discarded {positions} positions after a reconnect");
     }
     fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
-        panic!("a test source whose payloads all fit dropped {payloads} for their size");
+        panic!("a test ingestor whose payloads all fit dropped {payloads} for their size");
     }
     fn record_unconfirmed_stop(&self, positions: usize) {
         assert!(
             self.allow_unconfirmed_stop,
-            "a test source stopped with {positions} positions waiting on their trees"
+            "a test ingestor stopped with {positions} positions waiting on their trees"
         );
         self.observations.lock().unconfirmed_stops.push(positions);
     }
@@ -246,13 +246,13 @@ async fn run_policy_with_refresh(
     resume_required: bool,
 ) -> Arc<Mutex<IngestorLoopObservations>> {
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
-    let mut source = empty_source(observations.clone());
-    source.queued().extend(three_messages());
-    source.resume_required = resume_required;
-    source.replays_pending_after_resume = 0;
+    let mut connector = empty_ingestor(observations.clone());
+    connector.queued().extend(three_messages());
+    connector.resume_required = resume_required;
+    connector.replays_pending_after_resume = 0;
     let host = IngestorHost::new(FakeHost::running(observations.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    run_ingestor_instance_with_retry(source, host, replayable(policy), shutdown_rx).await;
+    run_ingestor_instance_with_retry(connector, host, replayable(policy), shutdown_rx).await;
     drop(shutdown_tx);
     observations
 }
@@ -268,7 +268,7 @@ fn retry_policy() -> nervix_connector::ParsedRetryPolicy {
     }
 }
 
-fn empty_source(observations: Arc<Mutex<IngestorLoopObservations>>) -> FakeIngestor {
+fn empty_ingestor(observations: Arc<Mutex<IngestorLoopObservations>>) -> FakeIngestor {
     FakeIngestor::empty(observations)
 }
 
@@ -295,21 +295,21 @@ impl PacedIngestorCadence for SingleOccurrenceCadence {
 async fn runtime_report_chain_ingestor_lifecycle() {
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
     let (shutdown_tx, mut shutdown) = watch::channel(false);
-    let mut source = empty_source(observations.clone());
-    source.stop_after_poll = Some(shutdown_tx);
-    source
+    let mut connector = empty_ingestor(observations.clone());
+    connector.stop_after_poll = Some(shutdown_tx);
+    connector
         .suspend_results
         .push_back(Err(Report::new(std::io::Error::other(
             "could not pause the connection",
         ))
         .change_context(IngestorError::Suspend { connector: "fake" })));
-    source
+    connector
         .close_results
         .push_back(Err(Report::new(std::io::Error::other(
             "could not finish the connection",
         ))
         .change_context(IngestorError::Close { connector: "fake" })));
-    source
+    connector
         .polls
         .push_back(Err(Report::new(std::io::Error::other(
             "the connection refused the poll",
@@ -320,12 +320,12 @@ async fn runtime_report_chain_ingestor_lifecycle() {
     host.wake_suspension = true;
     let mut ready = true;
     assert_eq!(
-        prepare_paced_source(&mut source, &mut host, &mut ready, &mut shutdown).await,
+        prepare_paced_ingestor(&mut connector, &mut host, &mut ready, &mut shutdown).await,
         PacedIngestorAction::Restart
     );
     host.suspend_intake = false;
     run_paced_ingestor(
-        source,
+        connector,
         host,
         SingleOccurrenceCadence {
             occurrence: Some(Timestamp::from_unix_nanos(1)),
@@ -366,19 +366,19 @@ impl PacedIngestorCadence for FailedCadence {
 }
 
 #[nervix_primitives::test]
-async fn runtime_report_chain_source_cadence() {
+async fn runtime_report_chain_ingestor_cadence() {
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
-    let source = empty_source(observations.clone());
+    let connector = empty_ingestor(observations.clone());
     let host = FakeHost::running(observations.clone());
     let (_shutdown_tx, shutdown) = watch::channel(false);
 
-    run_paced_ingestor(source, host, FailedCadence, NonZeroUsize::MIN, shutdown).await;
+    run_paced_ingestor(connector, host, FailedCadence, NonZeroUsize::MIN, shutdown).await;
 
     let observations = observations.lock();
     assert_eq!(
         observations.reported_errors,
         [
-            "could not advance source cadence: domain 'orders' clock became unavailable while \
+            "could not advance ingestor cadence: domain 'orders' clock became unavailable while \
              waiting for a logical deadline: domain 'orders' clock generation 3 is stopped"
         ]
     );
@@ -389,8 +389,8 @@ async fn runtime_report_chain_source_cadence() {
 #[nervix_primitives::test]
 async fn runtime_report_chain_ingestor_resume() {
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
-    let mut source = empty_source(observations.clone());
-    source
+    let mut connector = empty_ingestor(observations.clone());
+    connector
         .resume_results
         .push_back(Err(Report::new(std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
@@ -403,7 +403,7 @@ async fn runtime_report_chain_ingestor_resume() {
     let mut ready = false;
 
     assert_eq!(
-        prepare_paced_source(&mut source, &mut host, &mut ready, &mut shutdown).await,
+        prepare_paced_ingestor(&mut connector, &mut host, &mut ready, &mut shutdown).await,
         PacedIngestorAction::Restart
     );
     let observations = observations.lock();
@@ -415,16 +415,16 @@ async fn runtime_report_chain_ingestor_resume() {
 }
 
 #[nervix_primitives::test]
-async fn source_loop_replays_a_buffer_released_during_resume_before_polling() {
+async fn ingestor_loop_replays_a_buffer_released_during_resume_before_polling() {
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
-    let mut source = empty_source(observations.clone());
-    source.queued().extend(three_messages());
-    source.resume_required = false;
-    source.replays_pending_after_resume = 2;
+    let mut connector = empty_ingestor(observations.clone());
+    connector.queued().extend(three_messages());
+    connector.resume_required = false;
+    connector.replays_pending_after_resume = 2;
     let host = IngestorHost::new(FakeHost::running(observations.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     run_ingestor_instance_with_retry(
-        source,
+        connector,
         host,
         replayable(IngestorAckPolicy::None),
         shutdown_rx,
@@ -449,15 +449,15 @@ async fn source_loop_replays_a_buffer_released_during_resume_before_polling() {
 }
 
 #[nervix_primitives::test]
-async fn source_shutdown_cancels_pending_resume_and_closes_the_source() {
+async fn ingestor_shutdown_cancels_pending_resume_and_closes_the_ingestor() {
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
     let started = Arc::new(Notify::new());
-    let mut source = empty_source(observations.clone());
-    source.resume_gate = Some(started.clone());
+    let mut connector = empty_ingestor(observations.clone());
+    connector.resume_gate = Some(started.clone());
     let host = IngestorHost::new(FakeHost::running(observations.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let running = nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
-        source,
+        connector,
         host,
         replayable(IngestorAckPolicy::None),
         shutdown_rx,
@@ -466,24 +466,24 @@ async fn source_shutdown_cancels_pending_resume_and_closes_the_source() {
     shutdown_tx.send_replace(true);
     nervix_primitives::time::timeout(Duration::from_secs(10), running)
         .await
-        .assured("shutdown cancels the pending resume through the source-loop select")
+        .assured("shutdown cancels the pending resume through the ingestor-loop select")
         .assured("the ingestor loop exits without a task panic");
     assert_eq!(observations.lock().closes, 1);
 }
 
 #[nervix_primitives::test]
-async fn source_quiesce_change_cancels_pending_resume_before_retrying() {
+async fn ingestor_quiesce_change_cancels_pending_resume_before_retrying() {
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
     let started = Arc::new(Notify::new());
     let changed = Arc::new(Notify::new());
-    let mut source = empty_source(observations.clone());
-    source.resume_gate = Some(started.clone());
+    let mut connector = empty_ingestor(observations.clone());
+    connector.resume_gate = Some(started.clone());
     let mut fake_host = FakeHost::running(observations.clone());
     fake_host.quiesce_change = Some(changed.clone());
     let host = IngestorHost::new(fake_host);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let running = nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
-        source,
+        connector,
         host,
         replayable(IngestorAckPolicy::None),
         shutdown_rx,
@@ -496,7 +496,7 @@ async fn source_quiesce_change_cancels_pending_resume_before_retrying() {
     shutdown_tx.send_replace(true);
     nervix_primitives::time::timeout(Duration::from_secs(10), running)
         .await
-        .assured("shutdown cancels the retried resume through the source-loop select")
+        .assured("shutdown cancels the retried resume through the ingestor-loop select")
         .assured("the ingestor loop exits without a task panic");
     let observations = observations.lock();
     assert_eq!(observations.resumes, 2);
@@ -505,15 +505,15 @@ async fn source_quiesce_change_cancels_pending_resume_before_retrying() {
 }
 
 #[nervix_primitives::test]
-async fn request_source_loop_replays_retained_requests_and_closes_the_source_at_shutdown() {
+async fn request_ingestor_loop_replays_retained_requests_and_closes_the_ingestor_at_shutdown() {
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
     observations.lock().pending_replays = 2;
-    let source = empty_source(observations.clone());
+    let connector = empty_ingestor(observations.clone());
     let host = IngestorHost::new(FakeHost::running(observations.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     shutdown_tx.send_replace(true);
 
-    run_request_ingestor(source, host, shutdown_rx).await;
+    run_request_ingestor(connector, host, shutdown_rx).await;
 
     // Requests dispatch on the request path, so the loop never reads from the ingestor: it only
     // replays what the buffer retained before it observes the shutdown.
@@ -527,16 +527,16 @@ async fn request_source_loop_replays_retained_requests_and_closes_the_source_at_
 }
 
 #[nervix_primitives::test]
-async fn paced_source_preparation_suspends_a_ready_source_until_quiesce_releases() {
+async fn paced_ingestor_preparation_suspends_a_ready_ingestor_until_quiesce_releases() {
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
-    let mut source = empty_source(observations.clone());
+    let mut connector = empty_ingestor(observations.clone());
     let mut host = FakeHost::running(observations.clone());
     host.suspend_intake = true;
     host.wake_suspension = true;
     let (_shutdown_tx, mut shutdown) = watch::channel(false);
     let mut ready = true;
 
-    let action = prepare_paced_source(&mut source, &mut host, &mut ready, &mut shutdown).await;
+    let action = prepare_paced_ingestor(&mut connector, &mut host, &mut ready, &mut shutdown).await;
 
     assert_eq!(action, PacedIngestorAction::Restart);
     assert!(!ready);
@@ -548,10 +548,10 @@ async fn paced_source_preparation_suspends_a_ready_source_until_quiesce_releases
 }
 
 #[nervix_primitives::test]
-async fn paced_source_preparation_retries_resume_until_the_source_is_ready() {
+async fn paced_ingestor_preparation_retries_resume_until_the_ingestor_is_ready() {
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
-    let mut source = empty_source(observations.clone());
-    source.resume_results = VecDeque::from([
+    let mut connector = empty_ingestor(observations.clone());
+    connector.resume_results = VecDeque::from([
         Ok(IngestorResume::Waiting {
             retry_after: Duration::from_secs(60),
         }),
@@ -564,15 +564,15 @@ async fn paced_source_preparation_retries_resume_until_the_source_is_ready() {
     let mut ready = false;
 
     assert_eq!(
-        prepare_paced_source(&mut source, &mut host, &mut ready, &mut shutdown).await,
+        prepare_paced_ingestor(&mut connector, &mut host, &mut ready, &mut shutdown).await,
         PacedIngestorAction::Restart
     );
     assert_eq!(
-        prepare_paced_source(&mut source, &mut host, &mut ready, &mut shutdown).await,
+        prepare_paced_ingestor(&mut connector, &mut host, &mut ready, &mut shutdown).await,
         PacedIngestorAction::Restart
     );
     assert_eq!(
-        prepare_paced_source(&mut source, &mut host, &mut ready, &mut shutdown).await,
+        prepare_paced_ingestor(&mut connector, &mut host, &mut ready, &mut shutdown).await,
         PacedIngestorAction::Poll
     );
 
@@ -589,25 +589,25 @@ async fn paced_source_preparation_retries_resume_until_the_source_is_ready() {
 }
 
 #[nervix_primitives::test]
-async fn paced_source_preparation_stops_when_the_host_is_inactive() {
+async fn paced_ingestor_preparation_stops_when_the_host_is_inactive() {
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
-    let mut source = empty_source(observations.clone());
+    let mut connector = empty_ingestor(observations.clone());
     let mut host = FakeHost::running(observations.clone());
     host.active = false;
     let (_shutdown_tx, mut shutdown) = watch::channel(false);
     let mut ready = false;
 
     assert_eq!(
-        prepare_paced_source(&mut source, &mut host, &mut ready, &mut shutdown).await,
+        prepare_paced_ingestor(&mut connector, &mut host, &mut ready, &mut shutdown).await,
         PacedIngestorAction::Stop
     );
     assert_eq!(observations.lock().resumes, 0);
 }
 
 #[nervix_primitives::test]
-async fn paced_source_preparation_stops_suspended_intake_after_shutdown_closes() {
+async fn paced_ingestor_preparation_stops_suspended_intake_after_shutdown_closes() {
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
-    let mut source = empty_source(observations.clone());
+    let mut connector = empty_ingestor(observations.clone());
     let mut host = FakeHost::running(observations.clone());
     host.suspend_intake = true;
     let (shutdown_tx, mut shutdown) = watch::channel(false);
@@ -615,14 +615,14 @@ async fn paced_source_preparation_stops_suspended_intake_after_shutdown_closes()
     let mut ready = false;
 
     assert_eq!(
-        prepare_paced_source(&mut source, &mut host, &mut ready, &mut shutdown).await,
+        prepare_paced_ingestor(&mut connector, &mut host, &mut ready, &mut shutdown).await,
         PacedIngestorAction::Stop
     );
     assert_eq!(observations.lock().flushes, 1);
 }
 
 #[nervix_primitives::test]
-async fn source_loop_accepts_no_ack_messages_one_at_a_time() {
+async fn ingestor_loop_accepts_no_ack_messages_one_at_a_time() {
     let observations = run_policy(IngestorAckPolicy::None).await;
     let observations = observations.lock();
     assert_eq!(
@@ -635,7 +635,7 @@ async fn source_loop_accepts_no_ack_messages_one_at_a_time() {
 }
 
 #[nervix_primitives::test]
-async fn source_loop_waits_and_commits_each_sequential_ack() {
+async fn ingestor_loop_waits_and_commits_each_sequential_ack() {
     let observations = run_policy(IngestorAckPolicy::Sequential {
         timeout: Duration::from_secs(1),
         retry: retry_policy(),
@@ -659,17 +659,19 @@ async fn failed_rewind_cannot_commit_past_an_unacknowledged_kafka_position() {
         IngestorAcknowledgementOutcome::Ack,
         IngestorAcknowledgementOutcome::Ack,
     ]);
-    let mut source = empty_source(observations.clone());
-    source.queued().extend(three_messages().into_iter().take(2));
-    source.reject_failures_left = 2;
-    source.replay_rejected = true;
+    let mut connector = empty_ingestor(observations.clone());
+    connector
+        .queued()
+        .extend(three_messages().into_iter().take(2));
+    connector.reject_failures_left = 2;
+    connector.replay_rejected = true;
     let host = IngestorHost::new(FakeHost::running(observations.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let policy = IngestorAckPolicy::Sequential {
         timeout: Duration::from_secs(1),
         retry: retry_policy(),
     };
-    run_ingestor_instance_with_retry(source, host, replayable(policy), shutdown_rx).await;
+    run_ingestor_instance_with_retry(connector, host, replayable(policy), shutdown_rx).await;
     drop(shutdown_tx);
 
     let observations = observations.lock();
@@ -680,9 +682,9 @@ async fn failed_rewind_cannot_commit_past_an_unacknowledged_kafka_position() {
 }
 
 #[nervix_primitives::test]
-async fn source_loop_commits_one_parallel_ack_batch() {
+async fn ingestor_loop_commits_one_parallel_ack_batch() {
     let observations = run_policy(IngestorAckPolicy::Parallel {
-        max_in_flight: NonZeroUsize::new(3).verified("three is a nonzero source batch bound"),
+        max_in_flight: NonZeroUsize::new(3).verified("three is a nonzero ingestor batch bound"),
         batch_timeout: Duration::from_millis(10),
         timeout: Duration::from_secs(1),
         retry: retry_policy(),
@@ -701,7 +703,7 @@ async fn source_loop_commits_one_parallel_ack_batch() {
 }
 
 #[nervix_primitives::test]
-async fn source_loop_resumes_after_connector_configuration_changes() {
+async fn ingestor_loop_resumes_after_connector_configuration_changes() {
     let observations = run_policy_with_refresh(IngestorAckPolicy::None, true).await;
     let observations = observations.lock();
     assert_eq!(observations.resumes, 2);
@@ -732,12 +734,12 @@ async fn individual_settlement_confirms_successes_and_requeues_only_the_failed_d
         ),
     ]);
     let mut host = IngestorHost::new(services);
-    let mut source = empty_source(observations.clone());
+    let mut connector = empty_ingestor(observations.clone());
     let batch =
         IndividualBatch::intake(&mut host, three_messages().into(), Duration::from_secs(1)).await;
     let result = batch
         .settle(
-            &mut source,
+            &mut connector,
             &mut host,
             BatchSettlement {
                 position_class: PositionClass::BrokerRedelivered,
@@ -775,13 +777,13 @@ async fn individual_settlement_retains_each_unsettled_position_once_after_a_tran
         ),
     ]);
     let mut host = IngestorHost::new(services);
-    let mut source = empty_source(observations.clone());
-    source.reject_failures_left = 1;
+    let mut connector = empty_ingestor(observations.clone());
+    connector.reject_failures_left = 1;
     let batch =
         IndividualBatch::intake(&mut host, three_messages().into(), Duration::from_secs(1)).await;
     let result = batch
         .settle(
-            &mut source,
+            &mut connector,
             &mut host,
             BatchSettlement {
                 position_class: PositionClass::BrokerRedelivered,
@@ -830,7 +832,7 @@ fn shuttle_individual_settlement_preserves_every_delivery_until_its_own_graph_ou
                 }));
             }
             let mut host = IngestorHost::new(services);
-            let mut source = empty_source(observations.clone());
+            let mut connector = empty_ingestor(observations.clone());
             let batch = IndividualBatch::intake(
                 &mut host,
                 three_messages().into(),
@@ -839,7 +841,7 @@ fn shuttle_individual_settlement_preserves_every_delivery_until_its_own_graph_ou
             .await;
             let result = batch
                 .settle(
-                    &mut source,
+                    &mut connector,
                     &mut host,
                     BatchSettlement {
                         position_class: PositionClass::BrokerRedelivered,
@@ -900,12 +902,12 @@ async fn individual_settlement_confirms_ready_siblings_while_one_graph_wait_rema
         }
     });
     let mut host = IngestorHost::new(services);
-    let mut source = empty_source(observations.clone());
+    let mut connector = empty_ingestor(observations.clone());
     let batch =
         IndividualBatch::intake(&mut host, three_messages().into(), Duration::from_secs(30)).await;
     let result = batch
         .settle(
-            &mut source,
+            &mut connector,
             &mut host,
             BatchSettlement {
                 position_class: PositionClass::BrokerRedelivered,
@@ -949,13 +951,13 @@ async fn individual_transport_recovery_keeps_admitted_graph_work() {
         );
     });
     let mut host = IngestorHost::new(services);
-    let mut source = empty_source(observations.clone());
-    source.reject_failures_left = 1;
+    let mut connector = empty_ingestor(observations.clone());
+    connector.reject_failures_left = 1;
     let batch =
         IndividualBatch::intake(&mut host, three_messages().into(), Duration::from_secs(30)).await;
     let result = batch
         .settle(
-            &mut source,
+            &mut connector,
             &mut host,
             BatchSettlement {
                 position_class: PositionClass::BrokerRedelivered,
@@ -1004,12 +1006,12 @@ async fn individual_settlement_requeues_only_the_delivery_the_host_refused() {
     let mut services = FakeHost::running(observations.clone());
     services.refused_payload = Some(1);
     let mut host = IngestorHost::new(services);
-    let mut source = empty_source(observations.clone());
+    let mut connector = empty_ingestor(observations.clone());
     let batch =
         IndividualBatch::intake(&mut host, three_messages().into(), Duration::from_secs(1)).await;
     let result = batch
         .settle(
-            &mut source,
+            &mut connector,
             &mut host,
             BatchSettlement {
                 position_class: PositionClass::BrokerRedelivered,
@@ -1052,14 +1054,14 @@ async fn individual_settlement_counts_every_unconfirmed_position_when_shutdown_e
             (2, TestAcknowledgementPlan::Outcome(last)),
         ]);
         let mut host = IngestorHost::new(services);
-        let mut source = empty_source(observations.clone());
-        source.reject_failures_left = usize::from(transport_failed);
+        let mut connector = empty_ingestor(observations.clone());
+        connector.reject_failures_left = usize::from(transport_failed);
         let batch =
             IndividualBatch::intake(&mut host, three_messages().into(), Duration::from_secs(1))
                 .await;
         let result = batch
             .settle(
-                &mut source,
+                &mut connector,
                 &mut host,
                 BatchSettlement {
                     position_class: PositionClass::BrokerRedelivered,

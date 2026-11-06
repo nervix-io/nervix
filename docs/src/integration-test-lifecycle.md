@@ -56,6 +56,16 @@ The selections share a diagnostic build directory, as the canonical lane does, a
 attempt records for each selection.
 `just test-client-recovery-runner` checks scope completeness against feature discovery.
 
+## Focused Wire Schema List Scenarios
+
+`just test-wire-schema-lists` runs `tests/features/runtime/wire_schema_lists.feature` through the
+ordinary harness on one and three nodes: AVRO arrays with declared item types, JSON and CBOR list
+elements under their codec rules, and the refusals of lists a wire type cannot carry. It builds the
+server's console assets and WASM guests and loads the ONNX runtime, which every in-process node
+needs. These cases start no CLI, paced simulation or Python driver, so the recipe does not build
+those tools. Its arguments reach the scenario runner unchanged, such as `--name`, `--concurrency`
+and `--retry`. Broad `just test-scenarios` and CI keep their complete tool prerequisites.
+
 ## Delayed Consensus Heartbeat Answers
 
 The leader-lease regression uses a testing-only control on each follower's consensus probe. The
@@ -117,6 +127,33 @@ A focused startup scenario occupies the observability port to force the first la
 before runtime initialization.
 The harness joins that attempt and retries on a fresh observability port within the same readiness
 budget. The pacer's advertised endpoint, private target and retained connections stay in place.
+
+## Interrupted Membership Fixture
+
+The membership-recovery outline starts two stable voters and arms a one-shot interruption of the
+third node's promotion. The existing storage fault owner pauses an applied write after its durable
+sync. While that pause prevents the first membership step's reply, the fixture drives OpenRaft's
+caller until its effective joint configuration appears, then stops polling that caller. It releases
+the worker and observes the joint membership's applied log entry before refusing the caller's
+continuation with the same no-leader redirect as an unconfirmed lease. The uniform step is never
+submitted by that interrupted call. A retained witness contains both actual voter sets and the
+applied index; no fabricated membership or transport outage establishes the precondition.
+
+The storage pause's existing RAII release handles cancellation, and the complete fixture stays
+inside the existing membership mutation deadline. Its arming and witness observations clone node
+controls from the test registry before awaiting; ordinary builds delegate directly to the usual
+OpenRaft change. The public assertions wait for uniform membership, stop each possible voter in a
+separate example, and require both survivors to apply new commands. The registered diagnostic
+workloads also reach the storage pause's tracked condition-variable wait and release.
+
+Harness voter-convergence waits require the expected voters, `raft.membership_joint: false`, and
+`raft.membership_committed: true` together. A union that matches the requested identities while
+still joint, or a uniform entry that has not committed, cannot complete cluster construction or a
+new member's convergence wait. Real-process start and relaunch convergence require the same
+membership observations alongside agreement on the leader and fresh connected peer targets.
+Missing status observations are not treated as successful readiness.
+The in-process status parser is shared with the focused Rust harness tests, so its readiness
+matrix executes under the standard test runner alongside the real-process convergence reader.
 
 ## Wide Subscription Row Input
 
@@ -1668,9 +1705,10 @@ The harness keeps these boundaries explicit.
   grows with every node's wait for CPU, its control-class queue included, whether or not a peer is
   silent.
   Its completion regression also holds every application-revision reply from the two followers
-  after sampling the reply. Local revision publication and gossip continue, so the same prepared
-  client's user creation, relay creation and cluster-status query must finish in order while
-  those replies remain held. This batch has one twenty-second harness budget. On 25 October
+  after sampling the reply. The followers keep reporting their progress to the leader, so the same
+  prepared client's user creation, relay creation and cluster-status query must finish in order,
+  through those reports, while the replies remain held. This batch has one twenty-second harness
+  budget. On 25 October
   2026, with 16 runtime workers, 48 slots, six large materialized workloads and 192 distinct
   health cases, 88 original requests exceeded nine seconds but all succeeded before fault
   release in 9.016 to 11.998 seconds. Every pre-release status still reported node-3 connected.

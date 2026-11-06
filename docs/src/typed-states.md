@@ -325,8 +325,8 @@ transport offset conversion. The SDK's indexed authoring and typed-inspection vi
 empty JSON value arrays. These driver representations never enter semantic Models or plans.
 
 A NATS ingestor or emitter Model distinguishes `NATS SUBJECT` and `NATS STREAM` entities in its archived union.
-The registry's `NERVIX MODEL ITS` archive signature identifies the current Model layout, including
-the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types, explicit `BASE64` codec
+The registry's `NERVIX AVRO ITEM` archive signature identifies the current Model layout, including
+the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
 encoding, a Pulsar subscription's required type and an owned subscription's required start position,
 a Kafka consumer group's required start position, the required 16-bit branch partition count,
 typed ingestor instancing, Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source,
@@ -336,7 +336,7 @@ service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of s
 emitter writes beside its publishing mode, its retained-publication flag and MQTT 5 property
 mappings, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`,
 that header state, and inferencer state bindings with their initial expressions.
-Consensus's `raft_intake_inference_` keyspaces and current `ClusterState`
+Consensus's `raft_inference_avro_` keyspaces and current `ClusterState`
 metadata encoding, 14, identify its stored shapes, including the partition count of every resolved branch
 declaration in the committed schedule and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations. The runtime state store's
@@ -661,6 +661,19 @@ reachable member through an empty address. Other service advertisements, includi
 may be absent independently. Absence says the service is unavailable; it does not invent a reason.
 Peer selection and transport handling follow the [interconnect contract](./interconnect.md).
 
+**Voting configuration.** A membership planning snapshot retains OpenRaft's effective and
+committed membership publications, with every constituent voter set. It derives the voter union
+only for identity and admission checks; the union cannot stand in for the joint configuration's
+quorum state or its last target set. Completing a joint transition is a distinct planned mutation.
+The completion boundary checks that state and proposes any continuation in one OpenRaft Core
+turn. Its typed outcome distinguishes unchanged effective and committed records, an applied
+continuation carrying its returned voter set, and the original membership write error. A prior joint
+observation cannot force a uniform Core to append a duplicate entry. Only the continuation proposes
+a membership entry, using the Core's current joint target. The expected
+uniform target is complete only when its effective membership entry is committed.
+These are observation and planning values, not a second persisted membership encoding. See
+[Consensus Storage And Replication](consensus-storage-and-replication.md#follower-catch-up-and-learner-promotion).
+
 **Startup voter evidence.** The reconciliation task owns a process-local set of typed node names
 actually observed live, including observations made while following. An absent voter in that set
 means no live observation; Chitchat's current dead verdict does not supply one. A first relayed
@@ -862,7 +875,7 @@ a nearby instant: a program or `TIMESTAMP AT` that reads the field refuses the m
 `validation` message error naming the field, and a field nothing reads costs nothing. The retained
 copy a quiesce buffer replays keeps the unrepresentable state with its description.
 
-The MongoDB sink also distinguishes each failed write's document answers: delivered, rejected with
+The MongoDB emitter also distinguishes each failed write's document answers: delivered, rejected with
 the server's definitive refusal code, or unresolved. An insert's implicit applied-document account
 and a verbose bulk write's explicit applied indexes are separate request variants. The unsatisfied
 write concern remains an optional failure beside those answers; it never replaces the documents'

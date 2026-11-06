@@ -1,16 +1,16 @@
-//! The vocabulary of application sessions as a source and an emitter.
+//! The vocabulary of application sessions as an ingestor and an emitter.
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The producer source Model with its acknowledgement mode, the alterations of the
+//! - **Owns.** The producer ingestor Model with its acknowledgement mode, the alterations of the
 //!   ingestors that read it, the consumer emitter Model, and what each entity declares.
-//! - **Depends on.** The shared source and emitter declarations, the acknowledgement and retry
+//! - **Depends on.** The shared ingestor and emitter declarations, the acknowledgement and retry
 //!   vocabulary, and the schema name a body references.
 //! - **Must not know.** How a session attaches, how a batch is submitted, admitted or delivered,
 //!   or which node serves a producer or a consumer.
 //!
 //! No client Model configures this connector: an application reaches it through its own session.
-//! A producer's batches already carry the ingestor's input schema, so its source is held by
+//! A producer's batches already carry the ingestor's input schema, so its entity Model is held by
 //! [`IngestorInput`](crate::IngestorInput) beside the transport contract and never pairs with a
 //! codec, and an alteration of its ingestor holds no codec to set either.
 
@@ -149,7 +149,7 @@ impl IngestorDeclaration for ClientProducerIngestor {
 
 connector_ingestor_kinds! {
     connector Client = "CLIENT";
-    /// The entities a client source reads.
+    /// The entities a client ingestor reads.
     pub enum ClientIngestorEntity {
         Producer(ClientProducerIngestor => ClientProducerIngestorChange) = "PRODUCER", "Client batches";
     }
@@ -241,7 +241,7 @@ impl AlteredIngestorEntity for ClientProducerIngestor {
         input.client_entity_mut().verified(ALTERED_PAIR_CHECKED)
     }
 
-    /// A client source writes no quiesce mode: it honors `SUSPEND` alone, which setting changes
+    /// A client ingestor writes no quiesce mode: it honors `SUSPEND` alone, which setting changes
     /// nothing.
     fn set_quiesce_of(
         input: &mut IngestorInput,
@@ -256,7 +256,7 @@ impl AlteredIngestorEntity for ClientProducerIngestor {
         Ok(())
     }
 
-    /// A client source names the schema its producers write, and reads through no client.
+    /// A client ingestor names the schema its producers write, and reads through no client.
     fn client_of_mut(_input: &mut IngestorInput) -> Option<&mut ClientName> {
         None
     }

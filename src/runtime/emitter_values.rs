@@ -173,7 +173,7 @@ impl MappedRowEmitter {
         let mut carriers = Vec::with_capacity(run.carriers.len());
         let mut rows = 0_usize;
         for projected in &run.carriers {
-            // A emitter that resolves acknowledgements on its own commit boundary takes the ones its
+            // An emitter that resolves acknowledgements on its own commit boundary takes the ones its
             // write carries, so the host stops owning them the moment the write accepts the rows.
             let retained = match acknowledgements {
                 DeliveredAcknowledgements::Connector => {
@@ -547,7 +547,7 @@ impl MappedValuesProjection {
     /// The mapped columns named by their target columns in mapping order, each nullable exactly
     /// when its expression can produce a null for a row the mapping does not reject. A row whose
     /// mapping fails holds a null in place of the value it could not produce, which is why the
-    /// mapped batch's own schema keeps every column nullable; a emitter that requires a value in a
+    /// mapped batch's own schema keeps every column nullable; an emitter that requires a value in a
     /// column checks the mapping against these columns before its first batch arrives.
     pub(in crate::runtime) fn value_schema(&self) -> StdArc<arrow_schema::Schema> {
         let output_fields = self.program.program.output_schema.fields();

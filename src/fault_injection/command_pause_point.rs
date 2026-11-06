@@ -44,6 +44,7 @@ pub(super) enum CommandPausePoint {
     ForcedRecoveryMissingSchedule(ClusterNodeName),
     RuntimePreparation(ClusterNodeName),
     ApplicationRevisionResponse(ClusterNodeName),
+    ApplicationProgressReport(ClusterNodeName),
     ReferenceLookup(ClusterNodeName),
     DurableAdmission(ClusterNodeName),
     Reconciliation {

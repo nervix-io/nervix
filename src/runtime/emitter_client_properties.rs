@@ -32,7 +32,7 @@ use crate::runtime_schema::generated_batches::{
 const CASE_BYTES: usize = 2048;
 
 /// The rows of `source` a delivery carries: those `mask` names by their bit, in the order they
-/// lie in the batch. A emitter packs a delivery from the pending rows of one branch, which need not
+/// lie in the batch. An emitter packs a delivery from the pending rows of one branch, which need not
 /// be adjacent, and never packs none, so a batch with rows always gives at least its first one.
 fn delivered_rows(source: &RecordBatch, mask: u8) -> Vec<usize> {
     let mut rows = Vec::new();

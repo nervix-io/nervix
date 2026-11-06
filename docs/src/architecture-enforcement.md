@@ -31,6 +31,13 @@ generates is read back as policy. `just validate-typed-errors` is a separate sou
 count: it rejects `Result<_, String>` in product code outright, and
 [Errors And Diagnostics](errors-and-diagnostics.md) owns it.
 
+Connector declaration checks are separate from the Rust source and compiler rules.
+`just validate-connector-matrix` compares generated manual regions with the vocabulary's compiled
+entity and client declarations; `just validate-connector-capabilities` checks each declared runtime
+capability against a named public scenario. Both run in `just validate`, and neither changes the
+six structural counts or treats documentation prose as product policy. [Entity
+declarations](connector-contract.md#entity-declarations) owns their inputs and limits.
+
 ## Rule Contracts
 
 The eighteen rule families below have one implementation each. The family name remains useful

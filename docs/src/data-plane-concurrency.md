@@ -366,6 +366,7 @@ writer.
 | Clock installation | Each domain-clock lifecycle on each node publishes the complete missing, stopped, uninstalled, unpaced, or paced installation. | A read validates its bound lifecycle generation against one installation, then advances that installation's nondecreasing timestamp watermark atomically. A same-generation replacement retains the watermark; a different generation cannot be clamped by a stale reader. |
 | Accepted clock progress | Each runtime domain publishes its newest accepted generation, tick id, logical boundary, and authority UTC observation through a watch. | The watch serializes comparison and replacement, so concurrent progress deliveries cannot regress the id or its authority UTC observation. Generation changes and stops publish absence. A session observer subscribes before reading, retains a sender for as long as its attachment lives, so removing the domain wakes it instead of closing its wait, and uses an execution snapshot only to add its serving node's logical reading to a tick frame. |
 | Committed domain installation | Each node's runtime counts its installations of the committed domain states through a watch. An installation advances the count only after it has inserted, updated, or removed every domain. | A session attach waits for the first count before it looks up a domain, so a node that is still starting never refuses a domain the cluster has. Because the count advances after the domains are in place, the wait never releases before they are observable. |
+| Application progress | Each node publishes its process incarnation's progress record through a watch. Its writers, the consensus applied revision, the runtime applicator and the domain clock installer, only advance a phase, and an advance that moves nothing publishes nothing. The progress reports a node holds while it leads are a second watch over one map keyed by incarnation; each held report replaces it under the watch's lock, merging the incarnation's phases without moving one back and keeping only the incarnations the availability view holds live besides the reporter. | A revision barrier subscribes to both watches before it reads the record or the held reports, so an advance or a report after that read wakes it. The reporter registers on the record watch and the Raft leadership watch before it reads, and keeps one report in flight carrying the record it read last. No record, batch or acknowledgement path reaches either watch. A production-owner Shuttle check explores reports and advances racing a waiting barrier; the async watch waits remain outside Deloxide's detector. |
 | Forced-recovery destination installation | A recovery subscribes to the domain installation watch before looking for its execution, and selects its matching node under the schedule application mutex. | The watch retains a publication racing the absence check; the mutex orders selection after graph construction, even when domain lifecycle publication occurred first. The existing preparation deadline bounds both waits. The mutex is released before checkpoint transfer and guest restoration. A production-owner Shuttle check explores installation racing selection; async mutex and watch waits remain outside Deloxide's detector. |
 | Runtime-state assignment | Each state placement publishes one packed atomic binding containing its generation and capability. Replication roles are a separate immutable published snapshot. A running Kafka ingestor commits its domain offsets through a published originator, which schedule application replaces when a reassignment rebinds the offsets while the ingestor keeps running on its node. | A per-message operation admits itself, compares the exact binding it was granted, and proceeds only while that generation still grants the required capability. It never takes the assignment barrier. A commit loads the ingestor's published originator once; an ingestor instance the schedule stopped keeps its own superseded originator and stays refused. |
 | Ingestor quiesce decision | Each ingestor publishes the declared and pending modes, active causes, source support, and derived intake decision as one value. Concurrent lifecycle changes derive their replacement from the current publication. | Polling and per-message intake make one load to decide whether to dispatch, suspend, skip, buffer, drop, or reject. A source host retains its last observed publication across dispatch awaits; its change wait registers before comparing that publication with the current one, so an engagement or release in the gap wakes it. The retained-payload lock is reached only after the published decision selects buffering. |
@@ -733,6 +734,8 @@ at most `BATCH MAX MESSAGES` prepared members and is sealed on metadata or sourc
 member, or the message-count limit. Each encoding attempt uses the codec's bounded writer under
 `MAX SIZE`. The emitter retains original batch and row membership for acknowledgements and errors.
 
+An emitter evaluates only envelope clauses its entity declares and retains their prepared values
+with the payload in its pending work, so a retry uses the same envelope and input-row identities.
 A record emitter prepares its external bytes once before retention, including when a payload carries
 one row without `BATCH`. A Sentry envelope therefore keeps its event identity and complete bytes
 across retries and connector replacement; preparation adds no shared owner or synchronization.
@@ -791,8 +794,8 @@ This uses the existing semaphore adapter and makes no new memory-ordering claim.
 production connector worker while filesystem and consensus jobs complete, then verifies permit
 and byte-reservation return.
 
-The consumer a source or inspector shares with its jobs, and the producer a sink shares with its
-finish's flush, are each destroyed by one more connector storage job, which their retirement
+The consumer an ingestor or inspector shares with its jobs, and the producer an emitter shares with
+its finish's flush, are each destroyed by one more connector storage job, which their retirement
 submits once the last handle is dropped and which waits for a place rather than being refused; see
 [Kafka client retirement](./connector-contract.md#kafka-client-retirement). The retirement takes no
 control turn, since no job holds the client any more, and adds no synchronization of its own: the
@@ -800,6 +803,10 @@ shared pointer's own count decides which drop is the last, and the job enters th
 its existing wait for a place. Native broker waits, the destruction's included, are outside Shuttle
 and Deloxide's lock detector; the ordinary connector and retirement regressions and the
 one-/three-node stalled-broker and retirement scenarios own that evidence.
+
+An ingestor's typed metadata remains attached to its transport message. The host visits only fields
+the accepted programs request; a failed field projection stays with that message and its error
+path. The visit creates no branch-wide metadata map or shared publication.
 
 Kafka record metadata stays with its owning message until the host has projected the fields its
 programs read. Keys are borrowed, timestamps are typed when a visit hands them over, and metadata

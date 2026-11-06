@@ -660,6 +660,16 @@ test-command-recovery-scenarios: build-web-console wasm-processor-guests downloa
         --tags '@client_wire_transaction_batch_finalization_recovery or @client_wire_applying_probe_recovery' \
         --concurrency 1 --retry 0
 
+# Exercise list fields of every schemaful wire format through the in-process cluster: AVRO item
+# types, list-element ENCODE rules and the refusals of lists a wire type cannot carry.
+[positional-arguments]
+test-wire-schema-lists *args: build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/runtime/wire_schema_lists.feature "$@"
+
 # Exercise explicit COMMIT outcome recovery and a recorded failed prefix through in-process nodes.
 test-explicit-commit-recovery: build-web-console wasm-processor-guests download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- \
@@ -3730,12 +3740,12 @@ test-chaos-rate-probe:
 test-chaos-hold-quorum:
     exec bash scripts/chaos/tests/hold-quorum-self-test.sh
 
-# Judge a failover-length pause's sink progress and source consumer-group handoff from retained
+# Judge a failover-length pause's emitter progress and source consumer-group handoff from retained
 # pause timelines without a product image.
 test-chaos-pause-delivery:
     exec bash scripts/chaos/tests/pause-delivery-self-test.sh
 
-# Retain shell coverage of the failover-length pause's sink progress and consumer-group handoff controls.
+# Retain shell coverage of the failover-length pause's emitter progress and consumer-group handoff controls.
 coverage-chaos-pause-delivery:
     #!/usr/bin/env bash
     set -euo pipefail

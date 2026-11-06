@@ -620,6 +620,13 @@ revision restores the save under the active clock at `START`.
 
 ### Codecs And Ingress
 
+Before a schemaful codec is accepted, the registry refuses a wire field that cannot carry its
+internal field with `RegistryError::IncompatibleSchema`, naming the codec and the field: a type
+mismatch, an AVRO array nested to another depth than the internal `ARRAY` and `VEC` levels, a
+`DATETIME` or `BYTES` value or list element that travels as text without its `ENCODE` rule, or a
+`BASE64` rule on bytes the format carries natively. A rule whose field's innermost elements are not
+of the rule's type is the registry's `InvalidModel` refusal of the codec.
+
 Codec compilation, decoding and encoding return `CodecError` reports. The codec context names the
 codec, and the field when one is at fault, and the typed reason stays beneath it: a
 `CodecContractError` for a declaration or use the wire format does not support, such as a missing
@@ -1221,10 +1228,10 @@ starts where the group's committed offset or the ingestor's `START AT` places it
 
 A Kafka consumer takes the commands charge of the job that will destroy it before it is created,
 and a refused charge keeps `AdmissionError` beneath `KafkaTopicIngestorError::RetirementAdmission`. It
-fails the source's open or the partition inspector's start, as transiently as a refused control
+fails the ingestor's open or the partition inspector's start, as transiently as a refused control
 call. A Kafka producer takes the same charge, and a refused one keeps `AdmissionError` beneath
-`KafkaProducerStartError::RetirementAdmission` beneath `SinkStartError::Initialize`, whose
-description names the refused charge; the emitter starts its sink again after its retry delay. See
+`KafkaProducerStartError::RetirementAdmission` beneath `EmitterOpenError::Initialize`, whose
+description names the refused charge; the emitter starts again after its retry delay. See
 [Kafka client retirement](./connector-contract.md#kafka-client-retirement). A retirement has no
 caller to fail, so its supervisor reports a destruction job that panicked at `debug`.
 
@@ -1496,7 +1503,7 @@ key and the expected type with the VM's compile failure beneath it. An `SQS QUEU
 writes `DELAY` for a FIFO queue, a `DELAY` other than whole seconds up to 900s, or a
 `DEDUPLICATION ID` for a standard queue is refused with `SqsFifoQueueDelay`, `SqsDelay` or
 `SqsStandardQueueDeduplication`, naming the queue or the duration as written. These are command
-refusals before publication, including during `ALTER`, rather than retried source or sink
+refusals before publication, including during `ALTER`, rather than retried ingestor or emitter
 initialization failures. They never include a record's values. An ingestor whose delivery mode lacks
 the option choices its entity declares for it, such as an MQTT `ACK` mode outside a persistent
 session at QoS 1 or 2, is `ConnectorDeclarationIssue::Delivery`, carrying the vocabulary's typed
@@ -2490,6 +2497,17 @@ and a move never as an unconfirmed lease: the context's text says which, so an o
 rendered report or log line tells lease trouble from an election without a separate counter. The
 Raft or I/O error stays beneath the context as the report's cause.
 
+Membership timeout success is decided from both the effective configuration and its committed
+publication. A matching voter union does not convert that timeout into success while the expected
+uniform target remains joint or uncommitted. A refusal of a uniform continuation keeps the same
+typed Raft write classification; it does not mean the preceding joint entry was rolled back.
+A fatal failure reading Core or submitting its conditional completion passes through the same
+Raft write classifier with its original cause. The completion responder retains the original
+membership write error, including uncertainty, rather than interpreting it as a definite refusal.
+Finding that Core is already uniform is an ordinary completion outcome carrying its separate
+effective and committed records; it proposes no additional membership entry, even when a preceding
+joint observation became stale before Core handled the request.
+
 Trace-level vote and pre-vote transport completion events record the existing nested result before
 its foreign-error conversion, beside the local listener, peer and elapsed time. A transport error
 and a peer's typed refusal therefore remain distinguishable in the diagnostic. Cancellation by
@@ -2980,10 +2998,12 @@ command outcome names another execution reference than its command's is a protoc
 dispatcher reports `protocol violation: the reply to command execution '<own>' names execution
 '<other>'` in the terminal, shows nothing of that outcome as the command's, stops reading the
 connection, and recovers the command under its own reference on the next one. The console WebSocket
-session also stops on a reply that cannot be decoded or reassembled, or carries an unexpected body
-kind. It reports `protocol violation:` with the cause and that pending command outcomes are unknown.
-It recovers every waiting command whole, under its original reference and issue order, after the
-new connection restores the session. The console WebSocket
+session also stops on a reply that cannot be decoded or reassembled, and on a reply whose kind does
+not answer its request, which it reports as `protocol violation: the server answered with a reply
+of another kind`. It checks that kind before it applies anything the reply carries, so such a reply
+is never shown as a command's failure. Each report gives `protocol violation:` with the cause and
+says that pending command outcomes are unknown. The console recovers every waiting command whole,
+under its original reference and issue order, after the new connection restores the session. The console WebSocket
 transport closes a call whose client broke its framing with the codec's close code, a second
 download request with `1008`, an answer that does not fit a frame with `1011`, and every call when
 the node stops with `1001`.

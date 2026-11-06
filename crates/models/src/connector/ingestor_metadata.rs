@@ -1,4 +1,4 @@
-//! The typed `metadata` namespace a source exposes to its ingestor's programs.
+//! The typed `metadata` namespace an ingestor exposes to its programs.
 //!
 //! Layer: vocabulary.
 //!
@@ -6,7 +6,7 @@
 //!   exact types, that the entity's messages expose as `metadata.<field>`, and how a declared field
 //!   reads as a schema field.
 //! - **Depends on.** The schema field Model.
-//! - **Must not know.** Which source exposes a field, how a message hands its value over, which
+//! - **Must not know.** Which ingestor exposes a field, how a message hands its value over, which
 //!   fields a host builds columns for, or how a program reads them.
 //!
 //! Every ingestor entity declares its fields once, beside its other capabilities. The registry
