@@ -8186,6 +8186,7 @@ impl TermLineKind {
 )]
 mod tests {
     mod foreign_execution;
+    mod reply_kind;
     mod unreadable_reply;
 
     use leptos::prelude::Owner;
@@ -10798,6 +10799,19 @@ mod tests {
             .collect()
     }
 
+    /// The one verified frame a server sends `reply` in.
+    fn reply_frame(reply: &Reply) -> VerifiedFrame<ServerFrame> {
+        let ReplyDelivery::Frame(frame) = reply
+            .encode(&SESSION_LIMITS)
+            .assured("a test reply is far below the session limits")
+        else {
+            panic!("a test reply fits one frame");
+        };
+        frame
+            .verify(&SESSION_LIMITS)
+            .assured("an encoded frame verifies under the limits it was encoded for")
+    }
+
     fn suggestion_frames(request_id: RequestId) -> Vec<VerifiedFrame<ServerFrame>> {
         let small_frames = SessionLimits::try_from(SessionLimitSettings {
             frame_bytes: std::num::NonZeroUsize::new(1024).assured("a literal nonzero size"),
@@ -12759,7 +12773,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_create_and_wrong_command_replies_report_terminal_failures() {
+    fn a_cancelled_create_fails_and_a_reply_of_another_kind_interrupts_its_session() {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Pending);
             let mut requests = SessionRequests::new();
