@@ -98,7 +98,4 @@ pub use row_requests::{
     ExceededLimit, MeasuredRequest, RowOversize, RowRequest, RowRequestLimits, RowRequests,
 };
 pub use service_url::{ServiceUrl, ServiceUrlError};
-pub use tls::{
-    RustlsClientConfigProvider, ServerCertificateTrust, TlsClientConfigError,
-    install_rustls_crypto_provider,
-};
+pub use tls::{RustlsClientConfigProvider, ServerCertificateTrust, TlsClientConfigError};

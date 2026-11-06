@@ -28,11 +28,7 @@ use nervix_models::{
     RemoteAckResolution, RemoteRuntimeField, RemoteRuntimeRecordMetadata, ResourceName, Setting,
     SubscriptionBinding, Timestamp, Unit, WasmStateResetScope,
 };
-use nervix_primitives::{
-    sync::{mpsc, watch},
-    unmodeled::sync::OnceLock,
-};
-use nervix_recovery::Discarded as _;
+use nervix_primitives::sync::{mpsc, watch};
 use rkyv::{Archive, Deserialize, Serialize};
 use strum::IntoStaticStr;
 use thiserror::Error;
@@ -1432,6 +1428,8 @@ pub enum TlsPemFailureKind {
 
 #[derive(Debug, Error)]
 pub enum TlsConfigError {
+    #[error("interconnect TLS algorithm policy is invalid")]
+    AlgorithmPolicy,
     #[error("io error: {0}")]
     Io(#[from] io::Error),
     #[error("tls error: {0}")]
@@ -1474,18 +1472,6 @@ pub enum TlsConfigError {
     ClockUnavailable,
     #[error("the certificate clock reads outside the representable certificate time range")]
     ClockOutOfRange,
-}
-
-pub fn install_rustls_crypto_provider() {
-    static PROVIDER: OnceLock<()> = OnceLock::new();
-    PROVIDER.get_or_init(|| {
-        rustls::crypto::aws_lc_rs::default_provider()
-            .install_default()
-            .discarded(
-                "a provider the host installed first is the one this transport would have \
-                 installed",
-            );
-    });
 }
 
 #[cfg(test)]

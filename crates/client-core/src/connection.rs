@@ -2,7 +2,7 @@
 //!
 //! - **Owns.** The connect options, the channel a server is reached over, the `authorization`
 //!   metadata every call carries, and the directory of servers a lost session reconnects to.
-//! - **Depends on.** tonic's transport, rustls, and the native DNS resolver.
+//! - **Depends on.** tonic's transport, the cryptography boundary and the native DNS resolver.
 //! - **Must not know.** What the calls on a channel carry.
 
 use std::{str::FromStr as _, time::Duration};
@@ -14,7 +14,6 @@ use indexmap::IndexSet;
 use meticulous::OptionExt as _;
 use nervix_dns::{DnsConfiguration, DnsResolver};
 use nervix_recovery::Discarded as _;
-use rustls::crypto::aws_lc_rs;
 use tonic::{
     Request,
     metadata::{AsciiMetadataValue, errors::InvalidMetadataValue},
@@ -154,10 +153,7 @@ impl GrpcConnector {
             .map_err(|error| Report::new(ClientError::InvalidServerUri(error)))?;
         endpoint = endpoint.connect_timeout(self.options.connect_timeout);
         if is_https {
-            aws_lc_rs::default_provider().install_default().discarded(
-                "a provider another client installed first is the one this client would have \
-                 installed",
-            );
+            nervix_crypto::tls::install_default_provider();
             let mut tls = ClientTlsConfig::new();
             if let Some(pem) = self.options.ca_certificate_pem.clone() {
                 tls = tls.ca_certificate(Certificate::from_pem(pem));

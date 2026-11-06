@@ -2,20 +2,18 @@
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** NATS seed and credentials decoding, public-key encoding and the driver auth callback.
-//! - **Depends on.** AWS-LC signing, wire encodings, primitive shared ownership and the NATS driver.
+//! - **Depends on.** The cryptography boundary, wire encodings, primitive ownership and NATS.
 //! - **Must not know.** Models, graph routing, connector lifecycle or TLS policy.
 //!
-//! AWS-LC signing moves to `nervix-crypto` when that boundary is established (FIPS Prep 02).
-
 #![cfg_attr(
     nervix_lint,
     nervix::layer(engine, reason = "owns the NATS authentication wire boundary")
 )]
 
 use async_nats::{Auth, AuthError, ConnectOptions};
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair as _};
 use data_encoding::BASE32_NOPAD;
 use error_stack::{Report, ResultExt as _};
+use nervix_crypto::ed25519::Ed25519SigningKey;
 use nervix_primitives::sync::StdArc;
 use thiserror::Error;
 use zeroize::Zeroizing;
@@ -79,7 +77,7 @@ pub(super) enum NatsAuthenticationError {
 }
 
 struct SigningIdentity {
-    key: Ed25519KeyPair,
+    key: Ed25519SigningKey,
     public: String,
 }
 
@@ -103,11 +101,11 @@ impl SigningIdentity {
         if CHECKSUM.checksum(&raw[..34]) != u16::from_le_bytes([raw[34], raw[35]]) {
             return Err(Report::new(NatsAuthenticationError::SeedChecksum));
         }
-        let key = Ed25519KeyPair::from_seed_unchecked(&raw[2..34])
+        let key = Ed25519SigningKey::from_seed(&raw[2..34])
             .change_context(NatsAuthenticationError::SigningKey)?;
         let mut public = [0u8; PUBLIC_KEY_BYTES];
         public[0] = USER_PUBLIC_KEY_PREFIX;
-        public[1..33].copy_from_slice(key.public_key().as_ref());
+        public[1..33].copy_from_slice(key.public_key());
         let checksum = CHECKSUM.checksum(&public[..33]).to_le_bytes();
         public[33..].copy_from_slice(&checksum);
         Ok(Self {
@@ -151,8 +149,8 @@ impl AuthenticationIdentity {
         auth.signature = Some(
             signer
                 .key
-                .try_sign(nonce)
-                .map_err(AuthError::new)?
+                .sign(nonce)
+                .map_err(|error| AuthError::new(error.into_error()))?
                 .as_ref()
                 .to_vec(),
         );

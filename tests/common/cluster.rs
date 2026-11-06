@@ -505,7 +505,7 @@ fn ensure_dev_tls_assets() -> io::Result<()> {
 
 pub(crate) fn dev_tls_ca_pem() -> io::Result<Vec<u8>> {
     ensure_dev_tls_assets()?;
-    nervix_interconnect::install_rustls_crypto_provider();
+    nervix_crypto::tls::install_default_provider();
     std::fs::read(dev_tls_ca_path()?).map_err(io::Error::other)
 }
 

@@ -125,6 +125,12 @@ connector crate.
 The contract may name shared vocabulary types, Arrow, the async and error facilities needed by its
 boundary, the node's bounded executor, and configuration helpers for TLS, HTTP clients, service
 URLs, resource mounts, and physical time. It must not name the registry, runtime, relays, branches, schedules, or a driver.
+TLS provider selection belongs to `nervix-crypto`. Shared connector TLS uses its outward process
+default, keeping the full AWS-LC algorithms and a provider installed by an embedding host. SQS
+projects the boundary's typed outward choice into Smithy's AWS-LC mode, retaining the SDK's cipher
+filtering. The interconnect has an independent fixed provider, so its algorithm restrictions do not
+change connector TLS. [Cryptography](cryptography.md#algorithm-policy) owns this policy; connectors
+still own trust roots, identities and protocol negotiation.
 An integration crate may depend on the contract, vocabulary, Arrow, and its own driver stack. It
 must not depend on the server, another integration crate, or runtime collectors. Driver libraries
 belong in that integration's manifest, with test-harness dependencies kept separately. A

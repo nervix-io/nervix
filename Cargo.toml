@@ -166,6 +166,7 @@ nervix-connector-syslog = { workspace = true }
 nervix-connector-websockets = { workspace = true }
 nervix-connector-zeromq = { workspace = true }
 nervix-consensus = { workspace = true }
+nervix-crypto = { workspace = true }
 nervix-dataflow-graph = { workspace = true }
 nervix-deadlock = { workspace = true, optional = true }
 nervix-dns = { workspace = true }
@@ -334,6 +335,7 @@ members = [
   "crates/connectors/websockets",
   "crates/connectors/zeromq",
   "crates/consensus",
+  "crates/crypto",
   "crates/dataflow-graph",
   "crates/deadlock",
   "crates/dns",
@@ -576,6 +578,7 @@ nervix-connector-syslog = { package = "nervix-connector-syslog", path = "crates/
 nervix-connector-websockets = { package = "nervix-connector-websockets", path = "crates/connectors/websockets" }
 nervix-connector-zeromq = { package = "nervix-connector-zeromq", path = "crates/connectors/zeromq" }
 nervix-consensus = { package = "nervix-consensus", path = "crates/consensus" }
+nervix-crypto = { package = "nervix-crypto", path = "crates/crypto" }
 nervix-dataflow-graph = { package = "nervix-dataflow-graph", path = "crates/dataflow-graph" }
 nervix-deadlock = { package = "nervix-deadlock", path = "crates/deadlock" }
 nervix-dns = { package = "nervix-dns", path = "crates/dns" }

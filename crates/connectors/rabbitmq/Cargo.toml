@@ -39,6 +39,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 bolero = { workspace = true }
+nervix-crypto = { workspace = true }
 nervix-model-harness = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native", "test-util"] }
 nervix-test-environment = { workspace = true }

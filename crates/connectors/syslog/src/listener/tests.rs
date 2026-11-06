@@ -981,7 +981,7 @@ async fn a_connection_without_an_idle_deadline_waits_for_its_sender() {
 
 /// A TLS acceptor for a self-signed `localhost` identity.
 fn tls_acceptor() -> TlsAcceptor {
-    nervix_connector::install_rustls_crypto_provider();
+    nervix_crypto::tls::install_default_provider();
     let identity = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
         .assured("a self-signed identity for a fixed name can be generated");
     let key = rustls_pki_types::PrivateKeyDer::Pkcs8(rustls_pki_types::PrivatePkcs8KeyDer::from(

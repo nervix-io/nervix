@@ -273,6 +273,12 @@ cause; TLS files supplied in HTTP mode are refused. Certificates are loaded once
 requires restarting the node. A running listener retains the loaded identity. Client trust remains
 explicit: the native client uses the supplied CA, while the browser uses its own trust store.
 
+Native session clients and the server's certificate/key constructors obtain their outward rustls
+provider from `nervix-crypto`. It keeps the full AWS-LC default algorithm set and a process default
+already installed by an embedding host. The interconnect's fixed algorithm set is an independent
+provider and does not restrict public session TLS. [Cryptography](cryptography.md#algorithm-policy)
+owns these provider choices; certificate trust and the listener's configuration remain as above.
+
 ### Console WebSocket
 
 The web console reaches the same session engine over a WebSocket, `GET /console/ws` on the console
