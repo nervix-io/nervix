@@ -4428,3 +4428,10 @@ Stopping the domain before restarting the broker rules out replay by
 Nervix as the explanation for the surviving message. This broker is separate from the suite's
 shared RabbitMQ service, so the restart cannot disrupt another scenario. The after hook removes it
 explicitly after node teardown, including when the scenario fails before its restart step.
+
+### NATS authentication selection
+
+`just test-nats-authentication [arguments]` prepares the existing in-process scenario dependencies
+and selects only `tests/features/runtime/nats_authentication.feature`. It retains the ordinary
+harness, broker Testcontainers, one-/three-node examples and argument forwarding; it omits unrelated
+CLI, formatter and paced-simulation tool builds. The full scenario entry point remains unchanged.
