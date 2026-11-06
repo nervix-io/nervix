@@ -22,6 +22,7 @@ mod host_stack;
 mod reply_kind;
 #[cfg(not(feature = "shuttle"))]
 mod reports;
+mod request_kinds;
 #[cfg(not(feature = "shuttle"))]
 mod restoration;
 #[cfg(not(feature = "shuttle"))]
@@ -438,6 +439,11 @@ fn reader_fixture(capacity: usize) -> ReaderFixture {
     }
 }
 
+/// What a listing's reply must be: a domain list, a rejection or a cancellation.
+fn listing() -> ExpectedReply {
+    ExpectedReply::of(&ClientRequest::ListDomains)
+}
+
 /// Registers a waiter for `request`, which a reply must answer as a server answers that request.
 async fn register(pending: &Mutex<PendingReplies>, request: &ClientRequest) -> RegisteredRequest {
     pending
@@ -472,64 +478,6 @@ fn unsubscribe_request() -> ClientRequest {
         subscription: SubscriptionName::parse("live")
             .assured("the test subscription name is valid"),
     })
-}
-
-#[test]
-fn every_wire_request_kind_converts_to_the_client_request_kind_of_the_same_request() {
-    use nervix_client_wire::ClientRequestKind;
-    use strum::IntoEnumIterator as _;
-
-    // Written out independently of the conversion, in the order the wire contract declares them.
-    let expected = [
-        (ClientRequestKind::Command, RequestKind::Command),
-        (ClientRequestKind::Suggest, RequestKind::Suggest),
-        (ClientRequestKind::Choice, RequestKind::Choice),
-        (ClientRequestKind::ListDomains, RequestKind::ListDomains),
-        (ClientRequestKind::SelectDomain, RequestKind::SelectDomain),
-        (
-            ClientRequestKind::AttachTransaction,
-            RequestKind::AttachTransaction,
-        ),
-        (
-            ClientRequestKind::InspectTransaction,
-            RequestKind::InspectTransaction,
-        ),
-        (ClientRequestKind::Subscribe, RequestKind::Subscribe),
-        (ClientRequestKind::Unsubscribe, RequestKind::Unsubscribe),
-        (ClientRequestKind::Cancel, RequestKind::Cancel),
-        (
-            ClientRequestKind::AttachDomainClock,
-            RequestKind::AttachDomainClock,
-        ),
-        (
-            ClientRequestKind::DetachDomainClock,
-            RequestKind::DetachDomainClock,
-        ),
-        (ClientRequestKind::OpenIngestor, RequestKind::OpenIngestor),
-        (ClientRequestKind::SubmitBatch, RequestKind::SubmitBatch),
-        (ClientRequestKind::CloseIngestor, RequestKind::CloseIngestor),
-        (ClientRequestKind::OpenEmitter, RequestKind::OpenEmitter),
-        (
-            ClientRequestKind::ReadEmitterBatch,
-            RequestKind::ReadEmitterBatch,
-        ),
-        (
-            ClientRequestKind::SettleEmitterBatch,
-            RequestKind::SettleEmitterBatch,
-        ),
-        (ClientRequestKind::CloseEmitter, RequestKind::CloseEmitter),
-    ];
-    let listed: Vec<ClientRequestKind> = expected.iter().map(|(wire, _)| *wire).collect();
-    let every_request: Vec<ClientRequestKind> = ClientRequestKind::iter().collect();
-    assert_eq!(listed, every_request, "the table names every wire request");
-    for (wire, client) in expected {
-        assert_eq!(RequestKind::from(wire), client, "the kind of {wire:?}");
-    }
-    assert_eq!(
-        RequestKind::from(&ClientRequest::ListDomains),
-        RequestKind::ListDomains,
-        "a request converts through its wire kind"
-    );
 }
 
 #[test]
@@ -832,11 +780,7 @@ async fn a_frame_the_contract_does_not_describe_ends_the_exchange() {
         "the waiter observes the closed session"
     );
     assert!(
-        fixture
-            .pending
-            .lock()
-            .register(ExpectedReply::of(&ClientRequest::ListDomains))
-            .is_none(),
+        fixture.pending.lock().register(listing()).is_none(),
         "an ended exchange takes no further requests"
     );
     assert!(
@@ -1193,17 +1137,17 @@ async fn closing_a_failed_exchange_preserves_its_grpc_status_for_waiters() {
 async fn request_identities_start_at_one_and_are_never_reused() {
     let mut pending = PendingReplies::new();
     let first = pending
-        .register(ExpectedReply::of(&ClientRequest::ListDomains))
+        .register(listing())
         .assured("an open exchange registers requests");
     let second = pending
-        .register(ExpectedReply::of(&ClientRequest::ListDomains))
+        .register(listing())
         .assured("an open exchange registers requests");
     assert_eq!(first.request_id, request_id(1));
     assert_eq!(second.request_id, request_id(2));
 
     assert!(pending.take(second.request_id).is_some());
     let third = pending
-        .register(ExpectedReply::of(&ClientRequest::ListDomains))
+        .register(listing())
         .assured("an open exchange registers requests");
     assert_eq!(
         third.request_id,
@@ -1322,35 +1266,27 @@ async fn an_exchange_that_used_every_identity_takes_no_further_requests() {
         waiters: ahash::HashMap::default(),
     };
     let last = pending
-        .register(ExpectedReply::of(&ClientRequest::ListDomains))
+        .register(listing())
         .assured("the last identity is still free");
     assert_eq!(last.request_id, RequestId::new(NonZeroU64::MAX));
-    assert!(
-        pending
-            .register(ExpectedReply::of(&ClientRequest::ListDomains))
-            .is_none()
-    );
+    assert!(pending.register(listing()).is_none());
 }
 
 #[nervix_primitives::test]
 async fn closing_an_exchange_drops_every_waiter_once() {
     let mut pending = PendingReplies::new();
     let first = pending
-        .register(ExpectedReply::of(&ClientRequest::ListDomains))
+        .register(listing())
         .assured("an open exchange registers requests");
     let second = pending
-        .register(ExpectedReply::of(&ClientRequest::ListDomains))
+        .register(listing())
         .assured("an open exchange registers requests");
 
     pending.close();
 
     assert!(first.reply.await.is_err(), "the first waiter is dropped");
     assert!(second.reply.await.is_err(), "the second waiter is dropped");
-    assert!(
-        pending
-            .register(ExpectedReply::of(&ClientRequest::ListDomains))
-            .is_none()
-    );
+    assert!(pending.register(listing()).is_none());
     assert!(pending.take(first.request_id).is_none());
 }
 
