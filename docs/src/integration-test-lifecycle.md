@@ -27,7 +27,7 @@ console assets, loads the ONNX runtime and builds the CLI before starting the sc
 focused recipes do not build those tools. The ordinary scenario runner and its startup, execution,
 parallelism and teardown budgets are unchanged. Broad `just test-scenarios` and CI keep their
 complete tool prerequisites. Each recipe checks that all four of its cases execute and keeps its
-output under `target/<witnesses>`, `target/client-foreign-execution` and
+output under its own `target/<witnesses>` directory: `target/client-foreign-execution` or
 `target/client-reply-kind`.
 
 The focused client owner can be explored with
