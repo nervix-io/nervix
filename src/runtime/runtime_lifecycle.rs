@@ -493,6 +493,18 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) async fn pause_explicit_commit_failure_if_armed(
+        &self,
+        node: &ClusterNodeName,
+        transaction_id: &str,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_explicit_commit_failure_if_armed(node, transaction_id)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_command_admission_if_armed(&self, node_id: &ClusterNodeName) {
         self.inner
             .fault_injection

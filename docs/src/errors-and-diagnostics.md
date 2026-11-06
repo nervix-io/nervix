@@ -2620,6 +2620,15 @@ response. A model step that adopts its transaction's own pause validates its fro
 against the domain as that pause left it, so `PlanningInputsChanged` names only inputs that another
 owner changed.
 
+An explicit `COMMIT` applies the same distinction at its own result boundary. If an execution
+attempt returns a report, the coordinator reads the authoritative transaction again before
+answering from that report. A recorded terminal outcome supplies the reply, including its step
+diagnostics and recorded failure; a still-committing transaction answers
+`OutcomeUnknown(StillApplying)` and retains the command's execution reference for recovery. A
+leadership-loss report follows the leader route while no terminal outcome is known. Neither an
+attempt error nor the aggregate transaction status alone is a terminal result for the commit's
+reference.
+
 An ordinary command's preflight, queue, and commit-planning refusals are reports decided against
 its coordinator's observation of the command's internal transaction. Before the session maps such a
 report to the command's `Failed` disposition, the coordinator reads that transaction again. A
@@ -3582,6 +3591,7 @@ refuse, and unit tests beside each owner.
 | A cause appears once in a rendered chain | `inferencer.feature`: the cause of an unreadable ONNX model appears exactly once in the failed command's message |
 | A branch is named by its fingerprint | `wasm_processor.feature`: the server error of a branch with a sensitive key carries the fingerprint and not the key value. The runtime's unit tests hold every branch-local context to the same rendering |
 | A consensus failure keeps its class at a client mutation | `consensus_failure_reports.feature`: creating a domain or a user, cordoning and draining a node, and queueing a transaction statement each report the failure that rejected the proposal |
+| An explicit commit recovers a terminal outcome recorded after an attempt failed | `explicit_commit_recovery.feature` runs the public one- and three-node session cases; `explicit_commit_recovers_the_result_recorded_after_its_attempt_failed` holds a real failed attempt at the transaction owner while another coordinator finishes it |
 | A session ends with the status of its failure | `session_protocol.feature`, `authentication.feature` and `cli_session.feature` |
 | The formatter reports rejected source with its stage and exit status | `plexus_format.feature` |
 | Input a decoder must refuse fails with the owner's typed error and never panics | The registered Bolero targets `plexus-statement-text`, `models-duration-text`, `wasm-protocol-malformed`, `runtime-arrow-bodies-malformed`, `client-producer-batches-malformed`, `relay-wire-messages-malformed`, `client-discriminators`, `backup-malformed-records` and `consensus-state-corruption` |
