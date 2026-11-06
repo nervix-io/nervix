@@ -620,6 +620,13 @@ revision restores the save under the active clock at `START`.
 
 ### Codecs And Ingress
 
+Before a schemaful codec is accepted, the registry refuses a wire field that cannot carry its
+internal field with `RegistryError::IncompatibleSchema`, naming the codec and the field: a type
+mismatch, an AVRO array nested to another depth than the internal `ARRAY` and `VEC` levels, a
+`DATETIME` or `BYTES` value or list element that travels as text without its `ENCODE` rule, or a
+`BASE64` rule on bytes the format carries natively. A rule whose field's innermost elements are not
+of the rule's type is the registry's `InvalidModel` refusal of the codec.
+
 Codec compilation, decoding and encoding return `CodecError` reports. The codec context names the
 codec, and the field when one is at fault, and the typed reason stays beneath it: a
 `CodecContractError` for a declaration or use the wire format does not support, such as a missing
@@ -1223,8 +1230,8 @@ A Kafka consumer takes the commands charge of the job that will destroy it befor
 and a refused charge keeps `AdmissionError` beneath `KafkaTopicIngestorError::RetirementAdmission`. It
 fails the ingestor's open or the partition inspector's start, as transiently as a refused control
 call. A Kafka producer takes the same charge, and a refused one keeps `AdmissionError` beneath
-`KafkaProducerStartError::RetirementAdmission` beneath `SinkStartError::Initialize`, whose
-description names the refused charge; the emitter opens its connector again after its retry delay. See
+`KafkaProducerStartError::RetirementAdmission` beneath `EmitterOpenError::Initialize`, whose
+description names the refused charge; the emitter starts again after its retry delay. See
 [Kafka client retirement](./connector-contract.md#kafka-client-retirement). A retirement has no
 caller to fail, so its supervisor reports a destruction job that panicked at `debug`.
 
@@ -2489,6 +2496,17 @@ in a later term; otherwise no leader is known. An unconfirmed lease is never rep
 and a move never as an unconfirmed lease: the context's text says which, so an operator reading a
 rendered report or log line tells lease trouble from an election without a separate counter. The
 Raft or I/O error stays beneath the context as the report's cause.
+
+Membership timeout success is decided from both the effective configuration and its committed
+publication. A matching voter union does not convert that timeout into success while the expected
+uniform target remains joint or uncommitted. A refusal of a uniform continuation keeps the same
+typed Raft write classification; it does not mean the preceding joint entry was rolled back.
+A fatal failure reading Core or submitting its conditional completion passes through the same
+Raft write classifier with its original cause. The completion responder retains the original
+membership write error, including uncertainty, rather than interpreting it as a definite refusal.
+Finding that Core is already uniform is an ordinary completion outcome carrying its separate
+effective and committed records; it proposes no additional membership entry, even when a preceding
+joint observation became stale before Core handled the request.
 
 Trace-level vote and pre-vote transport completion events record the existing nested result before
 its foreign-error conversion, beside the local listener, peer and elapsed time. A transport error

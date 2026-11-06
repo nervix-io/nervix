@@ -43,9 +43,9 @@ type is recursive, so fixed and variable axes can be mixed, for example
 axis must have a positive length no greater than 2147483647, the largest length
 an Arrow `FixedSizeList` carries, fixed arrays must contain exactly that many
 elements at runtime, and dense multidimensional values must retain their nested
-shape. JSON and CBOR represent both with nested arrays. AVRO uses
-nested array schemas with item types inferred recursively from the internal
-schema.
+shape. JSON and CBOR represent both with nested arrays. An AVRO wire schema
+declares the item type of each array level, and Nervix writes exactly that item
+schema; see [List Fields](#list-fields).
 
 Append `OPTIONAL` to either an internal schema field or a wire schema field when the value may be absent. Optional fields are omitted from runtime records and emitted JSON payloads when no value is present.
 
@@ -83,7 +83,8 @@ AVRO wire schema:
 CREATE IF NOT EXISTS WIRE AVRO SCHEMA notification_wire MODE STRICT (
   user_id LONG,
   created_at STRING,
-  payload STRING OPTIONAL
+  payload STRING OPTIONAL,
+  latencies array<double> OPTIONAL
 );
 ```
 
@@ -91,8 +92,11 @@ JSON, CBOR, and AVRO wire schemas must declare at least one field.
 
 JSON fields declare `string`, `number`, `integer`, `boolean`, or `array`. CBOR fields declare
 `integer`, `float`, `boolean`, `text`, `bytes`, or `array`. AVRO fields declare
-`boolean`, `int`, `long`, `float`, `double`, `string`, `bytes`, or `array`. Keywords are
-case-insensitive; canonical definitions print the types in uppercase.
+`boolean`, `int`, `long`, `float`, `double`, `string`, `bytes`, or `array<item>`, where `item` is
+any AVRO type of this list, arrays included: `array<long>`, `array<array<double>>`. A JSON or CBOR
+`array` is bare, because neither format types the items of an array; an AVRO array always names its
+item type, because the Avro schema it describes does. Keywords are case-insensitive; canonical
+definitions print the types in uppercase, such as `ARRAY<ARRAY<DOUBLE>>`.
 
 | Wire type | Internal type |
 | --- | --- |
@@ -109,11 +113,50 @@ case-insensitive; canonical definitions print the types in uppercase.
 | AVRO `float` | `F32` |
 | AVRO `double` | `F64` |
 | AVRO `bytes` | `BYTES`, without an encoding rule |
-| JSON, CBOR or AVRO `array` | `ARRAY` or `VEC`, with item types derived from the internal schema |
+| JSON or CBOR `array` | `ARRAY` or `VEC` of any depth whose innermost elements bind as described in [List Fields](#list-fields) |
+| AVRO `array<item>` | `ARRAY` or `VEC` nested exactly as deep as the declared arrays, whose innermost element type `item` binds as an AVRO field of that type would |
 
-Integer decoding checks the internal type's range. AVRO scalar bindings are exact: for example,
-an `int` field binds an `I32` field. Encoding rules declare a text representation explicitly;
-they do not choose between runtime encoding modes.
+Integer decoding checks the internal type's range. AVRO bindings are exact at every depth: for
+example, an `int` field binds an `I32` field, and an `array<int>` field binds a `VEC<I32>` or an
+`ARRAY<I32, n>`. Encoding rules declare a text representation explicitly; they do not choose
+between runtime encoding modes.
+
+### List Fields
+
+A list field's elements are bound the way a scalar field of the innermost element type is, in
+every format. A codec's `ENCODE <field> AS RFC3339` or `ENCODE <field> AS BASE64` rule on a list
+field governs its innermost scalar elements, at any nesting depth, and only those elements:
+
+| Innermost internal element | JSON `array` element | CBOR `array` element | AVRO innermost item |
+| --- | --- | --- | --- |
+| `U8` through `U64`, `I8` through `I64` | integer | integer | `int` for `I32`, `long` for `I64`; no item binds the other widths |
+| `F32`, `F64` | number | float | `float` for `F32`, `double` for `F64` |
+| `BOOL` | boolean | boolean | `boolean` |
+| `STRING` | string | text | `string` |
+| `DATETIME` | RFC 3339 string, with `ENCODE <field> AS RFC3339` | RFC 3339 text, with `ENCODE <field> AS RFC3339` | `string`, with `ENCODE <field> AS RFC3339` |
+| `BYTES` | base64 string, with `ENCODE <field> AS BASE64` | byte string, without a rule | `bytes` without a rule, or `string` with `ENCODE <field> AS BASE64` |
+
+```plexus
+CREATE SCHEMA capture (stamps VEC<DATETIME>, chunks VEC<BYTES>, matrix ARRAY<F64, 2, 3>);
+CREATE WIRE JSON SCHEMA capture_json MODE STRICT (stamps array, chunks array, matrix array);
+CREATE CODEC capture_json_codec FROM WIRE JSON SCHEMA capture_json TO SCHEMA capture
+  ENCODE stamps AS RFC3339, chunks AS BASE64;
+CREATE WIRE AVRO SCHEMA capture_avro MODE STRICT (
+  stamps array<string>,
+  chunks array<bytes>,
+  matrix array<array<double>>
+);
+CREATE CODEC capture_avro_codec FROM WIRE AVRO SCHEMA capture_avro TO SCHEMA capture
+  ENCODE stamps AS RFC3339;
+```
+
+Validation refuses a codec, naming the codec and the field, when a list element has no exact
+binding: an AVRO item type other than the element's, an AVRO array nested more or less deeply than
+the internal `ARRAY` and `VEC` layers, a `DATETIME` or `BYTES` element that travels as text without
+its rule, or a `BASE64` rule on elements the format carries as native bytes. The decoder checks
+every element against the representation its type and rule require, and the encoder writes each
+element in that representation, so the shapes and fixed lengths of the internal type hold on both
+paths.
 
 CBOR uses its own six wire types. Its decoder walks `ciborium::Value` directly into typed Arrow
 builders. An integer is range-checked for its internal width; a float is decoded as a CBOR float,
@@ -126,7 +169,9 @@ ignores them after validating their CBOR structure.
 
 The web console's **Create** menu provides structured editors for internal schemas and each of
 these three declared wire formats. Internal collection controls build nested `ARRAY` and `VEC`
-types from an exact scalar type. Field order, `OPTIONAL`, `SENSITIVE`, wire mode, and exact format
+types from an exact scalar type. The AVRO form builds `array<item>` the same way, wrapping the
+item type it picks in one array per level, and the JSON and CBOR forms offer their bare `array`.
+Field order, `OPTIONAL`, `SENSITIVE`, wire mode, and exact format
 are preserved in the completed Model and its canonical command. See [Web Console](client-tools-web-console.md).
 
 SYSLOG is different: it is a predefined singleton wire schema whose shape comes from the syslog
@@ -248,7 +293,8 @@ CREATE IF NOT EXISTS CODEC notification_codec
 ```
 
 `created_at` is the internal schema field name. The matching wire field must be a
-string, and the internal field must be `DATETIME`.
+string, and the internal field must be `DATETIME`, or a list of `DATETIME` elements whose wire
+field carries them as text ([List Fields](#list-fields)).
 
 For an internal `BYTES` field carried as a JSON or AVRO `string`, declare its text representation:
 
@@ -261,8 +307,10 @@ CREATE CODEC binary_codec FROM WIRE JSON SCHEMA binary_wire TO SCHEMA binary_eve
 
 `BASE64` uses the RFC 4648 standard alphabet with padding and requires canonical text on decode.
 Malformed, unpadded, or noncanonical text is a decode error. AVRO `bytes` and CBOR `bytes` fields
-use their formats' native byte sequences and accept no encoding rule. Nested `ARRAY` and `VEC`
-byte elements use their format's byte representation.
+use their formats' native byte sequences and accept no encoding rule. A list of `BYTES` elements
+follows the same rules element by element: base64 strings under `ENCODE <field> AS BASE64` in a
+JSON `array` or an AVRO `array<string>`, and native byte sequences, without a rule, in a CBOR
+`array` or an AVRO `array<bytes>`.
 
 Live `WIRE JSON` ingestion copies each connector-owned payload into mutable scratch retained by
 the open ingest group, then parses it with simd-json using parser buffers retained beside that
@@ -372,8 +420,9 @@ values, and nulls of optional fields. The formats themselves set the bounds of t
   float narrows directly to `F32` when that is the internal field type. Ciborium widens an `F32`
   before writing CBOR, so an `F32` signaling NaN becomes a quiet NaN with the same sign and payload;
   other `F32` bits are preserved.
-- `WIRE AVRO` keeps every float bit pattern. It writes an unsigned element of an `ARRAY` or `VEC` as
-  an Avro `long`, so an element above 9223372036854775807 fails to encode.
+- `WIRE AVRO` keeps every float bit pattern. An array element travels as exactly the item type its
+  wire schema declares, which binds exactly one internal element type, so every element the codec
+  writes reads back unchanged.
 - A datetime travels as RFC 3339 text in UTC; text written with another offset reads as the same
   instant.
 - A `WIRE AVRO` payload is one raw Avro datum, without an object container or a schema registry

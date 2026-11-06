@@ -358,9 +358,24 @@ older voter's run the same way, without changing the membership.
 [Prerequisites At Join](node-settings.md#prerequisites-at-join) describes the verdicts the leader
 publishes and what a refused node does. Each membership reconciliation gives a blocking learner
 catch-up attempt ten seconds. Promotion to voter is proposed only after that attempt reports the
-learner caught up; the membership change has its own ten-second bound. A timeout leaves the node a
-learner, records `raft membership reconciliation failed`, and the one-second reconciliation loop
-tries again while ordinary replication continues.
+learner caught up; the membership change has its own ten-second bound. A catch-up timeout leaves
+the node a learner. A failed reconciliation records `raft membership reconciliation failed`, and
+the one-second reconciliation loop tries again while ordinary replication continues.
+
+A voter change first commits a joint configuration and then commits its uniform target. The joint
+configuration requires a majority of each constituent voter set; its union is not a uniform quorum.
+If the second step is refused or interrupted, reconciliation finishes the recorded target before
+planning another admission or address update. It preserves existing learners and completes the
+removal of voters excluded by a `DROP NODE`, rather than deriving a replacement target from the
+joint union or from gossip. The maintained OpenRaft completion operation checks the effective
+membership and proposes its continuation in one synchronous Core turn. A read before the request
+is only an observation: another request or a peer update can finish that transition before Core
+handles completion. An already uniform Core returns its effective and committed records without
+proposing an entry. A still-joint Core flattens its current target through the ordinary membership
+commitment, leader and lease gates, preserving independent learners and the existing removed-voter
+policy. Nervix then waits for the returned uniform membership to be committed. A timed wait counts as
+success only when the observed configuration is committed and uniform. Leadership changes and
+retries can continue the same committed joint transition.
 
 When discovery reports a different interconnect endpoint for an existing member, reconciliation
 replaces that member's recorded Raft address. A returning voter keeps its voter role; it is not
@@ -372,7 +387,10 @@ The consensus event stream and `info` log record `raft add learner`, `raft wait 
 `raft update address`, `raft promote voters`, and `raft membership updated` transitions. Every
 report on the consensus event stream reaches the node's sessions as a `Leadership` notice.
 `SHOW CLUSTER STATUS` reports the local `raft.last_log_index`, `raft.last_applied`, and each member's
-learner or voter role and recorded address.
+learner or voter role and recorded address. `raft.membership_joint` says whether the effective
+configuration still requires multiple majorities; `raft.membership_committed` says whether that
+effective configuration is committed. A converged voter list requires `membership_joint: false`
+and `membership_committed: true`, as well as the expected voter identities.
 
 ## Bounded Log Reading
 
@@ -492,11 +510,11 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-The dedicated database owns exactly four current keyspaces: `raft_intake_inference_logs`,
-`raft_intake_inference_meta`, `raft_intake_inference_state`, and
-`raft_intake_inference_snapshots`. Opening it validates the complete keyspace namespace before
+The dedicated database owns exactly four current keyspaces: `raft_inference_avro_logs`,
+`raft_inference_avro_meta`, `raft_inference_avro_state`, and
+`raft_inference_avro_snapshots`. Opening it validates the complete keyspace namespace before
 reading any records. This namespace identifies the current Model shape, including the separate JSON
-and CBOR wire type enums (CBOR has six types), AVRO representation types, explicit `BASE64` codec encoding, a Pulsar
+and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec encoding, a Pulsar
 subscription's required type, an owned Pulsar subscription's required start position, a Kafka
 consumer group's required start position, the serialized Sentry platform field, an ingestor's
 `TIMESTAMP AT metadata.<field>` source, the separate `NATS STREAM` ingestor and emitter entities, an SQS QUEUE emitter's `SEND` request shape, the receive

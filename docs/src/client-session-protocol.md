@@ -613,6 +613,10 @@ execution reference like any other lost reply.
 ## Command Dispositions
 
 Client CONFIG validation uses the ordinary failed-command outcome before configuration commits.
+An invalid connector/entity mode, option, envelope, metadata read or header write that the registry
+can judge from the declaration is likewise a failed command before graph publication. These
+refusals add no command disposition: the client still decides from the typed disposition and
+recovers an uncertain attempt under its original execution reference.
 The registry checks declared keys and the composition root runs network-free driver checks for
 standalone mutations and transaction preflight. Refusals name the client and key without rendering
 driver values that may contain credentials. A refused transaction statement leaves the transaction

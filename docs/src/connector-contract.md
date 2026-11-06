@@ -961,6 +961,23 @@ behavior. That change also supplies its generated conformance and runtime scenar
 The declaration describes the product a user can execute; plans for additional connector clauses
 remain in their owning work records until that delivery.
 
+The declaration crosses each boundary once, without becoming runtime graph policy:
+
+| Reader | What it takes from the declaration |
+| --- | --- |
+| Plexus grammar and completion | The connector/entity head, locator and option forms, mode bodies, header and metadata names, and valid choices. |
+| Registry and planner | Reference kinds, exact value and option requirements, legal modes, envelopes and batching; validation produces a typed plan before execution. |
+| Connector host | The validated plan and declared metadata, bounds and waits; the host owns routing, retry, quiesce, flush and acknowledgements. |
+| Console and inspection | Entity choices, confidential client keys, effective defaults and the canonical or descriptive presentation. |
+| Manuals and checks | The generated capability matrix, conformance tests and scenario inventory described below. |
+
+Three evidence layers hold this boundary to its declaration. Generated Plexus conformance tests
+check parsing, completion and accepted or refused construction; the test-only fake connector checks
+host policy and value retention, including registered Shuttle interleavings; production-owner tests
+and public scenarios through the real transport establish each connector's delivery and declared
+runtime capabilities. The matrix and inventory checks catch a missing or stale documentation row
+or scenario registration, but neither substitutes for observing the transport.
+
 | Side | What the entity declares |
 | --- | --- |
 | Ingestor | Header reads, the typed metadata fields in their order, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits, and any alternative locators a body may write instead of it, each with its own keywords and name; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
@@ -1088,11 +1105,9 @@ with the vocabulary's typed `UnmetDeliveryRequirement`, which names every requir
 the statement writes for each. A publishing mode declares its choices the same way: an MQTT topic's
 `NO ACK` requires `QOS 0` and its `ACK` requires `QOS 1` or `QOS 2`, the destination answers which
 choice its statement made, and `UnmetPublishingRequirement` is the refusal. Whether an ingestor can
-honor a quiesce mode, whether
-an emitter accepts a publishing mode, whether its body needs a codec, and the batching contract with its
-maximum and its refusal for an emitter that cannot batch are all read from the declaration. The
-registry, the planner and the console keep their own copies of some of these facts until the work
-that owns those layers reads the declaration instead.
+honor a quiesce mode, whether an emitter accepts a publishing mode, whether its body needs a codec,
+and the batching contract with its maximum and refusal are all read from the declaration. The
+registry, planner and console consume those facts without another allowed-value table.
 
 `REDIS PUBSUB` shares one channel-name rule between ingestion and emission: a nonempty literal
 of at most 1,024 UTF-8 bytes, passed through without normalization or wildcard interpretation.
