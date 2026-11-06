@@ -1402,6 +1402,33 @@ consumer detachment. The `shuttle_publish_cancellation_and_ack_race_release_one_
 check also races publisher cancellation against application ACK and verifies retained byte credit
 returns once. Timeout revocation is covered by the ordinary owner and public scenarios.
 
+### Rust client request interruption
+
+Each command waiter retains its expected execution reference in the exchange's existing pending
+registry. The reader compares that reference before delivering the outcome. A mismatch closes the
+registry under the same mutex that removes the waiter, retaining the first typed ending cause.
+Registration racing that end either obtains a waiter that is interrupted or observes the closed
+registry; it cannot leave a request waiting on an ended exchange. The reader routes no later frame
+after the mismatch. Dropping its future, including task abortion, closes the remaining waiters and
+ends its exact event and attachment generation.
+
+The exchange retains its reader handle until joining finishes, then clears it. A later close
+cannot poll that completed join again. Cancelling interruption before the join completes keeps
+the handle available for a later close to finish its cleanup.
+The ordinary `a_cancelled_interruption_keeps_cleanup_owned_until_close_finishes` witness cancels
+interruption while the reader has not yet stopped, then requires close to finish generation
+cleanup. The foreign-restore owner witness also requires recovery to serve a new request.
+
+`shuttle_a_foreign_reply_racing_registration_interrupts_every_waiter` drives the production reader
+and pending registry with registration and cancellation racing the mismatched reply. It requires
+every remaining waiter to be interrupted, the first mismatch cause to survive, and the later
+leadership frame to remain unread. It makes no claim about real network scheduling.
+
+A restore stream captures its channel and session generation together. A foreign restore outcome
+ends that generation only if it still owns the current session, so an intervening replacement is
+not interrupted. Request and recovery state remain with the caller's original execution reference.
+The protocol chapter owns the retry and uncertainty policy.
+
 ### Rust client attachment recovery
 
 The client retains desired producer and consumer handles independently of their wire attachments.
@@ -1428,6 +1455,15 @@ begin a subsequent restore. Public scenarios cover exchange I/O, late open repli
 cleanup and delivery interruption; those network effects are outside these in-process checks.
 [Client Session Protocol](./client-session-protocol.md) and its implementation manual own the
 restoration and application-outcome contract.
+
+Each native restore attempt captures its channel and exchange generation together before sending
+the archive. If its verified reply cannot be decoded or names another transport request, session
+termination checks that generation while holding the client's exchange mutex. It ends only the
+exchange that supplied the stream, interrupts its pending requests and stops its reader; a
+replacement exchange, even on the same channel, remains usable. The real-gRPC `restore_reply`
+owner tests cover both arrival orders and a subsequent reconnect. The public
+`client_restore_reply_validation.feature` scenarios recover a completed restore under the same
+reference after both invalid replies, through the native client and CLI on one and three nodes.
 
 ### Node quiesce accounting
 
@@ -1705,6 +1741,31 @@ consumers that it delivers through. A consumer that registers meanwhile receives
 only, so the acknowledgement shares a publication reserves for its attached consumers always match
 its deliveries, and a routed delivery, which holds no dispatch permit, cannot resolve a share it
 never reserved.
+
+## Failed Authentication Pacing
+
+The control plane's authentication owner keeps one access-ordered `ExpiryMap` of failed names
+behind an async mutex. A bucket holds governor's theoretical arrival mark. Its decision is made from
+one selected monotonic instant through governor's synchronous state-store interface; waits use the
+primitive boundary's timers. Credential verification and quota sleeps hold no map guard. A name
+with an outstanding quota therefore delays only its own attempts.
+
+Each admission operation may reclaim one oldest bucket whose quota has fully replenished. An
+operation adds at most one bucket, after a judged refusal. If the oldest bucket still holds debt,
+its last access was within a complete burst-recovery horizon, and access order places every other
+retained name within that horizon too. Reclaiming one full bucket before an insertion keeps the
+stored count from growing while stale entries remain; growth is limited to the largest recovery
+working set and live attempts. An active bucket is never displaced by a spray of other names.
+Success removes only that name. An admitted attempt shares the bucket's immutable key allocation
+as its receipt. A refusal skips a second charge only when pointer identity names that same active
+bucket; success or full recovery gives a fresh bucket a distinct allocation. No reference-count
+ordering is involved. Node teardown drops the owner and its volatile state.
+
+These are call-admission accesses. The async mutex and timers are outside Deloxide's tracked
+thread-blocking locks. Owner tests and public one- and three-node authentication scenarios verify
+the policy and its waits. The bounded `authentication-quota-clock` property compares every quota
+decision, exact wait and complete arrival mark with a persistent governor limiter. The expiry map's
+operation-sequence oracle and Miri qualify its relinking and allocation lifetimes.
 
 ## Ratchet And Review
 
@@ -2591,6 +2652,10 @@ stressed-restore records require recovery under the original execution reference
 archive with both quiesced domain cuts. The refusal owner's asynchronous mutex and the command's
 retry waits remain outside the detector; the public scenario and typed response-boundary tests
 establish their recovery and definitive-timeout outcomes without claiming an interleaving model.
+The native foreign-command-reply workload reaches pending registration, mismatch termination and
+session recovery on one and three nodes. Its active/order and stress records name the client and
+exchange owners; Deloxide observes their blocking registry locks, while the production-owner
+Shuttle check covers registration racing the reader's termination.
 Async command and reconnect mutexes, physical deadlines and network scheduling remain outside
 its observation; the public scenarios and client-session regressions assert their wait, expiry,
 leader-change and recovery outcomes directly. The bounded native-client case runs inside the

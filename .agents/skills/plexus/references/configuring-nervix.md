@@ -76,6 +76,11 @@ the open session, a reply that names another execution, and reconnect behavior, 
 directly. Follow the same documentation version as the selected index; these client chapters are
 outside the curated Plexus index.
 
+For native command or restore recovery after an execution-reference mismatch, read
+[Client Library](https://docs.nervix.io/client-library.html) and the command and restore contracts in
+[Client Implementation Manual](https://docs.nervix.io/client-implementation-manual.html) directly.
+Keep the original execution reference when recovering an uncertain outcome.
+
 Prefer the narrow indexed topic over an old copied snippet. Do not leave the immutable version
 selected by the documentation index when following related material.
 
@@ -217,6 +222,8 @@ current connection, retry and deadline limits.
   coincide. They declare `MODE STRICT|LOOSE` after their names, and a mode-only change uses `ALTER
   WIRE <format> SCHEMA <wire_schema> MODE STRICT|LOOSE`. SYSLOG is a predefined singleton wire
   schema referenced directly with `FROM SYSLOG`; it has no name or model lifecycle.
+- CBOR wire fields use exactly `integer`, `float`, `boolean`, `text`, `bytes`, or `array`. `bytes`
+  carries native CBOR byte strings; `DATETIME` binds `text` with `ENCODE field AS RFC3339`.
 - Every codec explicitly declares text interchange with `ENCODE field AS RFC3339` for datetimes
   and `ENCODE field AS BASE64` for bytes in JSON or AVRO strings. Read `Schemas And Codecs` for
   the exact binding matrix and native byte representations. Every JAQ-backed
@@ -517,7 +524,9 @@ current connection, retry and deadline limits.
 - `NATS SUBJECT` ingestors use `NO ACK` with a required `QUEUE GROUP` and `INSTANCES`, and
   `BUFFER` or `DROP` quiesce. Write NATS wildcards only in an ingestor's `SUBJECT`, as whole
   tokens with `>` last; a `NATS SUBJECT` emitter uses `MODE NO ACK` and one literal subject.
-  Check both against the NATS sections of `Ingestors` and `Emitters`.
+  Subject names are at most 1,024 UTF-8 bytes and have no whitespace, controls, empty tokens or
+  embedded wildcards; these limits are Nervix's declared contract. Check both against the NATS
+  sections of `Ingestors` and `Emitters`.
 - A `NATS STREAM` ingestor reads a durable pull consumer an operator provisioned:
   `STREAM '<stream>' CONSUMER '<consumer>'` with `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL`, and
   `SUSPEND`, `BUFFER` or `DROP` quiesce. Nervix creates neither the stream nor the consumer, and it

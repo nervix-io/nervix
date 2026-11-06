@@ -1587,7 +1587,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__events__bolero_events_keep_complete_values_and_owned_views/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "client-events"
 invariant = "Every unsolicited event preserves complete values; borrowed graph views retain exact bytes after their original frame is dropped."
@@ -2337,7 +2337,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_malformed_consensus_raft_records_fail_typed/corpus"
-domain_version = 26
+domain_version = 27
 features = []
 id = "consensus-raft-records-malformed"
 invariant = "Arbitrary bytes read as any Raft record, log key or section key free every decoding allocation and fail with the typed storage failure or name a value that stores back to the same record."
@@ -2697,10 +2697,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime_schema/__fuzz__/runtime_schema__codec_properties__bolero_schemaful_codecs_decode_every_row_they_encode/corpus"
-domain_version = 4
+domain_version = 5
 features = []
 id = "codec-schemaful-rows"
-invariant = "Every row a generated WIRE JSON, WIRE CBOR or WIRE AVRO codec of an accepted shape encodes decodes, in one group builder, back to the exact schema, values and nulls, floats by their bits, datetimes to the nanosecond, bytes, text and nested lists, whatever order the wire schema lists the fields in."
+invariant = "Every row a generated WIRE JSON, WIRE CBOR or WIRE AVRO codec of an accepted shape encodes decodes, in one group builder, back to the exact schema, values and nulls, floats by their bits, datetimes to the nanosecond, native CBOR bytes, text and nested lists, whatever order the wire schema lists the fields in."
 manifest = "Cargo.toml"
 max_input_bytes = 4096
 package = "nervix-server"
@@ -2712,7 +2712,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime_schema/__fuzz__/runtime_schema__codec_properties__bolero_damaged_payloads_leave_a_group_as_its_payloads_decode_alone/corpus"
-domain_version = 4
+domain_version = 5
 features = []
 id = "codec-schemaful-payload-groups"
 invariant = "Damaged payloads interleaved with a codec's own payloads are each accepted or refused in a group exactly as alone, with a typed failure of their own bytes, and the group's batch holds exactly the rows its accepted payloads decode to alone, in order."
@@ -2892,10 +2892,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime_schema/__fuzz__/runtime_schema__codec_properties__bolero_non_finite_floats_follow_the_json_projection/corpus"
-domain_version = 4
+domain_version = 5
 features = []
 id = "codec-json-non-finite-floats"
-invariant = "Over every float bit pattern a WIRE JSON or WIRE CBOR row reads back with each non-finite float of an optional top-level field as a null and every other value intact, and a row holding one in a required field or a list element is refused with a typed failure of its own payload."
+invariant = "Over every float bit pattern a WIRE JSON row reads back with each non-finite float of an optional top-level field as a null and every other value intact, and a row holding one in a required field or a list element is refused with a typed failure of its own payload."
 manifest = "Cargo.toml"
 max_input_bytes = 4096
 package = "nervix-server"
@@ -2967,16 +2967,31 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/expiry-map/src/__fuzz__/tests__bolero_operation_sequences_match_a_safe_reference_model/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "expiry-map-operations"
-invariant = "Bounded sequences of inserts, shared-key inserts, keyed and oldest removals, lookups, shared-key copies and clears over a small key space leave the map's iteration order, lengths, oldest entry, lookups and shared key allocations equal to an IndexMap reference, and drop every stored value exactly once."
+invariant = "Bounded sequences of inserts, shared-key inserts, keyed and oldest removals, lookups, renewals, shared-key copies and clears over a small key space leave the map's iteration order, lengths, oldest entry, lookups and shared key allocations equal to an IndexMap reference, and drop every stored value exactly once."
 manifest = "Cargo.toml"
 max_input_bytes = 1024
 package = "nervix-expiry-map"
 random_iterations = 256
 source = "crates/expiry-map/src/lib.rs"
 test = "tests::bolero_operation_sequences_match_a_safe_reference_model"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/application/authentication/pacing/__fuzz__/application__authentication__pacing__tests__bolero_quota_reanchoring_preserves_governors_complete_state/corpus"
+domain_version = 1
+features = []
+id = "authentication-quota-clock"
+invariant = "Reanchoring a per-name authentication bucket at each selected monotonic instant preserves every governor decision, exact refusal wait and complete theoretical arrival mark of a persistent governor limiter over bounded monotonic clock advances."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-server"
+random_iterations = 256
+source = "src/application/authentication/pacing/tests.rs"
+test = "application::authentication::pacing::tests::bolero_quota_reanchoring_preserves_governors_complete_state"
 test_target = "lib"
 
 [[target]]
@@ -3982,6 +3997,21 @@ package = "nervix-models"
 random_iterations = 256
 source = "crates/models/src/connector/mqtt/config_tests.rs"
 test = "connector::mqtt::config_tests::bolero_mqtt_client_config_preserves_every_valid_connection_setting"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/src/connector/__fuzz__/connector__nats__tests__bolero_nats_subjects_preserve_subscription_and_publication_bounds/corpus"
+domain_version = 1
+features = []
+id = "nats-subject-grammar"
+invariant = "Malformed bounded NATS subject text never yields a typed subscription name outside Nervix's byte, character and token bounds; every accepted publication name is an accepted literal subscription name."
+manifest = "Cargo.toml"
+max_input_bytes = 1152
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/src/connector/nats_tests.rs"
+test = "connector::nats::tests::bolero_nats_subjects_preserve_subscription_and_publication_bounds"
 test_target = "lib"
 
 [[target]]

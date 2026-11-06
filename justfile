@@ -337,6 +337,36 @@ test-inferencer-state *args: build-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/inferencer_state.feature {{ quote(args) }}
 
+# Run the native-client and CLI foreign-reference witnesses with only the tools they start.
+test-client-foreign-execution: build-web-console download-onnxruntime build-test-cli
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    mkdir -p {{ quote(cargo_target_dir + "/client-foreign-execution") }}
+    output="$(mktemp {{ quote(cargo_target_dir + "/client-foreign-execution/run.XXXXXXXX.log") }})"
+    result=0
+    cargo test --package nervix-scenarios --test scenarios -- --name '(A native command|The CLI) recovers its own execution after a foreign command reply' --retry 0 | tee "$output" || result=$?
+    python3 - "$output" <<'PY'
+    import re
+    import sys
+    from pathlib import Path
+    output = re.sub(r"\x1b\[[0-9;]*m", "", Path(sys.argv[1]).read_text())
+    counts = re.findall(r"^(\d+) scenarios?(?: \(|$)", output, re.MULTILINE)
+    if counts != ["4"]:
+        raise SystemExit(f"foreign execution witnesses must execute four scenarios; reported counts: {counts}")
+    PY
+    exit "$result"
+
+# Exercise restore reply validation through the native client and CLI on one and three nodes.
+# These cases start no paced driver or diagnostic report subprocess.
+test-client-restore-reply: build-web-console download-onnxruntime build-test-cli
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/runtime/client_restore_reply_validation.feature \
+        --concurrency 2 --retry 0
+
 # Qualify the real failed-step after hook; deliberate Cucumber failures stay failures.
 # This supervision check has its own verdict, outside ordinary coverage reports.
 test-backup-cut-cleanup: build-deps build-test-cli
@@ -566,6 +596,17 @@ test-web-console *args:
 
 test-harness-liveness *args: tests-deps
     cargo test --package nervix-scenarios --test harness_liveness -- {{ args }}
+
+# Exercise command-probe causality through its ordinary owner and the server's assets.
+test-command-probes *args: build-web-console wasm-processor-guests download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test harness_liveness -- command_probe_tests {{ quote(args) }}
+
+# Exercise the two committed-batch recovery fixtures through the in-process cluster.
+test-command-recovery-scenarios: build-web-console wasm-processor-guests download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/runtime/client_wire_failures.feature \
+        --tags '@client_wire_transaction_batch_finalization_recovery or @client_wire_applying_probe_recovery' \
+        --concurrency 1 --retry 0
 
 # Check external dependency startup and observation, including fresh Pulsar namespace readiness.
 test-environment *args:
@@ -1209,6 +1250,18 @@ test-websockets *args:
 test-websockets-shuttle check:
     SHUTTLE_TRACE_DIR={{ quote(cargo_target_dir + "/shuttle-failures/nervix-connector-websockets/" + check) }} cargo test --package nervix-connector-websockets --features shuttle --lib {{ quote(check) }} -- --exact --nocapture --test-threads=1
 
+# Explore one client owner and its nondeterminism check without unrelated server test roots.
+# The inventory and complete package selection remain qualified by test-shuttle in CI.
+test-client-shuttle check:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/shuttle") }} python3 -m scripts.client_recovery_checks shuttle --filter {{ quote(check) }} --target-dir {{ quote(cargo_target_dir + "/shuttle") }}
+
+# Qualify the complete registered client feature scope, with canonical process supervision.
+test-client-recovery-diagnostic selection: tests-deps
+    NERVIX_PREPARED_TARGET_DIR={{ quote(cargo_target_dir) }} python3 -m scripts.client_recovery_checks {{ quote(selection) }} --target-dir {{ quote(cargo_target_dir + "/client-recovery") }}
+
+test-client-recovery-runner:
+    python3 -m unittest --quiet scripts.tests.test_client_recovery_checks
+
 # Run the session wire codec tests and the gRPC and WebSocket sessions that carry its frames.
 test-client-wire *args:
     cargo test --package nervix-client-wire --all-features --all-targets -- {{ args }}
@@ -1372,9 +1425,9 @@ test-expiry-map:
 
 # Bolero reads its checked-in corpus from the source tree, which Miri's isolation forbids, so the
 # Miri run lifts isolation and bounds the property's random cases beside that corpus.
-test-expiry-map-miri:
+test-expiry-map-miri *args:
     MIRIFLAGS="-Zmiri-disable-isolation" BOLERO_RANDOM_ITERATIONS=4 BOLERO_RANDOM_MAX_LEN=512 \
-        cargo +nightly miri test --package nervix-expiry-map
+        cargo +nightly miri test --package nervix-expiry-map -- {{ args }}
 
 test-expiry-map-mutants:
     cargo mutants --package nervix-expiry-map --timeout 120
@@ -2581,6 +2634,10 @@ cargo-fmt:
 # Format one package during a focused implementation cycle.
 cargo-fmt-package package:
     cargo +nightly fmt --package {{ package }}
+
+# Format one Rust module and its children during a focused edit.
+rustfmt-file file:
+    rustfmt +nightly {{ quote(file) }}
 
 # Ripgrep honors the repository ignore rules, so generated target trees are not formatted.
 taplo-format:

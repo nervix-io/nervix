@@ -250,7 +250,7 @@ Feature: Kafka ingestion
         matrix <matrix_type>
       );
       CREATE WIRE <wire_format> SCHEMA nested_event_wire MODE STRICT (
-        tenant string,
+        tenant <tenant_wire_type>,
         matrix array
       );
       CREATE CODEC nested_event_codec
@@ -297,11 +297,11 @@ Feature: Kafka ingestion
     And the relay subscription does not receive a payload within "1s"
 
     Examples:
-      | cluster_size | wire_format | matrix_type  |
-      | 1            | JSON        | VEC<VEC<U8>> |
-      | 3            | JSON        | VEC<VEC<U8>> |
-      | 1            | CBOR        | VEC<VEC<U8>> |
-      | 3            | CBOR        | VEC<VEC<U8>> |
+      | cluster_size | wire_format | tenant_wire_type | matrix_type  |
+      | 1            | JSON        | string           | VEC<VEC<U8>> |
+      | 3            | JSON        | string           | VEC<VEC<U8>> |
+      | 1            | CBOR        | text             | VEC<VEC<U8>> |
+      | 3            | CBOR        | text             | VEC<VEC<U8>> |
 
   @decode_rejection
   Scenario Outline: A Kafka <mode_name> ingestor consumes a payload its codec refuses, reports its record and delivers the next one
