@@ -39,17 +39,18 @@ use std::{collections::BTreeMap, fmt};
 
 use bytes::Bytes;
 use error_stack::Report;
+use meticulous::OptionExt as _;
 use nervix_client_wire::{
-    BackupDownloadMessage, CommandDisposition, LeaderRedirect, Leadership, NodeEndpoints, Reply,
-    ReplyBody, RestoreDisposition, RestoreReply, ServerEvent, ServerMessage, SessionEndReason,
-    SessionLimits,
+    BackupDownloadMessage, CommandDisposition, DomainClockAttachDisposition, LeaderRedirect,
+    Leadership, NodeEndpoints, Reply, ReplyBody, RestoreDisposition, RestoreReply, ServerEvent,
+    ServerMessage, SessionEndReason, SessionLimits,
     websocket::{
         CONSOLE_BACKUP_DOWNLOAD_PATH, CONSOLE_RESTORE_PATH, CONSOLE_SESSION_PATH,
         ClientBackupDownloadWebSocketCodec, ClientRestoreWebSocketCodec, ClientWebSocketCodec,
         WebSocketData,
     },
 };
-use nervix_models::ClusterNodeName;
+use nervix_models::{ClusterNodeName, DomainName};
 use serde::Deserialize;
 use url::Url;
 
@@ -418,6 +419,17 @@ pub(crate) struct ConsoleConnectionRecord {
     losses: Vec<u64>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ClockAttachmentEvidenceError {
+    #[error("session connection {connection} has an unreadable frame")]
+    Unreadable { connection: usize },
+    #[error("session connection {connection} acknowledged clock '{domain}' more than once")]
+    Repeated {
+        connection: usize,
+        domain: DomainName,
+    },
+}
+
 /// Public session connections and setup replies observed before or after a command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConsoleSetupObservation {
@@ -502,6 +514,66 @@ pub(crate) enum ConnectionRecordViolation {
 }
 
 impl ConsoleConnectionRecord {
+    /// For a scene with one automatic clock selection per connection, counts the distinct
+    /// sessions that acknowledged it. A second acknowledgement on one connection is a defect even
+    /// when its request identity repeats. Scenes that issue manual attaches use their own oracle.
+    pub(crate) fn clock_attachment_count(
+        &self,
+        domain: &DomainName,
+    ) -> error_stack::Result<usize, ClockAttachmentEvidenceError> {
+        let codec = ClientWebSocketCodec::new(SessionLimits::DEFAULT);
+        let mut count = 0_usize;
+        for (number, connection) in self.numbered() {
+            if connection.purpose != ConnectionPurpose::Session {
+                continue;
+            }
+            let mut attached = false;
+            for frame in &connection.frames {
+                let data = WebSocketData::Binary(Bytes::copy_from_slice(&frame.bytes));
+                let frame = codec.decode(data).map_err(|error| {
+                    error.change_context(ClockAttachmentEvidenceError::Unreadable {
+                        connection: number,
+                    })
+                })?;
+                let message = ServerMessage::decode(&frame).map_err(|error| {
+                    error.change_context(ClockAttachmentEvidenceError::Unreadable {
+                        connection: number,
+                    })
+                })?;
+                let ServerMessage::Reply(Reply {
+                    body: ReplyBody::DomainClockAttach(outcome),
+                    ..
+                }) = message
+                else {
+                    continue;
+                };
+                let DomainClockAttachDisposition::Attached {
+                    domain: acknowledged,
+                    ..
+                } = outcome.disposition
+                else {
+                    continue;
+                };
+                if &acknowledged != domain {
+                    continue;
+                }
+                if attached {
+                    return Err(Report::new(ClockAttachmentEvidenceError::Repeated {
+                        connection: number,
+                        domain: domain.clone(),
+                    }));
+                }
+                attached = true;
+            }
+            if attached {
+                count = count
+                    .checked_add(1)
+                    .assured("connections are held in memory and cannot number usize::MAX");
+            }
+        }
+        Ok(count)
+    }
+
     /// Reads setup replies through the public codec. Comparing observations after a command
     /// proves both that the same connection survived and that existing intent was not restored.
     pub(crate) fn setup_observation(

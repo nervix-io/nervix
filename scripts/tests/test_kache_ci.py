@@ -986,12 +986,43 @@ class PublicationTests(unittest.TestCase):
         ])
         self.assertEqual(command.call_args.args[2], 1.0)
 
+    def test_a_real_manifest_process_times_out_after_successful_preflight(self) -> None:
+        with (
+            self.available_daemon(),
+            self.no_pending_uploads(),
+            mock.patch.object(kache_remote, "run_kache", wraps=kache_remote.run_kache) as command,
+        ):
+            publication, _kache, _output = self.publish({"manifest_seconds": 5}, budget=1.0)
+
+        self.assertEqual(publication.outcome, Outcome.INCOMPLETE)
+        self.assertIsNone(publication.manifest.status)
+        self.assertEqual(publication.reasons, ["The manifest was not saved within the budget."])
+        command.assert_called_once()
+        self.assertEqual(command.call_args.args[0][:2], ["save-manifest", "--manifest-key"])
+        self.assertEqual(command.call_args.args[2], 1.0)
+
     def test_a_telemetry_timeout_follows_a_successful_daemon_probe(self) -> None:
         with (
             self.available_daemon(),
             mock.patch.object(kache_remote, "run_kache", side_effect=self.expired_command) as command,
         ):
             publication, _kache, _output = self.publish({}, budget=0.5)
+
+        self.assertEqual(publication.outcome, Outcome.UNAVAILABLE)
+        self.assertEqual(publication.reasons, [
+            "The daemon's uploads could not be read: `kache telemetry write` did not answer within 1 s."
+        ])
+        self.assertIsNone(publication.manifest)
+        command.assert_called_once()
+        self.assertEqual(command.call_args.args[0][:2], ["telemetry", "write"])
+        self.assertEqual(command.call_args.args[2], 1.0)
+
+    def test_a_real_telemetry_process_times_out_after_successful_daemon_probe(self) -> None:
+        with (
+            self.available_daemon(),
+            mock.patch.object(kache_remote, "run_kache", wraps=kache_remote.run_kache) as command,
+        ):
+            publication, _kache, _output = self.publish({"telemetry_seconds": 3}, budget=0.5)
 
         self.assertEqual(publication.outcome, Outcome.UNAVAILABLE)
         self.assertEqual(publication.reasons, [
