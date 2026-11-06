@@ -229,7 +229,7 @@ Feature: Physical infrastructure deadlines under domain pacing
         ON edge
         PATH '/input'
         TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR physical_wait_state_source
+      CREATE HTTP ENDPOINT INGESTOR physical_wait_state_ingestor
         FROM physical_wait_state_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING physical_wait_preference_codec
         TIMESTAMP NOW
@@ -240,7 +240,7 @@ Feature: Physical infrastructure deadlines under domain pacing
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR physical_wait_input_source
+      CREATE HTTP ENDPOINT INGESTOR physical_wait_input_ingestor
         FROM physical_wait_input_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING physical_wait_notification_codec
         TIMESTAMP NOW
@@ -329,7 +329,7 @@ Feature: Physical infrastructure deadlines under domain pacing
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE KAFKA TOPIC INGESTOR physical_ack_source
+      CREATE KAFKA TOPIC INGESTOR physical_ack_ingestor
         FROM physical_ack_kafka TOPIC 'physical_ack_in_{{test_id}}' OFFSET BY CONSUMER GROUP 'physical_ack_{{test_id}}' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING physical_ack_codec
         TIMESTAMP NOW
@@ -339,7 +339,7 @@ Feature: Physical infrastructure deadlines under domain pacing
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC EMITTER physical_ack_sink
+      CREATE KAFKA TOPIC EMITTER physical_ack_emitter
         FROM physical_ack_records
         TO physical_ack_kafka TOPIC 'physical_ack_out_{{test_id}}'
         MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -350,13 +350,13 @@ Feature: Physical infrastructure deadlines under domain pacing
         ON GENERAL ERROR LOG;
       START AT '1980-01-01T00:00:00Z' TIME RATE <rate>;
       """
-    And emitter "physical_ack_sink" enters stall mode
+    And emitter "physical_ack_emitter" enters stall mode
     And Kafka message is published to topic "physical_ack_in_{{test_id}}"
       """
       {"user_id":77}
       """
     Then the observed broker does not receive a payload within "1200ms"
-    When emitter "physical_ack_sink" leaves stall mode
+    When emitter "physical_ack_emitter" leaves stall mode
     Then within "4s" the observed broker receives payloads
       """
       {"user_id":77}

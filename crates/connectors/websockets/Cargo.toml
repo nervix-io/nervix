@@ -1,5 +1,5 @@
 [package]
-description = "The WebSocket source and signaling protocol engine for Nervix"
+description = "The WebSocket ingestor and signaling protocol engine for Nervix"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-connector-websockets"

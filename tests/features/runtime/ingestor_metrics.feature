@@ -23,7 +23,7 @@ Feature: Ingestor metrics
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ingestor_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingestor_metrics_ingress ON edge PATH '/ingestor-metrics' TYPE HTTP;
-        CREATE HTTP ENDPOINT INGESTOR ingestor_metrics_source
+        CREATE HTTP ENDPOINT INGESTOR ingestor_metrics_ingestor
         FROM ingestor_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
@@ -52,11 +52,11 @@ Feature: Ingestor metrics
     When leadership is transferred to node "<leader>"
     And these Plexus commands are executed on node "node-1"
       """
-      DESCRIBE INGESTOR ingestor_metrics_source;
+      DESCRIBE INGESTOR ingestor_metrics_ingestor;
       """
     Then the last command output contains
       """
-      ingestor: ingestor_metrics_source
+      ingestor: ingestor_metrics_ingestor
       """
     And the last command output contains
       """
@@ -123,20 +123,20 @@ Feature: Ingestor metrics
       messages_per_batch received relay=notifications
       """
     And node "node-1" observability path "/metrics" eventually responds with 200 and contains 'target_kind="INGESTOR"'
-    And node "node-1" observability path "/metrics" eventually responds with 200 and contains 'target="ingestor_metrics_source"'
+    And node "node-1" observability path "/metrics" eventually responds with 200 and contains 'target="ingestor_metrics_ingestor"'
     And node "node-1" observability path "/metrics" eventually responds with 200 and contains "nervix_messages_per_batch_bucket"
     And node "node-1" observability path "/metrics" eventually responds with 200 and contains 'le="65536"'
     And node "node-1" observability metric "nervix_messages_total" with labels eventually equals 2
       """
       target_kind="INGESTOR"
-      target="ingestor_metrics_source"
+      target="ingestor_metrics_ingestor"
       direction="sent"
       relay="notifications"
       """
     And node "node-1" observability metric "nervix_messages_per_batch_count" with labels eventually equals 2
       """
       target_kind="INGESTOR"
-      target="ingestor_metrics_source"
+      target="ingestor_metrics_ingestor"
       direction="sent"
       relay="notifications"
       """
@@ -169,7 +169,7 @@ Feature: Ingestor metrics
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge payload-size-{{test_id}}.example.com;
       CREATE ENDPOINT payload_size_ingress ON edge PATH '/payload-size' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR payload_size_source
+      CREATE HTTP ENDPOINT INGESTOR payload_size_ingestor
         FROM payload_size_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
@@ -232,7 +232,7 @@ Feature: Ingestor metrics
           'subscription_buffer_messages' = '1024',
           'idle_timeout_ms' = '30000'
         };
-        CREATE <source_head> INGESTOR ingestor_metrics_source
+        CREATE <source_head> INGESTOR ingestor_metrics_ingestor
         FROM <source_clause>
         ON QUIESCE DROP
         DECODE USING notification_codec
@@ -244,9 +244,9 @@ Feature: Ingestor metrics
         ON GENERAL ERROR LOG;
         START;
       """
-    Then within "5s" node "node-1" eventually reports describe ingestor "ingestor_metrics_source" as "status: running"
+    Then within "5s" node "node-1" eventually reports describe ingestor "ingestor_metrics_ingestor" as "status: running"
     When 10 JSON messages with user id 42 are rapidly published to "<entity_kind>" input "<input>"
-    Then within "10s" node "node-1" eventually reports describe ingestor "ingestor_metrics_source" as "messages_total sent relay=notifications <metric_labels> total=10"
+    Then within "10s" node "node-1" eventually reports describe ingestor "ingestor_metrics_ingestor" as "messages_total sent relay=notifications <metric_labels> total=10"
     And the last command output metric "messages_total" "sent" relay "notifications" <metric_scope> has numeric values
       """
       total=10
@@ -273,14 +273,14 @@ Feature: Ingestor metrics
     And node "node-1" observability metric "nervix_messages_per_batch_count" with labels eventually equals 1
       """
       target_kind="INGESTOR"
-      target="ingestor_metrics_source"
+      target="ingestor_metrics_ingestor"
       direction="sent"
       relay="notifications"
       """
     And node "node-1" observability metric "nervix_messages_per_batch_sum" with labels eventually equals 10
       """
       target_kind="INGESTOR"
-      target="ingestor_metrics_source"
+      target="ingestor_metrics_ingestor"
       direction="sent"
       relay="notifications"
       """
@@ -319,7 +319,7 @@ Feature: Ingestor metrics
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-immediate-flush-{{test_id}}'
         };
-        CREATE MQTT TOPIC INGESTOR immediate_source
+        CREATE MQTT TOPIC INGESTOR immediate_ingestor
         FROM mqtt_main TOPIC 'immediate_notifications_{{test_id}}' SESSION CLEAN QOS 0 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
@@ -331,10 +331,10 @@ Feature: Ingestor metrics
         ON GENERAL ERROR LOG;
         START;
       """
-    Then within "5s" node "node-1" eventually reports describe ingestor "immediate_source" as "status: running"
+    Then within "5s" node "node-1" eventually reports describe ingestor "immediate_ingestor" as "status: running"
     And the last command output owner is saved as placeholder "immediate_source_owner"
     When 100 JSON messages with user id 42 are rapidly published to "MQTT" input "immediate_notifications_{{test_id}}"
-    Then within "10s" node "node-1" eventually reports describe ingestor "immediate_source" as "messages_total sent relay=notifications instance=0 physical_node={{immediate_source_owner}} total=100"
+    Then within "10s" node "node-1" eventually reports describe ingestor "immediate_ingestor" as "messages_total sent relay=notifications instance=0 physical_node={{immediate_source_owner}} total=100"
     And the last command output metric "batches_total" "sent" relay "notifications" instance 0 on any physical node has numeric values
       """
       total<100
@@ -368,7 +368,7 @@ Feature: Ingestor metrics
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ingestor_metrics_source;
         CREATE VHOST edge http-{{test_id}}-ingestor-restart.example.com;
         CREATE ENDPOINT ingestor_metrics_restart_ingress ON edge PATH '/ingestor-metrics-restart' TYPE HTTP;
-        CREATE HTTP ENDPOINT INGESTOR ingestor_metrics_source
+        CREATE HTTP ENDPOINT INGESTOR ingestor_metrics_ingestor
         FROM ingestor_metrics_restart_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
@@ -388,9 +388,9 @@ Feature: Ingestor metrics
       """
       {"user_id":43}
       """
-    Then within "5s" node "node-1" eventually reports describe ingestor "ingestor_metrics_source" as "messages_total sent relay=notifications physical_node=node-1 total=2"
+    Then within "5s" node "node-1" eventually reports describe ingestor "ingestor_metrics_ingestor" as "messages_total sent relay=notifications physical_node=node-1 total=2"
     When the cluster is restarted
-    Then within "10s" node "node-1" eventually reports describe ingestor "ingestor_metrics_source" as "messages_total sent relay=notifications physical_node=node-1 total=2"
+    Then within "10s" node "node-1" eventually reports describe ingestor "ingestor_metrics_ingestor" as "messages_total sent relay=notifications physical_node=node-1 total=2"
     And the last command output metric "batches_total" "sent" relay "notifications" physical node "node-1" has values
       """
       total=2
@@ -401,7 +401,7 @@ Feature: Ingestor metrics
       """
     And these Plexus commands are executed through the client on node "node-1"
       """
-      DESCRIBE INGESTOR ingestor_metrics_source;
+      DESCRIBE INGESTOR ingestor_metrics_ingestor;
       """
     Then the last command output metric "messages_total" "sent" relay "notifications" physical node "node-1" has values
       """
@@ -443,7 +443,7 @@ Feature: Ingestor metrics
           'subscription_buffer_messages' = '1024',
           'idle_timeout_ms' = '30000'
         };
-        CREATE REDIS PUBSUB INGESTOR remote_owner_metrics_source
+        CREATE REDIS PUBSUB INGESTOR remote_owner_metrics_ingestor
         FROM redis_main CHANNEL 'remote_owner_notifications_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
@@ -457,13 +457,13 @@ Feature: Ingestor metrics
         DRAIN NODE node-1;
         SHOW CLUSTER STATUS;
       """
-    Then the last cluster status owner for scheduled "ingestor" "remote_owner_metrics_source" is saved as placeholder "ingestor_owner"
-    And within "10s" node "node-1" eventually reports describe ingestor "remote_owner_metrics_source" as "owner: {{ingestor_owner}}"
+    Then the last cluster status owner for scheduled "ingestor" "remote_owner_metrics_ingestor" is saved as placeholder "ingestor_owner"
+    And within "10s" node "node-1" eventually reports describe ingestor "remote_owner_metrics_ingestor" as "owner: {{ingestor_owner}}"
     And Redis channel "remote_owner_notifications_{{test_id}}" eventually has 1 subscribers
     When 2 JSON messages with user id 42 are rapidly published to "REDIS" input "remote_owner_notifications_{{test_id}}"
-    Then within "10s" node "node-1" eventually reports describe ingestor "remote_owner_metrics_source" as "messages_total sent relay=notifications physical_node={{ingestor_owner}} total=2"
+    Then within "10s" node "node-1" eventually reports describe ingestor "remote_owner_metrics_ingestor" as "messages_total sent relay=notifications physical_node={{ingestor_owner}} total=2"
     When the cluster is restarted
-    Then within "10s" node "node-1" eventually reports describe ingestor "remote_owner_metrics_source" as "messages_total sent relay=notifications physical_node={{ingestor_owner}} total=2"
+    Then within "10s" node "node-1" eventually reports describe ingestor "remote_owner_metrics_ingestor" as "messages_total sent relay=notifications physical_node={{ingestor_owner}} total=2"
 
   Scenario Outline: DESCRIBE INGESTOR counts every message a JAQ codec unfolds from one payload
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -484,7 +484,7 @@ Feature: Ingestor metrics
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT unfolded_metrics_ingress ON edge PATH '/unfolded-metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR unfolded_metrics_source
+      CREATE HTTP ENDPOINT INGESTOR unfolded_metrics_ingestor
         FROM unfolded_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_batch_codec
         TO notifications
@@ -506,8 +506,8 @@ Feature: Ingestor metrics
       {"user_id":43}
       {"user_id":44}
       """
-    And within "10s" node "node-1" eventually reports describe ingestor "unfolded_metrics_source" as "messages_total received relay=- physical_node=node-1 total=3"
-    And within "10s" node "node-1" eventually reports describe ingestor "unfolded_metrics_source" as "messages_total sent relay=notifications physical_node=node-1 total=3"
+    And within "10s" node "node-1" eventually reports describe ingestor "unfolded_metrics_ingestor" as "messages_total received relay=- physical_node=node-1 total=3"
+    And within "10s" node "node-1" eventually reports describe ingestor "unfolded_metrics_ingestor" as "messages_total sent relay=notifications physical_node=node-1 total=3"
 
     Examples:
       | cluster_size |

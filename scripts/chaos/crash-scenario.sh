@@ -176,7 +176,7 @@ run_crash() {
     compose up --detach --no-deps load observer
     wait_for 'independent load, observer and broker' 30 check_support_containers
     wait_for 'source traffic started' 30 topic_progressed chaos_input 0
-    wait_for 'sink traffic started' 60 topic_progressed chaos_output 0
+    wait_for 'emitter traffic started' 60 topic_progressed chaos_output 0
     wait_for 'initial cross-node traffic metrics' 60 initial_remote_path_ready
     local host
     for host in "${node_hosts[@]}"; do
@@ -316,8 +316,8 @@ run_crash() {
         local output_after_placement
         output_after_placement="$(topic_end_offset chaos_output)"
         [[ "${output_after_placement}" =~ ^[0-9]+$ ]] \
-            || crash_fail product 'sink offset unavailable during owner recovery'
-        wait_for 'sink traffic resumed during outage' 60 \
+            || crash_fail product 'emitter offset unavailable during owner recovery'
+        wait_for 'emitter traffic resumed during outage' 60 \
             topic_progressed chaos_output "${output_after_placement}"
         delivery_resume_ms="$(( $(epoch_ms) - kill_requested_ms ))"
     fi

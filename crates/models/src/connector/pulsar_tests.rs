@@ -186,7 +186,7 @@ fn only_the_types_that_read_through_one_consumer_refuse_more_instances(
 ) {
     assert_eq!(kind.reads_through_one_consumer(), one_consumer);
 
-    let mut source = PulsarTopicIngestor {
+    let mut ingestor = PulsarTopicIngestor {
         client: ClientName::parse("broker").assured("the fixture name is valid"),
         topic: PulsarTopicName::parse("orders").assured("the fixture name is valid"),
         subscription: PulsarSubscription {
@@ -198,13 +198,13 @@ fn only_the_types_that_read_through_one_consumer_refuse_more_instances(
         mode: PulsarIngestMode::NoAck,
         quiesce: IngestQuiesceMode::Suspend,
     };
-    assert!(source.instances_fit_subscription());
+    assert!(ingestor.instances_fit_subscription());
 
-    source.instances =
+    ingestor.instances =
         crate::IngestorInstances::Count(NonZeroU64::new(2).assured("two is greater than zero"));
-    assert_eq!(source.instances_fit_subscription(), !one_consumer);
-    source.instances = crate::IngestorInstances::PerPartition;
-    assert_eq!(source.instances_fit_subscription(), !one_consumer);
+    assert_eq!(ingestor.instances_fit_subscription(), !one_consumer);
+    ingestor.instances = crate::IngestorInstances::PerPartition;
+    assert_eq!(ingestor.instances_fit_subscription(), !one_consumer);
 }
 
 #[test]

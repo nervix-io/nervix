@@ -227,7 +227,10 @@ outcomes.
 Targets must be live and must advertise that their domain clocks match the committed runtime
 revision the producer started from, or a later one. Each node's domain clock owner follows every
 committed domain and schedule change, and it advertises a runtime revision once every domain clock
-the node holds, authority fence included, equals that revision's committed lifecycle. It advertises
+the node holds, authority fence included, equals that revision's committed lifecycle. The
+advertisement is the node's gossip key for that revision; the owner also records the revision in
+the node's [application progress](./interconnect.md#application-progress), which target selection
+does not read. It advertises
 neither graph preparation nor activation, so a target whose graph installation waits still receives
 progress. A lifecycle change that only graph installation installs, such as a new generation of
 another domain, holds the advertisement until graph installation installs it. A new or reconnected

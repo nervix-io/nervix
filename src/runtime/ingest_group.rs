@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** Group decoding, timestamped row metadata, route execution and in-memory ACKs.
 //! - **Depends on.** Installed domain capabilities, compiled codecs and branch-local routes.
-//! - **Must not know.** Plexus parsing, consensus decisions or source transport lifecycle.
+//! - **Must not know.** Plexus parsing, consensus decisions or ingestor transport lifecycle.
 
 #![cfg_attr(
     nervix_lint,
@@ -20,14 +20,14 @@ use nervix_execution::{CpuClass, ExecutionError, MemoryClass};
 
 use super::*;
 
-/// Chosen operational bound for how many decoded source messages accumulate before an ingest group
+/// Chosen operational bound for how many decoded ingestor messages accumulate before an ingest group
 /// executes and becomes one Arrow batch per (relay, branch key). A group closes once it holds this
 /// many or more: every message of one payload joins the same group, so a payload that unfolds past
 /// the remaining room carries the group beyond the bound instead of being split. This is
 /// intentionally independent of a Plexus route's flush policy.
 pub(in crate::runtime) const INGEST_GROUP_MAX_ROWS: usize = 1024;
 
-/// Chosen operational bound for how long a partial source group waits when the source
+/// Chosen operational bound for how long a partial ingestor group waits when the ingestor
 /// goes quiet. This is intentionally independent of a Plexus route's flush policy.
 pub(in crate::runtime) const INGEST_GROUP_IDLE_FLUSH: Duration = Duration::from_millis(5);
 
@@ -108,7 +108,7 @@ impl UnfoldingNotAdmitted {
     }
 }
 
-/// One payload of a batch a source hands its host, and the entry that stays with it whatever its
+/// One payload of a batch an ingestor hands its host, and the entry that stays with it whatever its
 /// codec decides, such as the payload's metadata row.
 pub(in crate::runtime) struct BatchPayload<'p, T> {
     pub(in crate::runtime) payload: &'p [u8],
@@ -327,7 +327,7 @@ pub(super) struct BoundIngestor {
 
 /// What an ingestor reads, bound on this node.
 pub(super) enum BoundIngestorInput {
-    /// A transport: the codec that decodes its payloads, and the plan of its source.
+    /// A transport: the codec that decodes its payloads, and the plan of its ingestor.
     Transport {
         codec: Arc<CompiledCodec>,
         source: IngestorConnectorPlan,
@@ -368,14 +368,14 @@ pub(super) struct IngestGroupContext {
     pub(super) filter_where: Option<CompiledProgramWithMaterializedInterest>,
 }
 
-/// The payloads a source has decoded into its ingest group and is now accepting.
+/// The payloads an ingestor has decoded into its ingest group and is now accepting.
 ///
 /// The payloads have already been decoded into the group's record builder by
 /// [`IngestRouteCollector::decode_payload`], each as the zero or more messages it unfolded into;
 /// this call is what accepts them, by giving each payload the metadata row and ACK set that belong
-/// to it. A source may contribute one poll batch or several consecutive single-record polls. The
-/// collector owns the actual group boundary: request-scoped sources flush at the end of the
-/// request, while streaming sources flush at the message or idle-time bound.
+/// to it. An ingestor may contribute one poll batch or several consecutive single-record polls. The
+/// collector owns the actual group boundary: request-scoped ingestors flush at the end of the
+/// request, while streaming ingestors flush at the message or idle-time bound.
 pub(super) struct IngestGroupDispatch<'a> {
     pub(super) handles: &'a IngestTaskHandles,
     pub(super) domain: &'a DomainName,
@@ -383,15 +383,15 @@ pub(super) struct IngestGroupDispatch<'a> {
     pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
     pub(super) output_routes: &'a Arc<BoundIngestorRoutes>,
     pub(super) filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
-    /// One entry per decoded payload, read from the borrowed source messages and appended into the
+    /// One entry per decoded payload, read from the borrowed ingestor messages and appended into the
     /// group's own metadata builders once for every message the payload unfolded into.
     pub(super) metadata: &'a [IngestMetadataRow<'a>],
     /// Payload-aligned with `metadata`. Every message of a payload takes one share of its set, and
     /// an empty share is replaced by a tracked ack root.
     pub(super) acks: Vec<AckSet>,
     pub(super) ingested_at: Timestamp,
-    /// Sources differ only in when they flush this group: stream sources use the
-    /// size/idle-time bounds, while request-scoped sources flush at request completion.
+    /// Ingestors differ only in when they flush this group: stream ingestors use the
+    /// size/idle-time bounds, while request-scoped ingestors flush at request completion.
     pub(super) collector: &'a mut IngestRouteCollector,
 }
 
@@ -473,7 +473,7 @@ pub(super) struct PendingIngestGroup {
     pub(super) records: Option<RuntimeRecordBatchBuilder>,
     decoder: JsonDecoder,
     /// How many messages each decoded payload unfolded into, oldest first, for the payloads the
-    /// source has not accepted yet.
+    /// ingestor has not accepted yet.
     pub(super) undispatched_payloads: VecDeque<usize>,
     pub(super) metadata: Option<IngestMetadataBuilders>,
     /// One ACK set per accepted message.
@@ -497,7 +497,7 @@ impl PendingIngestGroup {
     }
 
     /// Decodes one payload into the group's record builder, opened for the codec's schema on the
-    /// first payload the group decodes, and holds its messages until the source accepts it.
+    /// first payload the group decodes, and holds its messages until the ingestor accepts it.
     /// `admission` says what an unfolding does when the node's extension workers have no room.
     ///
     /// A payload that fails to decode leaves the group's rows exactly as they were. When the group
@@ -537,7 +537,7 @@ impl PendingIngestGroup {
         }
     }
 
-    /// Payloads the group has decoded but the source has not accepted yet.
+    /// Payloads the group has decoded but the ingestor has not accepted yet.
     pub(super) fn undispatched_payloads(&self) -> usize {
         self.undispatched_payloads.len()
     }
@@ -578,7 +578,7 @@ impl PendingIngestGroup {
                 ack_sets: acks.len(),
             }));
         }
-        // Payloads are accepted in the order they decoded, and a source may accept them one at a
+        // Payloads are accepted in the order they decoded, and an ingestor may accept them one at a
         // time, so a contribution may cover a prefix of what the group has decoded but never more.
         if payload_count > self.undispatched_payloads.len() {
             return Err(Report::new(IngestGroupError::DecodedPayloadCount {
@@ -774,10 +774,10 @@ pub(super) struct IngestorMessageError<'a> {
     pub(super) execution_now: Timestamp,
 }
 
-/// Accumulates one source ingest group before program execution, then holds its routed
+/// Accumulates one ingestor's group before program execution, then holds its routed
 /// messages long enough to build one Arrow batch per (relay, branch key).
 ///
-/// A source decodes each payload into the open group with `decode_payload` and accepts the payloads
+/// An ingestor decodes each payload into the open group with `decode_payload` and accepts the payloads
 /// that decoded with `collect`, so the group's records, metadata and ACKs stay row-aligned. The
 /// metadata projection is fixed when the ingestor binds its programs, so every group the collector
 /// opens builds the same columns.
@@ -800,7 +800,7 @@ impl IngestRouteCollector {
     /// Opens a collector whose groups build the metadata columns `projection` reads and close at
     /// `row_bound` rows.
     ///
-    /// Sources that flush one group per message or per poll pass their own bound so a
+    /// Ingestors that flush one group per message or per poll pass their own bound so a
     /// short group does not size its builders for a streaming one.
     pub(super) fn new(
         projection: Arc<IngestMetadataProjection>,
@@ -824,7 +824,7 @@ impl IngestRouteCollector {
         self.input_refused
     }
 
-    /// Decodes one source payload into the group's record builder, its unfolding admitted to the
+    /// Decodes one ingestor payload into the group's record builder, its unfolding admitted to the
     /// node's extension workers as `admission` says.
     ///
     /// The builder belongs to the group, so consecutive payloads share one set of Arrow columns,
@@ -903,7 +903,7 @@ impl IngestRouteCollector {
     pub(super) fn take_pending(
         &mut self,
     ) -> error_stack::Result<Option<(IngestGroupContext, IngestGroupRows)>, IngestGroupError> {
-        // A decoded payload the source never accepted would put the records out of step with the
+        // A decoded payload the ingestor never accepted would put the records out of step with the
         // metadata and ACKs, so the group says so rather than closing over the mismatch.
         let undispatched = self.pending.undispatched_payloads();
         if undispatched != 0 {
@@ -966,7 +966,7 @@ impl IngestRouteCollector {
 
     /// The messages the open group has accepted.
     ///
-    /// Sources close the group once this reaches [`INGEST_GROUP_MAX_ROWS`]. It counts messages
+    /// Ingestors close the group once this reaches [`INGEST_GROUP_MAX_ROWS`]. It counts messages
     /// rather than payloads, and a payload that unfolds past the remaining room overshoots the
     /// bound rather than being split.
     pub(super) fn len(&self) -> usize {
@@ -1519,10 +1519,10 @@ impl Runtime {
         }
     }
 
-    /// Accepts the rows a source decoded into the current ingest group.
+    /// Accepts the rows an ingestor decoded into the current ingest group.
     ///
     /// Program execution is deliberately deferred until `flush_ingest_collector`, so
-    /// sources that receive one record per poll still enter the columnar VM once for the
+    /// ingestors that receive one record per poll still enter the columnar VM once for the
     /// collected group rather than once per call to this method.
     pub(in crate::runtime) async fn dispatch_ingested_records(
         &self,
@@ -1581,7 +1581,7 @@ impl Runtime {
         let output_routes = &context.output_routes;
         let filter_where = context.filter_where.as_ref();
 
-        // Sources that do not track acks themselves still need a root for downstream
+        // Ingestors that do not track acks themselves still need a root for downstream
         // resolution to land on. Those completions are deliberately never observed.
         let mut _unobserved_completions = Vec::new();
         for slot in rows.acks.iter_mut().filter(|slot| slot.is_empty()) {

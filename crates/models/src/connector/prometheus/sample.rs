@@ -1,13 +1,13 @@
-//! The sample a Prometheus query source delivers.
+//! The sample a Prometheus query ingestor delivers.
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The JSON object a query source delivers for one sample of an instant query, how
-//!   that object writes the sample's value, and what a query can answer that a query source does
+//! - **Owns.** The JSON object a query ingestor delivers for one sample of an instant query, how
+//!   that object writes the sample's value, and what a query can answer that a query ingestor does
 //!   not read.
 //! - **Depends on.** The vocabulary's timestamps, JSON numbers and declarative string rendering.
 //! - **Must not know.** How a query is sent, how an answer is read or decoded, or which codec
-//!   judges the object a source delivers.
+//!   judges the object an ingestor delivers.
 
 #![cfg_attr(
     nervix_lint,
@@ -22,11 +22,11 @@ use thiserror::Error;
 
 use crate::Timestamp;
 
-/// The one `resultType` a query source reads: a `vector` of float samples, each delivered as a
+/// The one `resultType` a query ingestor reads: a `vector` of float samples, each delivered as a
 /// [`PrometheusSample`]. Everything else a query can answer is a [`PrometheusUnsupportedResult`].
 pub const PROMETHEUS_VECTOR_RESULT: &str = "vector";
 
-/// The object a query source delivers for one sample: what the API's `vector` result holds for it,
+/// The object a query ingestor delivers for one sample: what the API's `vector` result holds for it,
 /// with the sample's instant written out as text.
 ///
 /// This type is the payload contract, and the connector encodes nothing but it. Labels stay under
@@ -102,7 +102,7 @@ impl Serialize for PrometheusNonFiniteValue {
     }
 }
 
-/// What an instant query can answer that a query source does not read. Each fails its poll with a
+/// What an instant query can answer that a query ingestor does not read. Each fails its poll with a
 /// failure that names it, the next poll queries again, and no sample of that answer is delivered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display, strum::EnumIter, strum::EnumString)]
 #[strum(serialize_all = "lowercase")]

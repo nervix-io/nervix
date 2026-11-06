@@ -156,7 +156,7 @@ run_restore_fresh_cluster() {
 
     phase 'fresh restore: quiesced backup under load'
     wait_for 'source baseline' 40 topic_progressed chaos_input 9
-    wait_for 'acknowledged sink baseline' 60 topic_progressed chaos_output 9
+    wait_for 'acknowledged emitter baseline' 60 topic_progressed chaos_output 9
     backup_archive_domain "${archive_dir}" chaos_baseline "${archive_dir}/domain.nvxb" \
         "${archive_dir}/report.json" \
         || fresh_fail product 'the packaged CLI could not create the quiesced archive'

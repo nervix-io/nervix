@@ -2,12 +2,12 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The Kafka client Model, the topic source and emitter Models with their offset and
+//! - **Owns.** The Kafka client Model, the topic ingestor and emitter Models with their offset and
 //!   delivery modes, a consumer group's start position and its alteration, the topic and consumer
-//!   group names a source reads with the rules Kafka holds them to, and what each entity declares.
+//!   group names an ingestor reads with the rules Kafka holds them to, and what each entity declares.
 //!   Client declarations also own public configuration keys, types and confidentiality, and the
 //!   one name a client accepts for each librdkafka property.
-//! - **Depends on.** The shared source and emitter declarations and the names a body references.
+//! - **Depends on.** The shared ingestor and emitter declarations and the names a body references.
 //! - **Must not know.** The Kafka driver, or how a topic is consumed or
 //!   produced to.
 
@@ -572,11 +572,11 @@ impl KafkaIngestMode {
 
 connector_ingestors! {
     connector Kafka = "KAFKA";
-    /// What a Kafka source reads.
+    /// What a Kafka ingestor reads.
     pub enum KafkaIngestor;
     /// The alterations of the ingestors that read a Kafka entity.
     pub enum KafkaTopicIngestorAlteration;
-    /// The entities a Kafka source reads.
+    /// The entities a Kafka ingestor reads.
     pub enum KafkaIngestorEntity {
         Topic(KafkaTopicIngestor => KafkaTopicIngestorChange) = "TOPIC", "Kafka";
     }

@@ -1,5 +1,5 @@
 [package]
-description = "The ZeroMQ source and sink connector for Nervix"
+description = "The ZeroMQ ingestor and emitter connector for Nervix"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-connector-zeromq"
@@ -23,5 +23,5 @@ zeromq = { workspace = true }
 
 [dev-dependencies]
 meticulous = { workspace = true }
-# The deadline checks measure a sink's waits on a paused clock.
+# The deadline checks measure an emitter's waits on a paused clock.
 nervix-primitives = { workspace = true, features = ["native", "test-util"] }
