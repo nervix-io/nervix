@@ -33,9 +33,11 @@ reference. `DESCRIBE CLIENT <name>` shows effective defaults and configured valu
 For delivery durations and direct-value mappings, follow the Ingestors delivery-mode and Emitters
 direct-value sections. Nervix validates the entity's declared limits and exact mapping types at
 `CREATE` and `ALTER`; correct a refused declaration before starting the domain.
-For MQTT sources, read [Ingestors → MQTT](../../../docs/src/ingestors.md#mqtt) before promising
-delivery during downstream stalls; it distinguishes QoS 0 overflow, acknowledged capacity and
-the counters that expose each outcome, and the refusal of a broker grant below the declared QoS.
+For MQTT sources, read [Ingestors → MQTT](../../../docs/src/ingestors.md#mqtt) for the session/QoS/mode
+pairings and the broker's shared-subscription requirement, including with one instance. Read its
+session and identity rules before sharing a client between entities or promising recovery after an
+owner change. Its acknowledgement section distinguishes QoS 0 overflow, acknowledged capacity,
+keep-alive during downstream stalls and the refusal of a broker grant below the declared QoS.
 For MQTT retained publication, typed publish properties and user-property headers, read
 [Emitters → MQTT](../../../docs/src/emitters.md#mqtt) for their exact types, limits and retry contract.
 For Pulsar source identity, keys, redelivery and event-time windows, read

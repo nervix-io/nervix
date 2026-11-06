@@ -9,6 +9,7 @@ use indexmap::{IndexMap, map::Entry};
 use serde::{Deserialize, Serialize};
 
 pub mod audit;
+pub mod origin;
 pub mod rules;
 pub mod source;
 
