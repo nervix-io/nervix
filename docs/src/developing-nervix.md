@@ -693,8 +693,8 @@ and exact `value`, `identity` and `state` roles at their semantic owners. The
 [typed-state contracts](./typed-states.md#source-owned-identity-and-installation-contracts) state the
 supported scope. `just test-typed-ratchet-contracts <unittest selector...>` runs focused pass/fail
 compiler fixtures after preparing `just test-typed-ratchet-compiler`. `just test-ratchet-units`
-also qualifies language provenance before resolution; `python3 -m scripts.check_layer_provenance`
-prints current source/manifest violations. Calibration logs and complete matrix/coverage outputs
+also qualifies language provenance before resolution; `just ratchet` prints current
+source/manifest violations. Calibration logs and complete matrix/coverage outputs
 belong on the owning task, not in the source tree. Compilation under a modeled mode qualifies
 recognition and supplies no concurrency execution evidence.
 

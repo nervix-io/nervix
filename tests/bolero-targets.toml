@@ -99,6 +99,36 @@ source = "tools/nervix-lint/ratchet/src/representations.rs"
 test = "representations::bolero_matrix_round_trip"
 test_target = "lib"
 
+[[target]]
+case_timeout_seconds = 10
+corpus = "tools/nervix-lint/ratchet/src/__fuzz__/gate__tests__bolero_baseline_file_round_trip_preserves_every_declared_count/corpus"
+domain_version = 1
+features = []
+id = "typed-gate-baseline"
+invariant = "Every declared structural count survives a downward-gate baseline file JSON round trip exactly."
+manifest = "tools/nervix-lint/Cargo.toml"
+max_input_bytes = 32
+package = "nervix-ratchet"
+random_iterations = 256
+source = "tools/nervix-lint/ratchet/src/gate.rs"
+test = "gate::tests::bolero_baseline_file_round_trip_preserves_every_declared_count"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "tools/nervix-lint/ratchet/src/gate/__fuzz__/gate__graph__tests__bolero_generated_depth_trees_recover_every_edge_and_refuse_skipped_depths/corpus"
+domain_version = 1
+features = []
+id = "typed-gate-product-graph"
+invariant = "Bounded depth-prefixed release trees recover every package edge once and refuse malformed skipped depths."
+manifest = "tools/nervix-lint/Cargo.toml"
+max_input_bytes = 32
+package = "nervix-ratchet"
+random_iterations = 256
+source = "tools/nervix-lint/ratchet/src/gate/graph.rs"
+test = "gate::graph::tests::bolero_generated_depth_trees_recover_every_edge_and_refuse_skipped_depths"
+test_target = "lib"
+
 
 [[target]]
 case_timeout_seconds = 10
