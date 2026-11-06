@@ -705,7 +705,7 @@ Transport-specific schemes and keys:
   client certificate. A plaintext `ws://...` endpoint reads no TLS file, so `CREATE WEBSOCKETS
   CLIENT` refuses all three with it; see [`WEBSOCKETS CONNECTION`](#websockets-connection).
 - `MQTT`: use `mqtts://...` in `addr`. Nervix requires `tls_ca_file` for server trust and also supports `tls_cert_file` plus `tls_key_file` for mTLS. A plaintext `mqtt://` address reads no TLS file, so `CREATE MQTT CLIENT` refuses all three with it.
-- `NATS`: use `tls://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
+- `NATS`: use `tls://...` in `addr`. Nervix trusts the platform's native roots, or only `tls_ca_file` when it is set, and presents `tls_cert_file` with `tls_key_file` as its client certificate; a `nats://` address uses TLS only when the server requires it. See [NATS](#nats).
 - `PULSAR`: use `pulsar+ssl://...` in `addr`. Nervix honors `tls_ca_file`, presents `tls_cert_file` with `tls_key_file` as its client certificate, and honors optional `tls_allow_insecure_connection` plus `tls_hostname_verification_enabled`, all of which `CREATE PULSAR CLIENT` refuses with a plaintext `pulsar://...` address; see [Pulsar](#pulsar).
 - `RABBITMQ`: use `amqps://...` in `addr`. Nervix honors `tls_ca_file` and presents `tls_cert_file` with `tls_key_file` as its client certificate; see [RabbitMQ](#rabbitmq).
 - `REDIS`: use `rediss://...` in `addr`. Nervix trusts the host's trust store, or only
@@ -2318,6 +2318,18 @@ again on its declared `RETRY POLICY`, or on the host's reconnect cadence in `MOD
 
 ### NATS
 
+NATS has two ingestor entities, one for each way a NATS server hands out messages, and both read
+through a `NATS CLIENT`. `NATS SUBJECT` subscribes to a subject through Core NATS as a member of a
+queue group: the server hands each message to one member of the group as it arrives and retains
+nothing, so the entity reads in `MODE NO ACK` and quiesces with `BUFFER` or `DROP`. `NATS STREAM`
+reads a JetStream stream through a durable pull consumer: the stream stores what is published to
+its subjects and keeps it for as long as its operator's retention policy and limits allow, and the
+consumer keeps the position, so the entity acknowledges each delivery in `MODE ACK SEQUENTIAL` or
+`MODE ACK PARALLEL` and can also quiesce with `SUSPEND`. A stream stores a Core publication to one
+of its subjects as it stores a JetStream one, and a subscription receives a JetStream publication
+to its subject as it receives a Core one, so either entity reads what either
+[NATS emitter](emitters.md#nats) publishes to a subject it reads.
+
 <!-- connector-matrix:ingest-nats-subject:start -->
 ```plexus,ignore
 CREATE NATS SUBJECT INGESTOR <name>
@@ -2372,7 +2384,11 @@ Mount a resource containing a credentials file and write its resolved path, such
 inspection. URL user information remains delegated to the NATS driver.
 
 Ingestors and emitters use the same authentication and TLS options. A `tls://` address requires
-TLS on both sides, with the configured CA and optional paired client certificate and key.
+TLS on every connection the client makes, reconnections and servers the cluster announces
+included, whichever direction it serves; a `nats://` address uses TLS only when the server
+announces that it requires it. The client verifies the server's certificate against the
+platform's native roots, or only against `tls_ca_file` when it is set, and presents
+`tls_cert_file` with `tls_key_file` as its client certificate.
 An unreadable or malformed credentials file is a configuration failure; a broker refusing the
 identity is a connection failure reported by the boundary's existing general error policy and
 retry cadence. Nervix does not create accounts or users on the broker.
@@ -2452,11 +2468,11 @@ bounds how often the consumer delivers a message, and JetStream stops delivering
 it.
 
 `SUSPEND` lets the instance's pull go: the instance unsubscribes the inbox its pull requests
-deliver to, so the consumer delivers nothing to it while it is suspended and the stream keeps
-everything published meanwhile for the consumer. A delivery the instance had received but not yet
-read when it suspends is negatively acknowledged, so the consumer delivers it again once the
-instance resumes, and one still on its way is delivered again once the consumer's `AckWait`
-passes. Under `BUFFER` and `DROP` the instance keeps pulling while it is quiesced and
+deliver to, so the consumer delivers nothing to it while it is suspended. What is published
+meanwhile waits in the stream for the consumer, unless the stream's own limits, such as a maximum
+age, discard it first. A delivery the instance had received but not yet read when it suspends is
+negatively acknowledged, so the consumer delivers it again once the instance resumes, and one
+still on its way is delivered again once the consumer's `AckWait` passes. Under `BUFFER` and `DROP` the instance keeps pulling while it is quiesced and
 acknowledges each delivery once the host buffered or dropped it, as every acknowledged source does
 in those modes.
 

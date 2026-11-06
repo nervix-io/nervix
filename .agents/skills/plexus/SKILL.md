@@ -50,12 +50,18 @@ For Pulsar receipt deadlines, event times and delayed delivery, read
 [Emitters → Pulsar](../../../docs/src/emitters.md#pulsar). Check the generated capability mirror
 before carrying an option from one direction to the other.
 
+For NATS consumption, choose `NATS SUBJECT INGESTOR` for a Core NATS queue subscription, which
+reads in `MODE NO ACK` with a required `QUEUE GROUP` and `INSTANCES` and never sees what is
+published while it is not subscribed, or `NATS STREAM INGESTOR` for a JetStream stream and durable
+pull consumer an operator provisioned, which acknowledges each delivery. Read
+[Ingestors → NATS](../../../docs/src/ingestors.md#nats) for the client's authentication and TLS
+keys, the consumer checks, redelivery and what a stream keeps.
 For NATS publication, choose `NATS SUBJECT EMITTER` with `MODE NO ACK` for Core NATS, or
 `NATS STREAM EMITTER` with a provisioned `STREAM`, a literal `SUBJECT` captured by that stream,
 and `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX <n>` for a JetStream PubAck. The stream
-emitter may set `MESSAGE ID <expression>` for server deduplication across retries. Read
-[Emitters → NATS](../../../docs/src/emitters.md#nats) for the complete clause order, failure
-outcomes and retry boundary.
+emitter may set `MESSAGE ID <expression>`, which JetStream deduplicates across retries within the
+stream's duplicate window. Read [Emitters → NATS](../../../docs/src/emitters.md#nats) for both
+entities' complete clause order, failure outcomes and retry boundary.
 
 For RabbitMQ consumption choose `MODE NO ACK`, `MODE ACK SEQUENTIAL`, or
 `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
