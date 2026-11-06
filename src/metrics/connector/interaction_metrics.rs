@@ -10,6 +10,42 @@
 
 use super::*;
 
+#[test]
+fn ingestor_interaction_registration_preserves_every_execution_unit() {
+    let metrics = RuntimeMetrics::default();
+    let domain = DomainName::parse("metrics_test").assured("the fixture domain is valid");
+    let source =
+        nervix_models::IngestorName::parse("source").assured("the fixture ingestor is valid");
+    let node = ClusterNodeName::parse("node-1").assured("the fixture node is valid");
+    let children = [
+        nervix_models::Unit::SINGLE,
+        nervix_models::Unit::FIRST_INSTANCE,
+        nervix_models::Unit::try_instance(u64::from(u32::MAX) + 1)
+            .assured("the fixture instance fits the execution-unit range"),
+    ]
+    .map(|unit| {
+        let (interactions, decode_rejections) =
+            metrics.register_ingestor_interactions(&domain, &source, unit, Some(&node));
+        [
+            interactions.unfolding_refused,
+            interactions.transport_redeliveries,
+            interactions.oversized_payloads,
+            interactions.header_values_dropped,
+            decode_rejections,
+        ]
+    });
+    for (value, counters) in [1, 2, 3].into_iter().zip(&children) {
+        for counter in counters {
+            counter.inc_by(value);
+        }
+    }
+    for (value, counters) in [1, 2, 3].into_iter().zip(&children) {
+        for counter in counters {
+            assert_eq!(counter.get(), value);
+        }
+    }
+}
+
 fn registered(
     metrics: &RuntimeMetrics,
     node: &str,

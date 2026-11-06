@@ -144,16 +144,17 @@ pub struct PulsarTopicIngestor {
     pub client: ClientName,
     pub topic: PulsarTopicName,
     pub subscription: PulsarSubscription,
-    pub instances: NonZeroU64,
+    pub instances: crate::IngestorInstances,
     pub mode: PulsarIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
 
 impl PulsarTopicIngestor {
     /// Whether this ingestor's instances fit the type of its subscription. A type that reads through
-    /// one consumer has no use for a second instance.
+    /// one consumer requires one fixed instance rather than a partition-dependent count.
     pub fn instances_fit_subscription(&self) -> bool {
-        self.instances.get() == 1 || !self.subscription.kind.reads_through_one_consumer()
+        matches!(self.instances, crate::IngestorInstances::Count(count) if count.get() == 1)
+            || !self.subscription.kind.reads_through_one_consumer()
     }
 }
 
@@ -489,6 +490,7 @@ const PULSAR_TOPIC_METADATA: IngestorMetadataDeclaration = IngestorMetadataDecla
 
 impl IngestorDeclaration for PulsarTopicIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        instancing: crate::IngestorInstancingCapability::PerPartition,
         // A Pulsar message carries its properties as a list, in the order the producer wrote them.
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         metadata: PULSAR_TOPIC_METADATA,
@@ -564,6 +566,10 @@ impl IngestorDeclaration for PulsarTopicIngestor {
 }
 
 impl IngestorEntityBody for PulsarTopicIngestor {
+    fn instances(&self) -> Option<crate::IngestorInstances> {
+        Some(self.instances)
+    }
+
     fn reference(&self) -> IngestorReference<'_> {
         IngestorReference::Client(&self.client)
     }

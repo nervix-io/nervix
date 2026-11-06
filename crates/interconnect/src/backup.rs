@@ -318,7 +318,7 @@ mod wire_properties {
                                         kind,
                                         identifier: ModelName::parse("accumulator")
                                             .assured("the processor name is valid"),
-                                        unit: nervix_models::Unit::Single,
+                                        unit: nervix_models::Unit::SINGLE,
                                         branch_key: branch_key.clone(),
                                     },
                                     branch_fingerprint: branched.then_some(case.digest),

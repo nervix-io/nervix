@@ -137,6 +137,12 @@ scope. A complete Plexus `SET TO` can change its payload selection, envelope and
 construction as part of the same atomic alteration; its head and replacement must retain the stored
 connector/entity kind.
 
+Adding, changing or removing an emitter's batching limits contributes `EMITTER_BATCH_POLICY` to
+the same impact report and requires entity pause. The old task drains its partial buffers and
+unanswered prepared output under the policy that admitted them before the replacement starts.
+A failed pre-commit drain keeps the previous policy and its owning task. A flush-only alteration
+continues to change the running task's cadence dynamically.
+
 A native client emitter keeps its prepared IPC bytes, source members and application ACK wait as
 emitter work. Force flush releases rows into that same wait; a read or network delivery does not
 finish the drain. A consumer settlement runs beside the session's ordered command lane, so an
@@ -440,3 +446,17 @@ without carrying sensitive payload values. Per-record details and hot-path buffe
 this inspection contract. Ingestor quiesce buffer metrics and current live observations remain in
 [Metrics And Observability](./metrics-and-observability.md); retained impact is the source for
 what this transaction required and actually engaged.
+
+## Unit-Qualified Intake Scope
+
+Persisted gate plans retain `EntityGateTargets`. A model mutation selects complete entities and
+expands every current instance, including retained work during publication. A schedule handoff
+selects the exact moved units and expands their exact placement component. Source instance `p`
+and relay partition `p` can therefore share one gate without selecting a sibling instance.
+Engagement, drain counters, ACK roots, capture authorization and release all preserve that unit
+selection. Logical entity names remain the inspection projection; they do not replace the stored
+selection or widen an ownership handoff. A change to an ingestor's declared unit set selects the
+union of preceding and target units. Its state transition consumes every preceding unit's cut,
+so an unchanged physical owner participates in that capture and receives a prepared target cut.
+Source confirmation checks the units the source actually owned; a newly introduced target
+instance is never treated as an existing source instance.

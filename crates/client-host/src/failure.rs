@@ -165,6 +165,7 @@ impl Failure {
             | ClientError::InvalidUploadReply
             | ClientError::InvalidRestoreReply
             | ClientError::ExecutionReferenceMismatch { .. }
+            | ClientError::ReplyKindMismatch { .. }
             | ClientError::UploadIdentityMismatch { .. } => FailureKind::Protocol,
             ClientError::SessionClosed => FailureKind::Closed,
             ClientError::ConsumerSessionUnavailable => FailureKind::Connect,
@@ -312,7 +313,7 @@ mod call_cancellation_tests {
     use meticulous::ResultExt as _;
     use nervix_client_core::{
         CommandDisposition, RequestKind,
-        wire::{CancellationStage, UnknownOutcomeCause},
+        wire::{CancellationStage, ReplyBodyKind, UnknownOutcomeCause},
     };
 
     use super::*;
@@ -389,6 +390,49 @@ mod call_cancellation_tests {
                 .message()
                 .contains("the later stream could not be staged")
         );
+    }
+
+    #[test]
+    fn a_reply_of_another_kind_is_reported_as_uncertain_under_the_own_reference() {
+        let reference =
+            CommandExecutionReference::parse("own-command").assured("a valid reference");
+        let failure = Failure::from(
+            Report::new(ClientError::ReplyKindMismatch {
+                request: RequestKind::Command,
+                reply: ReplyBodyKind::DomainList,
+            })
+            .change_context(ClientError::RequestInterrupted {
+                request: RequestKind::Command,
+            })
+            .change_context(ClientError::UncertainCommand {
+                reference: reference.clone(),
+            }),
+        );
+        assert_eq!(failure.kind(), FailureKind::Uncertain);
+        assert_eq!(failure.execution_reference(), Some(&reference));
+        assert!(
+            failure
+                .message()
+                .contains("a domain_list reply cannot answer the command request"),
+            "the typed cause stays in the reported chain: {}",
+            failure.message()
+        );
+
+        let interrupted = Failure::from(
+            Report::new(ClientError::ReplyKindMismatch {
+                request: RequestKind::ListDomains,
+                reply: ReplyBodyKind::Command,
+            })
+            .change_context(ClientError::RequestInterrupted {
+                request: RequestKind::ListDomains,
+            }),
+        );
+        assert_eq!(interrupted.kind(), FailureKind::Transport);
+        let violation = Failure::from(ClientError::ReplyKindMismatch {
+            request: RequestKind::ListDomains,
+            reply: ReplyBodyKind::Command,
+        });
+        assert_eq!(violation.kind(), FailureKind::Protocol);
     }
 
     #[test]

@@ -1003,7 +1003,10 @@ fn inferencer_change_aspects(
     {
         changes.push(ModelChangeAspect::InferencerBinding);
     }
-    if base.inputs != candidate.inputs || base.output_schema != candidate.output_schema {
+    if base.inputs != candidate.inputs
+        || base.output_schema != candidate.output_schema
+        || base.state != candidate.state
+    {
         changes.push(ModelChangeAspect::InferencerTensors);
     }
     if has_dynamic_change {
@@ -2437,6 +2440,7 @@ mod catch_all_kind_tests {
             resource_version: 1,
             file: "models/score.onnx".to_string(),
             inputs: Vec::new(),
+            state: Vec::new(),
             output_schema: Vec::new(),
             mode: AckMode::Attached,
             filter_where: None,

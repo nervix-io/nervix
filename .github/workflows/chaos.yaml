@@ -48,6 +48,7 @@ on:
         type: choice
         options:
           - smoke
+          - intake-recovery
           - soak
         default: smoke
 

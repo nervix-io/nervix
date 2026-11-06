@@ -285,6 +285,7 @@ pub struct CreateInferencer<Version = u64> {
     pub resource_version: Version,
     pub file: String,
     pub inputs: Vec<InferencerTensorMapping>,
+    pub state: Vec<InferencerStateBinding>,
     pub output_schema: Vec<InferencerTensorDeclaration>,
     #[serde(default)]
     pub mode: AckMode,
@@ -307,8 +308,18 @@ impl CreateInferencer {
                     .iter()
                     .map(|declaration| (declaration.tensor.as_str(), &declaration.schema)),
             )
+            .chain(
+                self.state
+                    .iter()
+                    .map(|binding| (binding.input.as_str(), &binding.schema)),
+            )
         {
             let batch_axis_count = schema.batch_axis_count();
+            if !self.state.is_empty() && batch_axis_count != 0 {
+                return Err(Report::new(InferencerTensorSchemaError::BatchWithState {
+                    tensor: tensor.to_string(),
+                }));
+            }
             if batch_axis_count > 1 {
                 return Err(Report::new(
                     InferencerTensorSchemaError::MultipleBatchAxes {
@@ -349,12 +360,34 @@ pub enum InferencerExecutionMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum InferencerTensorSchemaError {
+    #[error("tensor '{tensor}' cannot use BATCH with STATE")]
+    BatchWithState { tensor: String },
     #[error("tensor '{tensor}' contains more than one BATCH axis")]
     MultipleBatchAxes { tensor: String },
     #[error("inferencer mixes batched and per-message tensor bindings")]
     MixedExecutionModes,
     #[error("tensor '{tensor}' fixed element count exceeds the supported size")]
     ElementCountOverflow { tensor: String },
+}
+
+/// One fixed model state tensor, passed from an output to an input on the next admitted row.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct InferencerStateBinding {
+    pub input: String,
+    pub output: String,
+    pub schema: InferencerTensorSchema,
+    pub initial: InferencerStateInitial,
+}
+
+/// The initial value of a branch's model-carried state.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum InferencerStateInitial {
+    Zeros,
+    Constant(crate::Expression),
 }
 
 #[derive(

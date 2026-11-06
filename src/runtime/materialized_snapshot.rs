@@ -2062,7 +2062,7 @@ mod tests {
                 let descriptor = MaterializedRelayDescriptor {
                     domain: nervix_models::DomainName::parse("prod").assured("domain is valid"),
                     entity: nervix_models::ModelName::parse("state").assured("relay is valid"),
-                    unit: nervix_models::Unit::Single,
+                    unit: nervix_models::Unit::SINGLE,
                     schema: SchemaFingerprint::from_digest(std::array::from_fn(|_| {
                         arbitrary.entropy().byte()
                     })),

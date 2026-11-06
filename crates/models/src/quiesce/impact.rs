@@ -1975,20 +1975,20 @@ mod impact_report_tests {
         let four = crate::BranchPartitions::Direct(
             std::num::NonZeroU16::new(4).assured("four is not zero"),
         );
-        assert_eq!(four.unit_of(seed), Unit::Partition(1));
-        assert_eq!(crate::BranchPartitions::ONE.unit_of(seed), Unit::Single);
+        assert_eq!(four.unit_of(seed), Unit::partition(1));
+        assert_eq!(crate::BranchPartitions::ONE.unit_of(seed), Unit::SINGLE);
         assert_eq!(
             four.units(),
             vec![
-                Unit::Partition(0),
-                Unit::Partition(1),
-                Unit::Partition(2),
-                Unit::Partition(3)
+                Unit::partition(0),
+                Unit::partition(1),
+                Unit::partition(2),
+                Unit::partition(3)
             ]
         );
-        assert_eq!(crate::BranchPartitions::ONE.units(), vec![Unit::Single]);
+        assert_eq!(crate::BranchPartitions::ONE.units(), vec![Unit::SINGLE]);
         let largest = crate::BranchPartitions::Direct(std::num::NonZeroU16::MAX);
-        let Unit::Partition(partition) = largest.unit_of(seed) else {
+        let crate::UnitKind::Partition(partition) = largest.unit_of(seed).kind() else {
             panic!("a branch of many partitions places a key in one of them");
         };
         assert!(partition < u32::from(u16::MAX));

@@ -194,13 +194,16 @@ fn only_the_types_that_read_through_one_consumer_refuse_more_instances(
             ownership: PulsarSubscriptionOwnership::Provisioned,
             kind,
         },
-        instances: NonZeroU64::MIN,
+        instances: crate::IngestorInstances::Count(NonZeroU64::MIN),
         mode: PulsarIngestMode::NoAck,
         quiesce: IngestQuiesceMode::Suspend,
     };
     assert!(source.instances_fit_subscription());
 
-    source.instances = NonZeroU64::new(2).assured("two is greater than zero");
+    source.instances =
+        crate::IngestorInstances::Count(NonZeroU64::new(2).assured("two is greater than zero"));
+    assert_eq!(source.instances_fit_subscription(), !one_consumer);
+    source.instances = crate::IngestorInstances::PerPartition;
     assert_eq!(source.instances_fit_subscription(), !one_consumer);
 }
 

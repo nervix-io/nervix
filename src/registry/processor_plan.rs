@@ -15,7 +15,7 @@
 use std::num::NonZeroU64;
 
 use ahash::{HashMap, HashSet};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AckMode, BranchName, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
     CreateBranch, ErrorPolicies, FlushPolicy, GeneralErrorPolicy, InferencerTensorDeclaration,
@@ -121,6 +121,7 @@ pub(crate) enum BranchedProcessorOperationSpec {
         resource_version: u64,
         file: String,
         inputs: Vec<InferencerTensorMapping>,
+        state: Option<InferencerStatePlan>,
         output_schema: Vec<InferencerTensorDeclaration>,
     },
     WasmProcessor {
@@ -131,6 +132,61 @@ pub(crate) enum BranchedProcessorOperationSpec {
         limits: nervix_models::WasmProcessorLimits,
         rejected_state_policy: nervix_models::WasmRejectedStatePolicy,
     },
+}
+
+/// A validated fixed state port pair. Initial expressions are materialized during node binding.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct InferencerStatePortPlan {
+    pub(crate) input: String,
+    pub(crate) output: String,
+    pub(crate) schema: nervix_models::InferencerTensorSchema,
+    pub(crate) elements: usize,
+    pub(crate) initial: nervix_models::InferencerStateInitial,
+}
+
+/// The static state footprint and ordered port pairs of one concrete inferencer branch.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct InferencerStatePlan {
+    pub(crate) bindings: Vec<InferencerStatePortPlan>,
+    pub(crate) bytes_per_branch: u64,
+}
+
+impl InferencerStatePlan {
+    fn from_validated(bindings: &[nervix_models::InferencerStateBinding]) -> Option<Self> {
+        if bindings.is_empty() {
+            return None;
+        }
+        let mut bytes_per_branch = 0u64;
+        let bindings = bindings
+            .iter()
+            .map(|binding| {
+                let elements = binding.schema.fixed_element_count().verified(
+                    "registry state validation proved every fixed tensor element count fits",
+                );
+                let bytes = u64::try_from(elements)
+                    .verified("the supported native usize widths fit in u64")
+                    .checked_mul(
+                        u64::try_from(std::mem::size_of::<f32>())
+                            .assured("the size of f32 fits in u64"),
+                    )
+                    .verified("registry state validation checked the tensor byte count");
+                bytes_per_branch = bytes_per_branch.checked_add(bytes).verified(
+                    "registry state validation checked the combined branch state byte count",
+                );
+                InferencerStatePortPlan {
+                    input: binding.input.clone(),
+                    output: binding.output.clone(),
+                    schema: binding.schema.clone(),
+                    elements,
+                    initial: binding.initial.clone(),
+                }
+            })
+            .collect();
+        Some(Self {
+            bindings,
+            bytes_per_branch,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -508,6 +564,7 @@ pub(crate) fn branched_node_specs_from_models(
                         resource_version: inferencer.resource_version,
                         file: inferencer.file.clone(),
                         inputs: inferencer.inputs.clone(),
+                        state: InferencerStatePlan::from_validated(&inferencer.state),
                         output_schema: inferencer.output_schema.clone(),
                     },
                 };
@@ -555,7 +612,6 @@ pub(crate) fn branched_node_specs_from_models(
 
 #[cfg(test)]
 mod tests {
-    use meticulous::ResultExt as _;
     use nervix_models::{
         BranchEviction, BranchSelection, CreateJunction, CreateSchema, ParseAsType,
         ProcessorOutput, ProcessorOutputs, ScheduledNode, SchemaField,

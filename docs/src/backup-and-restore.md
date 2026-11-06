@@ -289,7 +289,7 @@ deduplicator keys.
 
 ```text
 backup: ./cluster.nvxb
-format: 1
+format: 3
 producer_version: 0.1.0
 language_version: 0.1.0
 cluster: nervix-3f1c
@@ -845,17 +845,16 @@ its format version, each a little-endian 16-bit integer. The rest is an
 | Users | 2 | 1 | Every user's name and password hash as a PHC string |
 | Domain | 3 | 1 | Pace, default placement policy, lifecycle status, start count, the point the latest start began from, the committed clock mapping, the logical instant the clock had reached, and each declared resource with its next version number |
 | Resource version | 4 | 1 | The version's domain, resource and number, its upload state, and for a published version its checksums, file count, sizes, creation time and creating node |
-| WASM guest state descriptor | 5 | 2 | The scheduled unit, saved branch key, schema fingerprint, guest state generation and checkpoint revision |
-| Kafka domain offsets | 6 | 3 | The scheduled unit, ingestor schema fingerprint, optional applied explicit-start generation, and ordered topic and partition positions, expressed as the next offset to consume |
-| Branch lifecycle | 7 | 2 | The scheduled unit, owner kind, schema fingerprint, branch keys, last ingestion times and incarnations in LRU order |
-| Materialized relay descriptor | 8 | 2 | Domain and relay names, scheduled unit, schema fingerprint, revision, ownership fence, branch generation, row count and group count |
-| Materialized record identities | 9 | 2 | The scheduled unit and ordered row identities: an unbranched identity or typed branch fields, and low/high ingestion watermarks |
-| Deduplicator keyspace descriptor | 10 | 2 | Domain and deduplicator names, scheduled unit, schema fingerprint, branch fingerprint and typed branch fields, revision, key count and group count |
-| Window state descriptor | 11 | 2 | Domain and window processor names, scheduled unit, schema fingerprint, window model digest, branch fingerprint and typed branch fields, revision, branch incarnation, first and next admission sequence, each retained row's low/high ingestion watermarks, group count, and each aggregate's structure: rebuilt from the retained rows, or a linear histogram with its delayed removals as expiry time and bucket |
+| WASM guest state descriptor | 5 | 4 | The scheduled unit, saved branch key, schema fingerprint, guest state generation and checkpoint revision |
+| Kafka domain offsets | 6 | 5 | The scheduled unit, ingestor schema fingerprint, optional applied explicit-start generation, and ordered topic and partition positions, expressed as the next offset to consume |
+| Branch lifecycle | 7 | 4 | The scheduled unit, owner kind, schema fingerprint, branch keys, last ingestion times and incarnations in LRU order |
+| Materialized relay descriptor | 8 | 4 | Domain and relay names, scheduled unit, schema fingerprint, revision, ownership fence, branch generation, row count and group count |
+| Materialized record identities | 9 | 4 | The scheduled unit and ordered row identities: an unbranched identity or typed branch fields, and low/high ingestion watermarks |
+| Deduplicator keyspace descriptor | 10 | 4 | Domain and deduplicator names, scheduled unit, schema fingerprint, branch fingerprint and typed branch fields, revision, key count and group count |
+| Window state descriptor | 11 | 4 | Domain and window processor names, scheduled unit, schema fingerprint, window model digest, branch fingerprint and typed branch fields, revision, branch incarnation, first and next admission sequence, each retained row's low/high ingestion watermarks, group count, and each aggregate's structure: rebuilt from the retained rows, or a linear histogram with its delayed removals as expiry time and bucket |
 
-The archive format major version is `2`. An archive with another major version fails before any
-state section can be skipped or installed; capture a new archive in the current unit-bearing
-format. A reader refuses invalid record magic, an unsupported
+The archive format major version is `5`. An archive with another major version fails before any
+state section can be skipped or installed; capture a new archive in the current instance-unit format. A reader refuses invalid record magic, an unsupported
 manifest or required configuration record, an unknown record kind in the manifest, a first entry
 other than the manifest, and any section whose place, length or digest differs from what the
 manifest declares. A state record whose header names another state kind than the manifest declares,
@@ -1050,3 +1049,9 @@ restore no longer plans against the cluster, reports `restore failed:`, the reas
 steps it recorded stay applied. A restore whose archive no client sent to a new leader before the
 retry validity of its execution reference ended reports `restore stopped after the steps it
 recorded`. No message includes password hashes or resource bytes.
+
+Ingestor offset and branch-lifecycle records retain their global `Instance(i)` placement. A
+quiesced cut observes and checkpoints each locally owned source unit; restore preserves those
+identities and lets the current scheduler choose their owners. Canonical Models retain fixed
+counts or `INSTANCES PER PARTITION`. The current major fences this ownership contract before any
+configuration or state is installed.

@@ -58,8 +58,8 @@ enum RelocationError {
         member: NodeRef,
         owner: ClusterNodeName,
     },
-    #[error("{kind} '{name}' in domain '{domain}' is divided into partitions that each have their own owner, and RELOCATE moves a node with one owner", kind = .member.kind.as_str(), name = .member.identifier.as_str())]
-    MemberPartitioned { domain: DomainName, member: NodeRef },
+    #[error("{kind} '{name}' in domain '{domain}' has multiple execution units; RELOCATE requires a member with one owner", kind = .member.kind.as_str(), name = .member.identifier.as_str())]
+    MemberMultipleUnits { domain: DomainName, member: NodeRef },
 }
 
 /// One unit member with the assignment the relocation gives it.
@@ -641,15 +641,18 @@ fn planned_relocation_schedule(
                 .checked_add(1)
                 .assured("a slot count clamped to a collected list leaves room for the primary"),
         );
-        node.single_unit_mut().primary_node = Some(destination.clone());
-        node.single_unit_mut().assigned_nodes = assigned_nodes;
+        let unit = node
+            .sole_unit_mut()
+            .assured("relocation validated that each member has exactly one unit");
+        unit.primary_node = Some(destination.clone());
+        unit.assigned_nodes = assigned_nodes;
     }
 
     for group in &mut planned.placement_groups {
         if group
             .members
             .iter()
-            .any(|group_member| moved.contains(group_member))
+            .any(|group_member| moved.contains(&group_member.node))
         {
             group.primary_node = Some(destination.clone());
         }
@@ -720,8 +723,8 @@ fn relocation_member_owner<'a>(
             member: member.clone(),
         }));
     };
-    if node.is_partitioned() {
-        return Err(Report::new(RelocationError::MemberPartitioned {
+    if node.units.len() > 1 {
+        return Err(Report::new(RelocationError::MemberMultipleUnits {
             domain: domain.clone(),
             member: member.clone(),
         }));

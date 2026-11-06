@@ -143,12 +143,18 @@ class InventoryTests(unittest.TestCase):
     def test_inventory_has_current_targets_and_exact_corpus_paths(self) -> None:
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
+            "runtime-kafka-unit-layouts",
+            "runtime-ingestor-metric-layouts",
+            "models-ingestor-instancing",
+            "interconnect-intake-units",
             "typed-runner-lease",
             "typed-runner-policy",
             "typed-runner-compilation",
             "typed-runner-completion",
             "typed-runner-identity",
             "typed-runner-matrix",
+            "typed-gate-baseline",
+            "typed-gate-product-graph",
             "clickhouse-client-tls-pairing",
             "client-config-schema",
             "connector-entity-presentation",
@@ -265,6 +271,7 @@ class InventoryTests(unittest.TestCase):
             "models-archived-counts",
             "consensus-archived-counts",
             "registry-archived-models",
+            "inferencer-tensor-columns",
             "runtime-window-archived-counts",
             "simd-constant-division",
             "simd-checked-lanes",
@@ -475,6 +482,29 @@ class InventoryTests(unittest.TestCase):
             )
             self.assertEqual(target.corpus.parent.name, target.test.replace("::", "__"))
             self.assertGreater(target.random_iterations, 0)
+
+    def test_inferencer_state_domains_include_the_required_model_field(self) -> None:
+        versions = {
+            target.id: target.domain_version for target in bolero.load_inventory().targets
+        }
+        for target, version in {
+            "plexus-model": 49,
+            "plexus-archive-model": 51,
+            "plexus-statement": 49,
+            "plexus-statement-text": 48,
+            "plexus-format-document": 48,
+            "plexus-format-text": 47,
+            "models-archived-models": 48,
+            "registry-archived-models": 43,
+            "consensus-state-records": 42,
+            "consensus-state-corruption": 42,
+            "consensus-raft-records": 41,
+            "registry-stored-models": 38,
+            "registry-stored-models-corruption": 38,
+            "inferencer-tensor-columns": 1,
+        }.items():
+            with self.subTest(target=target):
+                self.assertEqual(versions[target], version)
 
     def test_invalid_case_budget_and_duplicate_id_fail(self) -> None:
         text = bolero.INVENTORY.read_text()

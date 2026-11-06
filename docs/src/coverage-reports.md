@@ -405,7 +405,7 @@ just coverage-patch origin/main
 
 `functions_over_complexity_30` is the number of functions the pinned cargo-crap analyzer scores
 above cyclomatic complexity 30. Exactly 30 is outside the count; 31 is inside. The analyzer's
-version is declared once in `scripts/cargo_crap.py` and built through kache by
+version is declared once in `nervix-ratchet crap` and built through kache by
 `just install-cargo-crap`. The ratchet and advisory CRAP report use that same build. Another
 version, an incomplete source walk, a parsing warning, or an analysis with no measured function
 fails the count; it never reads as zero. The [source eligibility and analyzer limits](./architecture-enforcement.md#function-complexity)
@@ -432,7 +432,7 @@ The retained run identities and comparison evidence belong to the Coverage Integ
 ## Advisory CRAP Report
 
 `just check-coverage` publishes an advisory CRAP report over the merged ordinary workspace report.
-It runs the pinned cargo-crap, the version `scripts/cargo_crap.py` declares for the complexity count
+It runs the pinned cargo-crap, the version `nervix-ratchet crap` declares for the complexity count
 too, over the whole repository root. The root package's directory holds every workspace member,
 and the Cargo projects nested in it, such as the lint workspace, are walked as well, because some
 ordinary producers measure them. No default exclusion applies, so test, bench and example sources

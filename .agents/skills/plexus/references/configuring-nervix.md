@@ -75,14 +75,16 @@ and [Client Implementation Manual](https://docs.nervix.io/client-implementation-
 S-7 and K-5. Keep an unanswered reopening distinct from a refusal, and account for the live-edge gap.
 
 For browser controls waiting behind commands, lookup replacement, uncertain-command recovery on
-the open session, a reply that names another execution, and reconnect behavior, read
+the open session, unreadable replies, replies naming another execution, uncertain restore outcomes,
+and reconnect behavior, read
 [Web Console](https://docs.nervix.io/client-tools-web-console.html#bounded-buffers) and
 [Client Session Protocol](https://docs.nervix.io/client-session-protocol.html#restoration-and-bounded-consumers)
 directly. Follow the same documentation version as the selected index; these client chapters are
 outside the curated Plexus index.
 
-For native command or restore recovery after an execution-reference mismatch, read
-[Client Library](https://docs.nervix.io/client-library.html) and the command and restore contracts in
+For native command or restore recovery after an execution-reference mismatch or a reply of another
+kind than its request, read [Client Library](https://docs.nervix.io/client-library.html) and the
+command and restore contracts in
 [Client Implementation Manual](https://docs.nervix.io/client-implementation-manual.html) directly.
 Keep the original execution reference when recovering an uncertain outcome.
 
@@ -172,6 +174,7 @@ inputs. Keep placeholders obvious and list provisioning that must happen outside
 | Order records by expressions within a time bound | `REORDERER` |
 | Produce width/step aggregates | `WINDOW PROCESSOR` |
 | Run an ONNX model | `INFERENCER` |
+| Carry ONNX state between rows of each branch | `INFERENCER`; read `Runtime Nodes` → `State tensors` for the fixed-shape, initialization and reset contract |
 | Run custom guest processing | `WASM PROCESSOR` |
 | Reuse trusted batch-column logic inside expressions | `UDF` |
 | Match records from left and right relay sets | `CORRELATOR` |
@@ -205,6 +208,9 @@ bound PULL ingestor with connecting PUSH peers when a peer can restart: a connec
 does not detect or recover a lost peer. Read the ZeroMQ sections of Ingestors and Emitters for the
 current connection, retry and deadline limits.
 
+- Check [ingestor instancing](../../../../docs/src/ingestors.md#instancing) before adding placement
+  rules. Validate connector capability, count addressability, constructing branch structure and
+  Kafka offset ownership; inspect each instance with `DESCRIBE INGESTOR`.
 - Every referenced name is declared in the active domain before use.
 - Every placement rule has non-empty `FROM` and `TO` sets whose members already exist and are
   schedulable runtime nodes. Every relay is eligible and participates in corridor coverage,
@@ -536,18 +542,23 @@ current connection, retry and deadline limits.
   `SUSPEND`, `BUFFER` or `DROP` quiesce. Nervix creates neither the stream nor the consumer, and it
   refuses a push consumer and one whose acknowledgement policy is not explicit. `SET STREAM` and
   `SET CONSUMER` move it in place, and it continues from the position of the consumer it then
-  names. Read `Ingestors` → `NATS` for redelivery, `MaxRequestBatch`, `MaxRequestExpires` and
-  `AckWait`.
+  names. The stream keeps unread messages only as long as its own retention and limits allow, so
+  check them before relying on `SUSPEND` across a long pause. Read `Ingestors` → `NATS` for
+  redelivery, `MaxRequestBatch`, `MaxRequestExpires` and `AckWait`.
 - For NATS routing by the actual delivery, use the metadata fields declared in `Ingestors` →
   `NATS`; a wildcard subscription's subject is concrete, and a stream's reply is its acknowledgement
   subject. `NATS SUBJECT` emitters can write `REPLY TO`; read `Emitters` → `NATS` for its value
-  rules and retry boundary. Both directions preserve header order and require TLS for `tls://`.
+  rules and retry boundary. Both directions preserve header order and require TLS for `tls://`,
+  and a client with `tls_ca_file` trusts only that file, not the platform's roots.
 - A `NATS STREAM` emitter publishes to an operator-provisioned `STREAM '<stream>'` and a literal
   `SUBJECT '<subject>'` that stream captures. Use `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX
-  <n>` with an `ACK TIMEOUT` and retry policy. The stream is checked when the emitter opens;
-  a subject the named stream does not capture is rejected per record. `MESSAGE ID <expression>`
-  writes `Nats-Msg-Id` so a retry after a lost PubAck can be deduplicated by JetStream. Read
-  `Emitters` → `NATS` for the full declaration and guarantee boundary.
+  <n>` with an `ACK TIMEOUT` and retry policy. The stream is looked up when the emitter opens, and
+  a missing one keeps the emitter unavailable, holding its records, until an operator provisions
+  it; a subject the named stream does not capture is rejected per record. `MESSAGE ID <expression>`
+  writes `Nats-Msg-Id` so a retry after a lost PubAck can be deduplicated by JetStream within the
+  stream's duplicate window. The emitter's own `Nats-Expected-Stream`, and under `MESSAGE ID` its
+  `Nats-Msg-Id`, replace a written header spelled exactly that way. Read `Emitters` → `NATS` for the
+  full declaration and guarantee boundary.
 - For `PULSAR TOPIC`, read [Ingestors → Pulsar](../../../../docs/src/ingestors.md#pulsar)
   before selecting subscription ownership, creation position, TYPE, instances or a metadata time.
   Keep an existing cursor distinct from its creation policy, and preserve null metadata and

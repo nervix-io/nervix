@@ -127,6 +127,15 @@ flow. Expanding an error projection into an explicit Result branch preserves its
 context and recovery disposition. The source parser reports malformed authored Rust through a
 typed path/location context over the original parse cause; rendering includes that cause once.
 
+Emitter branch TTL/LRU retirement is a normal lifetime outcome. It NoACKs only unresolved
+host-owned rows, releases their prepared content and parked materialized-state wait, and
+preserves acknowledgements transferred to a connector. `EmitterBranchRetentionError` retains
+typed domain-clock and physical-deadline causes; a branched input without its concrete key has
+a distinct failure. An unavailable clock postpones a maintenance scan and records a transient
+failure; it never turns held rows into decode rejections or blocks a physical retry or stop
+deadline. New input whose retention activity cannot be established follows the emitter's
+general error policy.
+
 Nervix gives a failure its meaning at the boundary that can decide what went wrong. That meaning
 travels through the graph as a semantic error and an `error-stack` report. A public edge renders a
 diagnostic only after it has made the decision the error permits. Ordinary control outcomes, such
@@ -683,6 +692,28 @@ or the optional applied-start generation. A mismatched signature retains the typ
 `KafkaOffsetCheckpointError::FormatSignature` cause beneath `RuntimePersistenceError::DecodeState`.
 Loading, replica conversion and backup capture all use that owning decoder; no missing marker is
 filled from domain metadata.
+
+Kafka's canonical-start coordination retains its typed offer, encoding, allocation and transfer
+causes beneath `StateReplicationError::KafkaStart`. A capture freeze reports `KafkaStartFrozen`;
+the shared checkpoint-transfer deadline reports `KafkaStartDeadline`. Changed lifecycle or
+assignment authority reports `Superseded`. The interconnect handler rejects a source node that
+does not match its authenticated peer before reading or changing state. Runtime admission also
+checks the current membership incarnation. These failures end that initialization attempt; the
+host retries through its existing source lifecycle without polling from substitute positions.
+
+An ingestor layout preparation retains invalid selections, source or checkpoint inventories,
+component kinds and allocation bounds beneath `OwnershipHandoffError::IngestorUnitLayout`.
+Offset and metric decoding keep their owning typed causes. Preparation fails before publishing
+the replacement layout; it never installs only the source cuts that happened to succeed.
+Membership-incarnation refusals name the affected node and its source or destination role.
+Replicas receiving prepared state are destinations of that transfer, so a layout's additional
+participants retain the same diagnostic precision as a single-unit handoff.
+
+Fixed ingestor counts are checked for native conversion and execution-unit layout before
+placement allocates their units. A conversion or layout failure remains beneath
+`IngestorInstancingError::UnaddressableCount` and `RegistryError::IngestorInstancing`; the report
+names the complete declared count, ingestor and domain. It is refused at model admission rather
+than ending the session's ordered task while materializing an impossible unit map.
 
 The vocabulary's `ArchivedCountError` reports a fixed-width archived count that the receiving
 target's `usize` cannot represent. Archive decoding retains it beneath the owning storage or
@@ -1640,6 +1671,25 @@ operator can distinguish memory waiting, worker waiting and dependency work. The
 observations of the run; a successful later inspection does not identify the cause of an earlier
 timeout.
 
+The shared ONNX environment reports native diagnostics with a static message, the native severity
+and code site. It preserves the `ort::logging` tracing target and the `ort` span's identity and
+location. Native diagnostic text may contain tensor values, so it never enters the log, including
+under trace logging; this projection applies to model inspection and both inference modes.
+
+Stateful inferencer validation names the inferencer and offending port when a declaration repeats
+a port, uses a non-fixed state axis, mixes `BATCH` with `STATE`, or supplies an `INITIAL` expression
+that reads fields, is nondeterministic, or has the wrong type, shape or nullability. Model binding
+validation checks both ports of each state pair and requires complete input and output coverage.
+These are configuration refusals before activation.
+
+At stateful admission, an `INPUTS` row error or model refusal goes through that route's
+`ON MESSAGE ERROR` policy with the original input and captured materialized-state snapshot. It
+does not advance the branch's tensors or discard other rows of the input batch. A worker admission
+refusal that evaluated nothing remains an execution failure, with its typed cause; it is not a
+model rejection. A route construction error occurs after the model's successful invocation and
+does not undo that invocation. A later flush dispatches its buffered outputs without running the
+model again.
+
 ### Client Inspection Admission
 
 Client inspection during incoming preflight may refuse full command-memory or filesystem queue
@@ -2295,6 +2345,13 @@ replica diagnostic prints that cause chain. Cancellation or failed conversion pu
 partial table, and an assignment-token refusal keeps a delayed transfer from overwriting a
 promoted owner. A commit that lacks its required replica acknowledgement still reports the
 existing quorum deadline; catch-up retries do not turn that deadline into a successful commit.
+Kafka start coordination preserves typed admission, native conversion, memory and bulk-transfer
+causes through its reporting boundary. A frozen unit reports its exact placement, and a
+coordination deadline names the domain, source and unit. The current node incarnation, ownership
+fingerprint and originating assignment fence stale work. A count transition refuses incomplete
+source inventories, foreign partition ownership and repeated metric identities before preparing
+target state; a failed preparation cannot publish a partial layout.
+
 A stopping node's `stopping_node_drain` request answers with outcomes of its own instead, because
 its only subject is the authenticated sender: completed or failed, each with the leader's report for
 the sender's log, or not the leader, which sends the sender to the leader it observes next. A node
@@ -2655,7 +2712,12 @@ the server's `RequestCancelled` at `BeforeAdmission` for a command that never ra
 violation at the exchange reader, which ends that session before reading another frame. The call
 recovers under its own reference through the ordinary session-loss path, or reports
 `UncertainCommand` if recovery cannot finish. A restore's reference mismatch ends the session
-used by its stream and returns `UncertainCommand` above `ExecutionReferenceMismatch`. Hosts read
+used by its stream and returns `UncertainCommand` above `ExecutionReferenceMismatch`. A reply whose
+kind cannot answer its request, such as a domain listing under a command's request identity, is
+reported the same way at the exchange reader, as `ReplyKindMismatch` naming the request and the
+reply's kind, before anything the reply carries is applied. Every request still waiting on that
+session is interrupted. A call that cannot recover reports `RequestInterrupted` above that cause,
+and a command `UncertainCommand` above both. Hosts read
 `FailureKind::Uncertain` and the original execution reference from that outer context; the CLI
 reports an unknown outcome with exit status `3` when recovery did not complete.
 The client decides retries, session
@@ -2894,18 +2956,25 @@ completed backup's archive was not downloaded, never as a failure of the backup.
 failure names an archive file the browser could not read or that is empty, a transport failure, a
 stall, a missing reply, a reply that does not decode or answers another request or reference, or a
 restore whose outcome stayed unknown through its repetitions, which the dialog reports naming the
-execution reference. Once an attempt has sent the whole archive without learning the outcome, or
-the leader has answered that the outcome is unknown, the restore may have been admitted. A failure
-that then ends it, a refusal of a later stream, and an execution reference the leader no longer
-holds all sit beneath `the console stopped before learning the outcome of a restore the leader may
-have admitted`, and the dialog reports the outcome as unknown naming the execution reference. The
-dialog renders a restore stream failure's whole report. A refusal of the stream when no attempt
+execution reference. A reply that cannot be read or answers another request or execution stops
+the restore call with its typed failure and `the outcome of restore '<own>' is unknown`. It never
+establishes a refusal or applies another execution's result. Once an attempt has sent the whole
+archive without learning the outcome, or the leader has answered that the outcome is unknown, the
+restore may have been admitted. If a later archive read, missing console address, stream refusal or
+expired execution reference ends it, that failure sits beneath `the console stopped before learning
+the outcome of a restore the leader may have admitted`; the dialog reports the outcome as unknown
+naming the execution reference. An already uncertain reply failure keeps its own typed context.
+The dialog renders a restore stream failure's whole report. A refusal of the stream when no attempt
 could have had the restore admitted is shown as `restore refused (<failure>): <message>`, and the
 restore's own outcome as the dispatcher renders any command's. A session reply whose
 command outcome names another execution reference than its command's is a protocol violation: the
 dispatcher reports `protocol violation: the reply to command execution '<own>' names execution
 '<other>'` in the terminal, shows nothing of that outcome as the command's, stops reading the
 connection, and recovers the command under its own reference on the next one. The console WebSocket
+session also stops on a reply that cannot be decoded or reassembled, or carries an unexpected body
+kind. It reports `protocol violation:` with the cause and that pending command outcomes are unknown.
+It recovers every waiting command whole, under its original reference and issue order, after the
+new connection restores the session. The console WebSocket
 transport closes a call whose client broke its framing with the codec's close code, a second
 download request with `1008`, an answer that does not fit a frame with `1011`, and every call when
 the node stops with `1001`.
@@ -3638,3 +3707,20 @@ renders the property value. The publisher projects these reports into the record
 outcome before transport and continues with representable neighbours. A wrong property name or
 type at this connector boundary remains a typed contract refusal; normal statements are already
 checked against the entity's declaration and exact types at `CREATE` and `ALTER`.
+
+## Ingestor Instancing Boundaries
+
+The registry owns typed `IngestorInstancingError` causes for unsupported instancing, missing or
+different construction partition structures and Kafka's required domain-offset mode. The
+surrounding report identifies the domain and ingestor. Correct the declaration before activation.
+A count change uses the ownership-handoff preparation boundary to preserve the offset lifetime.
+Start planning separately validates the complete resolved unit declaration.
+`AlreadyRunning` and `IngestorNotRunning` name the exact source unit, allowing a sibling instance
+to start or stop independently.
+Per-unit DESCRIBE requests and status records preserve the unit selected by their caller.
+`UnitIndexError` is the vocabulary's pure refusal for an instance ordinal outside its compact
+identity range. Semantic JSON validates that bound during deserialization. The client wire decoder
+preserves the cause under `WireDecodeError::InvalidValue`, and a stored tagged key preserves it
+under `StoredStateIssue::KeyUnitInvalid` and `RuntimePersistenceError::DecodeState`.
+Allocation-layout validation rejects unaddressable count declarations before materializing units;
+every addressable index fits the identity range.

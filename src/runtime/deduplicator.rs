@@ -651,7 +651,7 @@ mod tests {
             },
             kind: ModelKind::Deduplicator,
             identifier: ModelName::parse("dedup_orders").assured("the identifier is well formed"),
-            unit: nervix_models::Unit::Single,
+            unit: nervix_models::Unit::SINGLE,
             branch_key: None,
         };
         Arc::new(

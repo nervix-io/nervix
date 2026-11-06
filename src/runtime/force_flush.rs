@@ -489,6 +489,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
+        unit: Unit,
     ) -> IngestorAckRootTrackers {
         let domain_tracker = match self.inner.in_flight_by_domain.get(domain) {
             Some(tracker) => tracker.value().clone(),
@@ -499,8 +500,10 @@ impl Runtime {
                 .or_insert_with(|| Arc::new(AckRootTracker::default()))
                 .clone(),
         };
-        let ingestor_entity =
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        let ingestor_entity = DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
+            unit,
+        );
         let ingestor_tracker = match self.inner.in_flight_by_ingestor.get(&ingestor_entity) {
             Some(tracker) => tracker.value().clone(),
             None => self

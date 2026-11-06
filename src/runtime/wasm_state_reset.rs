@@ -153,7 +153,7 @@ impl BranchInstanceTemplate {
         domain: &DomainName,
         key: Option<BranchKey>,
     ) -> error_stack::Result<Vec<u8>, WasmStateResetRuntimeError> {
-        let processor = ModelName::from(&self.source);
+        let processor = self.owner.node.identifier.clone();
         let fresh = || WasmStateResetRuntimeError::FreshInitialization {
             processor: processor.clone(),
         };
@@ -296,8 +296,7 @@ impl Runtime {
         if self.entity_gate_operation_owns_unit(
             coordination,
             domain,
-            &entity,
-            Unit::Single,
+            &NodeUnitRef::new(entity, Unit::SINGLE),
             EntityGatePurpose::WasmStateReset(scope),
         ) {
             return Ok(());

@@ -15,7 +15,7 @@ from scripts import connector_matrix as matrix
 def declarations():
     return {
         "ingest": [{
-            "entity": "KAFKA TOPIC", "connector": "KAFKA", "reference": "KAFKA client",
+            "entity": "KAFKA TOPIC", "connector": "KAFKA", "reference": "KAFKA client", "instancing": "per_partition",
             "locator": "TOPIC 'orders' (kafka_topic)", "options": [],
             "modes": ["NO ACK", "ACK SEQUENTIAL ACK TIMEOUT 5s"],
             "quiesce": ["SUSPEND"], "metadata": ["metadata.offset: I64 OPTIONAL"],

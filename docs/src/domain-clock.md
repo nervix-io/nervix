@@ -566,6 +566,16 @@ connector boundary. An Iceberg emitter's `COMMIT EACH` is not measured from that
 the host reads a fresh snapshot at the first cadence check after a flush stages rows and arms the
 commit's logical deadline from it, and a retry or drain forces the commit without a clock read.
 
+Emitter branch activity is measured at input acceptance in the domain's coordinate. TTL expiry is
+checked by physical maintenance against domain time, independently for each source's held
+branches. A wait for required materialized state belongs to that held work and ends when its
+branch expires. Removing a branch neither reassigns surviving records' execution snapshots nor
+creates a publish for an empty buffer. Force flush, retry and stop retain their existing clock
+ownership; branch maintenance does not turn a physical drain deadline into a logical one.
+The emitter retention owner captures the node's configured branch scan interval at startup;
+its physical wake is registered in the clock-boundary check. An unreadable clock defers that
+scan without discarding held work, and a pending stop defers expiry while its drain owns the task.
+
 An HTTP emitter's prepared method, target, headers, and optional body retain the execution
 snapshot of the admitted record through retries and an entity-pause drain. Changing the emitter
 does not re-evaluate an admitted request under the replacement. Attempt timeouts, retry backoff,
@@ -723,6 +733,11 @@ elapsed behavior exactly, and a simulated interconnect host waits in simulated t
 not model time: under Shuttle a timeout never measures its deadline, and a check decides whether it
 wins. HTTP request deadlines and `Retry-After` therefore stay physical, flush cadence keeps the
 domain clock, and no check establishes progress by waiting.
+
+An emitter's partial buffer and connector-staged acknowledged work keep their source alive on a
+100-millisecond physical beat, even when another input is waiting for materialized state. New input
+does not postpone it, an active retry owns its existing beat, and no beat remains after all held work
+is released. This liveness deadline neither advances logical flush cadence nor confirms delivery.
 
 The web console's clock display is an external observer: its clock-display module reads browser UTC
 to project an attached paced mapping for the screen. That projection does not enter a node's read

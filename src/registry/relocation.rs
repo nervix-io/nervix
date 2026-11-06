@@ -173,15 +173,16 @@ impl ActiveGraph {
 
         let placement = self.placement.effective(default_policy);
 
+        let unit_groups =
+            super::unit_placement::UnitPlacementGroups::decide(self, &placement.require_groups);
         let hard_group = |key: &NodeRef| -> Vec<NodeRef> {
-            match placement.group_by_member.get(key) {
-                Some(group_index) => {
-                    let mut members = placement.require_groups[*group_index].clone();
-                    members.sort();
-                    members
+            let mut members = std::collections::BTreeSet::from([key.clone()]);
+            for group in &unit_groups.groups {
+                if group.iter().any(|member| &member.node == key) {
+                    members.extend(group.iter().map(|member| member.node.clone()));
                 }
-                None => vec![key.clone()],
             }
+            members.into_iter().collect()
         };
 
         let mut groups: Vec<UnitGroup> = Vec::new();
