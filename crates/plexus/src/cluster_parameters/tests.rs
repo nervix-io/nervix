@@ -108,7 +108,9 @@ fn malformed_assignments_do_not_escape_into_another_statement_family() {
 fn completion_after_multi_span_durations_stays_in_cluster_assignments() {
     let prefix = "ALTER CLUSTER SET DOMAIN_DRAIN_TIMEOUT = 13m 49s, ";
     let suggestions = suggest_statement(prefix, prefix.len());
-    for parameter in ClusterParameterKey::iter() {
+    for parameter in ClusterParameterKey::iter()
+        .filter(|parameter| *parameter != ClusterParameterKey::DomainDrainTimeout)
+    {
         assert!(
             suggestions.contains(&parameter.keyword()),
             "{suggestions:?}"
@@ -120,6 +122,18 @@ fn completion_after_multi_span_durations_stays_in_cluster_assignments() {
             "{suggestions:?}"
         );
     }
+    let statement = parse_statement(&format!("{prefix}REPLICA_COUNT = 2;"))
+        .assured("a distinct assignment follows the complete duration");
+    let Statement::AlterCluster(alter) = statement else {
+        panic!("the grammar must return cluster administration");
+    };
+    assert_eq!(
+        alter.parameters.iter().cloned().collect::<Vec<_>>(),
+        vec![
+            nervix_models::ClusterParameterChange::DomainDrainTimeout(Duration::from_secs(829)),
+            nervix_models::ClusterParameterChange::ReplicaCount(2),
+        ]
+    );
 }
 
 #[test]
