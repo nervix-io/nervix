@@ -62,7 +62,7 @@ records their scope without treating a passing qualification as a completed camp
 | `client-emitter-wire` | `nervix-client-wire` native emitter frame round-trip equality | all current request, reply, refusal and settlement variants with bounded exact schema, window, identity, branch and batch fields, v1 | 256 | 128 bytes |
 | `client-requests` | `nervix-client-wire` complete client request equality | every current request family, identities, positions, schemas and opaque I/O payloads, v4 | 128 | 2048 bytes |
 | `client-replies` | `nervix-client-wire` complete reply equality | every reply family, dispositions, ordered diagnostics and structured command metadata, v4 | 128 | 4096 bytes |
-| `client-events` | `nervix-client-wire` complete event equality and retained graph ownership | every unsolicited event, discovery, clocks and opaque graph text, v1 | 128 | 2048 bytes |
+| `client-events` | `nervix-client-wire` complete event equality and retained graph ownership | every unsolicited event with every notice level and kind, discovery, clocks and opaque graph text, v2 | 128 | 2048 bytes |
 | `client-streams` | `nervix-client-wire` complete stream equality and shared chunk ownership | all upload, download and restore roots and outcomes, v3 | 128 | 2048 bytes |
 | `client-upload-archives` | `nervix-client-core` complete directory tree and deterministic archive bytes against an independent tar decoder | empty directories, nested and GNU long paths, arbitrary file bytes and block boundaries, v1 | 128 | 4096 bytes |
 | `client-reply-transfer` | `nervix-client-wire` exact segmentation bytes, reply equality and rejected append isolation | single frames and ordered transfers, incorrect identities and duplicates, v1 | 128 | 256 bytes |

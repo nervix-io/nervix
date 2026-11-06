@@ -369,7 +369,8 @@ reconciliation passes propose no further address change. The stored address supp
 contact hints; Raft traffic resolves the authenticated node identity through the interconnect.
 
 The consensus event stream and `info` log record `raft add learner`, `raft wait for learner`,
-`raft update address`, `raft promote voters`, and `raft membership updated` transitions.
+`raft update address`, `raft promote voters`, and `raft membership updated` transitions. Every
+report on the consensus event stream reaches the node's sessions as a `Leadership` notice.
 `SHOW CLUSTER STATUS` reports the local `raft.last_log_index`, `raft.last_applied`, and each member's
 learner or voter role and recorded address.
 

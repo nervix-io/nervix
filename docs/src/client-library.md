@@ -451,7 +451,9 @@ belong to the client rather than to one session, so a reader keeps calling them 
   as described above.
 - `next_server_event()` never opens a session itself. Notices end with the session that delivered
   them, including the ones not read yet, and the stream continues with the notices of the next
-  session.
+  session. Each `ServerEvent` carries the notice's `level`, its `kind` (`NoticeKind::Membership`,
+  `Leadership`, `ClusterParameters`, `Runtime` or `ControlPlane`) and its display text; a reader
+  routes notices by `kind` and never by their text.
 
 A failed read leaves its stream open. `ClientError::EventOverflow` from `next_server_event()` means
 notices arrived faster than they were read: the client dropped the ones it held, and the next read

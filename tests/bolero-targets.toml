@@ -1572,7 +1572,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__events__bolero_events_keep_complete_values_and_owned_views/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "client-events"
 invariant = "Every unsolicited event preserves complete values; borrowed graph views retain exact bytes after their original frame is dropped."
