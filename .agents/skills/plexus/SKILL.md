@@ -513,7 +513,8 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   same payload schema. Unlike ordinary processors, those inputs may use differently named
   branches. Keep collection separate per source relay and concrete branch, and remember that one
   node-wide materialized dependency or message-error relay must be exact-branch compatible with
-  every source.
+  every source. Check [emitter retention](../../../docs/src/emitters.md#branch-semantics) when
+  combining inputs, long flush intervals or required materialized-state waits.
 - Give every emitter an explicit transport-supported `MODE` as the final emitter subclause before
   `ENCODE USING`. Include every required variable: all modes declare `RETRY POLICY BACKOFF <d> MAX
   <d>`; asynchronous confirming modes also declare `ACK SEQUENTIAL` or `ACK PARALLEL MAX <n>` and
