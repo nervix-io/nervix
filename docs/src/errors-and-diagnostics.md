@@ -3044,8 +3044,19 @@ reply cannot establish whether the node applied the restore. The client ends tha
 session and interrupts its pending requests; a replacement session remains usable. The shared host
 reports `FailureKind::Uncertain`, the C binding reports `NX_ERROR_UNCERTAIN`, and the CLI exits with
 status `3` and the original execution reference. Other errors that may hide an admitted restore
-likewise retain their cause beneath `UncertainCommand`. An unreadable or empty archive remains
-`NX_ERROR_INVALID_ARGUMENT`; a valid stream refusal is a definitive failed outcome.
+likewise retain their cause beneath `UncertainCommand`. A pre-admission unreadable or empty archive
+is `NX_ERROR_INVALID_ARGUMENT`; a valid stream refusal is a definitive failed outcome if no earlier
+attempt could have been admitted.
+
+A structurally rejected native restore reply retains the complete frame-verification report
+through tonic's standard-error source, where its typed rejection can be inspected. Tonic's own
+receive-size failure happens before frame verification and retains its status instead. The
+restore receive phase distinguishes either from a server refusal received before the response;
+no classification reads a status message. After ending only the session selected for that stream,
+the client reports `UncertainCommand` under the original execution reference above
+`InvalidRestoreReply` and the receive failure. The shared binding exposes `NX_ERROR_UNCERTAIN`
+with that reference, and the CLI reports status 3. A replacement session and definitive local,
+authentication and declared stream refusals retain their meanings.
 
 ## Sensitive Data And Observability
 
