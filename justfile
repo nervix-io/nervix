@@ -433,6 +433,13 @@ test-scenarios-binary binary *args: download-onnxruntime
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     exec "$@"
 
+# Replay a compiled unit-test executable against its frozen source without a Cargo rebuild.
+[positional-arguments]
+test-unit-binary binary *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec "$@"
+
 # Replay a compiled ONNX inspection owner with an explicit runtime library.
 test-onnx-owner-binary binary library *args:
     ORT_DYLIB_PATH={{ quote(library) }} {{ quote(binary) }} {{ quote(args) }}
@@ -619,6 +626,12 @@ test-command-recovery-scenarios: build-web-console wasm-processor-guests downloa
         --input tests/features/runtime/client_wire_failures.feature \
         --tags '@client_wire_transaction_batch_finalization_recovery or @client_wire_applying_probe_recovery' \
         --concurrency 1 --retry 0
+
+# Exercise multi-span cluster durations with only the in-process server's prerequisites.
+test-cluster-duration-scenarios: build-web-console wasm-processor-guests download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/cluster/cluster_parameters.feature \
+        --tags @multi_span_cluster_duration --concurrency 2 --retry 0
 
 # Check external dependency startup and observation, including fresh Pulsar namespace readiness.
 test-environment *args:

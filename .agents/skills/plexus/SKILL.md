@@ -310,7 +310,8 @@ During node startup, `SHOW CLUSTER STATUS;` and `DESCRIBE CLUSTER;` remain avail
 
 Use `ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;`
 for committed Nervix cluster policy changes. Keep it outside domain transactions; it needs no
-selected domain. Read `Node Settings` for the complete parameter set, positive duration bounds,
+selected domain. Read `Domains And Time` → `Duration Literals` for duration spelling, and
+`Node Settings` for the complete parameter set, positive duration bounds,
 existing-model cap refusals, live installation and committed-versus-running inspection. Seed flags
 belong only to the first bootstrap, including when their value equals the default. Later starts,
 including the returning bootstrap node, omit them.
