@@ -644,6 +644,9 @@ mod tests {
             for mode in [AckMode::Attached, AckMode::Detached] {
                 for collect in [false, true] {
                     let mut draft = complete(family);
+                    if family == ProcessorFamily::Reingestor {
+                        draft.routes[0].branch.choose_unbranched();
+                    }
                     draft.mode = mode;
                     let collection = if collect {
                         draft.collect = Some(InputCollectPolicy {
