@@ -723,21 +723,19 @@ impl ExpectedReply {
                 reply,
             });
         }
-        let ReplyBody::Command(outcome) = body else {
-            return None;
-        };
         // Only a command is answered by a command outcome, and a command's expectation always
         // names its execution.
-        let Some(expected) = &self.execution_reference else {
-            return None;
-        };
-        if expected == &outcome.execution_reference {
-            return None;
+        match (&self.execution_reference, body) {
+            (Some(expected), ReplyBody::Command(outcome))
+                if expected != &outcome.execution_reference =>
+            {
+                Some(ExchangeEnd::ExecutionMismatch {
+                    expected: expected.clone(),
+                    received: outcome.execution_reference.clone(),
+                })
+            }
+            _ => None,
         }
-        Some(ExchangeEnd::ExecutionMismatch {
-            expected: expected.clone(),
-            received: outcome.execution_reference.clone(),
-        })
     }
 }
 
