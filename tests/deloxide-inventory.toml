@@ -421,6 +421,7 @@ kind = "cucumber"
 package = "nervix-scenarios"
 selections = ["deloxide", "deloxide-order"]
 tags = [
+  "@client_restore_codec_native",
   "@kafka_record_metadata",
   "@mqtt_metadata",
   "@nats_authentication",
@@ -3602,6 +3603,9 @@ workloads = [
   "stress.client-restore-reply-validation-restore",
   "scenario.client-foreign-execution",
   "stress.client-foreign-execution",
+  "scenario.restore-codec-rejection",
+  "stress.restore-codec-rejection",
+  "stress.restore-codec-rejection-restore",
   "paced.reopen-generation",
   "paced.delayed-refusal",
   "scenario.backup-lease-release-recovery",
@@ -3654,6 +3658,9 @@ workloads = [
   "stress.client-restore-reply-validation-restore",
   "scenario.client-foreign-execution",
   "stress.client-foreign-execution",
+  "scenario.restore-codec-rejection",
+  "stress.restore-codec-rejection",
+  "stress.restore-codec-rejection-restore",
   "scenario.client-alter-drain",
   "paced.reopen-generation",
   "scenario.backup-lease-release-recovery",
@@ -5234,6 +5241,35 @@ invariant = "A foreign command outcome ends its session and the client recovers 
 invocation = "stress-scenarios"
 scenario = "A native command recovers its own execution after a foreign command reply on <cluster_size> nodes"
 selections = ["deloxide-stress"]
+[[workload]]
+coverage = "Native restores through the real one- and three-node cluster and a bounded gRPC peer that replaces only a completed restore's reply. Rejection ends the selected client's tracked pending registry, and original-reference recovery opens a new session; tonic buffering and async transport are untracked. The ordinary CLI examples are outside this diagnostic selection."
+examples = 4
+feature = "tests/features/runtime/client_restore_codec_rejection.feature"
+id = "scenario.restore-codec-rejection"
+invariant = "A locally unreadable restore reply cannot establish failure or close a replacement session, and the completed original execution remains recoverable."
+invocation = "scenarios"
+scenario = "An unreadable restore reply keeps the <client> outcome uncertain on <cluster_size> nodes (<reply>)"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: the four native malformed and oversized restore replies reach the same tracked client pending registry and original-reference recovery on one and three nodes. Async transport, tonic buffering and the ordinary CLI process remain outside detector evidence."
+examples = 4
+feature = "tests/features/runtime/client_restore_codec_rejection.feature"
+id = "stress.restore-codec-rejection"
+invariant = "A locally unreadable restore reply cannot establish failure or close a replacement session, and the completed original execution remains recoverable."
+invocation = "stress-scenarios"
+scenario = "An unreadable restore reply keeps the <client> outcome uncertain on <cluster_size> nodes (<reply>)"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: the four native malformed and oversized restore replies reach the same tracked client pending registry and original-reference recovery on one and three nodes. Async transport, tonic buffering and the ordinary CLI process remain outside detector evidence."
+examples = 4
+feature = "tests/features/runtime/client_restore_codec_rejection.feature"
+id = "stress.restore-codec-rejection-restore"
+invariant = "A locally unreadable restore reply cannot establish failure or close a replacement session, and the completed original execution remains recoverable."
+invocation = "stress-restore-scenarios"
+scenario = "An unreadable restore reply keeps the <client> outcome uncertain on <cluster_size> nodes (<reply>)"
+selections = ["deloxide-stress-restore"]
 
 [[workload]]
 coverage = "The native client on one and three nodes consumes a real completed restore through an invalid-reply peer, ends the originating exchange through its tracked pending-reply lock, then recovers under the original reference. Async session locks, socket waits and the ordinary CLI subprocess used for backup are outside Deloxide."

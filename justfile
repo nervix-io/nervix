@@ -350,6 +350,25 @@ test-client-foreign-execution: build-web-console download-onnxruntime build-test
     PY
     exit "$result"
 
+# Exercise real native/CLI restores through a bounded reply-corrupting peer without preparing
+# unrelated simulation drivers. The ordinary scenario runner and its lifecycle stay in charge.
+test-restore-codec-replies *args: build-deps build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    mkdir -p {{ quote(cargo_target_dir + "/restore-codec-replies") }}
+    restore_codec_log="$(mktemp {{ quote(cargo_target_dir + "/restore-codec-replies/run.XXXXXX.log") }})"
+    cargo test --package nervix-scenarios --test scenarios -- --tags @client_restore_codec_rejection {{ quote(args) }} 2>&1 | tee "$restore_codec_log"
+    python3 - "$restore_codec_log" <<'PY'
+    import re
+    import sys
+    from pathlib import Path
+    output = re.sub(r"\x1b\[[0-9;]*m", "", Path(sys.argv[1]).read_text())
+    counts = re.findall(r"^(\d+) scenarios?(?: \(|$)", output, re.MULTILINE)
+    if counts != ["8"]:
+        raise SystemExit(f"restore reply witnesses must execute eight scenarios; reported counts: {counts}")
+    PY
+
 # Exercise restore reply validation through the native client and CLI on one and three nodes.
 # These cases start no paced driver or diagnostic report subprocess.
 test-client-restore-reply: build-web-console download-onnxruntime build-test-cli
@@ -642,25 +661,6 @@ test-scenarios-reuse *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     export NERVIX_TESTCONTAINERS_MODE=reusable
     cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
-
-# Measure the public client protocol against a release nervix-server process.
-# The JSON report and raw Prometheus scrape record the workload, toolchain, hardware and limits.
-client-wire-baseline samples="100" upload_samples="5" payload_bytes="1024" output="target/client-wire-baseline": build-web-console download-onnxruntime
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    cargo build --release --package nervix-server --bin nervix-server
-    export NERVIX_CLIENT_WIRE_BASELINE_SERVER={{ quote(cargo_target_dir + "/release/nervix-server") }}
-    export NERVIX_CLIENT_WIRE_BASELINE_SERVER_PROFILE=release
-    export NERVIX_CLIENT_WIRE_BASELINE_SAMPLES={{ quote(samples) }}
-    export NERVIX_CLIENT_WIRE_BASELINE_UPLOAD_SAMPLES={{ quote(upload_samples) }}
-    export NERVIX_CLIENT_WIRE_BASELINE_PAYLOAD_BYTES={{ quote(payload_bytes) }}
-    export NERVIX_CLIENT_WIRE_BASELINE_OUTPUT={{ quote(output) }}
-    cargo test --package nervix-scenarios --test scenarios -- \
-        --input tests/features/runtime/client_wire_baseline.feature \
-        --tags @client_wire_baseline \
-        --concurrency 1 \
-        --retry 0
 
 # Capture the web console images the book publishes. The capture tool starts a real nervix-server,
 # seeds it with nervix-cli, and drives the console in a browser, so the images are build output

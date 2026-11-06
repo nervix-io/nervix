@@ -655,6 +655,13 @@ no other command changes those domains while it applies.
 The staged archive is released when its restore's outcome is recorded, or when the retry validity
 of the execution reference ends; a dry run releases it when it answers.
 
+A malformed or oversized native restore reply leaves the outcome uncertain even if the restore
+already completed. Keep the original statement, archive and execution reference and repeat them
+to recover that outcome. The CLI exits with status 3 and prints the reference. If no earlier
+attempt could have been admitted, a local archive error, an authentication refusal or a valid
+declared stream refusal remains definitive; see
+[Restoring](client-library.md#restoring) for the native-client contract.
+
 ### Restoring From The Command Line
 
 `nervix-cli restore` runs one restore and exits:
