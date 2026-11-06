@@ -105,7 +105,7 @@ enum BufferedRow {
     Prepared,
     /// The emitter delivered the row, which the emitter's sent counters count once.
     Delivered,
-    /// A emitter that publishes on its own commit accepted the row and took its acknowledgements, so
+    /// An emitter that publishes on its own commit accepted the row and took its acknowledgements, so
     /// that commit, not this buffer, counts it as sent.
     Staged,
     /// The row was rejected once its message error was delivered.
@@ -1991,7 +1991,7 @@ mod tests {
         assert_eq!(reported.load(Ordering::Acquire), 0);
     }
 
-    /// A emitter that commits on its own cadence still holds staged messages when its emitter task is
+    /// An emitter that commits on its own cadence still holds staged messages when its emitter task is
     /// torn down. Nothing holds them once the task is gone, so the count drains read for the
     /// emitter drops to zero instead of keeping them until a restarted task first changes its
     /// buffer.

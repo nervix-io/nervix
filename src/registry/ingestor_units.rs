@@ -151,7 +151,7 @@ impl IngestorUnits {
             .collect()
     }
 
-    /// The exact relay units with which this source instance must move.
+    /// The exact relay units with which this ingestor instance must move.
     pub(in crate::registry) fn colocated_relays(&self, unit: Unit) -> Vec<NodeUnitRef> {
         let (Self::PerPartition { count, relays }, nervix_models::UnitKind::Instance(index)) =
             (self, unit.kind())

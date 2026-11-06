@@ -2701,7 +2701,7 @@ mod tests {
         assert!(EmitterRecordAcknowledgements::new(AckSet::empty()).is_empty());
     }
 
-    /// A emitter whose transport client still holds records once the loop ends. It answers its
+    /// An emitter whose transport client still holds records once the loop ends. It answers its
     /// finish as `answer` says and reports the deadline the host finished it by.
     struct HoldingEmitter {
         answer: fn() -> EmitterFinishResult,

@@ -3,9 +3,9 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The client's closed configuration schema and signaling reference, the connection's
-//!   literal upgrade fields and frame kind, the endpoint source Model, and their declarations.
+//!   literal upgrade fields and frame kind, the endpoint ingestor Model, and their declarations.
 //!   Client declarations also own public configuration keys, types and confidentiality.
-//! - **Depends on.** Shared source/client declarations, HTTP field rules and referenced names.
+//! - **Depends on.** Shared ingestor/client declarations, HTTP field rules and referenced names.
 //! - **Must not know.** Drivers, sockets, TLS file contents, signaling execution, or how endpoints
 //!   are published, routed to or served.
 
@@ -100,7 +100,7 @@ pub struct WebsocketsConnectionIngestor {
 const WEBSOCKETS_CONNECTION_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
-            holds: "accepted signaling frames retained for source reads",
+            holds: "accepted signaling frames retained for ingestor reads",
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::Setting(
                     "handshake_buffer_capacity messages (default 16), each at most \
@@ -409,11 +409,11 @@ impl crate::IngestorEntityChange for WebsocketsEndpointIngestorChange {
 
 connector_ingestors! {
     connector Websockets = "WEBSOCKETS";
-    /// What a WebSockets source reads.
+    /// What a WebSockets ingestor reads.
     pub enum WebsocketsIngestor;
     /// The alterations of the ingestors that read a WebSockets entity.
     pub enum WebsocketsIngestorAlteration;
-    /// The entities a WebSockets source reads.
+    /// The entities a WebSockets ingestor reads.
     pub enum WebsocketsIngestorEntity {
         Connection(WebsocketsConnectionIngestor => WebsocketsConnectionIngestorChange) = "CONNECTION", "WebSocket client";
         Endpoint(WebsocketsEndpointIngestor => WebsocketsEndpointIngestorChange) = "ENDPOINT", "WebSocket endpoint";

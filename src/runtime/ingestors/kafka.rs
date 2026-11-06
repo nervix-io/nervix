@@ -36,7 +36,7 @@ struct RuntimeKafkaDomainOffsets {
     domain: DomainName,
     ingestor: IngestorName,
     topic: String,
-    /// Fixed for this source lifetime; a count change joins this source before installing its
+    /// Fixed for this ingestor lifetime; a count change joins this ingestor before installing its
     /// replacement. One unit initializes directly through its native owner.
     instances: NonZeroU64,
     /// The originator this ingestor instance acts under, which schedule application replaces when
@@ -251,7 +251,7 @@ impl KafkaPartitionWatch {
         ));
     }
 
-    /// The topic's partitions in order, or `None` once a failed inspection is reported. The source
+    /// The topic's partitions in order, or `None` once a failed inspection is reported. The ingestor
     /// reports a topic the broker does not have itself, so the watch observes it as a topic without
     /// partitions, and the partitions of the topic once provisioned read as a topology change.
     async fn observe(&self) -> Option<Vec<i32>> {
@@ -352,7 +352,7 @@ impl KafkaTopicIngestorStartPlan {
         }
 
         let mut domain_offsets = None;
-        let source_offset_mode = match offsets {
+        let connector_offset_mode = match offsets {
             KafkaOffsetPlan::ConsumerGroup { group, start_at } => {
                 KafkaTopicIngestorOffsetMode::ConsumerGroup {
                     group_id: group.as_str().to_string(),
@@ -393,23 +393,26 @@ impl KafkaTopicIngestorStartPlan {
                 }
             }
         };
-        let source_plan = IngestorPlan {
+        let connector_plan = IngestorPlan {
             connector: KafkaTopicIngestorPlan {
                 executor: runtime.executor().clone(),
                 config: resolved_client.entries,
                 topic,
-                offset_mode: source_offset_mode,
+                offset_mode: connector_offset_mode,
             },
             capabilities: ingestor.ingestor_capabilities(instances, acknowledgement.support()),
             acknowledgement,
         };
 
-        let policy =
-            BrokerIngestorPolicy::new(acknowledgement, source_plan.capabilities.position_class());
-        let source = KafkaTopicIngestor::open(&source_plan.connector, ingestor.instance_index())
-            .await
-            .change_context_lazy(|| ingestor.initialize_failure())?;
-        let instance = Box::new(BrokerIngestorInstance { source, policy });
+        let policy = BrokerIngestorPolicy::new(
+            acknowledgement,
+            connector_plan.capabilities.position_class(),
+        );
+        let connector =
+            KafkaTopicIngestor::open(&connector_plan.connector, ingestor.instance_index())
+                .await
+                .change_context_lazy(|| ingestor.initialize_failure())?;
+        let instance = Box::new(BrokerIngestorInstance { connector, policy });
         Ok(IngestorStart {
             instance,
             companions,

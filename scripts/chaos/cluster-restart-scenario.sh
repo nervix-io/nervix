@@ -263,9 +263,9 @@ run_cluster_restart() {
         cluster_settled_and_connected "${case_dir}/recovered" \
         || recovery_fail product "the cluster did not settle within ${cluster_restart_settle_bound}s after the restart"
     local settled_ms="$(( $(epoch_ms) - start_requested_ms ))"
-    wait_for 'sink output advanced after the restart' "${cluster_restart_delivery_bound}" \
+    wait_for 'emitter output advanced after the restart' "${cluster_restart_delivery_bound}" \
         topic_progressed chaos_output "${output_while_down}" \
-        || recovery_fail product 'sink output did not advance after the restart'
+        || recovery_fail product 'emitter output did not advance after the restart'
     local delivery_ms="$(( $(epoch_ms) - start_requested_ms ))"
     wait "${cluster_restart_sampler_pid}" || true
     parse_status_samples "${case_dir}/status-samples.log" "${case_dir}/status-samples.ndjson"

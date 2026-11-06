@@ -54,7 +54,7 @@ impl WasmCheckpointHolds {
     }
 }
 
-/// A checkpoint in progress is progress of the inputs it holds: their source must not time them
+/// A checkpoint in progress is progress of the inputs it holds: their ingestor must not time them
 /// out and send them again while the checkpoint is still on its way to its boundary.
 impl AcknowledgementKeepalive for WasmCheckpointHolds {
     fn keep_alive(&self) {
@@ -355,8 +355,8 @@ mod tests {
         assert_eq!(outcome, AckOutcome::Ack);
     }
 
-    /// A checkpoint still under way reports the inputs it holds alive to their source, so the
-    /// source's `ACK TIMEOUT` does not send them again, and leaves them unresolved until it ends.
+    /// A checkpoint still under way reports the inputs it holds alive to their ingestor, so the
+    /// ingestor's `ACK TIMEOUT` does not send them again, and leaves them unresolved until it ends.
     #[nervix_primitives::test]
     async fn a_checkpoint_under_way_keeps_its_held_inputs_alive() {
         let (acks, mut completion) = AckSet::root();

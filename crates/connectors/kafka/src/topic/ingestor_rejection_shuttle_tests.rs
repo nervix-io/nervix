@@ -132,7 +132,7 @@ async fn take_the_partition_away(events: mpsc::UnboundedSender<RebalanceEvent>) 
     for event in [RebalanceEvent::Revoke, RebalanceEvent::Assign] {
         nervix_primitives::task::consume_budget().await;
         if events.send(event).is_err() {
-            panic!("the source serves rebalances until the check ends");
+            panic!("the ingestor serves rebalances until the check ends");
         }
     }
 }

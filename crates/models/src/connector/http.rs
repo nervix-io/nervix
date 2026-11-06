@@ -2,12 +2,12 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The HTTP client Model and transport declaration, the polled request source with its delivery mode, the source
+//! - **Owns.** The HTTP client Model and transport declaration, the polled request ingestor with its delivery mode, the ingestor
 //!   that reads an HTTP endpoint this cluster serves, the request emitter Model, and what each entity
 //!   declares.
 //!   Client declarations also own public configuration keys, types and confidentiality, and a polled
 //!   request owns how its headers read them.
-//! - **Depends on.** The shared source and emitter declarations, expressions, the domain clock's
+//! - **Depends on.** The shared ingestor and emitter declarations, expressions, the domain clock's
 //!   period and the names a body references.
 //! - **Must not know.** The HTTP client library, how a request is built,
 //!   sent or classified, or how an endpoint is published, routed to or served.
@@ -606,11 +606,11 @@ impl crate::IngestorEntityChange for HttpEndpointIngestorChange {
 
 connector_ingestors! {
     connector Http = "HTTP";
-    /// What an HTTP source reads.
+    /// What an HTTP ingestor reads.
     pub enum HttpIngestor;
     /// The alterations of the ingestors that read an HTTP entity.
     pub enum HttpRequestIngestorAlteration;
-    /// The entities an HTTP source reads.
+    /// The entities an HTTP ingestor reads.
     pub enum HttpIngestorEntity {
         Request(HttpRequestIngestor => HttpRequestIngestorChange) = "REQUEST", "HTTP polling";
         Endpoint(HttpEndpointIngestor => HttpEndpointIngestorChange) = "ENDPOINT", "HTTP endpoint";

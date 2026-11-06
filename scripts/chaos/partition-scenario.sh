@@ -856,9 +856,9 @@ recover_partition() {
     else
         partition_finding "${case_dir}" 'execution did not converge on the current schedule after healing'
     fi
-    wait_for 'sink output advanced after healing' "${partition_delivery_after_heal_bound}" \
+    wait_for 'emitter output advanced after healing' "${partition_delivery_after_heal_bound}" \
         topic_progressed chaos_output "${output_at_heal}" \
-        || partition_fail product 'sink output did not advance after healing'
+        || partition_fail product 'emitter output did not advance after healing'
     delivery_after_heal_ms="$(( $(epoch_ms) - heal_completed_ms ))"
     partition_canary "chaos_partition_${ordinal}_after" "${rejoining_host}" "${case_dir}" 60 after true
     [[ "$(canary_outcome "${case_dir}" "chaos_partition_${ordinal}_after")" == acknowledged ]] \
@@ -1107,7 +1107,7 @@ partition_case_follower() {
     local output_after_failover
     output_after_failover="$(topic_end_offset chaos_output)"
     majority_delivery_ms=null
-    if wait_for 'sink output advanced on the majority while the follower was isolated' \
+    if wait_for 'emitter output advanced on the majority while the follower was isolated' \
         "${partition_majority_delivery_bound}" topic_progressed chaos_output "${output_after_failover}"; then
         majority_delivery_ms="$(( $(epoch_ms) - isolation_verified_ms ))"
     else
@@ -1304,7 +1304,7 @@ run_partition_recovery() {
     compose up --detach --no-deps load observer
     wait_for 'independent load, observer and broker' 30 check_support_containers
     wait_for 'source traffic started' 30 topic_progressed chaos_input 0
-    wait_for 'sink traffic started' 60 topic_progressed chaos_output 0
+    wait_for 'emitter traffic started' 60 topic_progressed chaos_output 0
     wait_for 'initial cross-node traffic metrics' 60 initial_remote_path_ready
     local host
     for host in "${node_hosts[@]}"; do

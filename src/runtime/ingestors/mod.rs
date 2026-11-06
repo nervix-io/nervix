@@ -6,7 +6,7 @@
 //!   its dependencies, and mapping its input plan to the connector that runs a transport or to the
 //!   client ingestor the node hosts, which is the only place an input plan's kind selects anything.
 //! - **Depends on.** Ingestor start plans, the host ingestor launcher, every ingestor connector, and
-//!   the endpoint and client sources the server keeps.
+//!   the endpoint and client ingestors the server keeps.
 //! - **Must not know.** Plexus parsing, registry validation, or placement computation.
 
 #![cfg_attr(
@@ -17,7 +17,7 @@
     nervix_lint,
     nervix::context(
         lifecycle,
-        reason = "source installation and intake withdrawal bind one exact connector lifetime"
+        reason = "ingestor installation and intake withdrawal bind one exact connector lifetime"
     )
 )]
 
@@ -41,7 +41,7 @@ pub(in crate::runtime) mod zeromq;
 /// Why this node could not start an ingestor.
 ///
 /// Every failure names the ingestor, or the domain and codec it binds. A failure to initialize the
-/// ingestor's ingestor is [`IngestorStartError::Initialize`], with the cause beneath it: a
+/// ingestor's connector is [`IngestorStartError::Initialize`], with the cause beneath it: a
 /// [`IngestorConnectorStartError`], or the report of the client configuration, connector plan, ingestor
 /// instance or domain cadence that failed.
 #[derive(Debug, Error)]
@@ -74,12 +74,12 @@ pub(crate) enum IngestorStartError {
     },
 }
 
-/// Why an ingestor's client configuration could not resolve or its ingestor could not be composed
+/// Why an ingestor's client configuration could not resolve or its connector could not be composed
 /// or opened on this node. Startup wraps it in [`IngestorStartError::Initialize`]; retirement
 /// wraps it in [`RuntimeError::RetireIngestorEntity`].
 #[derive(Debug, Error)]
 pub(crate) enum IngestorConnectorStartError {
-    #[error("failed to resolve the source's client configuration")]
+    #[error("failed to resolve the ingestor's client configuration")]
     ClientConfiguration,
     #[error("the node DNS resolver is not installed")]
     NodeDnsUnavailable,
@@ -199,7 +199,7 @@ impl Runtime {
 
     /// Starts one ingestor. Every ingestor takes this path.
     ///
-    /// Everything that can fail comes first: the ingestor's dependencies compile and its ingestor
+    /// Everything that can fail comes first: the ingestor's dependencies compile and its connector
     /// plan composes into opened connector instances. Only then does the host register the ingestor
     /// and start its tasks, so an ingestor that cannot start leaves nothing running behind it.
     pub(in crate::runtime) async fn start_ingestor(
@@ -220,14 +220,14 @@ impl Runtime {
             input,
             dependencies,
         } = self.ingestor_dependencies(ingestor, input).await?;
-        let (codec, source) = match input {
+        let (codec, entity) = match input {
             BoundIngestorInput::Transport { codec, source } => (codec, source),
             BoundIngestorInput::Client { plan, generation } => {
                 self.host_client_ingestor(ingestor, &plan, generation, quiesce, dependencies);
                 return Ok(());
             }
         };
-        let source = match source {
+        let connector = match entity {
             IngestorConnectorPlan::Http(HttpIngestorStartPlan::Request(plan)) => {
                 plan.compose(self, ingestor).await?
             }
@@ -274,7 +274,7 @@ impl Runtime {
                 plan.compose(self, ingestor).await?
             }
         };
-        self.host_ingestor(ingestor, quiesce, dependencies, codec, source);
+        self.host_ingestor(ingestor, quiesce, dependencies, codec, connector);
         Ok(())
     }
 }
@@ -305,22 +305,22 @@ mod tests {
         T::try_from(value.to_string()).assured("the fixture name is valid")
     }
 
-    /// The entrypoint plans of a domain whose one ingestor, `ingestor`, reads `ingestor` through
+    /// The entrypoint plans of a domain whose ingestor `orders_ingestor` reads `entity` through
     /// `client_model` with a JSON codec into the relay `events`.
-    fn planned_source_ingestor(
+    fn planned_transport_ingestor(
         domain: &DomainName,
-        source: IngestorEntity,
+        entity: IngestorEntity,
         client_model: Model,
     ) -> EntrypointPlans {
         let ingestor = CreateIngestor {
-            name: named("source"),
+            name: named("orders_ingestor"),
             output_routes: with_inherit_all(nervix_models::ProcessorOutputs::single(named(
                 "events",
             )))
             .with_flush_policy(FlushPolicy::Immediate)
             .with_branch(OutputBranch::Unbranched),
             input: nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
-                source,
+                source: entity,
                 codec: named("json"),
             }),
             timestamp_source: None,
@@ -374,7 +374,7 @@ mod tests {
         use nervix_connector_fake::{FakeIngestor, FakeIngestorPlan, IngestorObservations};
         use nervix_primitives::sync::blocking::Mutex;
         let domain = named("instances");
-        let plans = planned_source_ingestor(
+        let plans = planned_transport_ingestor(
             &domain,
             IngestorEntity::Kafka(nervix_models::KafkaIngestor::Topic(
                 nervix_models::KafkaTopicIngestor {
@@ -405,7 +405,7 @@ mod tests {
             );
             let plan = plans
                 .ingestor(
-                    &named("source"),
+                    &named("orders_ingestor"),
                     Unit::try_instance(index)
                         .assured("the fixture index fits the execution-unit range"),
                 )
@@ -432,7 +432,7 @@ mod tests {
         let runtime = Runtime::default();
         let domain: DomainName = named("sales");
         let client_name: ClientName = named("upstream");
-        let plans = planned_source_ingestor(
+        let plans = planned_transport_ingestor(
             &domain,
             IngestorEntity::Http(HttpIngestor::Request(HttpRequestIngestor {
                 client: client_name.clone(),
@@ -453,8 +453,8 @@ mod tests {
         );
         let plan = plans
             .ingestors()
-            .find(|plan| plan.ingestor.name == named::<IngestorName>("source"))
-            .assured("the fixture schedules the ingestor named source");
+            .find(|plan| plan.ingestor.name == named::<IngestorName>("orders_ingestor"))
+            .assured("the fixture schedules the ingestor named orders_ingestor");
 
         let report = runtime
             .start_ingestor(plan)
@@ -465,19 +465,19 @@ mod tests {
             matches!(
                 report.current_context(),
                 IngestorStartError::DomainExecutionUnavailable { domain: failed, ingestor }
-                    if *failed == domain && ingestor.as_str() == "source"
+                    if *failed == domain && ingestor.as_str() == "orders_ingestor"
             ),
             "{report:?}"
         );
-        let message =
-            "the execution of domain 'sales' is not installed while starting ingestor 'source'";
+        let message = "the execution of domain 'sales' is not installed while starting ingestor \
+                       'orders_ingestor'";
         assert_eq!(format!("{report:#}"), message);
     }
 
     #[test]
     fn ingestor_start_failures_keep_their_diagnostic_text() {
         let domain: DomainName = named("sales");
-        let ingestor: IngestorName = named("source");
+        let ingestor: IngestorName = named("orders_ingestor");
         let initialize = || IngestorStartError::Initialize {
             domain: domain.clone(),
             ingestor: ingestor.clone(),
@@ -490,7 +490,7 @@ mod tests {
                     unit: Unit::try_instance(2)
                         .assured("the fixture index fits the execution-unit range"),
                 }),
-                "ingestor 'source' in domain 'sales' instance 2 is already running",
+                "ingestor 'orders_ingestor' in domain 'sales' instance 2 is already running",
             ),
             (
                 Report::new(IngestorStartError::CodecNotInstantiated {
@@ -510,22 +510,22 @@ mod tests {
                     protocol: named("handshake"),
                 })
                 .change_context(initialize()),
-                "failed to initialize ingestor 'source' in domain 'sales': missing signaling \
-                 protocol 'handshake'",
+                "failed to initialize ingestor 'orders_ingestor' in domain 'sales': missing \
+                 signaling protocol 'handshake'",
             ),
             (
                 Report::new(IngestorConnectorStartError::EndpointNotInstantiated {
                     endpoint: named("events_endpoint"),
                 })
                 .change_context(initialize()),
-                "failed to initialize ingestor 'source' in domain 'sales': endpoint \
+                "failed to initialize ingestor 'orders_ingestor' in domain 'sales': endpoint \
                  'events_endpoint' is not instantiated",
             ),
             (
                 Report::new(IngestorConnectorStartError::KafkaDomainOffsetsNotAuthoritative)
                     .change_context(initialize()),
-                "failed to initialize ingestor 'source' in domain 'sales': Kafka DOMAIN offsets \
-                 are not authoritative on this node",
+                "failed to initialize ingestor 'orders_ingestor' in domain 'sales': Kafka DOMAIN \
+                 offsets are not authoritative on this node",
             ),
         ];
         for (report, message) in cases {
@@ -534,7 +534,7 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn sources_that_resolve_names_report_missing_node_dns_as_start_failure() {
+    async fn ingestors_that_resolve_names_report_missing_node_dns_as_start_failure() {
         let runtime = Runtime::default();
         let domain: DomainName = named("sales");
         let client_name: ClientName = named("upstream");
@@ -646,11 +646,11 @@ mod tests {
                 }),
             ),
         ] {
-            let plans = planned_source_ingestor(&domain, source, client_model);
+            let plans = planned_transport_ingestor(&domain, source, client_model);
             let plan = plans
                 .ingestors()
-                .find(|plan| plan.ingestor.name == named::<IngestorName>("source"))
-                .assured("the fixture schedules the ingestor named source");
+                .find(|plan| plan.ingestor.name == named::<IngestorName>("orders_ingestor"))
+                .assured("the fixture schedules the ingestor named orders_ingestor");
             let IngestorInputPlan::Transport(transport) = &plan.input else {
                 panic!("the fixture ingestor reads a transport");
             };
@@ -673,17 +673,19 @@ mod tests {
                 IngestorConnectorPlan::Sqs(SqsIngestorStartPlan::Queue(source)) => {
                     source.compose(&runtime, &plan.ingestor).await
                 }
-                _ => panic!("the fixture only includes sources that resolve names"),
+                _ => panic!("the fixture only includes ingestors that resolve names"),
             };
             let Err(report) = result else {
-                panic!("a source that resolves names must fail without node DNS before it opens");
+                panic!(
+                    "an ingestor that resolves names must fail without node DNS before it opens"
+                );
             };
             let IngestorStartError::Initialize { domain, ingestor } = report.current_context()
             else {
                 panic!("the failure must name the ingestor that could not start: {report:?}");
             };
             assert_eq!(domain.as_str(), "sales");
-            assert_eq!(ingestor.as_str(), "source");
+            assert_eq!(ingestor.as_str(), "orders_ingestor");
             assert!(
                 matches!(
                     report.downcast_ref::<IngestorConnectorStartError>(),
@@ -693,8 +695,8 @@ mod tests {
             );
             assert_eq!(
                 format!("{report:#}"),
-                "failed to initialize ingestor 'source' in domain 'sales': the node DNS resolver \
-                 is not installed"
+                "failed to initialize ingestor 'orders_ingestor' in domain 'sales': the node DNS \
+                 resolver is not installed"
             );
         }
     }
@@ -712,7 +714,7 @@ mod tests {
     }
 
     /// Composes the ZeroMQ ingestor `ingestor` of domain `sales`, which reads `client`.
-    async fn compose_zeromq_source(
+    async fn compose_zeromq_ingestor(
         runtime: &Runtime,
         client: CreateClientZeroMq,
     ) -> error_stack::Result<connector::IngestorStart, IngestorStartError> {
@@ -722,11 +724,11 @@ mod tests {
             mode: ZeroMqIngestMode::NoAck,
             quiesce: IngestQuiesceMode::Suspend,
         }));
-        let plans = planned_source_ingestor(&domain, pull, Model::ClientZeroMq(client));
+        let plans = planned_transport_ingestor(&domain, pull, Model::ClientZeroMq(client));
         let plan = plans
             .ingestors()
-            .find(|plan| plan.ingestor.name == named::<IngestorName>("source"))
-            .assured("the fixture schedules the ingestor named source");
+            .find(|plan| plan.ingestor.name == named::<IngestorName>("orders_ingestor"))
+            .assured("the fixture schedules the ingestor named orders_ingestor");
         let IngestorInputPlan::Transport(transport) = &plan.input else {
             panic!("the fixture ingestor reads a transport");
         };
@@ -739,7 +741,7 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn a_zeromq_source_resolves_its_client_configuration_before_it_opens() {
+    async fn a_zeromq_ingestor_resolves_its_client_configuration_before_it_opens() {
         let runtime = Runtime::default();
         let feed = ClientResourceMount {
             resource: named("feed"),
@@ -760,14 +762,14 @@ mod tests {
             ),
         ];
         for (client, cause) in cases {
-            let Err(report) = compose_zeromq_source(&runtime, client).await else {
-                panic!("a ZeroMQ source must resolve its client configuration before it opens");
+            let Err(report) = compose_zeromq_ingestor(&runtime, client).await else {
+                panic!("a ZeroMQ ingestor must resolve its client configuration before it opens");
             };
             assert!(
                 matches!(
                     report.current_context(),
                     IngestorStartError::Initialize { domain, ingestor }
-                        if domain.as_str() == "sales" && ingestor.as_str() == "source"
+                        if domain.as_str() == "sales" && ingestor.as_str() == "orders_ingestor"
                 ),
                 "the failure must name the ingestor that could not start: {report:?}"
             );
@@ -777,13 +779,15 @@ mod tests {
             );
             assert_eq!(
                 format!("{report:#}"),
-                format!("failed to initialize ingestor 'source' in domain 'sales': {cause}")
+                format!(
+                    "failed to initialize ingestor 'orders_ingestor' in domain 'sales': {cause}"
+                )
             );
         }
     }
 
     #[nervix_primitives::test]
-    async fn a_zeromq_source_renders_its_address_over_a_mount_it_keeps() {
+    async fn a_zeromq_ingestor_renders_its_address_over_a_mount_it_keeps() {
         let store_root = tempfile::tempdir().expect("resource store tempdir");
         let content_root = tempfile::tempdir().expect("resource content tempdir");
         std::fs::write(content_root.path().join("feed.txt"), "feed")
@@ -806,7 +810,7 @@ mod tests {
             version: 1,
         };
 
-        let composed = compose_zeromq_source(
+        let composed = compose_zeromq_ingestor(
             &runtime,
             zeromq_client(Some(feed), "ipc://{{ feed }}/ingest.sock"),
         )

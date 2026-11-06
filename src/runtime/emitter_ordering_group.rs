@@ -9,7 +9,7 @@
 //! - **Must not know.** Which emitter writes records under a group, what the external system does with
 //!   it, or when the emitter publishes.
 //!
-//! A emitter that orders records per group receives each record's group already evaluated, so the
+//! An emitter that orders records per group receives each record's group already evaluated, so the
 //! expression that produced it, and the reason a record has none, both stay with the host.
 
 #![cfg_attr(
