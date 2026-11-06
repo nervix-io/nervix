@@ -681,6 +681,15 @@ fn output_arrow_bytes(
     Some(bytes)
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "Arrow List offset buffers contain one terminal boundary after their parent rows"
+    )
+)]
+const LIST_TERMINAL_OFFSET_COUNT: usize = 1;
+
 /// Copies only public outputs into Arrow. Native state tensors never enter this conversion.
 fn output_tensor_array(
     schema: &InferencerTensorSchema,
@@ -719,7 +728,7 @@ fn output_tensor_array(
             InferencerTensorDimension::Dynamic => {
                 let mut offsets = Vec::with_capacity(
                     parents
-                        .checked_add(1)
+                        .checked_add(LIST_TERMINAL_OFFSET_COUNT)
                         .ok_or_else(|| Report::new(StatefulInferenceError::OutputSize))?,
                 );
                 for parent in 0..=parents {
