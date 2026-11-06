@@ -1,10 +1,12 @@
 //! The client against an in-process session server over a real gRPC connection.
 //!
-//! The server is a hand-written tonic service that routes the two session methods itself, exactly
+//! The server is a hand-written tonic service that routes the session methods itself, exactly
 //! as a transport integrates the session protocol. Every exchange the client opens is handed to
 //! the test, which plays the server's side inline: it reads the requests the client sends and
 //! answers them in whatever order and shape the behavior under test needs. Uploads are answered by
 //! a fixed handler that installs whatever archive arrives whole.
+
+mod foreign_restore;
 
 use std::{
     convert::Infallible,
@@ -56,12 +58,12 @@ use crate::{
         Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection,
         ChoiceStatus, ChoiceTarget, ChoiceValue, ClientFrame, ClientMessage, ClientRequest,
         DomainInfo, DomainList, DomainPaceChoice, DomainsObserved, EncodedFrame, InspectionOutcome,
-        LeaderRedirect, LeadershipObserved, NodeEndpoints, NoticeLevel, Reply, ReplyBody,
-        ReplyDelivery, RequestId, RowSchema, ServerFrame, ServerNotice, SessionLimitSettings,
-        SessionLimits, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
-        SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRowsEncoder,
-        SubscriptionType, UploadDisposition, UploadFailure, UploadFrame, UploadMessage,
-        UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame, WireEncodeError,
+        LeaderRedirect, LeadershipObserved, NodeEndpoints, NoticeKind, NoticeLevel, Reply,
+        ReplyBody, ReplyDelivery, RequestId, RowSchema, ServerFrame, ServerNotice,
+        SessionLimitSettings, SessionLimits, SubscribeDisposition, SubscribeOutcome,
+        SubscriptionEndReason, SubscriptionEnded, SubscriptionHandle, SubscriptionOpened,
+        SubscriptionRowsEncoder, SubscriptionType, UploadDisposition, UploadFailure, UploadFrame,
+        UploadMessage, UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame, WireEncodeError,
         grpc::{
             EXCHANGE_PATH, SERVICE_NAME, ServerExchangeCodec, ServerUploadCodec,
             UPLOAD_RESOURCE_PATH,
@@ -195,6 +197,7 @@ struct SessionService {
     uploads: mpsc::Sender<ReceivedUpload>,
     fail_upload_replies: Arc<AtomicU64>,
     upload_reply_mode: Arc<Mutex<Option<UploadReplyMode>>>,
+    restore_reply_gate: Arc<Mutex<Option<foreign_restore::RestoreReplyGate>>>,
 }
 
 enum UploadReplyMode {
@@ -230,6 +233,17 @@ impl Service<http::Request<Body>> for SessionService {
                 };
                 Ok(grpc.streaming(exchange, request).await)
             }),
+            crate::wire::grpc::RESTORE_BACKUP_PATH => Box::pin(async move {
+                let mut grpc = Grpc::new(crate::wire::grpc::ServerRestoreCodec::new(limits()));
+                Ok(grpc
+                    .client_streaming(
+                        foreign_restore::RestoreWithForeignReference {
+                            gate: service.restore_reply_gate,
+                        },
+                        request,
+                    )
+                    .await)
+            }),
             UPLOAD_RESOURCE_PATH => Box::pin(async move {
                 let mut grpc = Grpc::new(ServerUploadCodec::new(limits()));
                 let upload = InstallUpload {
@@ -239,9 +253,11 @@ impl Service<http::Request<Body>> for SessionService {
                 };
                 Ok(grpc.client_streaming(upload, request).await)
             }),
-            _ => Box::pin(async move {
-                Ok(Status::unimplemented("the session serves two methods").into_http())
-            }),
+            _ => {
+                Box::pin(
+                    async move { Ok(Status::unimplemented("unknown session method").into_http()) },
+                )
+            }
         }
     }
 }
@@ -418,6 +434,7 @@ struct TestServer {
     uploads: mpsc::Receiver<ReceivedUpload>,
     fail_upload_replies: Arc<AtomicU64>,
     upload_reply_mode: Arc<Mutex<Option<UploadReplyMode>>>,
+    restore_reply_gate: Arc<Mutex<Option<foreign_restore::RestoreReplyGate>>>,
     task: JoinHandle<()>,
 }
 
@@ -445,12 +462,14 @@ impl TestServer {
         let (upload_sender, uploads) = mpsc::channel(4);
         let fail_upload_replies = Arc::new(AtomicU64::new(0));
         let upload_reply_mode = Arc::new(Mutex::new(None));
+        let restore_reply_gate = Arc::new(Mutex::new(None));
         let service = SessionService {
             exchanges: exchange_sender,
             exchange_hold: exchange_hold.clone(),
             uploads: upload_sender,
             fail_upload_replies: fail_upload_replies.clone(),
             upload_reply_mode: upload_reply_mode.clone(),
+            restore_reply_gate: restore_reply_gate.clone(),
         };
         let task = nervix_primitives::task::spawn(async move {
             Server::builder()
@@ -466,6 +485,7 @@ impl TestServer {
             uploads,
             fail_upload_replies,
             upload_reply_mode,
+            restore_reply_gate,
             task,
         }
     }
@@ -779,6 +799,7 @@ async fn a_closed_session_recovers_through_a_configured_seed() {
         .send(
             ServerNotice {
                 level: NoticeLevel::Warning,
+                kind: NoticeKind::Runtime,
                 message: "relay 'orders' is behind".to_string(),
             }
             .encode(&limits())
@@ -790,6 +811,7 @@ async fn a_closed_session_recovers_through_a_configured_seed() {
         .assured("the notice task completes")
         .assured("the notice stream continues on the recovered session");
     assert_eq!(notice.level, NoticeLevel::Warning);
+    assert_eq!(notice.kind, NoticeKind::Runtime);
     assert_eq!(notice.message, "relay 'orders' is behind");
     let recovered_requests = client.inner.exchange.lock().await.requests();
     assert!(matches!(
@@ -1883,6 +1905,7 @@ async fn a_reply_larger_than_a_frame_arrives_in_parts() {
                 .send(
                     ServerNotice {
                         level: NoticeLevel::Info,
+                        kind: NoticeKind::Leadership,
                         message: "raft transition: state=Leader".to_string(),
                     }
                     .encode(&limits())
@@ -1902,6 +1925,7 @@ async fn a_reply_larger_than_a_frame_arrives_in_parts() {
         .await
         .assured("the notice between the parts is delivered");
     assert_eq!(notice.level, NoticeLevel::Info);
+    assert_eq!(notice.kind, NoticeKind::Leadership);
     assert_eq!(notice.message, "raft transition: state=Leader");
 }
 

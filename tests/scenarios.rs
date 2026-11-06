@@ -210,6 +210,7 @@ mod backup;
 mod cli_outcomes;
 mod clickhouse_connections;
 mod client_consumers;
+mod client_foreign_execution;
 mod client_producers;
 mod client_traffic;
 mod common;
@@ -5970,6 +5971,28 @@ async fn then_cli_repl_eventually_displays(world: &mut ScenarioWorld, expected: 
             terminal.transcript()
         );
     }
+}
+
+/// Counts what the REPL displayed so far. A preceding step waits for a later line, so the count is
+/// taken after the events it bounds were printed rather than read from a quiet terminal.
+#[then(expr = "the CLI REPL displays {string} exactly {int} times")]
+async fn then_cli_repl_displays_exactly_times(
+    world: &mut ScenarioWorld,
+    expected: String,
+    expected_count: usize,
+) {
+    let expected = expand_placeholders(world, &expected);
+    let terminal = world
+        .cli_terminal
+        .as_ref()
+        .verified("a preceding step started the CLI REPL");
+    let count = terminal.occurrences(&expected);
+    assert_eq!(
+        count,
+        expected_count,
+        "the CLI REPL displayed {expected:?} {count} times; it displayed:{}",
+        terminal.transcript()
+    );
 }
 
 /// Rows a relay publishes while the cluster is still converging after a node restart can be lost in
@@ -21768,6 +21791,37 @@ async fn then_selector_contains_docstring(
         );
         nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// The elements `selector` matches, one per docstring line, in whatever order they arrived: replies
+/// to requests a connection sends together are shown as they come. A preceding step waits for the
+/// outcome these lines must sit beside, so a line that should not be there has arrived by the time
+/// the elements are compared.
+#[then(regex = r#"^selector "([^"]+)" shows exactly these lines in any order$"#)]
+async fn then_selector_shows_exactly_these_lines_in_any_order(
+    world: &mut ScenarioWorld,
+    selector: String,
+    #[step] step: &Step,
+) {
+    let expected = expand_placeholders(world, docstring(step).trim());
+    let mut expected = expected.lines().map(str::trim).collect::<Vec<_>>();
+    expected.sort_unstable();
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before selector assertions");
+    let selector = expand_placeholders(world, &selector);
+    let texts = page
+        .locator(&selector)
+        .all_inner_texts()
+        .await
+        .expect("selector text must be readable");
+    let mut shown = texts.iter().map(|text| text.trim()).collect::<Vec<_>>();
+    shown.sort_unstable();
+    assert_eq!(
+        shown, expected,
+        "expected selector '{selector}' to show exactly these lines in any order"
+    );
 }
 
 #[then(expr = "selector {string} contains {string} for {int} milliseconds")]
