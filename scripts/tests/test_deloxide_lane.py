@@ -20,6 +20,7 @@ import unittest
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 from scripts import deloxide_lane
 from scripts.deloxide_lane import (
@@ -437,7 +438,7 @@ class InventoryTests(unittest.TestCase):
         for index, group in enumerate(identities):
             for other in identities[index + 1:]:
                 self.assertTrue(group.isdisjoint(other))
-        self.assertEqual([sum(scenario.runs for scenario in group) for group in groups], [268, 10, 6])
+        self.assertEqual([sum(scenario.runs for scenario in group) for group in groups], [270, 10, 6])
         for invocation, group in zip(phases, groups, strict=True):
             registered = inventory.workloads_of(invocation.id, "deloxide-stress")
             self.assertEqual(deloxide_lane.scenario_problems(invocation, registered, group), [])
@@ -577,7 +578,7 @@ class InventoryTests(unittest.TestCase):
                     self.assertEqual(counterpart.invariant, workload.invariant)
                     self.assertTrue(counterpart.coverage.startswith("Under scheduling stress: "))
         self.assertEqual(set(stressed), expected)
-        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-scenarios", "deloxide-stress")), 268)
+        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-scenarios", "deloxide-stress")), 270)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-transaction-retention", "deloxide-stress")), 6)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-endpoint-acknowledgement", "deloxide-stress")), 10)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-paced-simulation", "deloxide-stress")), 36)
@@ -1127,13 +1128,41 @@ class SupervisionTests(unittest.TestCase):
     def test_an_interruption_ends_the_process_and_propagates(self) -> None:
         marker = self.root / "started"
         launch = self.launch(f"touch {marker}; sleep 60")
+        wait = subprocess.Popen.wait
+        processes: list[subprocess.Popen[bytes]] = []
+
+        def cleanup() -> None:
+            for process in processes:
+                if deloxide_lane.running_members(process.pid):
+                    self.processes.stop(process, self.processes.stop_grace_seconds)
+
+        self.addCleanup(cleanup)
+
+        def interrupt_after_start(process: subprocess.Popen[bytes], timeout: float | None = None) -> int:
+            if not processes:
+                processes.append(process)
+                deadline = time.monotonic() + (launch.bound_seconds if timeout is None else timeout)
+                while not marker.exists():
+                    self.assertIsNone(process.poll(), "the child ended before reporting readiness")
+                    self.assertLess(time.monotonic(), deadline, "the child never reported readiness")
+                    time.sleep(0.01)
+                # Process construction and readiness do not consume the interruption interval.
+                signal.setitimer(signal.ITIMER_REAL, 0.5)
+                timeout = max(deadline - time.monotonic(), 0.0)
+            return wait(process, timeout=timeout)
+
         previous = signal.signal(signal.SIGALRM, lambda number, frame: (_ for _ in ()).throw(deloxide_lane.Interrupted(signal.SIGTERM)))
         self.addCleanup(signal.signal, signal.SIGALRM, previous)
-        signal.setitimer(signal.ITIMER_REAL, 0.5)
-        with self.assertRaises(deloxide_lane.Interrupted):
-            self.processes.run(launch)
-        signal.setitimer(signal.ITIMER_REAL, 0)
+        try:
+            with mock.patch.object(subprocess.Popen, "wait", interrupt_after_start):
+                with self.assertRaises(deloxide_lane.Interrupted) as interrupted:
+                    self.processes.run(launch)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
         self.assertTrue(marker.exists())
+        self.assertEqual(interrupted.exception.number, signal.SIGTERM)
+        self.assertEqual(len(processes), 1)
+        self.assertEqual(deloxide_lane.running_members(processes[0].pid), [])
 
 
 class LaneTests(unittest.TestCase):

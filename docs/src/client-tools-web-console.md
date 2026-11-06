@@ -697,6 +697,15 @@ streams the archive again, from its first byte, until the leader answers. If no 
 within about ten minutes, the dialog reports the restore's outcome as unknown and names its
 execution reference.
 
+The leader admits a restore as soon as it holds the whole archive, so once an attempt has sent the
+whole archive without an answer the console can read, or the leader has answered that the outcome
+is not known yet, the restore may have run. If the restore then ends without its outcome, because
+the browser can no longer read the file, a reply cannot be read, the leader refuses a later
+stream, or the leader no longer holds the execution reference, the dialog reports the outcome as
+unknown under that reference, with what stopped it, and never as a refusal: a refusal of a later
+stream says nothing about the earlier one. A file the browser cannot read before any attempt has
+sent the whole archive changes nothing, and the dialog reports the restore as refused.
+
 The console never renders what an archive holds beyond the summary a backup reports and the report
 a restore returns.
 

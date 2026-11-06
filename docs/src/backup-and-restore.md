@@ -657,8 +657,9 @@ of the execution reference ends; a dry run releases it when it answers.
 
 A malformed or oversized native restore reply leaves the outcome uncertain even if the restore
 already completed. Keep the original statement, archive and execution reference and repeat them
-to recover that outcome. The CLI exits with status 3 and prints the reference. A local archive
-error, an authentication refusal or a valid declared stream refusal remains definitive; see
+to recover that outcome. The CLI exits with status 3 and prints the reference. If no earlier
+attempt could have been admitted, a local archive error, an authentication refusal or a valid
+declared stream refusal remains definitive; see
 [Restoring](client-library.md#restoring) for the native-client contract.
 
 ### Restoring From The Command Line
@@ -766,7 +767,12 @@ describes the dialog itself.
 - **Retries.** Every attempt of a restore sends the same execution reference, statement, and
   archive. A redirect streams it again to the leader, and a lost connection or an unknown outcome
   streams it again from its first byte, for about ten minutes; after that the console reports the
-  outcome as unknown and names the reference.
+  outcome as unknown and names the reference. An attempt that sent the whole archive without
+  learning the outcome, or an answer that the outcome is not known yet, may have had the restore
+  admitted. The console then also reports the outcome as unknown under the reference, never as
+  refused, when the restore ends without it: when the browser can no longer read the archive file,
+  a reply cannot be read, the leader refuses a later stream, or the leader no longer holds the
+  reference.
 - **What the browser shows.** The dialog shows the summary a backup reports and the report a
   restore returns, and never what an archive holds beyond them. `DESCRIBE BACKUP` runs only in
   `nervix-cli`.

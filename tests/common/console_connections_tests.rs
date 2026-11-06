@@ -15,23 +15,27 @@ use std::num::NonZeroU64;
 
 use meticulous::ResultExt as _;
 use nervix_client_wire::{
-    BackupDownloadMessage, CommandDisposition, CommandOutcome, LeaderRedirect, Leadership,
-    LeadershipObserved, NodeEndpoints, NoticeKind, NoticeLevel, OutcomeOrigin, Reply, ReplyBody,
-    ReplyDelivery, RequestId, RestoreDisposition, RestoreReply, RestoreUploadFailure, ServerNotice,
-    SessionEndReason, SessionEnding, SessionLimits,
+    BackupDownloadMessage, CommandDisposition, CommandOutcome, DomainClockAttachDisposition,
+    DomainClockAttachOutcome, LeaderRedirect, Leadership, LeadershipObserved, NodeEndpoints,
+    NoticeKind, NoticeLevel, OutcomeOrigin, Reply, ReplyBody, ReplyDelivery, RequestId,
+    RestoreDisposition, RestoreReply, RestoreUploadFailure, ServerNotice, SessionEndReason,
+    SessionEnding, SessionLimits,
     websocket::{
         CONSOLE_BACKUP_DOWNLOAD_PATH, CONSOLE_RESTORE_PATH, CONSOLE_SESSION_PATH,
         ServerBackupDownloadWebSocketCodec, ServerRestoreWebSocketCodec, ServerWebSocketCodec,
     },
 };
-use nervix_models::{ClusterNodeName, CommandExecutionReference};
+use nervix_models::{
+    ClusterNodeName, CommandExecutionReference, DomainClockObservation, DomainClockObservedState,
+    DomainName,
+};
 use serde_json::{Value, json};
 use url::Url;
 
 use crate::console_connections::{
-    BackupStream, ConnectionPurpose, ConnectionRecordViolation, ConsoleAddress,
-    ConsoleAddressError, ConsoleConnectionRecord, FrameReadFailure, ReportedLeaders,
-    UnreadableFrame,
+    BackupStream, ClockAttachmentEvidenceError, ConnectionPurpose, ConnectionRecordViolation,
+    ConsoleAddress, ConsoleAddressError, ConsoleConnectionRecord, FrameReadFailure,
+    ReportedLeaders, UnreadableFrame,
 };
 
 /// The console the page is opened on, which redirects its session to the leader's.
@@ -65,6 +69,66 @@ fn leaders(record: &ConsoleConnectionRecord) -> ReportedLeaders {
 /// A frame the page received at `received`, in the shape the recorder keeps it.
 fn frame(received: u64, bytes: Vec<u8>) -> Value {
     json!({ "received": received, "bytes": bytes })
+}
+
+fn clock_attached(domain: &DomainName) -> Vec<u8> {
+    let reply = Reply {
+        request_id: RequestId::new(NonZeroU64::MIN),
+        body: ReplyBody::DomainClockAttach(DomainClockAttachOutcome {
+            disposition: DomainClockAttachDisposition::Attached {
+                domain: domain.clone(),
+                clock: DomainClockObservation {
+                    generation: 1,
+                    state: DomainClockObservedState::Stopped,
+                },
+            },
+            message: "following the clock".to_string(),
+        }),
+    };
+    let ReplyDelivery::Frame(frame) = reply.encode(&LIMITS).assured("a clock reply fits a frame")
+    else {
+        panic!("the small clock reply is not transferred");
+    };
+    Vec::from(ServerWebSocketCodec::new(LIMITS).encode(frame))
+}
+
+#[test]
+fn clock_acknowledgements_belong_to_distinct_sessions_of_the_same_clock_generation() {
+    let domain = DomainName::parse("tenant").assured("a literal domain");
+    let mut connections = Vec::new();
+    for number in 0..3 {
+        connections.push(json!({
+            "address": LEADER, "path": CONSOLE_SESSION_PATH,
+            "opened": number * 4 + 1, "connected": number * 4 + 2,
+            "released": number * 4 + 4,
+            "frames": [frame(number * 4 + 3, clock_attached(&domain))],
+        }));
+    }
+    assert_eq!(
+        record(connections, &[])
+            .clock_attachment_count(&domain)
+            .assured("each session acknowledged the clock once"),
+        3
+    );
+}
+
+#[test]
+fn repeated_clock_acknowledgements_on_one_session_fail_the_observation() {
+    let domain = DomainName::parse("tenant").assured("a literal domain");
+    let record = record(
+        vec![json!({
+            "address": LEADER, "path": CONSOLE_SESSION_PATH,
+            "opened": 1, "connected": 2, "released": null,
+            "frames": [frame(3, clock_attached(&domain)), frame(4, clock_attached(&domain))],
+        })],
+        &[],
+    );
+    let error = record
+        .clock_attachment_count(&domain)
+        .expect_err("one session duplicated its acknowledgement");
+    assert!(
+        matches!(error.current_context(), ClockAttachmentEvidenceError::Repeated { connection: 1, domain: named } if named == &domain)
+    );
 }
 
 /// The leader whose node advertises `web_console`.
