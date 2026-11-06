@@ -97,7 +97,7 @@ impl SectionSet {
                     },
                     kind: ModelKind::Relay,
                     identifier: ModelName::parse("state").assured("fixture relay is valid"),
-                    unit: nervix_models::Unit::Single,
+                    unit: nervix_models::Unit::SINGLE,
                     branch_key: None,
                 },
                 None,
@@ -110,7 +110,7 @@ impl SectionSet {
                     },
                     kind: ModelKind::WindowProcessor,
                     identifier: ModelName::parse("latency").assured("fixture window is valid"),
-                    unit: nervix_models::Unit::Single,
+                    unit: nervix_models::Unit::SINGLE,
                     branch_key: Some(vec![RemoteRuntimeField {
                         name: "tenant".to_string(),
                         value: RemoteRuntimeValue::String("acme".to_string()),

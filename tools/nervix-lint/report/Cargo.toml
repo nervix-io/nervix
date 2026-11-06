@@ -13,7 +13,9 @@ serde.workspace = true
 serde_json.workspace = true
 syn.workspace = true
 thiserror.workspace = true
+toml = "1.1"
 
 [dev-dependencies]
 bolero.workspace = true
 meticulous.workspace = true
+tempfile = "3.27"

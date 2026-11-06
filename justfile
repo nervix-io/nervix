@@ -40,10 +40,10 @@ install-cargo-bolero:
     cargo install --locked --version 0.13.4 --no-default-features --features libfuzzer cargo-bolero
 
 # Build the pinned cargo-crap, which the complexity count and the CRAP report run, into a root of its
-# own below the target directory. scripts/cargo_crap.py declares the version; a build already there
+# own below the target directory. nervix-ratchet crap declares the version; a build already there
 # is kept.
-install-cargo-crap:
-    python3 -m scripts.cargo_crap install
+install-cargo-crap: build-ratchet-runner
+    {{ quote(cargo_target_dir / "typed-ratchet/source/debug/nervix-ratchet") }} crap install --root {{ quote(justfile_directory()) }} --target-dir {{ quote(cargo_target_dir) }}
 
 # Server library properties embed the same real console assets as the product.
 bolero-deps: build-web-console
@@ -433,6 +433,13 @@ test-scenarios-binary binary *args: download-onnxruntime
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     exec "$@"
 
+# Replay a compiled unit-test executable against its frozen source without a Cargo rebuild.
+[positional-arguments]
+test-unit-binary binary *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec "$@"
+
 # Replay a compiled ONNX inspection owner with an explicit runtime library.
 test-onnx-owner-binary binary library *args:
     ORT_DYLIB_PATH={{ quote(library) }} {{ quote(binary) }} {{ quote(args) }}
@@ -626,6 +633,12 @@ test-explicit-commit-recovery: build-web-console wasm-processor-guests download-
         --input {{ quote(justfile_directory() / "tests/features/runtime/{explicit_commit_recovery,plexus_transactions}.feature") }} \
         --tags '@explicit_commit_recovery or @transaction_failed_resume' \
         --concurrency 1 --retry 0
+
+# Exercise multi-span cluster durations with only the in-process server's prerequisites.
+test-cluster-duration-scenarios: build-web-console wasm-processor-guests download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/cluster/cluster_parameters.feature \
+        --tags @multi_span_cluster_duration --concurrency 2 --retry 0
 
 # Check external dependency startup and observation, including fresh Pulsar namespace readiness.
 test-environment *args:
@@ -2933,6 +2946,9 @@ clippy-target lane package args toolchain="":
 # share one directory of their own, so a package checked again, or one beside it, reuses its build.
 cargo-clippy-package package *args: (clippy-target "package" package ["--all-targets", args])
 
+# Lint one library, including its test profile, without selecting product binaries in a model mode.
+cargo-clippy-package-lib package *args: (clippy-target "package" package ["--lib", args])
+
 # Lint every product Clippy target, with four concurrent processes by default.
 cargo-clippy jobs=default_jobs: (run-with-jobs "clippy-targets" jobs)
 
@@ -2950,12 +2966,20 @@ audit:
 
 # Count the architecture debt and fail when a count is above its baseline in debt-baseline.json.
 ratchet *args: typed-ratchet-build typed-ratchet-source-build install-cargo-crap
-    python3 -m scripts.ratchet {{ args }}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    gate=({{ quote(cargo_target_dir / "typed-ratchet/source/debug/nervix-ratchet") }} gate {{ args }})
+    if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
+        exec python3 scripts/native_coverage.py exec "${gate[@]}"
+    fi
+    exec "${gate[@]}"
 
 # Focused regression checks for the debt gate, its shared Rust source scanner and its pinned
 # complexity analyzer.
 test-ratchet-units: typed-ratchet-source-build install-cargo-crap
-    python3 -m unittest scripts.tests.test_ratchet scripts.tests.test_cargo_crap scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_lint_audit
+    just ratchet-tests lib
+    just test-typed-ratchet-reports
+    python3 -m unittest scripts.tests.test_validation_entrypoint scripts.tests.test_clock_boundaries scripts.tests.test_lint_audit
 
 test-ratchet-audit-caller:
     python3 -m unittest scripts.tests.test_lint_audit
@@ -2968,7 +2992,7 @@ typed-ratchet-source-build:
     if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
         source_toolchain="nightly-2026-09-17"
     fi
-    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/source cargo +"$source_toolchain" build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/source cargo +"$source_toolchain" build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --package nervix-ratchet
 
 typed-ratchet-build: build-ratchet-runner
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report
@@ -3156,7 +3180,7 @@ coverage-typed-ratchet-python: typed-ratchet-source-build install-cargo-crap tes
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     export COVERAGE_FILE="{{ cargo_target_dir }}/typed-ratchet/python.coverage"
-    "${coverage[@]}" run --branch --source=scripts.ratchet,scripts.cargo_crap,scripts.rust_source,scripts.check_typed_errors,scripts.check_layer_provenance,scripts.check_clock_boundaries,scripts.native_coverage,scripts.bolero,scripts.bolero_rustc,scripts.bolero_coverage,scripts.build_web_console,scripts.lint_audit,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_ratchet scripts.tests.test_cargo_crap scripts.tests.test_lint_audit scripts.tests.test_check_typed_errors scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
+    "${coverage[@]}" run --branch --source=scripts.rust_source,scripts.check_typed_errors,scripts.check_clock_boundaries,scripts.native_coverage,scripts.bolero,scripts.bolero_rustc,scripts.bolero_coverage,scripts.build_web_console,scripts.lint_audit,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_validation_entrypoint scripts.tests.test_lint_audit scripts.tests.test_check_typed_errors scripts.tests.test_clock_boundaries scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
     "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/typed-ratchet/python.lcov"
     "${coverage[@]}" report
 
@@ -3273,7 +3297,7 @@ validate-dns-dependencies:
 # Turmoil and Deloxide lints and the source, dependency and documentation validations. The second
 # lints the Shuttle and Loom modes and the compiler tooling, builds the ratchet's tools and runs the
 # ratchet once its own lints have finished. Together the two parts are every check `validate` runs,
-# which scripts/tests/test_ratchet.py holds the checks job's matrix to.
+# which scripts/tests/test_validation_entrypoint.py holds the checks job's matrix to.
 validate-ci jobs=default_jobs shard="": (run-with-jobs validate_ci_recipe(shard) jobs)
 
 validate_ci_recipe(shard) := if shard == "" { "validate-ci-targets" } else if shard == "1/2" { "validate-ci-shard-1" } else if shard == "2/2" { "validate-ci-shard-2" } else { error("validate-ci takes shard 1/2 or 2/2, or none for every check, not " + shard) }
@@ -3534,8 +3558,8 @@ coverage-go-ci-tool:
     COVERAGE_FILE=target/go-ci-tool/.coverage uv run --no-project --with coverage==7.11.0 coverage run --branch --source=scripts.install_go_ci_tool -m unittest scripts.tests.test_go_ci_tool
     COVERAGE_FILE=target/go-ci-tool/.coverage uv run --no-project --with coverage==7.11.0 coverage report -m --include=scripts/install_go_ci_tool.py
 
-# Every script test runs here, the ratchet's included, so this installs the source parser and the
-# pinned complexity analyzer those tests measure with.
+# Every script test runs here, including the advisory CRAP report and CI-entrypoint checks, so
+# this builds the Rust gate and installs its pinned complexity analyzer.
 test-docs: typed-ratchet-source-build install-cargo-crap
     uv run --locked python -m unittest discover -s scripts/tests -p "test_*.py"
     node --test cloudflare/docs-worker/src/index.test.js
@@ -3701,6 +3725,10 @@ test-chaos-local-image:
 # Bound startup artifact publication by the controller's actual remaining budget.
 test-chaos-startup-status:
     exec bash scripts/chaos/tests/startup-status-self-test.sh
+
+# Verify fresh public requests in run-owned observation helpers, including input and failures.
+test-chaos-observation-helpers:
+    exec bash scripts/chaos/tests/observation-helpers-self-test.sh
 
 # Derive the backup run's graph from the checked-in baseline fixture, as every verifier self-check does.
 test-chaos-backup-fixture:

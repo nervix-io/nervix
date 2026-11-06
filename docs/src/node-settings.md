@@ -22,6 +22,10 @@ cadence owned by `RuntimeAdmission`. This remains an internal policy constant pe
 adoption; installation does not introduce another numeric policy or an operator option. Committed
 schedule and domain updates can wake an installation retry sooner, and success ends that cadence.
 
+Canonical Kafka start admission derives its deadline from the interconnect checkpoint-transfer
+contract. Selecting and durably adopting a start cut waits for that transfer, so it shares the
+existing transfer budget rather than defining another numeric policy or operator option.
+
 Changes to the server's command line, startup settings and initialization contract keep the shipped
 Kubernetes operator's generated startup command, chart and example current in the same delivery.
 The server-image [deployment checks](installation-kubernetes.md#deployment-qualification) qualify
@@ -369,6 +373,13 @@ Plexus, the Nervix graph definition language:
 
 ```plexus
 ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;
+```
+
+Duration assignments accept [multi-span duration literals](domains-and-time.md#duration-literals),
+including the text canonical Plexus renders:
+
+```plexus
+ALTER CLUSTER SET DOMAIN_DRAIN_TIMEOUT = 13m 49s;
 ```
 
 The statement runs outside domain transactions and needs no selected domain. Its assignments

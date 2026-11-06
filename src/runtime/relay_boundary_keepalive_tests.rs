@@ -41,7 +41,7 @@ async fn a_delivery_to_the_relay_owner_reports_its_records_alive_while_it_waits(
     batch.acks = vec![acks];
     let domain = domain("default");
     let relay = named::<RelayName>("orders");
-    let delivery = services.dispatch_to_owner(&domain, &relay, &batch, Unit::Single);
+    let delivery = services.dispatch_to_owner(&domain, &relay, &batch, Unit::SINGLE);
     tokio::pin!(delivery);
 
     for interval in 1..=3 {
@@ -107,14 +107,14 @@ async fn a_delivery_to_a_remote_consumer_reports_its_records_alive_while_it_wait
         &relay,
         RelayPayloadKind::Routed,
         &batch.key,
-        Unit::Single,
+        Unit::SINGLE,
     );
     let earlier_delivery = channel
         .lock_for_delivery()
         .await
         .expect("the open channel serves an earlier delivery");
     let domain = domain("default");
-    let delivery = services.dispatch_remote_runtime_consumers(&domain, Unit::Single, &batch);
+    let delivery = services.dispatch_remote_runtime_consumers(&domain, Unit::SINGLE, &batch);
     tokio::pin!(delivery);
 
     for interval in 1..=3 {

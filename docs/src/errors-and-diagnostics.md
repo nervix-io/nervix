@@ -693,6 +693,28 @@ or the optional applied-start generation. A mismatched signature retains the typ
 Loading, replica conversion and backup capture all use that owning decoder; no missing marker is
 filled from domain metadata.
 
+Kafka's canonical-start coordination retains its typed offer, encoding, allocation and transfer
+causes beneath `StateReplicationError::KafkaStart`. A capture freeze reports `KafkaStartFrozen`;
+the shared checkpoint-transfer deadline reports `KafkaStartDeadline`. Changed lifecycle or
+assignment authority reports `Superseded`. The interconnect handler rejects a source node that
+does not match its authenticated peer before reading or changing state. Runtime admission also
+checks the current membership incarnation. These failures end that initialization attempt; the
+host retries through its existing source lifecycle without polling from substitute positions.
+
+An ingestor layout preparation retains invalid selections, source or checkpoint inventories,
+component kinds and allocation bounds beneath `OwnershipHandoffError::IngestorUnitLayout`.
+Offset and metric decoding keep their owning typed causes. Preparation fails before publishing
+the replacement layout; it never installs only the source cuts that happened to succeed.
+Membership-incarnation refusals name the affected node and its source or destination role.
+Replicas receiving prepared state are destinations of that transfer, so a layout's additional
+participants retain the same diagnostic precision as a single-unit handoff.
+
+Fixed ingestor counts are checked for native conversion and execution-unit layout before
+placement allocates their units. A conversion or layout failure remains beneath
+`IngestorInstancingError::UnaddressableCount` and `RegistryError::IngestorInstancing`; the report
+names the complete declared count, ingestor and domain. It is refused at model admission rather
+than ending the session's ordered task while materializing an impossible unit map.
+
 The vocabulary's `ArchivedCountError` reports a fixed-width archived count that the receiving
 target's `usize` cannot represent. Archive decoding retains it beneath the owning storage or
 transport failure. Registry Model records validate their current frame signature and report
@@ -2304,6 +2326,13 @@ replica diagnostic prints that cause chain. Cancellation or failed conversion pu
 partial table, and an assignment-token refusal keeps a delayed transfer from overwriting a
 promoted owner. A commit that lacks its required replica acknowledgement still reports the
 existing quorum deadline; catch-up retries do not turn that deadline into a successful commit.
+Kafka start coordination preserves typed admission, native conversion, memory and bulk-transfer
+causes through its reporting boundary. A frozen unit reports its exact placement, and a
+coordination deadline names the domain, source and unit. The current node incarnation, ownership
+fingerprint and originating assignment fence stale work. A count transition refuses incomplete
+source inventories, foreign partition ownership and repeated metric identities before preparing
+target state; a failed preparation cannot publish a partial layout.
+
 A stopping node's `stopping_node_drain` request answers with outcomes of its own instead, because
 its only subject is the authenticated sender: completed or failed, each with the leader's report for
 the sender's log, or not the leader, which sends the sender to the leader it observes next. A node
@@ -2912,18 +2941,25 @@ completed backup's archive was not downloaded, never as a failure of the backup.
 failure names an archive file the browser could not read or that is empty, a transport failure, a
 stall, a missing reply, a reply that does not decode or answers another request or reference, or a
 restore whose outcome stayed unknown through its repetitions, which the dialog reports naming the
-execution reference. Once an attempt has sent the whole archive without learning the outcome, or
-the leader has answered that the outcome is unknown, the restore may have been admitted. A failure
-that then ends it, a refusal of a later stream, and an execution reference the leader no longer
-holds all sit beneath `the console stopped before learning the outcome of a restore the leader may
-have admitted`, and the dialog reports the outcome as unknown naming the execution reference. The
-dialog renders a restore stream failure's whole report. A refusal of the stream when no attempt
+execution reference. A reply that cannot be read or answers another request or execution stops
+the restore call with its typed failure and `the outcome of restore '<own>' is unknown`. It never
+establishes a refusal or applies another execution's result. Once an attempt has sent the whole
+archive without learning the outcome, or the leader has answered that the outcome is unknown, the
+restore may have been admitted. If a later archive read, missing console address, stream refusal or
+expired execution reference ends it, that failure sits beneath `the console stopped before learning
+the outcome of a restore the leader may have admitted`; the dialog reports the outcome as unknown
+naming the execution reference. An already uncertain reply failure keeps its own typed context.
+The dialog renders a restore stream failure's whole report. A refusal of the stream when no attempt
 could have had the restore admitted is shown as `restore refused (<failure>): <message>`, and the
 restore's own outcome as the dispatcher renders any command's. A session reply whose
 command outcome names another execution reference than its command's is a protocol violation: the
 dispatcher reports `protocol violation: the reply to command execution '<own>' names execution
 '<other>'` in the terminal, shows nothing of that outcome as the command's, stops reading the
 connection, and recovers the command under its own reference on the next one. The console WebSocket
+session also stops on a reply that cannot be decoded or reassembled, or carries an unexpected body
+kind. It reports `protocol violation:` with the cause and that pending command outcomes are unknown.
+It recovers every waiting command whole, under its original reference and issue order, after the
+new connection restores the session. The console WebSocket
 transport closes a call whose client broke its framing with the codec's close code, a second
 download request with `1008`, an answer that does not fit a frame with `1011`, and every call when
 the node stops with `1001`.
@@ -3649,3 +3685,20 @@ renders the property value. The publisher projects these reports into the record
 outcome before transport and continues with representable neighbours. A wrong property name or
 type at this connector boundary remains a typed contract refusal; normal statements are already
 checked against the entity's declaration and exact types at `CREATE` and `ALTER`.
+
+## Ingestor Instancing Boundaries
+
+The registry owns typed `IngestorInstancingError` causes for unsupported instancing, missing or
+different construction partition structures and Kafka's required domain-offset mode. The
+surrounding report identifies the domain and ingestor. Correct the declaration before activation.
+A count change uses the ownership-handoff preparation boundary to preserve the offset lifetime.
+Start planning separately validates the complete resolved unit declaration.
+`AlreadyRunning` and `IngestorNotRunning` name the exact source unit, allowing a sibling instance
+to start or stop independently.
+Per-unit DESCRIBE requests and status records preserve the unit selected by their caller.
+`UnitIndexError` is the vocabulary's pure refusal for an instance ordinal outside its compact
+identity range. Semantic JSON validates that bound during deserialization. The client wire decoder
+preserves the cause under `WireDecodeError::InvalidValue`, and a stored tagged key preserves it
+under `StoredStateIssue::KeyUnitInvalid` and `RuntimePersistenceError::DecodeState`.
+Allocation-layout validation rejects unaddressable count declarations before materializing units;
+every addressable index fits the identity range.

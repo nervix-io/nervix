@@ -235,7 +235,14 @@ impl Runtime {
                         {
                             unit.primary_node.as_ref() == Some(&prepared.source)
                         } else {
-                            false
+                            // A replacement layout can create this target unit. Its source was
+                            // validated against another unit in the exact frozen base revision.
+                            scheduled.is_some_and(|node| {
+                                node.kind() == ModelKind::Ingestor
+                                    && node.units.values().any(|unit| {
+                                        unit.primary_node.as_ref() == Some(&prepared.source)
+                                    })
+                            })
                         };
                         prepared.coordination.same_process_as(authority)
                             && participants_match
@@ -244,8 +251,7 @@ impl Runtime {
                             && self.entity_gate_operation_owns_unit(
                                 &prepared.coordination,
                                 &entity.entity.domain,
-                                &entity.entity.node,
-                                entity.unit,
+                                &NodeUnitRef::new(entity.entity.node.clone(), entity.unit),
                                 EntityGatePurpose::OwnershipHandoff,
                             )
                     }

@@ -90,7 +90,7 @@ impl FaultInjection {
         relay: &RelayName,
         unit: Unit,
     ) {
-        let Unit::Partition(partition) = unit else {
+        let nervix_models::UnitKind::Partition(partition) = unit.kind() else {
             return;
         };
         let key =

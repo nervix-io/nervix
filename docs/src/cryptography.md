@@ -151,7 +151,7 @@ use that reaches a counted crate only through another file's re-export counts at
 **Product dependencies.** The gate reads Cargo's resolved graph of `nervix-server` for both release
 targets with `cargo tree`, which resolves features for the product alone, as the release build does.
 Each normal or build dependency edge onto a crate on the list is one site, so a further dependent of
-a crate the product already links counts too. The list, declared once in `scripts/ratchet.py`,
+a crate the product already links counts too. The list, declared once in `nervix-ratchet gate`,
 names crates implementing digests, message authentication, key derivation and password hashing,
 ciphers and authenticated encryption, public-key algorithms and cryptographic random generators, and
 complete cryptography libraries such as `ring` and OpenSSL. Crates that only define traits or
@@ -169,7 +169,7 @@ a graph was not read correctly.
 `just ratchet --show non_aws_lc_crypto` lists every site. An authored site shows its file, line and
 source line, marked `(authored)`. A graph site points at the dependent's `Cargo.lock` entry and
 shows the edge, marked `(graph)`. The baseline was measured when the rule landed, and a change may
-lower the count but never raise it. `scripts/tests/test_ratchet.py` pins both parts and the gate,
+lower the count but never raise it. `tools/nervix-lint/ratchet` tests pin both parts and the gate,
 including an added dependency on `sha2` or `argon2`, a dependency that brings `ring`, and a second
 AWS-LC module, whether a second version, the FIPS crate beside the default one or a module that
 differs on one release target. The registered `typed-non-aws-lc-crypto` property checks every
@@ -203,3 +203,8 @@ onto AWS-LC: password authentication through the MongoDB, Postgres and MySQL dri
 SCRAM while librdkafka draws its client nonce from `rd_jitter`, SQS and object-storage request
 signing, RabbitMQ PKCS#12 client identities and Parquet encryption in Iceberg. Non-security uses,
 the register's entries and the inventory's non-security and unused rows, are not refused.
+
+Runtime checkpoint digests also identify retained Kafka start offers and immutable pending-seed
+projections. Their purpose is non-security content checking: detecting changed, truncated or
+mismatched transfer bodies inside authenticated node requests. The existing checkpoint digest
+owner computes and verifies them under bounded execution and memory admission.

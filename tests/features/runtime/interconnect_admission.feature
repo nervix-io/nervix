@@ -457,7 +457,7 @@ Feature: Interconnect relay admission
       RELOCATE RELAY notifications ONTO NODE <relay_owner> IGNORE PREFERENCES;
       RELOCATE EMITTER kafka_forward ONTO NODE node-2 IGNORE PREFERENCES;
       """
-    Then node "node-1" eventually reports status containing "kind=ingestor name=kafka_notifications owner=node-1"
+    Then node "node-1" eventually reports status containing "kind=ingestor name=kafka_notifications unit=instance:0 owner=node-1"
     And node "node-1" eventually reports status containing "kind=relay name=notifications owner=<relay_owner>"
     And node "node-1" eventually reports status containing "kind=emitter name=kafka_forward owner=node-2"
     Given remote relay admission for domain "{{domain}}" is paused

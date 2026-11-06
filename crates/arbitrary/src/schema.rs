@@ -171,7 +171,7 @@ impl Arbitrary<'_> {
             .pick([WireSchemaStrictness::Strict, WireSchemaStrictness::Loose])
     }
 
-    /// A JSON wire schema, which is also the shape of a CBOR wire schema.
+    /// A JSON wire schema in its declared vocabulary.
     pub fn json_wire_schema(&mut self) -> CreateJsonWireSchema {
         self.wire_schema(JSON_TYPES)
     }

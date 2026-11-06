@@ -39,7 +39,7 @@ fn ownership_handoff_preparation_retains_exact_coordination_identity_across_reop
         source_incarnation: ClusterNodeIncarnation::new(31),
         destination_incarnation: ClusterNodeIncarnation::new(32),
         entity: &entity,
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         base_schedule_fingerprint: [4; 32],
         target_schedule_fingerprint: [5; 32],
     };
@@ -85,7 +85,7 @@ fn ownership_handoff_preparation_retains_exact_coordination_identity_across_reop
                 &domain,
                 ModelKind::Relay,
                 &identifier,
-                nervix_models::Unit::Single,
+                nervix_models::Unit::SINGLE,
             )
             .expect("a stale activation lookup should be readable")
             .is_none()
@@ -97,7 +97,7 @@ fn ownership_handoff_preparation_retains_exact_coordination_identity_across_reop
             &domain,
             ModelKind::Relay,
             &identifier,
-            nervix_models::Unit::Single,
+            nervix_models::Unit::SINGLE,
         )
         .expect("stale cleanup should remain idempotent");
     assert!(
@@ -108,7 +108,7 @@ fn ownership_handoff_preparation_retains_exact_coordination_identity_across_reop
                 &domain,
                 ModelKind::Relay,
                 &identifier,
-                nervix_models::Unit::Single,
+                nervix_models::Unit::SINGLE,
             )
             .expect("the exact activation should remain readable")
             .is_some()
@@ -120,7 +120,7 @@ fn ownership_handoff_preparation_retains_exact_coordination_identity_across_reop
             &domain,
             ModelKind::Relay,
             &identifier,
-            nervix_models::Unit::Single,
+            nervix_models::Unit::SINGLE,
         )
         .expect("the exact coordination identity should discard its activation");
     assert!(
@@ -131,7 +131,7 @@ fn ownership_handoff_preparation_retains_exact_coordination_identity_across_reop
                 &domain,
                 ModelKind::Relay,
                 &identifier,
-                nervix_models::Unit::Single,
+                nervix_models::Unit::SINGLE,
             )
             .expect("discarded activation lookup should be readable")
             .is_none()
@@ -153,7 +153,7 @@ fn forced_recovery_preparation_survives_reopen_and_activation_is_idempotent() {
         },
         kind: ModelKind::Relay,
         identifier: identifier.clone(),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: None,
     };
     let payload = crate::runtime::empty_sealed_container()
@@ -171,7 +171,7 @@ fn forced_recovery_preparation_survives_reopen_and_activation_is_idempotent() {
         destination: &destination,
         destination_incarnation,
         entity: &entity,
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         target_schedule_fingerprint,
     };
 
@@ -261,7 +261,7 @@ fn forced_recovery_preserves_checkpoint_after_incarnation_change() {
         },
         kind: ModelKind::Relay,
         identifier: identifier.clone(),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: None,
     };
     let payload = crate::runtime::empty_sealed_container()
@@ -279,7 +279,7 @@ fn forced_recovery_preserves_checkpoint_after_incarnation_change() {
         destination: &destination,
         destination_incarnation,
         entity: &entity,
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         target_schedule_fingerprint,
     };
 
@@ -372,7 +372,7 @@ fn forced_recovery_preserves_checkpoint_after_fingerprint_change() {
         },
         kind: ModelKind::Relay,
         identifier: identifier.clone(),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: None,
     };
     let payload = crate::runtime::empty_sealed_container()
@@ -390,7 +390,7 @@ fn forced_recovery_preserves_checkpoint_after_fingerprint_change() {
         destination: &destination,
         destination_incarnation,
         entity: &entity,
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         target_schedule_fingerprint,
     };
 
@@ -493,7 +493,7 @@ fn wasm_guest_placement(tenant: &str, value: u64) -> RuntimeStatePlacement {
         },
         kind: ModelKind::WasmProcessor,
         identifier: ModelName::parse("counting_guest").expect("valid model name"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key: Some(tenant_branch(tenant)),
     }
 }
@@ -524,7 +524,7 @@ fn current_identity(
                 ModelKind::WasmProcessor,
                 ModelName::parse("counting_guest").expect("valid model name"),
             ),
-            nervix_models::Unit::Single,
+            nervix_models::Unit::SINGLE,
         ),
         ScheduledStateIdentity {
             schema_fingerprint: guest_schema(),
@@ -710,7 +710,7 @@ fn forced_recovery_publishes_staged_guest_state_in_the_committed_generation() {
         destination: &destination,
         destination_incarnation: ClusterNodeIncarnation::new(7),
         entity: &entity,
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         target_schedule_fingerprint: [8; 32],
     };
     store
@@ -789,7 +789,7 @@ fn orders_placement(state: RuntimeState, branch_key: Option<BranchKey>) -> Runti
         state,
         kind: ModelKind::Deduplicator,
         identifier: ModelName::parse("orders").expect("valid model name"),
-        unit: nervix_models::Unit::Single,
+        unit: nervix_models::Unit::SINGLE,
         branch_key,
     }
 }
@@ -867,7 +867,7 @@ fn a_schema_change_replaces_only_schema_bound_state() {
                 &HashMap::from_iter([(
                     NodeUnitRef::new(
                         NodeRef::new(ModelKind::Deduplicator, current_branch.identifier.clone()),
-                        nervix_models::Unit::Single,
+                        nervix_models::Unit::SINGLE,
                     ),
                     ScheduledStateIdentity {
                         schema_fingerprint: current,

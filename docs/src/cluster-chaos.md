@@ -266,15 +266,25 @@ half of the range. The manifest records the subnet, the dynamic range and the no
 | `broker` | Kafka | One KRaft broker and controller, with automatic topic creation disabled. The run creates every topic explicitly, with one partition and replication factor 1 |
 | `nervix-1` | Nervix | The bootstrap node, the only one given the default user's password |
 | `nervix-2`, `nervix-3` | Nervix | The other voters of a three-node run, joining through `nervix-1` |
-| `admin` | Nervix | Disposable containers that run the packaged `nervix-cli` against a node's session route |
+| `admin` | Nervix | A run-owned container that executes a fresh packaged `nervix-cli` for each command against a node's session route; uploads with their own file mounts use disposable containers |
 | `broker-admin` | Kafka | Disposable topic and consumer-group administration |
 | `kcat` | kcat | Disposable producers and topic readers |
-| `probe` | Alpine | Disposable listener, readiness and metrics probes |
+| `probe` | Alpine | A run-owned container that executes fresh listener, readiness and metrics probes; fault-specific probes may use disposable containers |
 | `load`, `state-load`, `paced-load`, `life-load` | kcat | The continuous loads |
 | `endpoint-load`, `endpoint-websocket` | Python | The [endpoints](#endpoints) scenario's HTTP and WebSocket clients |
 | `postgres` | PostgreSQL | The [lifetimes](#lifetimes) scenario's database, with its data on a tmpfs |
 | `observer` | Alpine | The independent listener observer |
 | `clock-observer` | Nervix | One domain-clock observer per node |
+
+The shared `admin` and `probe` containers start with the broker and end in the run's labeled
+cleanup. They hold no client sessions between commands. Every CLI and probe process has closed
+standard input and runs without a TTY under the existing per-call and whole-run bounds. A failed
+helper or request fails its observation; it does not cause a replacement helper to start. This
+avoids paying container creation and attachment costs for every read without changing endpoints,
+readiness assertions, control commands, delivery ledgers or product deadlines. The independent
+listener observer remains a separate process and container.
+The helper also applies that request's remaining bound inside the container, with a five-second
+kill reserve, so ending a Docker client cannot leave an unbounded client process in a reused helper.
 
 ### Node Settings
 
@@ -334,7 +344,7 @@ Every container, network and volume a run owns carries `io.nervix.chaos.run=<run
 | `just chaos run SCENARIO --image IMAGE [OPTIONS]` | Runs one scenario. `--help` after the scenario prints its options |
 | `just chaos replay RUN_DIRECTORY [--artifacts DIR] [--run-id ID] [--timeout SECONDS] [--verifier-self-check RECORD] [--keep]` | Replays a recorded mixed-instability run |
 | `just chaos suite list` | Lists the suites, their shards, and each entry's command and budget |
-| `just chaos suite smoke\|soak --image IMAGE [--image-kind KIND] [--image-revision REVISION] [--shard N] [--entry ID]... [--artifacts DIR] [--suite-id ID]` | Runs a suite, one shard of it, or named entries |
+| `just chaos suite SUITE --image IMAGE [--image-kind KIND] [--image-revision REVISION] [--shard N] [--entry ID]... [--artifacts DIR] [--suite-id ID]` | Runs a catalogued suite, one shard of it, or named entries |
 | `just chaos suite shards SUITE` | Prints the suite's CI matrix as JSON: each shard's entries with its execution, preparation, step and job budgets |
 | `just chaos suite cleanup [--wait SECONDS] SUITE_DIRECTORY` | Ends what a suite left behind |
 | `just chaos suite report [--expect-shards N] SUITE_JSON...` | Renders one summary of several shards' records, and fails unless every one passed |
@@ -411,7 +421,7 @@ A run records each phase it enters in `phases.ndjson` and its final phase in `ma
 | `startup status publication` | The validated public status, published by byte copy and atomic rename within 30 seconds |
 | `image identity verification` | Every node container runs the resolved image |
 | `Plexus graph installation` | The domain `chaos_baseline`, the graph through the packaged CLI, and `START` |
-| `public placement evidence` | On three nodes, `RELOCATE` places the ingestor on `node-1`, the relay on `node-2` and the emitter on `node-3`, so traffic crosses nodes. Each owner must read back through `DESCRIBE` within 60 seconds |
+| `public placement evidence` | On three nodes, `RELOCATE` places the relay on `node-2` and the emitter on `node-3`, so traffic crosses nodes. The single-instance fixtures place the ingestor on `node-1`; the spread-instance fixture observes all three ready unit owners without relocating the logical ingestor. Each placement must read back through `DESCRIBE` within 60 seconds |
 | The scenario's own phases | Traffic startup, then each fault and its recovery |
 | `load pacing` | The pacing verdict of every continuous load |
 | `offset and output boundaries` | Consumer offsets at the source boundary, then the output boundary |
@@ -2589,13 +2599,24 @@ The `smoke` suite runs in three shards:
 | 2 | `endpoints-3-owner-crash` | `endpoints --nodes 3 --fault owner-crash` | 12 |
 | 3 | `lifetimes-3-owner-crash` | `lifetimes --nodes 3 --fault owner-crash` | 25 |
 
+The `intake-recovery` suite selects two existing recovery entries on one shard. It checks spread
+ingestor ownership after a node crash and persisted state after a single-node cluster restart.
+It keeps each scenario's assertions and budget and runs the same controller and verifier checks
+as the larger suites. Select `intake-recovery` in a manual Chaos workflow run, or run
+`just chaos suite intake-recovery --image REPOSITORY@sha256:DIGEST`.
+
+| Shard | Entry | Command | Budget (min) |
+| ---: | --- | --- | ---: |
+| 1 | `ingestor-instances-owner-crash` | `ingestor-instances-owner-crash` | 7 |
+| 1 | `stateful-1-cluster-restart` | `stateful --nodes 1 --fault cluster-restart` | 22 |
+
 The `soak` suite runs every delivered scenario, topology, case, profile and fault, in fourteen shards:
 
 | Shard | Entries, with budgets in minutes |
 | ---: | --- |
 | 1 | `mixed-seed-42` (seed 42, `preserve-quorum`, 30 minutes) 60; `baseline-1` 3; `baseline-3` 4; `cluster-restart-1` 6; `cluster-restart-3` 7 |
 | 2 | `mixed-seed-45` (seed 45, `temporary-quorum-loss`) 60; `leader-crash-1` 6; `leader-crash-3` 7; `follower-crash` 5 |
-| 3 | `mixed-seed-136` (seed 136, `temporary-quorum-loss`) 60; `ingestor-owner-crash` 6; `emitter-owner-crash` 5; `stale-follower` 4; `former-owner-restart` 10 |
+| 3 | `mixed-seed-136` (seed 136, `temporary-quorum-loss`) 60; `ingestor-owner-crash` 6; `ingestor-instances-owner-crash` 7; `emitter-owner-crash` 5; `stale-follower` 4; `former-owner-restart` 10 |
 | 4 | `mixed-rotating-preserve` 60; `rolling-restart-1` 5; `rolling-restart-3` 7; `backup-1` 4; `backup-3` 4 |
 | 5 | `mixed-rotating-temporary` 60; `mixed-burst-loss-leader-peer` 15; `pause-resume` 14 |
 | 6 | `partition-follower` 9; `partition-asymmetric` 7; `partition-leader` 7; `partition-quorum-loss` 8; `degraded-delay`, `degraded-jitter`, `degraded-random-loss`, `degraded-burst-loss`, `degraded-rate-limit`, `degraded-combined` 10 each |
@@ -3113,3 +3134,20 @@ node-local Raft prerequisites in its replay deployment. Restarts and later joins
 committed record and pass no parameter seeds. Stateful checkpoint observations use the installed
 snapshot interval. [Node Settings](node-settings.md#committed-parameter-changes) owns the seed and
 parameter-change contract.
+
+## Spread Ingestor Owner Loss
+
+`just chaos run ingestor-instances-owner-crash --image <immutable-image>` installs the dedicated
+`fixtures/instances.plexus` graph with three globally indexed Kafka consumers on three nodes. The
+existing crash controller SIGKILLs the observed owner of instance 0, verifies the outage, checks
+continued source and sink progress, restarts the same container and checks recovery and the final
+delivery ledger. The public description must show all three units running and ready on distinct
+owners before the fault. During the outage every unit remains running and ready, only the failed
+owner's unit changes owner, and each sibling keeps its exact owner. The before/after index-to-owner
+JSON maps are retained beside the ordinary fault evidence. The case joins the soak inventory and
+runs locally against release and diagnostic images of the same source revision.
+
+The input topic has one partition, so Kafka may assign traffic to any one of the three consumers.
+The initial source metric must be positive on an observed intake node; the relay and emitter
+metrics must also be positive on their distinct, explicitly placed nodes. The setup retains every
+instance owner in `public/instance-owners.json` and `results/remote-path.json`.

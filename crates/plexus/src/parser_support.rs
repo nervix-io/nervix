@@ -1099,20 +1099,25 @@ pub fn duration_lit<'src>()
     // setting consumes it validates it; checking it here would take over validation the runtime has
     // to do anyway, since models also arrive from persisted state. Only keywords are ruled out,
     // because a keyword is never a value.
+    let span = select! { Token::NumberLiteral(value) => value }.then(word_raw());
+    let spans = span
+        .clone()
+        .map(|(number, unit)| format!("{number}{unit}"))
+        .foldl(span.repeated(), |mut raw, (number, unit)| {
+            raw.push(' ');
+            raw.push_str(&number);
+            raw.push_str(&unit);
+            raw
+        });
+
     choice((
-        select! { Token::NumberLiteral(value) => value }
-            .then(word_raw())
-            .map(|(number, unit)| format!("{number}{unit}"))
-            .try_map(|raw, span| {
-                let mapping_input = nervix_models::parse_duration_text(&raw).map(|_| raw.clone());
-                match mapping_input {
-                    Ok(mapped_value) => Ok(mapped_value),
-                    Err(report) => Err(Rich::custom(
-                        span,
-                        format!("invalid duration '{raw}': {}", report.current_context()),
-                    )),
-                }
-            }),
+        spans.try_map(|raw, span| match nervix_models::parse_duration_text(&raw) {
+            Ok(_) => Ok(raw),
+            Err(report) => Err(Rich::custom(
+                span,
+                format!("invalid duration '{raw}': {report:#}"),
+            )),
+        }),
         unknown_word(),
     ))
     .labelled("duration_literal")
@@ -2425,16 +2430,36 @@ mod tests {
         error::{RichPattern, RichReason},
         prelude::*,
     };
-    use meticulous::OptionExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::NamePosition;
     use strum::IntoEnumIterator as _;
 
     use super::{
-        ALTER_OPERATION_HEADS, LexedInput, ParseError, current_word_prefix, filter_where_clause,
-        format_parse_error, into_parse_error, kw, lex_input, schema_ref, suggestions_from_errors,
-        token_span_to_source_span,
+        ALTER_OPERATION_HEADS, LexedInput, ParseError, current_word_prefix, duration_lit,
+        filter_where_clause, format_parse_error, into_parse_error, kw, lex_input, schema_ref,
+        suggestions_from_errors, token_span_to_source_span,
     };
     use crate::lexer::{Identifier, Token, Word};
+
+    #[test]
+    fn multi_span_duration_keeps_the_following_keyword() {
+        let LexedInput { tokens, .. } =
+            lex_input("1 min 30s MAX").assured("the input is lexical Plexus");
+        let parsed = duration_lit()
+            .then_ignore(kw(Identifier::Max))
+            .then_ignore(end())
+            .parse(tokens.as_slice())
+            .into_result()
+            .assured("MAX belongs to the following clause");
+        assert_eq!(parsed, "1min 30s");
+    }
+
+    #[test]
+    fn duration_does_not_consume_a_count_and_its_messages_keyword() {
+        let LexedInput { tokens, .. } =
+            lex_input("100 MESSAGES").assured("the input is lexical Plexus");
+        assert!(duration_lit().parse(tokens.as_slice()).has_errors());
+    }
 
     #[test]
     fn canonical_plexus_quotes_a_keyword_exactly_where_the_grammar_reads_it_as_one() {
