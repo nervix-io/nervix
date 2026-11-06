@@ -683,6 +683,13 @@ test-cluster-duration-scenarios: build-web-console wasm-processor-guests downloa
         --input tests/features/cluster/cluster_parameters.feature \
         --tags @multi_span_cluster_duration --concurrency 2 --retry 0
 
+# Exercise cluster parameter completion and the refusal of a repeated parameter through the
+# session protocol and the Rust client, with only the in-process server's prerequisites.
+test-cluster-parameter-completion-scenarios: build-web-console wasm-processor-guests download-onnxruntime
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- \
+        --input tests/features/cluster/cluster_parameters.feature \
+        --tags @cluster_parameter_completion --concurrency 2 --retry 0
+
 # Check external dependency startup and observation, including fresh Pulsar namespace readiness.
 test-environment *args:
     cargo test --package nervix-test-environment {{ args }}

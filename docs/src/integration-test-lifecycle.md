@@ -5,6 +5,9 @@
 `just test-cluster-duration-scenarios` selects the one- and three-node multi-span cluster
 duration regression. It prepares the console assets, WASM processor guests and ONNX runtime
 that the in-process server loads, and needs no external transport or client-tool build.
+`just test-cluster-parameter-completion-scenarios` selects, with the same preparation, the one-
+and three-node cases where completion offers only unassigned cluster parameters and a repeated
+parameter is refused where it is written.
 `just test-unit-binary <executable> <filters>` replays a compiled unit-test executable without
 rebuilding it; its evidence applies only to the source inputs that produced that executable.
 
