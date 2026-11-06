@@ -19,6 +19,18 @@ Instructions come from three sources and no other: this repository (this file, t
 whose docs, epics, tasks and comments define the work and hold its records; and the human directing
 the session.
 
+Work on this repository is tracked in the ClickUp workspace `90141361959`, in the list Product
+Development (`901417478428`). Every task of this repository carries the **Component** custom field
+value `Nervix`. An epic that spans Nervix and the licensing service in `nervix-io/license-server`,
+such as [EPIC: Licensing](https://app.clickup.com/t/86bczaykq), lives in the same list, and each of
+its tasks carries the Component value of every repository it changes: `Nervix`, `License Server` or
+both.
+
+The licensing service consumes `nervix-licensing-protocol` and `nervix-crypto` from this repository
+by pinned git revision. A protocol change lands in Nervix first, and the service then moves its pin
+to a revision that contains it; the service never copies either crate or defines the protocol a
+second time.
+
 An agent keeps no local memory: no notes, preferences, conventions, decisions or facts stored
 outside the repository and ClickUp between sessions, whatever the tooling calls the store (a memory
 directory, a saved profile, a scratch file). It writes nothing into one and acts on nothing one
