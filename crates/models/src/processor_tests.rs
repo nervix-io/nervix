@@ -5,11 +5,11 @@ use crate::{
     AlterJunctionError, AlterProcessorError, AlterProcessorOperation, AlterReingestor,
     AlterReingestorError, AlterReorderer, AlterReordererError, AlterReordererOperation,
     BranchSelection, CreateDeduplicator, CreateInferencer, CreateJunction, CreateReingestor,
-    CreateReorderer, Expression, FlushPolicy, InferencerExecutionMode, InferencerTensorDeclaration,
-    InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
-    InferencerTensorRepresentation, InferencerTensorSchema, InferencerTensorSchemaError, Literal,
-    MaterializedStateDependency, MaterializedStatePolicy, ParseAsType, ProcessorInputs,
-    ProcessorOutput, ProcessorOutputs,
+    CreateReorderer, Expression, FlushPolicy, InferencerExecutionMode, InferencerStateBinding,
+    InferencerStateInitial, InferencerTensorDeclaration, InferencerTensorDimension,
+    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
+    InferencerTensorSchema, InferencerTensorSchemaError, Literal, MaterializedStateDependency,
+    MaterializedStatePolicy, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
 };
 
 fn named<N>(raw: &str) -> N
@@ -612,6 +612,7 @@ fn inferencer(
             schema: tensor(input),
             expression: Expression::Literal(Literal::Bool(true)),
         }],
+        state: Vec::new(),
         output_schema: vec![InferencerTensorDeclaration {
             tensor: "output".to_string(),
             schema: tensor(output),
@@ -666,5 +667,70 @@ fn inferencer_execution_mode_follows_the_batch_axes_of_every_tensor() {
             .execution_mode()
             .expect_err("the tensor schemas admit no execution mode");
         assert_eq!(error.current_context(), &expected);
+    }
+}
+
+#[test]
+fn stateful_inferencer_refuses_batch_axes_in_each_tensor_family() {
+    let one = InferencerTensorDimension::Fixed(nonzero!(1u32));
+    let batch = InferencerTensorDimension::Batch;
+    let state = InferencerStateBinding {
+        input: "state_in".to_string(),
+        output: "state_out".to_string(),
+        schema: tensor(vec![one]),
+        initial: InferencerStateInitial::Zeros,
+    };
+    for (input, output, state_dimensions, port) in [
+        (vec![batch, one], vec![one], vec![one], "input"),
+        (vec![one], vec![batch, one], vec![one], "output"),
+        (vec![one], vec![one], vec![batch, one], "state_in"),
+    ] {
+        let mut processor = inferencer(input, output);
+        processor.state = vec![InferencerStateBinding {
+            schema: tensor(state_dimensions),
+            ..state.clone()
+        }];
+        let error = processor
+            .execution_mode()
+            .expect_err("STATE requires one invocation per row");
+        assert_eq!(
+            error.current_context(),
+            &InferencerTensorSchemaError::BatchWithState {
+                tensor: port.to_string()
+            },
+        );
+    }
+    let mut processor = inferencer(vec![one], vec![one]);
+    processor.state = vec![state];
+    assert_eq!(
+        processor
+            .execution_mode()
+            .expect("fixed state is per-message"),
+        InferencerExecutionMode::PerMessage
+    );
+}
+
+#[test]
+fn stateful_inferencer_serialization_preserves_both_initial_forms() {
+    let one = InferencerTensorDimension::Fixed(nonzero!(1u32));
+    for initial in [
+        InferencerStateInitial::Zeros,
+        InferencerStateInitial::Constant(Expression::Array(vec![Expression::Cast {
+            expression: Box::new(Expression::Literal(Literal::I64(3))),
+            target: ParseAsType::F32,
+        }])),
+    ] {
+        let mut processor = inferencer(vec![one], vec![one]);
+        processor.state = vec![InferencerStateBinding {
+            input: "state_in".to_string(),
+            output: "state_out".to_string(),
+            schema: tensor(vec![one]),
+            initial,
+        }];
+        let encoded =
+            serde_json::to_vec(&processor).expect("the complete current Model serializes");
+        let decoded: CreateInferencer =
+            serde_json::from_slice(&encoded).expect("the complete current Model decodes");
+        assert_eq!(decoded, processor);
     }
 }

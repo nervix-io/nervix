@@ -183,6 +183,23 @@ pub(super) struct ProcessorOutputBatchScope {
     pub(super) shared: SharedBatchColumns,
 }
 
+/// Ordinary dispatch carries no additional source state; inference retains its admitted row.
+pub(super) trait ProcessorOutputErrorSource: Copy {
+    fn original_row(&self) -> Option<&RuntimeRow>;
+}
+
+impl ProcessorOutputErrorSource for () {
+    fn original_row(&self) -> Option<&RuntimeRow> {
+        None
+    }
+}
+
+impl ProcessorOutputErrorSource for &RuntimeRow {
+    fn original_row(&self) -> Option<&RuntimeRow> {
+        Some(*self)
+    }
+}
+
 #[cfg_attr(
     nervix_lint,
     nervix::dispatch(reason = "the admitted expression executor owns its generic effects")
@@ -193,6 +210,7 @@ pub(super) async fn evaluate_processor_output_events(
     output_index: usize,
     batch: &RelayRecordBatch,
     scope: &mut ProcessorOutputBatchScope,
+    error_source: impl ProcessorOutputErrorSource,
 ) -> Result<
     (
         Vec<PendingProcessorOutputBatch>,
@@ -254,15 +272,18 @@ pub(super) async fn evaluate_processor_output_events(
     for (output_row, input_row) in executed.selected_rows.iter().enumerate() {
         if let Some(side_error) = executed.batch.errors().row(output_row).first() {
             let partial_output = captured_partial_output(&executed.batch, output_row);
-            let record = batch.runtime_row(input_row).map_err(|error| {
-                PlannedGeneralFailure::new(
-                    error.change_context(PlannedGeneralError::MaterializeErrorInput {
-                        operation,
-                        row: input_row,
-                    }),
-                    batch.acks.clone(),
-                )
-            })?;
+            let record = match error_source.original_row() {
+                Some(record) => record.clone(),
+                None => batch.runtime_row(input_row).map_err(|error| {
+                    PlannedGeneralFailure::new(
+                        error.change_context(PlannedGeneralError::MaterializeErrorInput {
+                            operation,
+                            row: input_row,
+                        }),
+                        batch.acks.clone(),
+                    )
+                })?,
+            };
             message_errors.push(PendingProcessorOutputMessageError {
                 row: input_row,
                 key: batch.keys[input_row].clone(),
@@ -324,7 +345,7 @@ pub(super) async fn dispatch_processor_outputs(
     outputs: &mut RelayProcessorOutputsNode,
     batch: RelayRecordBatch,
 ) -> Option<Vec<AckSet>> {
-    dispatch_selected_processor_outputs(context, outputs, batch, None, false).await
+    dispatch_selected_processor_outputs(context, outputs, batch, None, false, ()).await
 }
 
 pub(super) async fn dispatch_processor_output(
@@ -333,7 +354,17 @@ pub(super) async fn dispatch_processor_output(
     batch: RelayRecordBatch,
     output_index: usize,
 ) -> Option<Vec<AckSet>> {
-    dispatch_selected_processor_outputs(context, outputs, batch, Some(output_index), true).await
+    dispatch_selected_processor_outputs(context, outputs, batch, Some(output_index), true, ()).await
+}
+
+/// A one-row model result keeps the admitted Arrow row for route error capture.
+pub(super) async fn dispatch_inferencer_result(
+    context: ProcessorOutputDispatchContext<'_>,
+    outputs: &mut RelayProcessorOutputsNode,
+    batch: RelayRecordBatch,
+    original_row: &RuntimeRow,
+) -> Option<Vec<AckSet>> {
+    dispatch_selected_processor_outputs(context, outputs, batch, None, false, original_row).await
 }
 
 pub(super) async fn dispatch_selected_processor_outputs(
@@ -342,6 +373,7 @@ pub(super) async fn dispatch_selected_processor_outputs(
     batch: RelayRecordBatch,
     selected_output: Option<usize>,
     flush_selected_immediately: bool,
+    error_source: impl ProcessorOutputErrorSource,
 ) -> Option<Vec<AckSet>> {
     if batch.message_count() == 0 {
         return Some(Vec::new());
@@ -450,6 +482,7 @@ pub(super) async fn dispatch_selected_processor_outputs(
             output_index,
             &batch,
             &mut scope,
+            error_source,
         )
         .await
         {

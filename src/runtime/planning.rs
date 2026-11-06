@@ -82,6 +82,8 @@ pub(in crate::runtime) enum PlanningError {
     },
     #[error("failed to prepare the bound WASM module for processor '{node}'")]
     PrepareWasmProcessor { node: ModelName },
+    #[error("failed to prepare initial ONNX state for inferencer '{node}'")]
+    PrepareInferencerState { node: ModelName },
     #[error("{kind:?} '{node}' input relay '{relay}' has no resolved branching")]
     MissingInputBranching {
         kind: ModelKind,
@@ -452,6 +454,7 @@ fn materialize_nodes(
                     resource_version,
                     file,
                     inputs,
+                    state,
                     output_schema,
                 } => {
                     let Some(input_relay) = node.input_relays.first() else {
@@ -467,31 +470,63 @@ fn materialize_nodes(
                             relay: input_relay.clone(),
                         }));
                     };
-                    let compiled_input_program = CompiledInferencerInputProgram::compile(
-                        &node.processor,
-                        inputs,
-                        input_schema,
-                        udfs,
-                    )
-                    .map_err(|reason| {
-                        reason.change_context(PlanningError::InferencerInputCompilation {
-                            node: node.processor.clone(),
-                            relay: input_relay.clone(),
-                        })
-                    })?;
-                    RelayProcessorOperationTemplate::Inferencer {
-                        output_routes: materialize_outputs(
-                            node.kind,
+                    if let Some(state) = state {
+                        let compiled_input_program =
+                            CompiledInferencerInputProgram::compile_stateful(
+                                &node.processor,
+                                inputs,
+                                input_schema,
+                                udfs,
+                            )
+                            .change_context_lazy(|| {
+                                PlanningError::InferencerInputCompilation {
+                                    node: node.processor.clone(),
+                                    relay: input_relay.clone(),
+                                }
+                            })?;
+                        RelayProcessorOperationTemplate::StatefulInferencer {
+                            output_routes: materialize_outputs(
+                                node.kind,
+                                &node.processor,
+                                output_routes,
+                                FlushPolicyRequirement::Required,
+                            )?,
+                            resource: resource.clone(),
+                            resource_version: *resource_version,
+                            file: file.clone(),
+                            inputs: inputs.clone(),
+                            output_schema: output_schema.clone(),
+                            state: state.clone(),
+                            compiled_input_program: Box::new(compiled_input_program),
+                            prepared: None,
+                        }
+                    } else {
+                        let compiled_input_program = CompiledInferencerInputProgram::compile(
                             &node.processor,
-                            output_routes,
-                            FlushPolicyRequirement::Required,
-                        )?,
-                        resource: resource.clone(),
-                        resource_version: *resource_version,
-                        file: file.clone(),
-                        inputs: inputs.clone(),
-                        output_schema: output_schema.clone(),
-                        compiled_input_program,
+                            inputs,
+                            input_schema,
+                            udfs,
+                        )
+                        .map_err(|reason| {
+                            reason.change_context(PlanningError::InferencerInputCompilation {
+                                node: node.processor.clone(),
+                                relay: input_relay.clone(),
+                            })
+                        })?;
+                        RelayProcessorOperationTemplate::Inferencer {
+                            output_routes: materialize_outputs(
+                                node.kind,
+                                &node.processor,
+                                output_routes,
+                                FlushPolicyRequirement::Required,
+                            )?,
+                            resource: resource.clone(),
+                            resource_version: *resource_version,
+                            file: file.clone(),
+                            inputs: inputs.clone(),
+                            output_schema: output_schema.clone(),
+                            compiled_input_program,
+                        }
                     }
                 }
                 BranchedProcessorOperationSpec::WasmProcessor {
@@ -803,6 +838,7 @@ fn bind_processor_template_programs(
                         input_relays: &processor.input_relays,
                         input_schema: primary_schema,
                         relay_schemas,
+                        generated_input_sensitivity: None,
                     },
                     output_routes,
                     output_context,
@@ -832,6 +868,7 @@ fn bind_processor_template_programs(
                         input_relays: &processor.input_relays,
                         input_schema: primary_schema,
                         relay_schemas,
+                        generated_input_sensitivity: None,
                     },
                     output_routes,
                     output_context,
@@ -846,6 +883,7 @@ fn bind_processor_template_programs(
                         input_relays: &processor.input_relays,
                         input_schema: primary_schema,
                         relay_schemas,
+                        generated_input_sensitivity: None,
                     },
                     output_routes,
                     output_context,
@@ -874,10 +912,27 @@ fn bind_processor_template_programs(
             }
             RelayProcessorOperationTemplate::Inferencer {
                 output_routes,
+                inputs,
+                output_schema,
+                ..
+            }
+            | RelayProcessorOperationTemplate::StatefulInferencer {
+                output_routes,
+                inputs,
                 output_schema,
                 ..
             } => {
                 let tensors = InferencerFilterMapTensors { output_schema };
+                let source_sensitivity = primary_schema.vm_sensitivity();
+                let sensitive = inputs.iter().any(|input| {
+                    expression_reads_sensitive_source(&input.expression, &source_sensitivity)
+                });
+                let generated_sensitivity = nervix_vm::SchemaSensitivity::from_sensitive_fields(
+                    output_schema
+                        .iter()
+                        .filter(|_| sensitive)
+                        .map(|port| port.tensor.clone()),
+                );
                 bind_transforming_output_programs(
                     TransformingOutputProgramBinding {
                         kind: processor.kind,
@@ -885,6 +940,7 @@ fn bind_processor_template_programs(
                         input_relays: &processor.input_relays,
                         input_schema: primary_schema,
                         relay_schemas,
+                        generated_input_sensitivity: Some(&generated_sensitivity),
                     },
                     output_routes,
                     output_context,
@@ -997,6 +1053,7 @@ struct TransformingOutputProgramBinding<'a> {
     input_relays: &'a [RelayName],
     input_schema: &'a CompiledSchema,
     relay_schemas: &'a HashMap<RelayName, Arc<CompiledSchema>>,
+    generated_input_sensitivity: Option<&'a nervix_vm::SchemaSensitivity>,
 }
 
 fn bind_transforming_output_programs<'a>(
@@ -1027,7 +1084,10 @@ fn bind_transforming_output_programs<'a>(
             &output.construction,
             RuntimeVmSchemaPair {
                 input: carrier_schema,
-                input_sensitivity: binding.input_schema.vm_sensitivity(),
+                input_sensitivity: binding
+                    .generated_input_sensitivity
+                    .cloned()
+                    .unwrap_or_else(|| binding.input_schema.vm_sensitivity()),
                 output: output_schema.arrow_schema(),
                 output_sensitivity: output_schema.vm_sensitivity(),
             },
@@ -1094,6 +1154,9 @@ pub(in crate::runtime) async fn bind_published_processor_plans(
             lookups,
             udfs,
         )?;
+        template
+            .prepare_stateful_inferencers(runtime.executor(), udfs)
+            .await?;
         template
             .prepare_wasm_processors(runtime, domain)
             .await

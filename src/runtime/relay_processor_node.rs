@@ -1321,6 +1321,34 @@ impl RelayProcessorNode {
                     )
                     .await;
                 }
+                RelayProcessorOperationNode::StatefulInferencer {
+                    output_routes,
+                    resource,
+                    resource_version,
+                    file,
+                    compiled_input_program,
+                    prepared,
+                    session,
+                } => {
+                    stateful_inferencer::admit_stateful_inferencer(
+                        stateful_inferencer::StatefulAdmissionContext {
+                            branch,
+                            processor: &self.processor,
+                            error_policies: &self.error_policies,
+                            output_routes,
+                            resource,
+                            resource_version: *resource_version,
+                            file,
+                            program: compiled_input_program,
+                            prepared,
+                            session,
+                            materialized_values: &materialized_values,
+                            execution_now,
+                        },
+                        batch,
+                    )
+                    .await;
+                }
                 RelayProcessorOperationNode::Inferencer {
                     output_routes,
                     resource,
@@ -1543,7 +1571,8 @@ impl RelayProcessorNode {
                         replicated_state.generations.mark_live_dirty();
                     }
                 }
-                RelayProcessorOperationNode::Junction { .. } => {}
+                RelayProcessorOperationNode::Junction { .. }
+                | RelayProcessorOperationNode::StatefulInferencer { .. } => {}
                 RelayProcessorOperationNode::Reorderer {
                     output_routes,
                     max_time,
@@ -2047,6 +2076,7 @@ impl RelayProcessorNode {
             | RelayProcessorOperationNode::Reorderer { .. }
             | RelayProcessorOperationNode::Correlator { .. }
             | RelayProcessorOperationNode::Inferencer { .. }
+            | RelayProcessorOperationNode::StatefulInferencer { .. }
             | RelayProcessorOperationNode::WasmProcessor { .. } => Ok(()),
         }
     }
@@ -2115,6 +2145,7 @@ impl RelayProcessorNode {
             | RelayProcessorOperationNode::Reorderer { .. }
             | RelayProcessorOperationNode::Correlator { .. }
             | RelayProcessorOperationNode::Inferencer { .. }
+            | RelayProcessorOperationNode::StatefulInferencer { .. }
             | RelayProcessorOperationNode::WasmProcessor { .. } => {
                 return SpawnedSnapshotTask {
                     task: None,
@@ -2155,7 +2186,8 @@ impl RelayProcessorNode {
                 .chain(state.pending_right.iter())
                 .map(|entry| checked_add_duration_to_timestamp(entry.received_at, *max_time))
                 .min(),
-            RelayProcessorOperationNode::Inferencer { .. } => None,
+            RelayProcessorOperationNode::Inferencer { .. }
+            | RelayProcessorOperationNode::StatefulInferencer { .. } => None,
             RelayProcessorOperationNode::WasmProcessor { instance, .. } => {
                 wasm_instance_next_deadline(instance.as_deref())
             }

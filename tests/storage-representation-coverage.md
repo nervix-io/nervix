@@ -45,7 +45,8 @@ Wire-schema generators carry each format's declared types, and codec generators 
 `BASE64` byte-text rules alongside `RFC3339` datetime-text rules. JSON, CBOR and AVRO retain their
 own wire type enums; CBOR carries its six native representation types. The Model/archive, registry
 and consensus properties preserve those complete
-values. The `NERVIX UNIT CBOR` registry signature and `raft_intake_cbor_` consensus namespace
+values, including inferencer state bindings and their initial expressions.
+The `NERVIX MODEL ITS` registry signature and `raft_intake_inference_` consensus namespace
 identify the current Model layout before decoding.
 
 `ALTER INGESTOR` and `ALTER EMITTER` statement generators draw, for every entity, each change its
@@ -54,7 +55,7 @@ Kafka's and Pulsar's `SET START AT`, a declared quiesce mode and `SET CLIENT` wh
 or writes through a client. They mix them with the shared operations, the in-place construction
 changes of a route or an emitter, and an emitter's envelope clauses and properties. The
 Model/archive, consensus and canonical Plexus properties preserve the complete operations in order,
-and the `raft_intake_cbor_` consensus namespace identifies the statement layout the
+and the `raft_intake_inference_` consensus namespace identifies the statement layout the
 transactions it keeps are stored in before decoding.
 
 Ingestor count declarations retain their full positive 64-bit range. Compact execution-unit ranks

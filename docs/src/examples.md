@@ -121,6 +121,10 @@ CREATE INFERENCER score_message
 The `INPUTS` mapping may read the original row. Route construction sees immutable generated model
 output, the branch, and declared materialized state, but not `input` or `message`.
 
+For a model with state input and successor output ports, add `STATE` between `INPUTS` and
+`OUTPUT SCHEMA`. [State tensors](processors.md#state-tensors) contains a complete running-sum
+declaration with independent state per branch, its initialization rules and its volatile lifetime.
+
 ## Window construction
 
 ```plexus

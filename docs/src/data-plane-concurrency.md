@@ -2755,6 +2755,17 @@ nodes with a replica, the deduplicator, window and guest-save restore scenarios 
 lifecycle and branch checkpoint announcements with the replica's lifecycle handle, where the
 replica task takes them under the same lock.
 
+The stateful inferencer instead owns its native session exclusively in the concrete branch task.
+Each admitted row awaits one extension-class executor job, which returns the session even when
+the model refuses the row. The previous tensor generation remains installed until all successor
+state and public output tensors validate; successor tensors move from ONNX output handles into
+the next generation without Arrow decoding. Route timers dispatch the already constructed
+results and never invoke the model. INITIAL tensors are prepared before publication and shared
+immutably by new branches. No tracked lock or shared-map protocol is added: Deloxide, Shuttle,
+Loom and Turmoil do not observe the opaque native operator. The ordinary public scenarios in
+`inferencer_state.feature` exercise ordered, interleaved branches on one and three nodes, different
+route cadences, filtered and refused inputs, and atomic state preservation after a native failure.
+
 The ONNX inspection admission scenario saturates the leader's bulk workers and wait queue, observes
 the typed CREATE INFERENCER refusal, releases the occupancy and creates the same inferencer on one
 and three nodes. Its paired stress registration reaches the occupancy holders mutex under bounded
