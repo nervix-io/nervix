@@ -661,6 +661,19 @@ reachable member through an empty address. Other service advertisements, includi
 may be absent independently. Absence says the service is unavailable; it does not invent a reason.
 Peer selection and transport handling follow the [interconnect contract](./interconnect.md).
 
+**Voting configuration.** A membership planning snapshot retains OpenRaft's effective and
+committed membership publications, with every constituent voter set. It derives the voter union
+only for identity and admission checks; the union cannot stand in for the joint configuration's
+quorum state or its last target set. Completing a joint transition is a distinct planned mutation.
+The completion boundary checks that state and proposes any continuation in one OpenRaft Core
+turn. Its typed outcome distinguishes unchanged effective and committed records, an applied
+continuation carrying its returned voter set, and the original membership write error. A prior joint
+observation cannot force a uniform Core to append a duplicate entry. Only the continuation proposes
+a membership entry, using the Core's current joint target. The expected
+uniform target is complete only when its effective membership entry is committed.
+These are observation and planning values, not a second persisted membership encoding. See
+[Consensus Storage And Replication](consensus-storage-and-replication.md#follower-catch-up-and-learner-promotion).
+
 **Startup voter evidence.** The reconciliation task owns a process-local set of typed node names
 actually observed live, including observations made while following. An absent voter in that set
 means no live observation; Chitchat's current dead verdict does not supply one. A first relayed

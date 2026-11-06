@@ -13390,6 +13390,61 @@ async fn when_consensus_connectivity_for_node_is_restored(
         .restore_consensus_connectivity(&crate::common::cluster::node_name(&node_id));
 }
 
+#[given(expr = "the promotion of node {string} will be interrupted after its joint entry applies")]
+async fn given_voter_promotion_will_be_interrupted(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .interrupt_voter_promotion(crate::common::cluster::node_name(&node_id))
+        .await;
+}
+
+#[when(expr = "node {string} starts joining without waiting for voter convergence")]
+async fn when_node_starts_joining_without_voter_convergence(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster_mut()
+        .add_node_without_waiting_for_voters(&node_id)
+        .await
+        .expect("the joining node did not start");
+}
+
+#[then(expr = "the promotion of node {string} was interrupted in the applied joint configuration")]
+async fn then_promotion_was_interrupted_in_applied_joint_configuration(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let joining = crate::common::cluster::node_name(&node_id);
+    let witness = nervix_primitives::time::timeout(Duration::from_secs(60), async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if let Some(witness) = world.fault_injection.interrupted_membership(&joining).await {
+                break witness;
+            }
+            nervix_primitives::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the promotion did not reach its controlled interruption");
+    let node = crate::common::cluster::node_name;
+    assert_eq!(
+        witness.configurations,
+        vec![
+            BTreeSet::from([node("node-1"), node("node-2")]),
+            BTreeSet::from([node("node-1"), node("node-2"), node("node-3")]),
+        ],
+        "the refusal must leave both actual quorum configurations in the applied log"
+    );
+    assert!(
+        witness.log_index > 0,
+        "the joint configuration must have an applied log entry"
+    );
+}
+
 #[when(expr = "node {string} is added to the cluster")]
 async fn when_node_is_added_to_the_cluster(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
