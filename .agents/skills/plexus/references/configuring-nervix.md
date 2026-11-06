@@ -532,18 +532,23 @@ current connection, retry and deadline limits.
   `SUSPEND`, `BUFFER` or `DROP` quiesce. Nervix creates neither the stream nor the consumer, and it
   refuses a push consumer and one whose acknowledgement policy is not explicit. `SET STREAM` and
   `SET CONSUMER` move it in place, and it continues from the position of the consumer it then
-  names. Read `Ingestors` → `NATS` for redelivery, `MaxRequestBatch`, `MaxRequestExpires` and
-  `AckWait`.
+  names. The stream keeps unread messages only as long as its own retention and limits allow, so
+  check them before relying on `SUSPEND` across a long pause. Read `Ingestors` → `NATS` for
+  redelivery, `MaxRequestBatch`, `MaxRequestExpires` and `AckWait`.
 - For NATS routing by the actual delivery, use the metadata fields declared in `Ingestors` →
   `NATS`; a wildcard subscription's subject is concrete, and a stream's reply is its acknowledgement
   subject. `NATS SUBJECT` emitters can write `REPLY TO`; read `Emitters` → `NATS` for its value
-  rules and retry boundary. Both directions preserve header order and require TLS for `tls://`.
+  rules and retry boundary. Both directions preserve header order and require TLS for `tls://`,
+  and a client with `tls_ca_file` trusts only that file, not the platform's roots.
 - A `NATS STREAM` emitter publishes to an operator-provisioned `STREAM '<stream>'` and a literal
   `SUBJECT '<subject>'` that stream captures. Use `MODE ACK SEQUENTIAL` or `MODE ACK PARALLEL MAX
-  <n>` with an `ACK TIMEOUT` and retry policy. The stream is checked when the emitter opens;
-  a subject the named stream does not capture is rejected per record. `MESSAGE ID <expression>`
-  writes `Nats-Msg-Id` so a retry after a lost PubAck can be deduplicated by JetStream. Read
-  `Emitters` → `NATS` for the full declaration and guarantee boundary.
+  <n>` with an `ACK TIMEOUT` and retry policy. The stream is looked up when the emitter opens, and
+  a missing one keeps the emitter unavailable, holding its records, until an operator provisions
+  it; a subject the named stream does not capture is rejected per record. `MESSAGE ID <expression>`
+  writes `Nats-Msg-Id` so a retry after a lost PubAck can be deduplicated by JetStream within the
+  stream's duplicate window. The emitter's own `Nats-Expected-Stream`, and under `MESSAGE ID` its
+  `Nats-Msg-Id`, replace a written header spelled exactly that way. Read `Emitters` → `NATS` for the
+  full declaration and guarantee boundary.
 - For `PULSAR TOPIC`, read [Ingestors → Pulsar](../../../../docs/src/ingestors.md#pulsar)
   before selecting subscription ownership, creation position, TYPE, instances or a metadata time.
   Keep an existing cursor distinct from its creation policy, and preserve null metadata and
