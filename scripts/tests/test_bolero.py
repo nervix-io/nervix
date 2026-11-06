@@ -143,6 +143,12 @@ class InventoryTests(unittest.TestCase):
     def test_inventory_has_current_targets_and_exact_corpus_paths(self) -> None:
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
+            "typed-runner-lease",
+            "typed-runner-policy",
+            "typed-runner-compilation",
+            "typed-runner-completion",
+            "typed-runner-identity",
+            "typed-runner-matrix",
             "clickhouse-client-tls-pairing",
             "client-config-schema",
             "connector-entity-presentation",
@@ -348,6 +354,7 @@ class InventoryTests(unittest.TestCase):
             "wasm-generated-pools",
             "wasm-generated-pools-malformed",
             "expiry-map-operations",
+            "authentication-quota-clock",
             "rate-limit-quota-bounds",
             "rate-limit-utc-generations",
             "vm-decimal-rounding-floats",
@@ -441,6 +448,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-vm",
             "nervix-approx-into",
             "nervix-columnar-json",
+            "nervix-ratchet",
             "nervix-bounded-write",
             "nervix-connector",
             "nervix-connector-sqs",

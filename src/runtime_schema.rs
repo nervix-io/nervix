@@ -90,6 +90,7 @@ mod arrow_body_properties;
 mod batch_container;
 #[cfg(test)]
 mod bounded_encoding_properties;
+mod cbor;
 mod client_batch;
 #[cfg(test)]
 pub(crate) mod codec_properties;
@@ -107,6 +108,7 @@ pub(crate) use arrow_body::ArrowBodyError;
 pub(crate) use batch_container::{
     BatchContainerError, BatchMember, BatchMemberEncoding, BoundedBatchEncoding,
 };
+pub use cbor::CborValueKind;
 pub use client_batch::{ClientBatchError, ClientBatchLimits, ClientSchemaDifference};
 pub use ipc_stream::UnsupportedFieldKind;
 pub(crate) use ipc_stream::{IpcMessages, IpcStreamError, StreamEnding};
@@ -143,7 +145,7 @@ pub(crate) struct CompiledCodecBatchEncoder<'a> {
 #[derive(Debug, Clone)]
 enum CompiledWireSchema {
     Json(CompiledJsonWireSchema<JsonType>),
-    Cbor(CompiledJsonWireSchema<CborType>),
+    Cbor(cbor::CompiledCborWireSchema),
     Avro(CompiledAvroWireSchema),
     JaqNative(CompiledJaqNativeCodec),
     Protobuf(CompiledProtobufCodec),
@@ -437,6 +439,19 @@ enum SerializableRuntimeValue {
     Vec(Vec<SerializableRuntimeValue>),
 }
 
+/// Why CBOR's header inspection could not finish before value decoding.
+#[derive(Debug, Error)]
+pub enum CborHeaderScanError {
+    #[error("CBOR header read failed")]
+    Read(#[source] io::Error),
+    #[error("invalid CBOR header at offset {0}")]
+    Syntax(usize),
+    #[error("CBOR header nesting exceeds the scanner limit")]
+    Depth,
+    #[error("unexpected CBOR break at offset {0}")]
+    Break(usize),
+}
+
 /// Why a codec could not be compiled, or could not decode or encode one payload.
 ///
 /// A variant that names only the codec, or the codec and a field, is a context: the report carries
@@ -466,6 +481,8 @@ pub enum CodecError {
         #[source]
         source: ciborium::de::Error<io::Error>,
     },
+    #[error("failed to inspect cbor headers for codec '{codec}'")]
+    CborHeaderScan { codec: String },
     #[error("failed to encode cbor payload for codec '{codec}'")]
     CborEncode {
         codec: String,
@@ -585,6 +602,7 @@ impl CodecError {
             | Self::JsonEncode { .. }
             | Self::ColumnarJsonEncode { .. }
             | Self::CborDecode { .. }
+            | Self::CborHeaderScan { .. }
             | Self::CborEncode { .. }
             | Self::AvroDecode { .. }
             | Self::AvroEncode { .. }
@@ -671,8 +689,14 @@ pub(crate) enum FieldDecodeError {
     #[error("expected {expected:?}, found a CBOR {found}")]
     CborWireType {
         expected: CborType,
-        found: JsonValueKind,
+        found: CborValueKind,
     },
+    #[error("CBOR tag is not a schemaful value")]
+    CborTag,
+    #[error("CBOR map key must be text")]
+    CborNonTextKey,
+    #[error("CBOR map has duplicate key '{key}'")]
+    CborDuplicateKey { key: String },
 }
 
 /// Why a field's value cannot be written in its wire type. It is the cause beneath
@@ -1159,12 +1183,7 @@ impl CompiledCodecBatchEncoder<'_> {
                 )?;
             }
             CompiledWireSchema::Cbor(_) => {
-                ciborium::into_writer(&row, &mut *output).map_err(|source| {
-                    Report::new(CodecError::CborEncode {
-                        codec: codec.to_string(),
-                        source,
-                    })
-                })?;
+                cbor::write_row(self.codec, &row, output)?;
             }
             CompiledWireSchema::Avro(wire_schema) => {
                 let value = row.to_avro_record(wire_schema)?;
@@ -1933,6 +1952,25 @@ impl RuntimeRecordBatchBuilder {
         Ok(())
     }
 
+    fn append_cbor_value(
+        &mut self,
+        value: &ciborium::value::Value,
+    ) -> error_stack::Result<(), RuntimeSchemaError> {
+        let index = self.next_field_index()?;
+        let field = &self.fields[index];
+        let expected = self.schema.field(index).data_type();
+        let location = RuntimeValueLocationRef::CodecField { field: &field.name };
+        cbor::append_to_arrow(
+            self.builders[index].as_mut(),
+            &field.ty,
+            expected,
+            value,
+            &location,
+        )?;
+        self.next_column += 1;
+        Ok(())
+    }
+
     fn append_borrowed_json_value(
         &mut self,
         value: &BorrowedValue<'_>,
@@ -2508,6 +2546,12 @@ pub enum RuntimeSchemaError {
         expected: ParseAsType,
         found: JsonValueKind,
     },
+    #[error("{location} holds a CBOR {found}, which is incompatible with {expected:?}")]
+    CborValueTypeMismatch {
+        location: RuntimeValueLocation,
+        expected: ParseAsType,
+        found: CborValueKind,
+    },
     #[error("{location} holds invalid base64 for BYTES")]
     InvalidBytesEncoding { location: RuntimeValueLocation },
     #[error("{location} holds an Avro {found:?}, which is incompatible with {expected:?}")]
@@ -3072,7 +3116,7 @@ pub(crate) fn compile_codec_spec_with_protobuf(
             CompiledWireSchema::Json(compile_json_wire_schema(schema_def, &schema))
         }
         ResolvedCodecWireFormat::Cbor(schema_def) => {
-            CompiledWireSchema::Cbor(compile_json_wire_schema(schema_def, &schema))
+            CompiledWireSchema::Cbor(cbor::CompiledCborWireSchema::compile(schema_def))
         }
         ResolvedCodecWireFormat::Avro(schema_def) => {
             let schema_json = avro_schema_json(schema_def, schema.fields());
@@ -3213,7 +3257,7 @@ pub(crate) fn decode_with_codec(
         CompiledWireSchema::Json(wire_schema) => {
             decode_json(codec, wire_schema, payload, decoder, builder)
         }
-        CompiledWireSchema::Cbor(wire_schema) => decode_cbor(codec, wire_schema, payload, builder),
+        CompiledWireSchema::Cbor(wire_schema) => cbor::decode(codec, wire_schema, payload, builder),
         CompiledWireSchema::Avro(wire_schema) => decode_avro(codec, wire_schema, payload, builder),
         CompiledWireSchema::Syslog(syslog) => syslog.decode(codec, payload, builder),
         CompiledWireSchema::JaqNative(_) | CompiledWireSchema::Protobuf(_) => {
@@ -3792,21 +3836,6 @@ fn decode_json(
     Ok(())
 }
 
-fn decode_cbor(
-    codec: &CompiledCodec,
-    wire_schema: &CompiledJsonWireSchema<CborType>,
-    payload: &[u8],
-    builder: &mut RuntimeRecordBatchBuilder,
-) -> error_stack::Result<(), CodecError> {
-    let value = ciborium::from_reader::<JsonValue, _>(Cursor::new(payload)).map_err(|source| {
-        Report::new(CodecError::CborDecode {
-            codec: codec.name.as_str().to_string(),
-            source,
-        })
-    })?;
-    decode_json_value(codec, &value, Some(wire_schema), builder)
-}
-
 /// Decode protobuf bytes as `message` into the JSON value jaq programs operate on.
 pub(crate) fn decode_protobuf_payload(
     message: &MessageDescriptor,
@@ -3893,7 +3922,6 @@ fn protobuf_message_to_json(
 fn decode_json_value(
     codec: &CompiledCodec,
     value: &JsonValue,
-    wire_schema: Option<&CompiledJsonWireSchema<CborType>>,
     builder: &mut RuntimeRecordBatchBuilder,
 ) -> error_stack::Result<(), CodecError> {
     let JsonValue::Object(object) = value else {
@@ -3901,32 +3929,9 @@ fn decode_json_value(
             codec: codec.name.as_str().to_string(),
         }));
     };
-
-    if let Some(wire_schema) = wire_schema
-        && !wire_schema.strictness.allows_unknown_fields()
-    {
-        for field in object.keys() {
-            if !wire_schema.fields.contains_key(field) {
-                return Err(Report::new(CodecError::UnexpectedField {
-                    codec: codec.name.as_str().to_string(),
-                    field: field.clone(),
-                }));
-            }
-        }
-    }
-
     for field in codec.schema.fields() {
-        let wire_field =
-            wire_schema.and_then(|wire_schema| wire_schema.fields.get(&field.name).copied());
-        if wire_schema.is_some() && wire_field.is_none() {
-            return Err(
-                codec.contract_violation(CodecContractError::MissingWireField {
-                    field: field.name.clone(),
-                }),
-            );
-        }
         let Some(value) = object.get(&field.name) else {
-            if field.optional && wire_field.is_none_or(|wire_field| wire_field.optional) {
+            if field.optional {
                 builder
                     .append_null()
                     .change_context_lazy(|| codec.invalid())?;
@@ -3938,24 +3943,13 @@ fn decode_json_value(
             }));
         };
         if value.is_null() {
-            if field.optional && wire_field.is_none_or(|wire_field| wire_field.optional) {
+            if field.optional {
                 builder
                     .append_null()
                     .change_context_lazy(|| codec.invalid())?;
                 continue;
             }
             return Err(codec.field_decode_failure(&field.name, FieldDecodeError::RequiredNull));
-        }
-        if let Some(wire_field) = wire_field
-            && !cbor_value_matches_wire_type(value, wire_field.ty)
-        {
-            return Err(codec.field_decode_failure(
-                &field.name,
-                FieldDecodeError::CborWireType {
-                    expected: wire_field.ty,
-                    found: json_value_kind(value),
-                },
-            ));
         }
         builder
             .append_json_value(value)
@@ -5098,31 +5092,6 @@ fn borrowed_json_value_matches_wire_type(value: &BorrowedValue<'_>, ty: JsonType
     }
 }
 
-fn cbor_value_matches_wire_type(value: &JsonValue, ty: CborType) -> bool {
-    match ty {
-        CborType::String | CborType::Bytes => value.is_string(),
-        CborType::Number => value.is_number(),
-        CborType::Integer => value.as_i64().is_some() || value.as_u64().is_some(),
-        CborType::Object => value.is_object(),
-        CborType::Array => value.is_array(),
-        CborType::Boolean => value.is_boolean(),
-        CborType::Null => value.is_null(),
-        CborType::U8 => value.as_u64().and_then(|v| u8::try_from(v).ok()).is_some(),
-        CborType::I8 => value.as_i64().and_then(|v| i8::try_from(v).ok()).is_some(),
-        CborType::U16 => value.as_u64().and_then(|v| u16::try_from(v).ok()).is_some(),
-        CborType::I16 => value.as_i64().and_then(|v| i16::try_from(v).ok()).is_some(),
-        CborType::U32 => value.as_u64().and_then(|v| u32::try_from(v).ok()).is_some(),
-        CborType::I32 => value.as_i64().and_then(|v| i32::try_from(v).ok()).is_some(),
-        CborType::U64 => value.as_u64().is_some(),
-        CborType::I64 => value.as_i64().is_some(),
-        CborType::Datetime => value
-            .as_str()
-            .and_then(|v| DateTime::parse_from_rfc3339(v).ok())
-            .is_some(),
-        CborType::F32 | CborType::F64 => value.is_number(),
-    }
-}
-
 fn avro_to_i64(value: &AvroValue) -> Option<i64> {
     match value {
         AvroValue::Int(v) => Some(i64::from(*v)),
@@ -5389,17 +5358,17 @@ mod tests {
                 },
                 WireSchemaField {
                     name: named("tenant"),
-                    ty: CborType::String,
+                    ty: CborType::Text,
                     optional: false,
                 },
                 WireSchemaField {
                     name: named("created_at"),
-                    ty: CborType::String,
+                    ty: CborType::Text,
                     optional: false,
                 },
                 WireSchemaField {
                     name: named("latency"),
-                    ty: CborType::Number,
+                    ty: CborType::Float,
                     optional: false,
                 },
                 WireSchemaField {
@@ -8127,10 +8096,17 @@ mod tests {
         )
         .assured("the CBOR array wire field matches a VEC of BYTES");
         let mut payload = Vec::new();
-        ciborium::into_writer(&serde_json::json!({"payload": ["AP8=", ""]}), &mut payload)
+        let value = ciborium::value::Value::Map(vec![(
+            ciborium::value::Value::Text("payload".to_string()),
+            ciborium::value::Value::Array(vec![
+                ciborium::value::Value::Bytes(vec![0, 255]),
+                ciborium::value::Value::Bytes(Vec::new()),
+            ]),
+        )]);
+        ciborium::into_writer(&value, &mut payload)
             .assured("the constructed CBOR value is encodable");
         let decoded =
-            decode_one(&codec, &payload).assured("each CBOR list element is canonical base64 text");
+            decode_one(&codec, &payload).assured("each CBOR list element is a byte string");
         let list = decoded
             .batch()
             .column(0)
@@ -8157,7 +8133,10 @@ mod tests {
         let mut output = Vec::new();
         encoder
             .encode_row_into(0, &mut output)
-            .assured("the byte elements have CBOR base64 representations");
+            .assured("the byte elements have native CBOR representations");
+        let emitted: ciborium::value::Value =
+            ciborium::from_reader(output.as_slice()).assured("the output is a CBOR value");
+        assert_eq!(emitted, value);
         let restored = decode_one(&codec, &output)
             .verified("the CBOR output was just encoded from this schema");
         assert_eq!(restored.batch(), decoded.batch());
@@ -8880,10 +8859,314 @@ mod tests {
         .expect("codec should compile")
     }
 
+    fn one_field_cbor_codec(ty: ParseAsType, wire_type: CborType) -> Arc<CompiledCodec> {
+        let schema = CreateSchema {
+            name: named("one_value"),
+            fields: vec![SchemaField {
+                name: named("value"),
+                ty,
+                optional: false,
+                sensitive: false,
+            }],
+        };
+        let wire = CreateWireSchema {
+            name: named("one_value_wire"),
+            strictness: WireSchemaStrictness::Strict,
+            fields: vec![WireSchemaField {
+                name: named("value"),
+                ty: wire_type,
+                optional: false,
+            }],
+        };
+        let model = CreateCodec {
+            name: named("one_value_codec"),
+            wire_format: CodecWireFormat::Cbor {
+                wire_schema: wire.name.clone(),
+            },
+            schema: schema.name.clone(),
+            encoding_rules: if matches!(schema.fields[0].ty, ParseAsType::Datetime) {
+                vec![CodecEncodingRule {
+                    field: named("value"),
+                    encoding: CodecEncoding::Rfc3339,
+                }]
+            } else {
+                Vec::new()
+            },
+        };
+        compile_codec(
+            &model,
+            Arc::new(compile_schema(&schema)),
+            ResolvedCodecWireFormat::Cbor(&wire),
+        )
+        .expect("the CBOR type binds the internal field")
+    }
+
+    #[test]
+    fn cbor_major_types_round_trip_through_each_bound_internal_type() {
+        use ciborium::value::Value as CborValue;
+
+        let integer = |value: i64| CborValue::Integer(value.into());
+        let cases = vec![
+            (ParseAsType::U8, CborType::Integer, integer(255)),
+            (ParseAsType::I8, CborType::Integer, integer(-128)),
+            (ParseAsType::U16, CborType::Integer, integer(65_535)),
+            (ParseAsType::I16, CborType::Integer, integer(-32_768)),
+            (ParseAsType::U32, CborType::Integer, integer(4_294_967_295)),
+            (ParseAsType::I32, CborType::Integer, integer(-2_147_483_648)),
+            (
+                ParseAsType::U64,
+                CborType::Integer,
+                CborValue::Integer(u64::MAX.into()),
+            ),
+            (ParseAsType::I64, CborType::Integer, integer(i64::MIN)),
+            (ParseAsType::F32, CborType::Float, CborValue::Float(1.25)),
+            (ParseAsType::F64, CborType::Float, CborValue::Float(-2.5)),
+            (ParseAsType::Bool, CborType::Boolean, CborValue::Bool(true)),
+            (
+                ParseAsType::String,
+                CborType::Text,
+                CborValue::Text("café".into()),
+            ),
+            (
+                ParseAsType::Bytes,
+                CborType::Bytes,
+                CborValue::Bytes(vec![0, 0xc2, 0xc3, 255]),
+            ),
+            (
+                ParseAsType::Datetime,
+                CborType::Text,
+                CborValue::Text("2024-02-29T12:34:56+00:00".into()),
+            ),
+            (
+                ParseAsType::Vec {
+                    element: Box::new(ParseAsType::Bytes),
+                },
+                CborType::Array,
+                CborValue::Array(vec![CborValue::Bytes(vec![0, 255])]),
+            ),
+            (
+                ParseAsType::Array {
+                    element: Box::new(ParseAsType::I16),
+                    len: nonzero!(2u32),
+                },
+                CborType::Array,
+                CborValue::Array(vec![integer(-1), integer(2)]),
+            ),
+        ];
+        for (ty, wire_type, value) in cases {
+            let codec = one_field_cbor_codec(ty.clone(), wire_type);
+            let input = CborValue::Map(vec![(CborValue::Text("value".into()), value)]);
+            let mut payload = Vec::new();
+            ciborium::into_writer(&input, &mut payload).expect("fixture encodes");
+            let decoded = decode_one(&codec, &payload)
+                .unwrap_or_else(|error| panic!("{ty:?} must decode: {error:#}"));
+            let mut emitted = Vec::new();
+            codec
+                .batch_encoder(&decoded)
+                .expect("the decoded row matches the codec")
+                .encode_row_into(0, &mut emitted)
+                .expect("the row encodes back to CBOR");
+            assert_eq!(emitted[0], 0xbf, "the emitted map keeps its CBOR framing");
+            let output: CborValue =
+                ciborium::from_reader(emitted.as_slice()).expect("encoded row is a CBOR value");
+            assert_eq!(output, input, "{ty:?} retains its CBOR representation");
+            let restored = decode_one(&codec, &emitted).expect("the emitted row decodes");
+            assert_eq!(
+                restored.batch(),
+                decoded.batch(),
+                "{ty:?} retains its Arrow value"
+            );
+
+            let foreign_values = [
+                (CborType::Integer, CborValue::Integer(1.into())),
+                (CborType::Float, CborValue::Float(1.25)),
+                (CborType::Boolean, CborValue::Bool(true)),
+                (CborType::Text, CborValue::Text("text".into())),
+                (CborType::Bytes, CborValue::Bytes(vec![0, 255])),
+                (CborType::Array, CborValue::Array(Vec::new())),
+            ];
+            for (foreign_type, foreign_value) in foreign_values {
+                if foreign_type == wire_type {
+                    continue;
+                }
+                let mut foreign_payload = Vec::new();
+                ciborium::into_writer(
+                    &CborValue::Map(vec![(CborValue::Text("value".into()), foreign_value)]),
+                    &mut foreign_payload,
+                )
+                .expect("a foreign major type is CBOR");
+                let refused = decode_one(&codec, &foreign_payload)
+                    .expect_err("a field must have its declared CBOR major type");
+                assert!(
+                    format!("{refused:#}")
+                        .contains("codec 'one_value_codec' failed to parse field 'value'"),
+                    "{ty:?} declared {wire_type:?} and received {foreign_type:?}: {refused:#}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cbor_f32_signaling_nan_is_read_as_a_quiet_nan_with_its_payload() {
+        let codec = one_field_cbor_codec(ParseAsType::F32, CborType::Float);
+        let payload = [
+            0xa1, 0x65, b'v', b'a', b'l', b'u', b'e', 0xfa, 0x7f, 0xa0, 0x00, 0x01,
+        ];
+        let decoded = decode_one(&codec, &payload).expect("the CBOR float is accepted");
+        let column = decoded
+            .batch()
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float32Array>()
+            .expect("the field is an F32 Arrow column");
+        assert_eq!(column.value(0).to_bits(), 0x7fe0_0001);
+    }
+
+    #[test]
+    fn cbor_integers_are_range_checked_at_every_internal_width() {
+        use ciborium::value::Value as CborValue;
+
+        let cases = [
+            (ParseAsType::U8, CborValue::Integer(256.into())),
+            (ParseAsType::I8, CborValue::Integer((-129).into())),
+            (ParseAsType::U16, CborValue::Integer(65_536.into())),
+            (ParseAsType::I16, CborValue::Integer((-32_769).into())),
+            (
+                ParseAsType::U32,
+                CborValue::Integer(4_294_967_296_u64.into()),
+            ),
+            (
+                ParseAsType::I32,
+                CborValue::Integer(2_147_483_648_u64.into()),
+            ),
+            (ParseAsType::U64, CborValue::Integer((-1).into())),
+            (ParseAsType::I64, CborValue::Integer(u64::MAX.into())),
+            (
+                ParseAsType::I64,
+                CborValue::Integer(
+                    ciborium::value::Integer::try_from(-18_446_744_073_709_551_616_i128)
+                        .expect("the smallest CBOR integer fits its 64-bit major type"),
+                ),
+            ),
+        ];
+        for (ty, value) in cases {
+            let codec = one_field_cbor_codec(ty.clone(), CborType::Integer);
+            let mut payload = Vec::new();
+            ciborium::into_writer(
+                &CborValue::Map(vec![(CborValue::Text("value".into()), value)]),
+                &mut payload,
+            )
+            .expect("the out-of-range integer is CBOR");
+            let error = decode_one(&codec, &payload).expect_err("integer exceeds internal type");
+            assert!(
+                format!("{error:#}")
+                    .contains("codec 'one_value_codec' failed to parse field 'value'"),
+                "{ty:?}: {error:#}"
+            );
+        }
+    }
+
     fn cbor_payload(value: &JsonValue) -> Vec<u8> {
         let mut payload = Vec::new();
         ciborium::into_writer(value, &mut payload).expect("a JSON value writes as CBOR");
         payload
+    }
+
+    #[test]
+    fn schemaful_cbor_rejects_tags_and_ambiguous_map_keys_with_field_context() {
+        use ciborium::value::Value as CborValue;
+
+        let cases = [
+            (
+                CborValue::Tag(42, Box::new(CborValue::Map(Vec::new()))),
+                "<root>",
+                "CBOR tag is not a schemaful value",
+            ),
+            (
+                CborValue::Map(vec![(
+                    CborValue::Text("created_at".to_string()),
+                    CborValue::Tag(
+                        0,
+                        Box::new(CborValue::Text("2024-02-29T12:34:56Z".to_string())),
+                    ),
+                )]),
+                "created_at",
+                "CBOR tag is not a schemaful value",
+            ),
+            (
+                CborValue::Map(vec![(
+                    CborValue::Text("created_at".to_string()),
+                    CborValue::Tag(1, Box::new(CborValue::Integer(7.into()))),
+                )]),
+                "created_at",
+                "CBOR tag is not a schemaful value",
+            ),
+            (
+                CborValue::Map(vec![(
+                    CborValue::Text("user_id".to_string()),
+                    CborValue::Tag(2, Box::new(CborValue::Bytes(vec![7]))),
+                )]),
+                "user_id",
+                "CBOR tag is not a schemaful value",
+            ),
+            (
+                CborValue::Map(vec![(
+                    CborValue::Text("user_id".to_string()),
+                    CborValue::Tag(3, Box::new(CborValue::Bytes(vec![7]))),
+                )]),
+                "user_id",
+                "CBOR tag is not a schemaful value",
+            ),
+            (
+                CborValue::Map(vec![(CborValue::Integer(7.into()), CborValue::Bool(true))]),
+                "<map key>",
+                "CBOR map key must be text",
+            ),
+            (
+                CborValue::Map(vec![
+                    (CborValue::Text("active".to_string()), CborValue::Bool(true)),
+                    (
+                        CborValue::Text("active".to_string()),
+                        CborValue::Bool(false),
+                    ),
+                ]),
+                "active",
+                "CBOR map has duplicate key 'active'",
+            ),
+            (
+                CborValue::Map(vec![(
+                    CborValue::Text("active".to_string()),
+                    CborValue::Tag(42, Box::new(CborValue::Bool(true))),
+                )]),
+                "active",
+                "CBOR tag is not a schemaful value",
+            ),
+        ];
+        let codec = strict_cbor_codec();
+        for (value, field, cause) in cases {
+            let mut payload = Vec::new();
+            ciborium::into_writer(&value, &mut payload).expect("the case is a CBOR value");
+            let error =
+                decode_one(&codec, &payload).expect_err("the case breaks the CBOR contract");
+            assert_eq!(
+                format!("{error:#}"),
+                format!("codec 'schemaful_cbor_codec' failed to parse field '{field}': {cause}")
+            );
+        }
+    }
+
+    #[test]
+    fn schemaful_cbor_rejects_a_multibyte_bignum_tag_header() {
+        let payload = [
+            0xa1, 0x67, b'u', b's', b'e', b'r', b'_', b'i', b'd', 0xd8, 0x02, 0x41, 0x07,
+        ];
+        let error = decode_one(&strict_cbor_codec(), &payload)
+            .expect_err("a bignum tag cannot satisfy an integer wire field");
+        assert_eq!(
+            format!("{error:#}"),
+            "codec 'schemaful_cbor_codec' failed to parse field 'user_id': CBOR tag is not a \
+             schemaful value"
+        );
     }
 
     #[rstest]
@@ -8919,7 +9202,7 @@ mod tests {
             "latency": 12.5, "active": "yes"
         }),
         "codec 'schemaful_cbor_codec' failed to parse field 'active': expected Boolean, found a \
-         CBOR string"
+         CBOR text"
     )]
     #[case::value(
         serde_json::json!({
@@ -8927,7 +9210,7 @@ mod tests {
             "latency": 12.5, "active": true
         }),
         "codec 'schemaful_cbor_codec' failed to parse field 'created_at': field 'created_at' \
-         holds a JSON string, which is incompatible with Datetime"
+         holds a CBOR text, which is incompatible with Datetime"
     )]
     fn strict_cbor_wire_schema_rejects_a_value_outside_it(
         #[case] value: JsonValue,
@@ -8951,9 +9234,10 @@ mod tests {
     #[test]
     fn a_malformed_cbor_payload_names_its_parser_error_once() {
         let malformed = [0xff_u8];
-        let parser_error = ciborium::from_reader::<JsonValue, _>(Cursor::new(&malformed[..]))
-            .expect_err("a lone break byte is not a CBOR item")
-            .to_string();
+        let parser_error =
+            ciborium::from_reader::<ciborium::value::Value, _>(Cursor::new(&malformed[..]))
+                .expect_err("a lone break byte is not a CBOR item")
+                .to_string();
 
         let error =
             decode_one(&strict_cbor_codec(), &malformed).expect_err("the payload is not CBOR");
@@ -8990,6 +9274,42 @@ mod tests {
     }
 
     #[test]
+    fn loose_cbor_wire_schema_rejects_tagged_unknown_fields() {
+        use ciborium::value::Value as CborValue;
+
+        let codec = compile_codec(
+            &schemaful_cbor_codec("schemaful_cbor_codec"),
+            Arc::new(compile_schema(&schema())),
+            ResolvedCodecWireFormat::Cbor(&cbor_wire_schema(WireSchemaStrictness::Loose)),
+        )
+        .expect("the loose codec compiles");
+        let mut value = CborValue::serialized(&serde_json::json!({
+            "user_id": 42,
+            "tenant": "acme",
+            "created_at": "2025-01-02T03:04:05+00:00",
+            "latency": 12.5,
+            "active": true
+        }))
+        .expect("the fixture has a CBOR value");
+        let CborValue::Map(fields) = &mut value else {
+            panic!("the fixture is a CBOR map");
+        };
+        fields.push((
+            CborValue::Text("ignored".to_string()),
+            CborValue::Tag(42, Box::new(CborValue::Bool(true))),
+        ));
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&value, &mut bytes).expect("the fixture encodes");
+
+        let error = decode_one(&codec, &bytes).expect_err("loose mode still rejects tags");
+        assert_eq!(
+            format!("{error:#}"),
+            "codec 'schemaful_cbor_codec' failed to parse field 'ignored': CBOR tag is not a \
+             schemaful value"
+        );
+    }
+
+    #[test]
     fn json_codec_accepts_missing_and_null_optional_fields() {
         let compiled_schema = Arc::new(compile_schema(&optional_schema()));
         let compiled_codec = compile_codec(
@@ -9014,6 +9334,68 @@ mod tests {
             Some(RuntimeValue::U32(7))
         );
         assert_eq!(single_batch_value(&explicit_null, "nickname"), None);
+    }
+
+    #[test]
+    fn cbor_codec_accepts_missing_and_null_optional_fields() {
+        use ciborium::value::Value as CborValue;
+
+        let schema = optional_schema();
+        let wire_schema = CreateCborWireSchema {
+            name: named("optional_notification_wire"),
+            strictness: Default::default(),
+            fields: vec![
+                WireSchemaField {
+                    name: named("user_id"),
+                    ty: CborType::Integer,
+                    optional: false,
+                },
+                WireSchemaField {
+                    name: named("nickname"),
+                    ty: CborType::Text,
+                    optional: true,
+                },
+            ],
+        };
+        let codec = CreateCodec {
+            name: named("cbor_optional_codec"),
+            wire_format: CodecWireFormat::Cbor {
+                wire_schema: wire_schema.name.clone(),
+            },
+            schema: schema.name.clone(),
+            encoding_rules: Vec::new(),
+        };
+        let compiled_codec = compile_codec(
+            &codec,
+            Arc::new(compile_schema(&schema)),
+            ResolvedCodecWireFormat::Cbor(&wire_schema),
+        )
+        .expect("codec should compile");
+
+        for entries in [
+            vec![(
+                CborValue::Text("user_id".into()),
+                CborValue::Integer(7.into()),
+            )],
+            vec![
+                (
+                    CborValue::Text("user_id".into()),
+                    CborValue::Integer(7.into()),
+                ),
+                (CborValue::Text("nickname".into()), CborValue::Null),
+            ],
+        ] {
+            let mut payload = Vec::new();
+            ciborium::into_writer(&CborValue::Map(entries), &mut payload)
+                .expect("optional fixture should encode");
+            let decoded = decode_one(&compiled_codec, &payload)
+                .expect("missing and null optional fields should decode");
+            assert_eq!(
+                single_batch_value(&decoded, "user_id"),
+                Some(RuntimeValue::U32(7))
+            );
+            assert_eq!(single_batch_value(&decoded, "nickname"), None);
+        }
     }
 
     #[test]

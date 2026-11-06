@@ -71,6 +71,9 @@ the CLI's Completion section.
 For secure CLI connections and console leader redirects, follow those chapters' connection
 sections and [Native session TLS](../../../docs/src/installation-cargo.md#native-session-tls).
 Listener certificates are node provisioning, configured outside Plexus statements.
+For authentication refusals and retry behavior, follow
+[Authentication](../../../docs/src/client-session-protocol.md#authentication); a response delay
+does not establish that a user exists.
 Read the Ingestors and Emitters chapters for `SHOW INGESTORS`, `SHOW EMITTERS`, and `DESCRIBE`;
 their inspection contracts distinguish effective options from canonical `SHOW CREATE` configuration.
 The web console's visual Create forms also cover internal schemas, declared JSON/CBOR/AVRO wire
@@ -456,8 +459,8 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   every create, alter, show, drop, and codec reference must include the exact format.
 - Use `BYTES` for arbitrary octets, including `ARRAY` and `VEC` elements. Keep branch key schemas
   free of `BYTES`. Check the wire representation and required encoding rule in `Schemas And
-  Codecs` → `Codecs`; an AVRO `bytes` field needs no rule. A cast never converts `BYTES`; use the
-  functions of `Expression Functions` → `Bytes, Encodings And Hashes`.
+  Codecs` → `Codecs`; CBOR and AVRO `bytes` fields need no rule. A cast never converts `BYTES`; use
+  the functions of `Expression Functions` → `Bytes, Encodings And Hashes`.
 - Declare wire-schema mode after the entity name with `CREATE WIRE <format> SCHEMA <name> MODE
   STRICT|LOOSE`. Change it with `ALTER WIRE <format> SCHEMA <wire_schema> MODE STRICT|LOOSE`;
   the same format-qualified ALTER form owns field evolution.

@@ -43,7 +43,7 @@ type is recursive, so fixed and variable axes can be mixed, for example
 axis must have a positive length no greater than 2147483647, the largest length
 an Arrow `FixedSizeList` carries, fixed arrays must contain exactly that many
 elements at runtime, and dense multidimensional values must retain their nested
-shape. JSON and CBOR represent both with nested JSON-style arrays. AVRO uses
+shape. JSON and CBOR represent both with nested arrays. AVRO uses
 nested array schemas with item types inferred recursively from the internal
 schema.
 
@@ -72,8 +72,8 @@ CBOR wire schema:
 ```plexus
 CREATE IF NOT EXISTS WIRE CBOR SCHEMA notification_wire MODE LOOSE (
   user_id integer,
-  created_at string,
-  payload string OPTIONAL
+  created_at text,
+  payload bytes OPTIONAL
 );
 ```
 
@@ -89,7 +89,8 @@ CREATE IF NOT EXISTS WIRE AVRO SCHEMA notification_wire MODE STRICT (
 
 JSON, CBOR, and AVRO wire schemas must declare at least one field.
 
-JSON fields declare `string`, `number`, `integer`, `boolean`, or `array`. AVRO fields declare
+JSON fields declare `string`, `number`, `integer`, `boolean`, or `array`. CBOR fields declare
+`integer`, `float`, `boolean`, `text`, `bytes`, or `array`. AVRO fields declare
 `boolean`, `int`, `long`, `float`, `double`, `string`, `bytes`, or `array`. Keywords are
 case-insensitive; canonical definitions print the types in uppercase.
 
@@ -97,23 +98,31 @@ case-insensitive; canonical definitions print the types in uppercase.
 | --- | --- |
 | JSON `integer` | `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `U64`, `I64` |
 | JSON `number` | `F32`, `F64` |
-| JSON or AVRO `boolean` | `BOOL` |
+| CBOR `integer` | `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `U64`, `I64` |
+| CBOR `float` | `F32`, `F64` |
+| JSON, CBOR or AVRO `boolean` | `BOOL` |
+| CBOR `text` | `STRING`; `DATETIME` with `ENCODE field AS RFC3339` |
+| CBOR `bytes` | `BYTES`, without an encoding rule |
 | JSON or AVRO `string` | `STRING`; `DATETIME` with `ENCODE field AS RFC3339`; `BYTES` with `ENCODE field AS BASE64` |
 | AVRO `int` | `I32` |
 | AVRO `long` | `I64` |
 | AVRO `float` | `F32` |
 | AVRO `double` | `F64` |
 | AVRO `bytes` | `BYTES`, without an encoding rule |
-| JSON or AVRO `array` | `ARRAY` or `VEC`, with item types derived from the internal schema |
+| JSON, CBOR or AVRO `array` | `ARRAY` or `VEC`, with item types derived from the internal schema |
 
 Integer decoding checks the internal type's range. AVRO scalar bindings are exact: for example,
 an `int` field binds an `I32` field. Encoding rules declare a text representation explicitly;
 they do not choose between runtime encoding modes.
 
-CBOR accepts `string`, `number`, `integer`, `object`, `array`, `boolean`, `null`, `U8` through
-`I64`, `F32`, `F64`, `DATETIME`, and `BYTES`. Its exact numeric types bind the internal type of
-the same name, and its `DATETIME` type carries RFC 3339 text without an encoding rule. A CBOR
-`string` binds `DATETIME` only with `ENCODE field AS RFC3339`.
+CBOR uses its own six wire types. Its decoder walks `ciborium::Value` directly into typed Arrow
+builders. An integer is range-checked for its internal width; a float is decoded as a CBOR float,
+including non-finite values. `DATETIME` uses RFC 3339 text under an
+explicit codec rule. CBOR byte strings carry `BYTES` directly. A tagged item, non-text map key,
+duplicate map key, or null in a required field is a decode error. `OPTIONAL` permits a missing or
+null field.
+`MODE STRICT` rejects undeclared fields, and `MODE LOOSE`
+ignores them after validating their CBOR structure.
 
 The web console's **Create** menu provides structured editors for internal schemas and each of
 these three declared wire formats. Internal collection controls build nested `ARRAY` and `VEC`
@@ -251,9 +260,9 @@ CREATE CODEC binary_codec FROM WIRE JSON SCHEMA binary_wire TO SCHEMA binary_eve
 ```
 
 `BASE64` uses the RFC 4648 standard alphabet with padding and requires canonical text on decode.
-Malformed, unpadded, or noncanonical text is a decode error. An AVRO `bytes` field uses Avro's
-native byte sequence and accepts no encoding rule. CBOR `BYTES` fields carry the same padded
-base64 text. Nested `ARRAY` and `VEC` byte elements use their format's byte representation.
+Malformed, unpadded, or noncanonical text is a decode error. AVRO `bytes` and CBOR `bytes` fields
+use their formats' native byte sequences and accept no encoding rule. Nested `ARRAY` and `VEC`
+byte elements use their format's byte representation.
 
 Live `WIRE JSON` ingestion copies each connector-owned payload into mutable scratch retained by
 the open ingest group, then parses it with simd-json using parser buffers retained beside that
@@ -355,12 +364,14 @@ values, and nulls of optional fields. The formats themselves set the bounds of t
 
 - JSON has no number for a NaN or an infinity. `WIRE JSON` writes a non-finite float as `null`,
   which reads back as a null of an optional field and refuses a required field or a list element.
-  `WIRE CBOR` writes the float itself but reads every value through the same JSON model, so it reads
-  a non-finite float as a null.
-- A JSON or CBOR number read into an `F32` field becomes the nearest `F32`, and the shortest
+  `WIRE CBOR` reads and writes native CBOR floats, including non-finite values.
+- A JSON number read into an `F32` field becomes the nearest `F32`, and the shortest
   decimal a writer prints for an `F32` reads back as that same `F32`, also where the number lies
   exactly halfway between two of them once read as a 64-bit float. A number beyond the type's range
-  rounds to an infinity. Every finite float the codec writes reads back to its exact bits.
+  rounds to an infinity. Every finite float the codec writes reads back to its exact bits. A CBOR
+  float narrows directly to `F32` when that is the internal field type. Ciborium widens an `F32`
+  before writing CBOR, so an `F32` signaling NaN becomes a quiet NaN with the same sign and payload;
+  other `F32` bits are preserved.
 - `WIRE AVRO` keeps every float bit pattern. It writes an unsigned element of an `ARRAY` or `VEC` as
   an Avro `long`, so an element above 9223372036854775807 fails to encode.
 - A datetime travels as RFC 3339 text in UTC; text written with another offset reads as the same

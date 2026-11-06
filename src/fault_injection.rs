@@ -52,6 +52,7 @@ mod backup_cut;
 mod backup_cut_tests;
 mod client_inspection;
 mod command_pause_point;
+mod command_reconciliation;
 mod command_reply;
 mod consensus;
 mod domain_clock;

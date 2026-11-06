@@ -8037,6 +8037,7 @@ dependencies = [
  "chitchat",
  "chrono",
  "ciborium",
+ "ciborium-ll",
  "clap",
  "clap_complete",
  "criterion 0.5.1",
