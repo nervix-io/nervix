@@ -459,22 +459,19 @@ fn check_sources(
                     .kind
                     .iter()
                     .any(|kind| kind == "lib" || kind == "bin" || kind == "proc-macro")
+                    && let Ok(path) = relative(root, &target.src_path)
+                    && sources.contains(&path)
                 {
-                    if let Ok(path) = relative(root, &target.src_path) {
-                        if sources.contains(&path) {
-                            entries.push(path);
-                        }
-                    }
+                    entries.push(path);
                 }
             }
             if entries.is_empty() {
                 for target in &package.targets {
-                    if target.kind.iter().any(|kind| kind == "test") {
-                        if let Ok(path) = relative(root, &target.src_path) {
-                            if sources.contains(&path) {
-                                entries.push(path);
-                            }
-                        }
+                    if target.kind.iter().any(|kind| kind == "test")
+                        && let Ok(path) = relative(root, &target.src_path)
+                        && sources.contains(&path)
+                    {
+                        entries.push(path);
                     }
                 }
             }
