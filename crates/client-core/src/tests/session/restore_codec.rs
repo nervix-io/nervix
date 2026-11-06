@@ -5,6 +5,8 @@
 //! - **Depends on.** The session fixture, tonic's framing, and the current restore wire contract.
 //! - **Must not know.** Server restore admission, planning, or persistence.
 
+mod restore_uncertainty;
+
 use std::{
     convert::Infallible,
     task::{Context, Poll},
@@ -61,6 +63,13 @@ enum ScriptedReply {
 struct RestoreService {
     session: SessionService,
     restores: mpsc::Sender<ReceivedRestore>,
+    archive_read: ArchiveRead,
+}
+
+#[derive(Clone, Copy)]
+enum ArchiveRead {
+    Complete,
+    StartOnly,
 }
 
 impl NamedService for RestoreService {
@@ -81,6 +90,7 @@ impl Service<http::Request<Body>> for RestoreService {
             return self.session.call(request);
         }
         let restores = self.restores.clone();
+        let archive_read = self.archive_read;
         Box::pin(async move {
             let mut grpc = Grpc::new(RawRestoreCodec).max_encoding_message_size(
                 limits()
@@ -88,13 +98,22 @@ impl Service<http::Request<Body>> for RestoreService {
                     .checked_add(1)
                     .assured("one byte beyond the bounded fixture frame fits usize"),
             );
-            Ok(grpc.streaming(ReceiveRestore { restores }, request).await)
+            Ok(grpc
+                .streaming(
+                    ReceiveRestore {
+                        restores,
+                        archive_read,
+                    },
+                    request,
+                )
+                .await)
         })
     }
 }
 
 struct ReceiveRestore {
     restores: mpsc::Sender<ReceivedRestore>,
+    archive_read: ArchiveRead,
 }
 
 impl StreamingService<VerifiedFrame<RestoreFrame>> for ReceiveRestore {
@@ -105,6 +124,7 @@ impl StreamingService<VerifiedFrame<RestoreFrame>> for ReceiveRestore {
 
     fn call(&mut self, request: Request<Streaming<VerifiedFrame<RestoreFrame>>>) -> Self::Future {
         let restores = self.restores.clone();
+        let archive_read = self.archive_read;
         Box::pin(async move {
             let mut stream = request.into_inner();
             let first = stream
@@ -117,14 +137,16 @@ impl StreamingService<VerifiedFrame<RestoreFrame>> for ReceiveRestore {
                 return Err(Status::invalid_argument("a restore starts with metadata"));
             };
             let mut archive = Vec::new();
-            while let Some(frame) = stream.message().await? {
-                task::consume_budget().await;
-                let RestoreMessage::Chunk(chunk) = RestoreMessage::decode(&frame)
-                    .assured("the production client encodes its restore chunks")
-                else {
-                    return Err(Status::invalid_argument("chunks follow the start"));
-                };
-                archive.extend_from_slice(chunk.bytes());
+            if let ArchiveRead::Complete = archive_read {
+                while let Some(frame) = stream.message().await? {
+                    task::consume_budget().await;
+                    let RestoreMessage::Chunk(chunk) = RestoreMessage::decode(&frame)
+                        .assured("the production client encodes its restore chunks")
+                    else {
+                        return Err(Status::invalid_argument("chunks follow the start"));
+                    };
+                    archive.extend_from_slice(chunk.bytes());
+                }
             }
             let (answer, reply) = oneshot::channel();
             restores
@@ -194,9 +216,19 @@ impl Codec for RawRestoreCodec {
 
 impl TestServer {
     async fn with_restore_codec() -> (Self, mpsc::Receiver<ReceivedRestore>) {
+        Self::with_restore_reading(ArchiveRead::Complete).await
+    }
+
+    async fn with_restore_reading(
+        archive_read: ArchiveRead,
+    ) -> (Self, mpsc::Receiver<ReceivedRestore>) {
         let (restores, received) = mpsc::channel(4);
         let server = Self::start_service(([127, 0, 0, 1], 0).into(), false, |session| {
-            RestoreService { session, restores }
+            RestoreService {
+                session,
+                restores,
+                archive_read,
+            }
         })
         .await;
         (server, received)

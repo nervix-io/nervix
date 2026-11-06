@@ -355,8 +355,8 @@ Feature: HTTP codec ingestion
       );
         CREATE WIRE <wire_format> SCHEMA metrics_wire MODE STRICT (
         device STRING,
-        cpu_last_64 ARRAY,
-        labels ARRAY OPTIONAL
+        cpu_last_64 <cpu_wire_type>,
+        labels <labels_wire_type> OPTIONAL
       );
         CREATE CODEC metrics_codec
         FROM WIRE <wire_format> SCHEMA metrics_wire
@@ -393,11 +393,11 @@ Feature: HTTP codec ingestion
     And the last relay subscription payload contains key fragment '{"device":"edge-1"}'
 
     Examples:
-      | cluster_size | wire_format | cpu_type      | labels_type |
-      | 1            | JSON        | ARRAY<F32, 3> | VEC<STRING> |
-      | 1            | AVRO        | ARRAY<F32, 3> | VEC<STRING> |
-      | 3            | JSON        | ARRAY<F32, 3> | VEC<STRING> |
-      | 3            | AVRO        | ARRAY<F32, 3> | VEC<STRING> |
+      | cluster_size | wire_format | cpu_type      | labels_type | cpu_wire_type | labels_wire_type |
+      | 1            | JSON        | ARRAY<F32, 3> | VEC<STRING> | ARRAY         | ARRAY            |
+      | 1            | AVRO        | ARRAY<F32, 3> | VEC<STRING> | ARRAY<FLOAT>  | ARRAY<STRING>    |
+      | 3            | JSON        | ARRAY<F32, 3> | VEC<STRING> | ARRAY         | ARRAY            |
+      | 3            | AVRO        | ARRAY<F32, 3> | VEC<STRING> | ARRAY<FLOAT>  | ARRAY<STRING>    |
 
   Scenario Outline: HTTP endpoint ingestor preserves multidimensional fixed and variable array shapes
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"

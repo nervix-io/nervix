@@ -3455,16 +3455,28 @@ pub fn string_literal(value: &str) -> String {
     }
 }
 
+/// A wire schema field type as canonical Plexus writes it: its keywords in uppercase.
 trait NativeTypeToPlexus {
     fn to_plexus_keyword(&self) -> String;
 }
 
-impl<T> NativeTypeToPlexus for T
-where
-    T: AsRef<str>,
-{
+impl NativeTypeToPlexus for JsonType {
     fn to_plexus_keyword(&self) -> String {
         self.as_ref().to_ascii_uppercase()
+    }
+}
+
+impl NativeTypeToPlexus for CborType {
+    fn to_plexus_keyword(&self) -> String {
+        self.as_ref().to_ascii_uppercase()
+    }
+}
+
+/// An AVRO type's keywords are the names of its Avro schema, so an array writes its item type at
+/// every depth, `ARRAY<ARRAY<DOUBLE>>`.
+impl NativeTypeToPlexus for AvroType {
+    fn to_plexus_keyword(&self) -> String {
+        self.to_string().to_ascii_uppercase()
     }
 }
 
@@ -3636,6 +3648,43 @@ mod tests {
         assert_eq!(
             plexus,
             "CREATE WIRE AVRO SCHEMA latency MODE STRICT (\n  p99 DOUBLE,\n  created_at STRING\n);"
+        );
+    }
+
+    #[test]
+    fn renders_avro_array_items_at_every_depth() {
+        let schema: Model = Model::WireAvroSchema(CreateWireSchema {
+            name: named("lists"),
+            strictness: Default::default(),
+            fields: vec![
+                WireSchemaField {
+                    name: named("totals"),
+                    ty: AvroType::array_of(AvroType::Long),
+                    optional: true,
+                },
+                WireSchemaField {
+                    name: named("matrix"),
+                    ty: AvroType::array_of(AvroType::array_of(AvroType::Double)),
+                    optional: false,
+                },
+            ],
+        });
+        assert_eq!(
+            schema.to_canonical_plexus().expect("must render"),
+            "CREATE WIRE AVRO SCHEMA lists MODE STRICT (\n  totals ARRAY<LONG> OPTIONAL,\n  \
+             matrix ARRAY<ARRAY<DOUBLE>>\n);"
+        );
+
+        let alter = crate::AlterWireSchema {
+            schema: named("lists"),
+            operations: vec![crate::AlterWireSchemaOperation::SetFieldType {
+                field: named("totals"),
+                ty: AvroType::array_of(AvroType::Int),
+            }],
+        };
+        assert_eq!(
+            super::alter_avro_wire_schema_to_canonical_plexus(&alter).expect("must render"),
+            "ALTER WIRE AVRO SCHEMA lists ALTER FIELD totals SET TYPE ARRAY<INT>;"
         );
     }
 
