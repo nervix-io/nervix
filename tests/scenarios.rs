@@ -220,6 +220,7 @@ mod deadlock_reports;
 mod domain_clock_attachment;
 mod domain_resume;
 mod emitter_finish;
+mod emitter_metrics;
 mod endpoint_intake;
 mod generated_http_payloads;
 mod http_transport;

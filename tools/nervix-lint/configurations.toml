@@ -115,12 +115,12 @@ packages = ["nervix-primitives", "nervix-paced-simulation", "nervix-server"]
 # and its limited cgroups have left beside the other admitted analysis compilations, until no other
 # is admitted, or for at most the wait limit. A compilation that peaks above the threshold needs a
 # reservation, and a reservation covers the peak its compilation measures. The server library's
-# analysis peaks at about 16 GiB; no other analysis compilation reaches 2 GiB.
+# analysis reaches about 17 GiB; other analyses stay below the admission threshold.
 [admission]
 threshold_gib = 4
 wait_limit_minutes = 30
 
 [[admission.reservation]]
 crate = "nervix_server"
-gib = 17
+gib = 18
 kind = "lib"
