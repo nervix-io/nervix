@@ -359,10 +359,15 @@ test-restore-codec-replies *args: build-deps build-test-cli build-deadlock-repor
     mkdir -p {{ quote(cargo_target_dir + "/restore-codec-replies") }}
     restore_codec_log="$(mktemp {{ quote(cargo_target_dir + "/restore-codec-replies/run.XXXXXX.log") }})"
     cargo test --package nervix-scenarios --test scenarios -- --tags @client_restore_codec_rejection {{ quote(args) }} 2>&1 | tee "$restore_codec_log"
-    if ! rg --quiet '^8 scenarios([ (]|$)' "$restore_codec_log"; then
-        echo "expected all eight restore reply scenarios to execute" >&2
-        exit 1
-    fi
+    python3 - "$restore_codec_log" <<'PY'
+    import re
+    import sys
+    from pathlib import Path
+    output = re.sub(r"\x1b\[[0-9;]*m", "", Path(sys.argv[1]).read_text())
+    counts = re.findall(r"^(\d+) scenarios?(?: \(|$)", output, re.MULTILINE)
+    if counts != ["8"]:
+        raise SystemExit(f"restore reply witnesses must execute eight scenarios; reported counts: {counts}")
+    PY
 
 # Qualify the real failed-step after hook; deliberate Cucumber failures stay failures.
 # This supervision check has its own verdict, outside ordinary coverage reports.

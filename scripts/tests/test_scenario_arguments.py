@@ -123,13 +123,23 @@ class ScenarioArgumentTests(unittest.TestCase):
             )
             cargo.chmod(0o755)
             environment = os.environ.copy()
-            environment["PATH"] = str(root) + os.pathsep + environment["PATH"]
+            # This recipe must also work on the book runner, which has no ripgrep. Keep the
+            # real shell/core tools and Python while excluding undeclared host executables.
+            for name in ("just", "bash", "sh", "mkdir", "mktemp", "tee", "uname"):
+                executable = shutil.which(name)
+                self.assertIsNotNone(executable, name)
+                (root / name).symlink_to(executable)
+            (root / "python3").symlink_to(sys.executable)
+            environment["PATH"] = str(root)
+            self.assertIsNone(shutil.which("rg", path=environment["PATH"]))
             environment["SCENARIO_ARGUMENT_CAPTURE"] = str(capture)
             arguments = ("--concurrency", "2", "--retry", "0", "two words", "$PATH")
             for summary, cargo_exit, succeeds in (
                 ("8 scenarios (8 passed)", 0, True),
+                ("\x1b[32m8 scenarios (8 passed)\x1b[0m", 0, True),
                 ("0 scenarios", 0, False),
                 ("4 scenarios (4 passed)", 0, False),
+                ("8 scenarios (8 passed)\n4 scenarios (4 passed)", 0, False),
                 ("8 scenarios (8 failed)", 101, False),
             ):
                 with self.subTest(summary=summary, cargo_exit=cargo_exit):
