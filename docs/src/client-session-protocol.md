@@ -2207,21 +2207,27 @@ they cover, and how to run them.
 ## Measured Costs
 
 [Client Wire 16](https://app.clickup.com/t/86bc1ahz3) retains the performance report, raw samples,
-reproduction commands, tested revisions and regression alarms, and
+reproduction commands, tested revisions and regression alarms,
 [Client Wire 18](https://app.clickup.com/t/86bc8cx3h) the command preparation and transport report
-with its paired samples. Measurements qualify their recorded workload, build profile and host; they
-do not establish throughput guarantees for another revision.
+with its paired samples, and [Client Wire 61](https://app.clickup.com/t/86bcx1uz6) the reports from
+before and after the server held its grammar. Measurements qualify their recorded workload, build
+profile and host; they do not establish throughput guarantees for another revision.
 
 Before it sends a command, a native client classifies the statements by parsing them with the
 client statement grammar. Building that grammar constructs the parser of every Plexus statement
-and allocates about a megabyte and a half, which costs far more than parsing a command with it,
-and releasing it costs about as much again. The Rust client therefore builds the grammar once on
-each thread that prepares a command and keeps it for the life of the thread. The execution
-identity and the request frame cost little beside the parse. `just client-wire-command-cost`
-measures each of these stages, and `just client-wire-tls-cost` compares the same command and fresh
-connections over plaintext and TLS in alternating pairs against two release servers. A TLS session
-pays most of what TLS costs in its handshake, when it connects; an established TLS session adds a
-few percent to a command's round trip.
+and allocates about 1.7 MB, which costs far more than parsing a command with it, and releasing it
+costs about as much again. The Rust client therefore builds the grammar once on each thread that
+prepares a command and keeps it for the life of the thread. The server reads every command,
+subscription, restore and completion request with the same grammar, held the same way: each worker
+thread of the node's runtime builds it for the first request it reads and keeps it. A node
+therefore holds at most one grammar on each worker thread, which is no more than its requests held
+while each built its own, and a completion request reads both the grammar's expectations and the
+local path being written with that one grammar. The execution identity and the request frame cost
+little beside the parse. `just client-wire-command-cost` measures each of these stages, and a
+completion read with a held grammar and with one built for it, and `just client-wire-tls-cost`
+compares the same command and fresh connections over plaintext and TLS in alternating pairs against
+two release servers. A TLS session pays most of what TLS costs in its handshake, when it connects;
+an established TLS session adds a few percent to a command's round trip.
 
 The cost model follows the protocol boundaries: the server writes Arrow column values directly
 into FlatBuffers tables, verification runs once per frame, and later views borrow that frame.

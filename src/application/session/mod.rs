@@ -78,9 +78,7 @@ use nervix_execution::{AdmissionError, CpuClass, ExecutionError, MemoryClass};
 use nervix_models::{
     CreateSubscription, DeleteSubscription, DomainName, TransactionInspectionRequest, UserName,
 };
-use nervix_plexus::client_statement::{
-    ClientStatement, ParsedClientStatement, parse_client_statement_sources,
-};
+use nervix_plexus::client_statement::{ClientStatement, ParsedClientStatement};
 use nervix_primitives::{
     sync::{
         Arc,
@@ -104,6 +102,7 @@ use super::{
     command_result::CommandResult,
     model_mutation::command_error,
     session_service::{SessionServiceImpl, rejected_source_response},
+    statement_grammar::with_statement_grammar,
     subscription::{OpenedSubscription, SessionDelivery, SessionSubscriptions, SessionView},
     transaction::TransactionInspectionOutcome,
 };
@@ -1222,7 +1221,8 @@ async fn open_subscription(
     if subscriptions.transaction_active() {
         return Err(Box::new(subscription_in_transaction()));
     }
-    let statements = match parse_client_statement_sources(&statement) {
+    let parsed = with_statement_grammar(|grammar| grammar.parse_sources(&statement));
+    let statements = match parsed {
         Ok(statements) => statements,
         Err(report) => {
             return Err(Box::new(rejected_source_response(report.current_context())));
