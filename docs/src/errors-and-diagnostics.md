@@ -1635,6 +1635,25 @@ operator can distinguish memory waiting, worker waiting and dependency work. The
 observations of the run; a successful later inspection does not identify the cause of an earlier
 timeout.
 
+The shared ONNX environment reports native diagnostics with a static message, the native severity
+and code site. It preserves the `ort::logging` tracing target and the `ort` span's identity and
+location. Native diagnostic text may contain tensor values, so it never enters the log, including
+under trace logging; this projection applies to model inspection and both inference modes.
+
+Stateful inferencer validation names the inferencer and offending port when a declaration repeats
+a port, uses a non-fixed state axis, mixes `BATCH` with `STATE`, or supplies an `INITIAL` expression
+that reads fields, is nondeterministic, or has the wrong type, shape or nullability. Model binding
+validation checks both ports of each state pair and requires complete input and output coverage.
+These are configuration refusals before activation.
+
+At stateful admission, an `INPUTS` row error or model refusal goes through that route's
+`ON MESSAGE ERROR` policy with the original input and captured materialized-state snapshot. It
+does not advance the branch's tensors or discard other rows of the input batch. A worker admission
+refusal that evaluated nothing remains an execution failure, with its typed cause; it is not a
+model rejection. A route construction error occurs after the model's successful invocation and
+does not undo that invocation. A later flush dispatches its buffered outputs without running the
+model again.
+
 ### Client Inspection Admission
 
 Client inspection during incoming preflight may refuse full command-memory or filesystem queue

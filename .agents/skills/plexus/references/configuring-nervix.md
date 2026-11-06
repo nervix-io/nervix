@@ -162,6 +162,7 @@ inputs. Keep placeholders obvious and list provisioning that must happen outside
 | Order records by expressions within a time bound | `REORDERER` |
 | Produce width/step aggregates | `WINDOW PROCESSOR` |
 | Run an ONNX model | `INFERENCER` |
+| Carry ONNX state between rows of each branch | `INFERENCER`; read `Runtime Nodes` → `State tensors` for the fixed-shape, initialization and reset contract |
 | Run custom guest processing | `WASM PROCESSOR` |
 | Reuse trusted batch-column logic inside expressions | `UDF` |
 | Match records from left and right relay sets | `CORRELATOR` |

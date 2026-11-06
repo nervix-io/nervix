@@ -1,3 +1,10 @@
+//! ONNX invocation at the data-plane boundary.
+//!
+//! Layer: data plane.
+//! Owns: native sessions, tensor invocation, branch-owned explicit state and safe diagnostics.
+//! Depends on: typed tensor plans, Arrow batches, the bounded executor and ONNX Runtime.
+//! Must not know: semantic Models, graph validation or placement decisions.
+
 #![cfg_attr(
     nervix_lint,
     nervix::context(
@@ -19,7 +26,7 @@ use nervix_models::{
     InferencerTensorMapping, InferencerTensorSchema,
 };
 use nervix_primitives::{
-    sync::{Arc, blocking::Mutex},
+    sync::{Arc, StdArc, blocking::Mutex},
     unmodeled::sync::OnceLock,
 };
 use ordered_float::OrderedFloat;
@@ -30,6 +37,9 @@ use ort::{
 };
 
 use crate::runtime_schema::{RuntimeRecordBatch, RuntimeValue};
+
+mod stateful;
+pub(super) use stateful::{PreparedStatefulInference, StatefulInferenceSession};
 
 /// Every way ONNX inference fails, from loading a model to reshaping one tensor axis.
 #[derive(Debug, thiserror::Error)]
@@ -164,9 +174,51 @@ static ONNX_ENVIRONMENT: OnceLock<Result<Environment, ort::Error>> = OnceLock::n
 
 /// The environment this process creates its ONNX sessions in.
 pub(crate) fn onnx_environment() -> error_stack::Result<&'static Environment, &'static ort::Error> {
-    match ONNX_ENVIRONMENT.get_or_init(|| ort::init().build()) {
+    match ONNX_ENVIRONMENT.get_or_init(|| {
+        ort::init()
+            .with_logger(StdArc::new(report_native_diagnostic))
+            .build()
+    }) {
         Ok(environment) => Ok(environment),
         Err(refusal) => Err(Report::new(refusal)),
+    }
+}
+
+/// Projects native diagnostics at their reporting boundary: native text can contain tensor values.
+/// Severity, the tracing target and the native code site remain available to operators.
+fn report_native_diagnostic(
+    level: ort::logging::LogLevel,
+    _category: &str,
+    id: &str,
+    site: &str,
+    _message: &str,
+) {
+    let span = tracing::span!(
+        target: "ort::logging",
+        tracing::Level::TRACE,
+        "ort",
+        id,
+        location = site
+    );
+    macro_rules! report {
+        ($severity:expr) => {
+            tracing::event!(
+                target: "ort::logging",
+                parent: &span,
+                $severity,
+                native_level = ?level,
+                native_site = site,
+                "native ONNX diagnostic"
+            )
+        };
+    }
+    match level {
+        ort::logging::LogLevel::Verbose => report!(tracing::Level::TRACE),
+        ort::logging::LogLevel::Info => report!(tracing::Level::INFO),
+        ort::logging::LogLevel::Warning => report!(tracing::Level::WARN),
+        ort::logging::LogLevel::Error | ort::logging::LogLevel::Fatal => {
+            report!(tracing::Level::ERROR);
+        }
     }
 }
 

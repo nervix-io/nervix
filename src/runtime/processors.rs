@@ -29,7 +29,7 @@ use super::{
     RelayMessage, RelayRecordBatch, ReplicatedWasmProcessorState, ReplicatedWindowProcessorState,
     RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector, WasmGuestStateResetFence,
     WasmLiveInstance, WindowAccumulatorPlan, WindowProcessorState,
-    inferencer::OnnxInferencerSession,
+    inferencer::{OnnxInferencerSession, PreparedStatefulInference, StatefulInferenceSession},
 };
 use crate::{
     registry::{BranchInstanceAckBoundary, BranchedProcessorNodeSpec},
@@ -173,6 +173,17 @@ pub(super) enum RelayProcessorOperationTemplate {
         output_schema: Vec<InferencerTensorDeclaration>,
         compiled_input_program: CompiledInferencerInputProgram,
     },
+    StatefulInferencer {
+        output_routes: RelayProcessorOutputsTemplate,
+        resource: ResourceName,
+        resource_version: u64,
+        file: String,
+        inputs: Vec<InferencerTensorMapping>,
+        output_schema: Vec<InferencerTensorDeclaration>,
+        state: crate::registry::InferencerStatePlan,
+        compiled_input_program: Box<CompiledProgramWithMaterializedInterest>,
+        prepared: Option<Arc<PreparedStatefulInference>>,
+    },
     WasmProcessor {
         output_routes: RelayProcessorOutputsTemplate,
         resource: ResourceName,
@@ -269,6 +280,15 @@ pub(super) enum RelayProcessorOperationNode {
         compiled_input_program: CompiledInferencerInputProgram,
         output_buffers: Vec<InferencerOutputBuffer>,
         session: Option<OnnxInferencerSession>,
+    },
+    StatefulInferencer {
+        output_routes: RelayProcessorOutputsNode,
+        resource: ResourceName,
+        resource_version: u64,
+        file: String,
+        compiled_input_program: Box<CompiledProgramWithMaterializedInterest>,
+        prepared: Arc<PreparedStatefulInference>,
+        session: Box<StatefulInferenceSession>,
     },
     WasmProcessor {
         output_routes: RelayProcessorOutputsNode,
@@ -390,6 +410,37 @@ impl CompiledInferencerInputProgram {
         input_schema: &CompiledSchema,
         udfs: Option<&UdfExecutor>,
     ) -> error_stack::Result<Self, ProcessorCompileError> {
+        Self::compile_inner(processor, mappings, input_schema, udfs, false)
+            .map(|(program, _)| program)
+    }
+
+    pub(super) fn compile_stateful(
+        processor: &ModelName,
+        mappings: &[InferencerTensorMapping],
+        input_schema: &CompiledSchema,
+        udfs: Option<&UdfExecutor>,
+    ) -> error_stack::Result<CompiledProgramWithMaterializedInterest, ProcessorCompileError> {
+        let (program, error_sites) =
+            Self::compile_inner(processor, mappings, input_schema, udfs, true)?;
+        Ok(CompiledProgramWithMaterializedInterest {
+            compiled: program.program,
+            materialized_interest: super::MaterializedProgramInterest::default(),
+            output_namespace_input: super::vm_compile::OutputNamespaceInput::Uninitialized,
+            lookup_hash_maps: Vec::new(),
+            error_sites,
+        })
+    }
+
+    fn compile_inner(
+        processor: &ModelName,
+        mappings: &[InferencerTensorMapping],
+        input_schema: &CompiledSchema,
+        udfs: Option<&UdfExecutor>,
+        capture_errors: bool,
+    ) -> error_stack::Result<
+        (Self, super::vm_compile::CompiledMessageErrorSites),
+        ProcessorCompileError,
+    > {
         let mut assignments = Vec::with_capacity(mappings.len());
         for mapping in mappings {
             let target = FieldName::parse(&mapping.tensor).change_context_lazy(|| {
@@ -458,9 +509,26 @@ impl CompiledInferencerInputProgram {
         .change_context_lazy(|| ProcessorCompileError::InferencerInputsCompile {
             processor: processor.clone(),
         })?;
-        Ok(Self {
-            program: Arc::new(program),
-        })
+        let error_sites = if capture_errors {
+            super::vm_compile::compiled_message_error_sites(
+                &parsed,
+                &vec![MessageErrorOperation::Inferencer; mappings.len()],
+                None,
+            )
+            .change_context_lazy(|| {
+                ProcessorCompileError::InferencerInputsCompile {
+                    processor: processor.clone(),
+                }
+            })?
+        } else {
+            super::vm_compile::CompiledMessageErrorSites::new()
+        };
+        Ok((
+            Self {
+                program: Arc::new(program),
+            },
+            error_sites,
+        ))
     }
 }
 
@@ -473,6 +541,7 @@ impl RelayProcessorOperationNode {
             | Self::Correlator { output_routes, .. }
             | Self::Junction { output_routes, .. }
             | Self::Inferencer { output_routes, .. }
+            | Self::StatefulInferencer { output_routes, .. }
             | Self::WasmProcessor { output_routes, .. } => output_routes,
         }
     }
@@ -485,6 +554,7 @@ impl RelayProcessorOperationNode {
             | Self::Correlator { output_routes, .. }
             | Self::Junction { output_routes, .. }
             | Self::Inferencer { output_routes, .. }
+            | Self::StatefulInferencer { output_routes, .. }
             | Self::WasmProcessor { output_routes, .. } => output_routes,
         }
     }

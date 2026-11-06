@@ -101,6 +101,12 @@ pub(in crate::registry) fn visit_model_expressions(
             for mapping in &model.inputs {
                 visitor(&mapping.expression);
             }
+            for state in &model.state {
+                if let nervix_models::InferencerStateInitial::Constant(expression) = &state.initial
+                {
+                    visitor(expression);
+                }
+            }
             visit_outputs(&model.output_routes, visitor);
         }
         Model::WasmProcessor(model) => {

@@ -43,7 +43,8 @@ use crate::{
     DescribeTransaction, DomainPace, DomainStartPoint, EmitterBatchPolicy, EmitterBody,
     EmitterEntity, EmitterEnvelope, EmitterPublishing, EnvelopeClause, ExistingUserPolicy,
     Expression, FieldScope, Float64Literal, FlushPolicy, GeneralErrorPolicy,
-    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping,
+    InferencerStateBinding, InferencerStateInitial, InferencerTensorDeclaration,
+    InferencerTensorDimension, InferencerTensorMapping, InferencerTensorSchema,
     IngestTimestampSource, IngestorInput, Inheritance, InputCollectPolicy, InspectionFormat,
     Invocation, JsonType, Literal, MaterializedStateDependency, MaterializedStatePolicy,
     MembershipOperator, MessageErrorPolicy, Model, ModelName, MongoDbConflictAction,
@@ -2312,6 +2313,9 @@ impl<Version: Display> CreateInferencer<Version> {
             "INPUTS",
             inference_mapping_items(&self.inputs)?,
         ));
+        if !self.state.is_empty() {
+            clauses.push(Clause::braced("STATE", inference_state_items(&self.state)?));
+        }
         clauses.push(Clause::braced(
             "OUTPUT SCHEMA",
             inference_output_schema_items(&self.output_schema)?,
@@ -2375,6 +2379,24 @@ impl<Version: Display> CreateWasmProcessor<Version> {
     }
 }
 
+fn inference_tensor_schema(schema: &InferencerTensorSchema) -> String {
+    let dimensions = schema
+        .dimensions
+        .iter()
+        .map(|dimension| match dimension {
+            InferencerTensorDimension::Fixed(size) => size.to_string(),
+            InferencerTensorDimension::Dynamic => "DYNAMIC".to_string(),
+            InferencerTensorDimension::Batch => "BATCH".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{} TENSOR<{}>[{dimensions}]",
+        schema.representation.as_ref(),
+        schema.element_type.as_ref()
+    )
+}
+
 fn inference_mapping_items(
     mappings: &[InferencerTensorMapping],
 ) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
@@ -2382,22 +2404,10 @@ fn inference_mapping_items(
         .iter()
         .map(|mapping| {
             Ok(format!(
-                "{} {} TENSOR<{}>[{}] = {}",
+                "{} {} = {}",
                 string_literal(&mapping.tensor),
-                mapping.schema.representation.as_ref(),
-                mapping.schema.element_type.as_ref(),
-                mapping
-                    .schema
-                    .dimensions
-                    .iter()
-                    .map(|dimension| match dimension {
-                        InferencerTensorDimension::Fixed(size) => size.to_string(),
-                        InferencerTensorDimension::Dynamic => "DYNAMIC".to_string(),
-                        InferencerTensorDimension::Batch => "BATCH".to_string(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                expression_to_plexus(&mapping.expression)?
+                inference_tensor_schema(&mapping.schema),
+                expression_to_plexus(&mapping.expression)?,
             ))
         })
         .collect()
@@ -2406,25 +2416,35 @@ fn inference_mapping_items(
 fn inference_output_schema_items(
     declarations: &[InferencerTensorDeclaration],
 ) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
-    declarations
+    Ok(declarations
         .iter()
         .map(|declaration| {
-            Ok(format!(
-                "{} {} TENSOR<{}>[{}]",
+            format!(
+                "{} {}",
                 string_literal(&declaration.tensor),
-                declaration.schema.representation.as_ref(),
-                declaration.schema.element_type.as_ref(),
-                declaration
-                    .schema
-                    .dimensions
-                    .iter()
-                    .map(|dimension| match dimension {
-                        InferencerTensorDimension::Fixed(size) => size.to_string(),
-                        InferencerTensorDimension::Dynamic => "DYNAMIC".to_string(),
-                        InferencerTensorDimension::Batch => "BATCH".to_string(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                inference_tensor_schema(&declaration.schema),
+            )
+        })
+        .collect())
+}
+
+fn inference_state_items(
+    bindings: &[InferencerStateBinding],
+) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
+    bindings
+        .iter()
+        .map(|binding| {
+            let initial = match &binding.initial {
+                InferencerStateInitial::Zeros => "ZEROS".to_string(),
+                InferencerStateInitial::Constant(expression) => {
+                    format!("({})", expression_to_plexus(expression)?)
+                }
+            };
+            Ok(format!(
+                "{} FROM {} {} INITIAL {initial}",
+                string_literal(&binding.input),
+                string_literal(&binding.output),
+                inference_tensor_schema(&binding.schema),
             ))
         })
         .collect()

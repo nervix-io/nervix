@@ -99,6 +99,8 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 - Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference,
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
   repartitioning.
+- For inference with model-carried state, read `Runtime Nodes` → `Inferencer` → `State tensors`
+  before choosing port bindings, initialization, branch isolation or recovery guarantees.
 - Placement: latency-critical or heavy corridors, colocation enforcement, rule precedence, and
   whether ordinary scheduler heuristics should remain neutral.
 - Operations: batching/flush, error routes, credentials/TLS resources, observability, session

@@ -260,6 +260,14 @@ impl fmt::Display for OtelMappingIssue {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum RegistryError {
+    #[error("inferencer '{node}' has invalid tensor schemas in domain '{domain}'")]
+    InferencerTensorSchemas { domain: DomainName, node: ModelName },
+    #[error("inferencer '{node}' tensor port '{port}' is invalid in domain '{domain}'")]
+    InferencerState {
+        domain: DomainName,
+        node: ModelName,
+        port: String,
+    },
     #[error("{parameter} limit {maximum} is below {actual} required by resource {resource:?}")]
     ResourceParameterLimit {
         resource: nervix_models::ResourceId,

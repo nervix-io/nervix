@@ -92,6 +92,15 @@ both use the same schedule-to-revision planning boundary.
 | Emitters | Typed emitter and optional connector client or codec, ordered source relays and predicates, construction, request, ordering and envelope expressions, flush, batching, ACK, and error policies | Resolve local mounts and schemas, bind programs, register local or remote consumers, and open the emitter |
 | Message errors | Source and optional partial-output schemas, target relay and branch, route flush contract, and ordered `SET` program | Bind once for the installed revision; execute it for failed records using their captured state |
 
+An inferencer's state specification records its validated port pairs, fixed element counts,
+initial expressions and static tensor bytes per branch. Node-local binding materializes the initial
+tensors before publishing the processor template. Each concrete branch starts with that immutable
+initial generation and exclusively owns its successors. Stateful admission runs the model once per
+row before output-route buffering; native state outputs become the next invocation's inputs without
+an Arrow round trip. Route flushes dispatch already-computed output. The stateless inferencer keeps
+its existing flush-time execution. These tensor generations are volatile and are recreated from
+the prepared initial generation after restart, owner change or eviction.
+
 Emitter planning reads the concrete destination's own publishing enum. Broker, MQTT and SQS
 alternatives lower exhaustively into their connector policies; request-only and unconfirmed-only
 entities need no mode-admission recheck. NATS SUBJECT lowers to a core-write leaf with no

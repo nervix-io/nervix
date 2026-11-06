@@ -295,6 +295,40 @@ impl RelayProcessorOperationNode {
                 Ok(())
             }
             (
+                Self::StatefulInferencer {
+                    output_routes,
+                    resource,
+                    resource_version,
+                    file,
+                    compiled_input_program,
+                    prepared,
+                    ..
+                },
+                RelayProcessorOperationTemplate::StatefulInferencer {
+                    output_routes: desired_outputs,
+                    resource: desired_resource,
+                    resource_version: desired_version,
+                    file: desired_file,
+                    compiled_input_program: desired_program,
+                    prepared: desired_prepared,
+                    ..
+                },
+            ) => {
+                let desired = desired_prepared
+                    .as_ref()
+                    .ok_or_else(|| Report::new(ProcessorTemplateError::InferencerSession))?;
+                if resource != desired_resource
+                    || resource_version != desired_version
+                    || file != desired_file
+                    || !prepared.same_binding(desired)
+                {
+                    return Err(Report::new(ProcessorTemplateError::InferencerSession));
+                }
+                output_routes.apply_template(desired_outputs)?;
+                *compiled_input_program = desired_program.clone();
+                Ok(())
+            }
+            (
                 Self::WasmProcessor {
                     output_routes,
                     resource,
@@ -631,6 +665,28 @@ impl RelayProcessorTemplate {
                         session: None,
                     }
                 }
+                RelayProcessorOperationTemplate::StatefulInferencer {
+                    output_routes,
+                    resource,
+                    resource_version,
+                    file,
+                    compiled_input_program,
+                    prepared,
+                    ..
+                } => {
+                    let prepared = prepared
+                        .as_ref()
+                        .ok_or_else(|| Report::new(ProcessorTemplateError::InferencerSession))?;
+                    RelayProcessorOperationNode::StatefulInferencer {
+                        output_routes: Self::instantiate_outputs(output_routes),
+                        resource: resource.clone(),
+                        resource_version: *resource_version,
+                        file: file.clone(),
+                        compiled_input_program: compiled_input_program.clone(),
+                        session: Box::new(prepared.instantiate()),
+                        prepared: prepared.clone(),
+                    }
+                }
                 RelayProcessorOperationTemplate::WasmProcessor {
                     output_routes,
                     resource,
@@ -683,6 +739,41 @@ impl RelayProcessorTemplate {
 }
 
 impl BranchInstanceTemplate {
+    pub(super) async fn prepare_stateful_inferencers(
+        &mut self,
+        executor: &nervix_execution::Executor,
+        udfs: Option<&UdfExecutor>,
+    ) -> error_stack::Result<(), planning::PlanningError> {
+        for processor in self.processors.values_mut() {
+            nervix_primitives::task::consume_budget().await;
+            if let RelayProcessorOperationTemplate::StatefulInferencer {
+                inputs,
+                output_schema,
+                state,
+                prepared,
+                ..
+            } = &mut processor.operation
+            {
+                *prepared = Some(Arc::new(
+                    inferencer::PreparedStatefulInference::prepare(
+                        executor,
+                        inputs,
+                        output_schema,
+                        state,
+                        udfs,
+                    )
+                    .await
+                    .change_context_lazy(|| {
+                        planning::PlanningError::PrepareInferencerState {
+                            node: processor.processor.clone(),
+                        }
+                    })?,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) async fn prepare_wasm_processors(
         &mut self,
         runtime: &Runtime,

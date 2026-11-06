@@ -10559,7 +10559,7 @@ async fn given_node_has_large_resource_file(
 }
 
 /// The generated ONNX models a fixture resource directory carries under `models/`.
-const ONNX_FIXTURE_MODELS: [&str; 7] = [
+const ONNX_FIXTURE_MODELS: [&str; 9] = [
     "simple_score.onnx",
     "alternate_score.onnx",
     "batch_score.onnx",
@@ -10567,6 +10567,8 @@ const ONNX_FIXTURE_MODELS: [&str; 7] = [
     "matrix_identity.onnx",
     "scalar_identity.onnx",
     "f64_score.onnx",
+    "running_sum.onnx",
+    "checked_running_sum.onnx",
 ];
 
 fn onnx_fixture_path(fixture: &str) -> PathBuf {
@@ -10588,6 +10590,14 @@ async fn place_onnx_fixture_resource_directory(
         .cluster()
         .node_base_dir(node_id)
         .expect("node base dir should exist");
+    place_onnx_fixture_resource_directory_at(world, base_dir, placeholder).await
+}
+
+async fn place_onnx_fixture_resource_directory_at(
+    world: &mut ScenarioWorld,
+    base_dir: PathBuf,
+    placeholder: &str,
+) -> PathBuf {
     let resource_dir = base_dir.join("fixtures").join(placeholder);
     let resource_dir = crate::common::runner_offload::off_the_runner(move || {
         ensure_onnx_runtime_loaded();
@@ -10615,6 +10625,31 @@ async fn place_onnx_fixture_resource_directory(
         .placeholders
         .insert(placeholder.to_string(), resource_dir.display().to_string());
     resource_dir
+}
+
+#[given(expr = "an ONNX fixture resource directory {string} exists")]
+async fn given_onnx_fixture_resource_directory_exists(
+    world: &mut ScenarioWorld,
+    placeholder: String,
+) {
+    if world.temp_root.is_none() {
+        world.temp_root = Some(
+            crate::common::runner_offload::off_the_runner(|| {
+                tempfile::Builder::new()
+                    .prefix("nervix-inference-fixtures-")
+                    .tempdir()
+                    .expect("the scenario owns its fixture root")
+            })
+            .await,
+        );
+    }
+    let base_dir = world
+        .temp_root
+        .as_ref()
+        .expect("the fixture root was initialized")
+        .path()
+        .to_path_buf();
+    place_onnx_fixture_resource_directory_at(world, base_dir, &placeholder).await;
 }
 
 #[given(expr = "node {string} has ONNX fixture resource directory {string}")]
@@ -21219,6 +21254,58 @@ async fn then_show_create_emitter_renders_these_clauses(
             "expected SHOW CREATE EMITTER {emitter} to contain {clause:?}, got: {output}"
         );
     }
+}
+
+#[then(
+    expr = "inferencer {string} is recreated from SHOW CREATE as {string} with its state \
+            declaration intact"
+)]
+async fn then_inferencer_is_recreated_from_show_create(
+    world: &mut ScenarioWorld,
+    name: String,
+    copy: String,
+) {
+    let leader = current_leader_node(world).await;
+    let canonical = world
+        .cluster()
+        .run_command(
+            &leader,
+            &world.domain,
+            &format!("SHOW CREATE INFERENCER {name};"),
+        )
+        .await
+        .expect("SHOW CREATE returns the inferencer's public declaration");
+    assert!(
+        canonical.contains("STATE"),
+        "the declaration retains STATE: {canonical}"
+    );
+    let statements = nervix_plexus::client_statement::parse_client_statements(&canonical)
+        .expect("the public declaration is executable Plexus");
+    assert_eq!(statements.len(), 1, "SHOW CREATE returns one declaration");
+    let recreated = canonical.replacen(
+        &format!("INFERENCER {name}"),
+        &format!("INFERENCER {copy}"),
+        1,
+    );
+    assert_ne!(canonical, recreated, "the copy has a distinct name");
+    world
+        .cluster()
+        .run_command(&leader, &world.domain, &recreated)
+        .await
+        .expect("the server accepts its complete stateful declaration under a new name");
+    let rendered_copy = world
+        .cluster()
+        .run_command(
+            &leader,
+            &world.domain,
+            &format!("SHOW CREATE INFERENCER {copy};"),
+        )
+        .await
+        .expect("SHOW CREATE returns the recreated declaration");
+    assert_eq!(
+        rendered_copy, recreated,
+        "recreation preserves the complete declaration"
+    );
 }
 
 #[then("the last command output is saved as the relocation plan")]

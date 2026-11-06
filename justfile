@@ -330,6 +330,13 @@ test-scenarios *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- {{ quote(args) }}
 
+# These checks reuse the scenario executable for both embedded nodes and a server process.
+test-inferencer-state *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/runtime/inferencer_state.feature {{ quote(args) }}
+
 # Qualify the real failed-step after hook; deliberate Cucumber failures stay failures.
 # This supervision check has its own verdict, outside ordinary coverage reports.
 test-backup-cut-cleanup: build-deps build-test-cli
@@ -3451,6 +3458,10 @@ coverage-kache-ci:
 test-go-ci-tool:
     python3 -m unittest scripts.tests.test_go_ci_tool
 
+# Run one Python script owner or named test without the full documentation suite.
+test-script-unit test:
+    uv run --locked python -m unittest {{ quote(test) }}
+
 # Measure the installer's Python lines separately from Rust's ordinary LCOV.
 coverage-go-ci-tool:
     mkdir -p target/go-ci-tool
@@ -4012,8 +4023,8 @@ generate-dev-tls:
     set -euo pipefail
     bash scripts/generate_dev_tls.sh
 
-generate-test-onnx output="tests/fixtures/onnx/simple_score.onnx" alternate_output="tests/fixtures/onnx/alternate_score.onnx" batch_output="tests/fixtures/onnx/batch_score.onnx" f64_output="tests/fixtures/onnx/f64_score.onnx" matrix_output="tests/fixtures/onnx/matrix_identity.onnx" dynamic_batch_output="tests/fixtures/onnx/dynamic_batch_score.onnx" scalar_output="tests/fixtures/onnx/scalar_identity.onnx":
-    python3 scripts/train_simple_onnx.py --output {{ output }} --alternate-output {{ alternate_output }} --batch-output {{ batch_output }} --f64-output {{ f64_output }} --matrix-output {{ matrix_output }} --dynamic-batch-output {{ dynamic_batch_output }} --scalar-output {{ scalar_output }}
+generate-test-onnx output="tests/fixtures/onnx/simple_score.onnx" alternate_output="tests/fixtures/onnx/alternate_score.onnx" batch_output="tests/fixtures/onnx/batch_score.onnx" f64_output="tests/fixtures/onnx/f64_score.onnx" matrix_output="tests/fixtures/onnx/matrix_identity.onnx" dynamic_batch_output="tests/fixtures/onnx/dynamic_batch_score.onnx" scalar_output="tests/fixtures/onnx/scalar_identity.onnx" running_sum_output="tests/fixtures/onnx/running_sum.onnx" checked_running_sum_output="tests/fixtures/onnx/checked_running_sum.onnx":
+    python3 scripts/train_simple_onnx.py --output {{ output }} --alternate-output {{ alternate_output }} --batch-output {{ batch_output }} --f64-output {{ f64_output }} --matrix-output {{ matrix_output }} --dynamic-batch-output {{ dynamic_batch_output }} --scalar-output {{ scalar_output }} --running-sum-output {{ running_sum_output }} --checked-running-sum-output {{ checked_running_sum_output }}
 
 # Download a CPU or CUDA 13 runtime; `host` selects the current machine's platform.
 download-onnxruntime flavor="cpu" platform="host":
@@ -4021,7 +4032,11 @@ download-onnxruntime flavor="cpu" platform="host":
 
 # Check runtime package selection and the CPU/CUDA image build targets.
 test-onnxruntime:
-    uv run --locked python -m unittest scripts.tests.test_onnxruntime
+    uv run --locked python -m unittest scripts.tests.test_onnxruntime scripts.tests.test_train_simple_onnx
+
+# Check the caller-selected destinations of every generated ONNX model.
+test-onnx-fixtures:
+    python3 -m unittest scripts.tests.test_train_simple_onnx
 
 # Build both final targets with fixture binaries and check layer sharing and runtime dependencies.
 test-onnxruntime-docker:
