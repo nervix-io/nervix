@@ -2,6 +2,12 @@
 
 *Plexus, the Nervix graph definition language.*
 
+`just test-cluster-duration-scenarios` selects the one- and three-node multi-span cluster
+duration regression. It prepares the console assets, WASM processor guests and ONNX runtime
+that the in-process server loads, and needs no external transport or client-tool build.
+`just test-unit-binary <executable> <filters>` replays a compiled unit-test executable without
+rebuilding it; its evidence applies only to the source inputs that produced that executable.
+
 The HTTPS console fixture uses the console's reserved port for its TLS listener and lets the
 system assign the accompanying plaintext listener's port. It advertises the reserved HTTPS
 address explicitly and presents the node's fixture certificate. The redirect scenario launches a

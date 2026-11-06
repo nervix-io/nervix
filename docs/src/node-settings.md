@@ -375,6 +375,13 @@ Plexus, the Nervix graph definition language:
 ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;
 ```
 
+Duration assignments accept [multi-span duration literals](domains-and-time.md#duration-literals),
+including the text canonical Plexus renders:
+
+```plexus
+ALTER CLUSTER SET DOMAIN_DRAIN_TIMEOUT = 13m 49s;
+```
+
 The statement runs outside domain transactions and needs no selected domain. Its assignments
 form one transition: either every assignment is committed or none is. A duplicate parameter,
 an invalid value, or a cap that an existing model exceeds refuses the transition with the

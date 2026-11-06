@@ -261,6 +261,7 @@ mod web_console_command_retry;
 mod web_console_connections;
 mod web_console_request_window;
 mod web_console_restore_faults;
+mod web_console_unreadable;
 mod websocket_lifecycle;
 mod wide_row_intake;
 

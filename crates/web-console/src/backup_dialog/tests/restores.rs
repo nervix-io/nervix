@@ -709,3 +709,71 @@ fn a_restore_ends_at_once_when_its_file_or_reply_cannot_be_read() {
     );
     assert_eq!(*ended.failure(), RestoreStreamError::NoAddress);
 }
+
+#[test]
+fn an_unreadable_restore_reply_naming_another_execution_leaves_its_own_outcome_unknown() {
+    let mut foreign = outcome(CommandDisposition::Failed);
+    foreign.execution_reference =
+        nervix_models::CommandExecutionReference::parse("0192d4e4-7b36-7c3e-9f00-000000000001")
+            .assured("a literal execution reference");
+    assert_ne!(foreign.execution_reference, reference());
+    let browser = InMemoryBrowser::with_scripts([answering_at_the_end(reply(
+        RestoreDisposition::Outcome(Box::new(foreign)),
+    ))]);
+    let ended = run(upload(archive_bytes()), &browser);
+    assert!(matches!(
+        ended.failure(),
+        RestoreStreamError::ReferenceMismatch { .. }
+    ));
+    assert_eq!(browser.observed().opened.len(), 1);
+    shows_unknown(ended);
+}
+
+#[test]
+fn an_unreadable_restore_reply_leaves_its_outcome_unknown() {
+    let browser = InMemoryBrowser::with_scripts([answering_at_the_end(Received::Text)]);
+    let ended = run(upload(archive_bytes()), &browser);
+    assert_eq!(*ended.failure(), RestoreStreamError::InvalidReply);
+    assert_eq!(browser.observed().opened.len(), 1);
+    shows_unknown(ended);
+}
+
+#[test]
+fn an_unreadable_restore_reply_answering_another_request_leaves_its_outcome_unknown() {
+    let reply = RestoreReply {
+        request_id: Some(nervix_client_wire::RequestId::new(
+            std::num::NonZeroU64::new(2).assured("the fixture's request identity is nonzero"),
+        )),
+        disposition: RestoreDisposition::Outcome(Box::new(outcome(CommandDisposition::Failed))),
+    };
+    let frame = reply
+        .encode(&SESSION_LIMITS)
+        .assured("the reply fits one frame");
+    let codec = ServerRestoreWebSocketCodec::new(SESSION_LIMITS);
+    let received = Received::Binary(Vec::from(codec.encode(frame)));
+    let browser = InMemoryBrowser::with_scripts([answering_at_the_end(received)]);
+    let ended = run(upload(archive_bytes()), &browser);
+    assert_eq!(*ended.failure(), RestoreStreamError::UnexpectedReply);
+    assert_eq!(browser.observed().opened.len(), 1);
+    shows_unknown(ended);
+}
+
+fn shows_unknown(ended: Ended) {
+    assert!(
+        ended.failure().leaves_outcome_unknown(),
+        "an unreadable reply proves nothing about this restore"
+    );
+    leptos::prelude::Owner::new().with(|| {
+        use leptos::prelude::GetUntracked as _;
+        let backups = super::dialog_signals();
+        let Err(failure) = ended.result else {
+            panic!("the reply breaks W-3");
+        };
+        backups.restore_failed(reference(), &failure);
+        assert!(matches!(
+            backups.restore.get_untracked(),
+            crate::backup_dialog::RestoreProgress::Unknown { reference: own, .. }
+                if own == reference()
+        ));
+    });
+}
