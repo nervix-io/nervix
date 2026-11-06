@@ -2384,7 +2384,11 @@ subject of the delivered message, including when the subscription uses a wildcar
 Header reads retain the wire order, including interleaved repeated names, with exact name matching.
 
 `NATS SUBJECT` ingestors use Core NATS queue subscriptions. `QUEUE GROUP` and `INSTANCES`
-are mandatory; use `INSTANCES 1` for a single queue member.
+are mandatory. `INSTANCES <n>` creates that many queue-group members across the cluster; use
+`INSTANCES 1` for one member. `INSTANCES PER PARTITION` creates one member for each partition index,
+placed with the corresponding partitions of its destination relays, under the
+[Instancing](#instancing) rules. Every member subscribes to the same subject and queue group;
+Core NATS chooses the member that receives each message.
 
 The NATS client accepts one optional authentication key: `token`, `nkey_seed` for a user NKey
 seed, or `credentials_file` for a NATS user credentials file containing its JWT and signing seed.
@@ -2457,7 +2461,8 @@ See the [NATS STREAM capability and mirror reference](connector-capabilities.md#
 
 `NATS STREAM` reads a JetStream stream through one durable pull consumer of it, and both belong to
 an operator: Nervix creates neither. `STREAM` and `CONSUMER` are string literals Nervix names
-exactly as written within the [external name rules](#external-names).
+exactly as written within the [external name rules](#external-names). This entity runs one instance
+and accepts no `INSTANCES` clause.
 
 The instance connects, looks the consumer up, and refuses a consumer it cannot read as it declares:
 a push consumer, which delivers to a subject of its own, and a consumer whose acknowledgement policy
