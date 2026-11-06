@@ -129,12 +129,12 @@ pub(in crate::registry) fn ensure_inferencer_state(
         let elements = binding.schema.fixed_element_count().ok_or_else(|| {
             Report::new(InferencerStateValidationError::ElementCount).change_context(context())
         })?;
-        let tensor_bytes = u64::try_from(elements)
-            .ok()
-            .and_then(|count| count.checked_mul(4))
-            .ok_or_else(|| {
-                Report::new(InferencerStateValidationError::ByteCount).change_context(context())
-            })?;
+        let elements = u64::try_from(elements)
+            .change_context(InferencerStateValidationError::ByteCount)
+            .change_context_lazy(context)?;
+        let tensor_bytes = elements.checked_mul(4).ok_or_else(|| {
+            Report::new(InferencerStateValidationError::ByteCount).change_context(context())
+        })?;
         bytes = bytes.checked_add(tensor_bytes).ok_or_else(|| {
             Report::new(InferencerStateValidationError::ByteCount).change_context(context())
         })?;

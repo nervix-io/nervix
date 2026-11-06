@@ -254,8 +254,9 @@ impl BoundSession {
     #[cfg_attr(
         nervix_lint,
         nervix::context(
-            lifecycle,
-            reason = "loads and resolves a session once for a branch lifetime"
+            recurring,
+            reason = "populates one branch's session cache before admission; later rows reuse the \
+                      retained native binding"
         )
     )]
     async fn load(
@@ -406,13 +407,14 @@ impl BoundSession {
                 .change_context_lazy(|| StatefulInferenceError::OutputTensor {
                     port: port.tensor.clone(),
                 })?;
+            let output_bytes = output_arrow_bytes(&port.schema, &shape, values.len())
+                .ok_or_else(|| Report::new(StatefulInferenceError::OutputSize))?;
             bytes = bytes
-                .checked_add(
-                    output_arrow_bytes(&port.schema, &shape, values.len())
-                        .ok_or_else(|| Report::new(StatefulInferenceError::OutputSize))?,
-                )
-                .filter(|bytes| *bytes <= limit)
+                .checked_add(output_bytes)
                 .ok_or_else(|| Report::new(StatefulInferenceError::WorkingSet))?;
+            if bytes > limit {
+                return Err(Report::new(StatefulInferenceError::WorkingSet));
+            }
             columns.push(output_tensor_array(
                 &port.schema,
                 &shape,
@@ -484,12 +486,16 @@ impl StatefulInferenceSession {
         if self.session.is_none() {
             self.session = Some(BoundSession::load(executor, path, definition).await?);
         }
-        let bytes = row
+        let input_bytes = row
             .estimated_bytes()
             .checked_mul(2)
-            .and_then(|bytes| bytes.checked_add(definition.state.bytes_per_branch))
-            .filter(|bytes| *bytes <= executor.limits().relay_decoded_bytes.as_u64())
             .ok_or_else(|| Report::new(StatefulInferenceError::WorkingSet))?;
+        let bytes = input_bytes
+            .checked_add(definition.state.bytes_per_branch)
+            .ok_or_else(|| Report::new(StatefulInferenceError::WorkingSet))?;
+        if bytes > executor.limits().relay_decoded_bytes.as_u64() {
+            return Err(Report::new(StatefulInferenceError::WorkingSet));
+        }
         let charge = executor
             .reserve(MemoryClass::Relay, bytes.max(1))
             .await
@@ -509,10 +515,13 @@ impl StatefulInferenceSession {
             .await
             .change_context(StatefulInferenceError::Execution)?;
         self.session = Some(session);
-        Ok(result.map(|(batch, generation)| {
-            self.generation = Arc::new(generation);
-            batch
-        }))
+        match result {
+            Ok((batch, generation)) => {
+                self.generation = Arc::new(generation);
+                Ok(Ok(batch))
+            }
+            Err(error) => Ok(Err(error)),
+        }
     }
 }
 

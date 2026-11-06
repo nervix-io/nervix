@@ -272,11 +272,9 @@ pub(super) async fn evaluate_processor_output_events(
     for (output_row, input_row) in executed.selected_rows.iter().enumerate() {
         if let Some(side_error) = executed.batch.errors().row(output_row).first() {
             let partial_output = captured_partial_output(&executed.batch, output_row);
-            let record = error_source
-                .original_row()
-                .cloned()
-                .map_or_else(|| batch.runtime_row(input_row), Ok)
-                .map_err(|error| {
+            let record = match error_source.original_row() {
+                Some(record) => record.clone(),
+                None => batch.runtime_row(input_row).map_err(|error| {
                     PlannedGeneralFailure::new(
                         error.change_context(PlannedGeneralError::MaterializeErrorInput {
                             operation,
@@ -284,7 +282,8 @@ pub(super) async fn evaluate_processor_output_events(
                         }),
                         batch.acks.clone(),
                     )
-                })?;
+                })?,
+            };
             message_errors.push(PendingProcessorOutputMessageError {
                 row: input_row,
                 key: batch.keys[input_row].clone(),
