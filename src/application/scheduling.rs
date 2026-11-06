@@ -1166,7 +1166,7 @@ impl SessionServiceImpl {
         deadline: ShutdownDeadline,
     ) -> ShutdownPhaseOutcome {
         let budget = ShutdownDrainBudget::start(drain_timeout, deadline);
-        // Stop source admission before the leader begins moving downstream nodes. A Kafka poll
+        // Stop ingestor admission before the leader begins moving downstream nodes. A Kafka poll
         // admitted while an emitter moves can otherwise leave its source ACK root waiting on that
         // move until the entire drain budget expires.
         self.inner.runtime.close_local_intake();
@@ -2500,7 +2500,7 @@ impl SessionServiceImpl {
                     let mut partitions =
                         match inspector.partitions(spec_for_task.topic.as_str()).await {
                             Ok(partitions) => partitions,
-                            // The ingestor's own source reports a topic the broker does not have,
+                            // The ingestor's connector reports a topic the broker does not have,
                             // so the watcher records it as a topic without partitions and
                             // publishes the real schedule once the topic is provisioned.
                             Err(error) if error.current_context().is_missing_topic() => Vec::new(),

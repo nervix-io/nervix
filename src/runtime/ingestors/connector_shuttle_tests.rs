@@ -50,7 +50,7 @@ impl PacedIngestorCadence for ChannelCadence {
             .due
             .recv()
             .await
-            .assured("the check holds the cadence sender until it shuts the source down"))
+            .assured("the check holds the cadence sender until it shuts the ingestor down"))
     }
 }
 
@@ -115,7 +115,7 @@ impl IngestorHostServices for ChannelHost {
         &mut self,
         _messages: Vec<IngestorIntakeMessage<'_>>,
     ) -> IngestorIntakeResult<IngestorBatchAcknowledgement> {
-        panic!("a channel source reads without acknowledgements");
+        panic!("a channel ingestor reads without acknowledgements");
     }
 
     async fn flush(&mut self) -> IngestorIntakeResult<()> {
@@ -167,23 +167,23 @@ impl IngestorHostServices for ChannelHost {
     fn mark_ready(&self) {}
     fn mark_unready(&self) {}
     fn record_transient_error(&self, reason: String, _retry_after: Duration) {
-        panic!("channel source had an unexpected transient error: {reason}");
+        panic!("channel ingestor had an unexpected transient error: {reason}");
     }
     fn clear_transient_error(&self) {}
     fn report_error(&self, message: String) {
-        panic!("channel source reported an unexpected error: {message}");
+        panic!("channel ingestor reported an unexpected error: {message}");
     }
     fn handle_ack_failure(&self, reason: String) {
-        panic!("unacknowledged channel source reported an ACK failure: {reason}");
+        panic!("unacknowledged channel ingestor reported an ACK failure: {reason}");
     }
     fn record_transport_redeliveries(&self, positions: usize) {
-        panic!("a channel source without positions discarded {positions} after a reconnect");
+        panic!("a channel ingestor without positions discarded {positions} after a reconnect");
     }
     fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
-        panic!("a channel source whose payloads all fit dropped {payloads} for their size");
+        panic!("a channel ingestor whose payloads all fit dropped {payloads} for their size");
     }
     fn record_unconfirmed_stop(&self, positions: usize) {
-        panic!("a channel source without positions left {positions} unconfirmed");
+        panic!("a channel ingestor without positions left {positions} unconfirmed");
     }
 }
 
@@ -215,7 +215,7 @@ impl PacedIngestorHostServices for ChannelHost {
     }
 
     fn record_poll_error(&self, reason: String) {
-        panic!("channel source had an unexpected poll error: {reason}");
+        panic!("channel ingestor had an unexpected poll error: {reason}");
     }
 }
 
@@ -264,7 +264,7 @@ fn engagement_during_dispatch(family: IngestorFamily, cause: IngestorQuiesceCaus
         let metrics = RuntimeMetrics::default();
         let domain = DomainName::try_from("shuttle")
             .assured("the check's domain is an identifier-shaped name");
-        let ingestor = IngestorName::try_from("source")
+        let ingestor = IngestorName::try_from("ingestor")
             .assured("the check's ingestor is an identifier-shaped name");
         let labels = metrics.register_ingestor_quiesce(&domain, &ingestor, Unit::SINGLE, None);
         let quiesce = Arc::new(IngestorQuiesceControl::new(
@@ -293,15 +293,15 @@ fn engagement_during_dispatch(family: IngestorFamily, cause: IngestorQuiesceCaus
             dispatch_completed: None,
         };
         let (shutdown, shutdown_rx) = watch::channel(false);
-        let source = ChannelIngestor::new(receiver);
+        let connector = ChannelIngestor::new(receiver);
         if matches!(family, IngestorFamily::Request) {
-            // Request sources only replay work already buffered when their loop starts.
+            // Request ingestors only replay work already buffered when their loop starts.
             send_message(&replays, 1).await;
         }
         let loop_task = match family {
             IngestorFamily::Broker => {
                 nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
-                    source,
+                    connector,
                     IngestorHost::new(host),
                     BrokerIngestorPolicy {
                         acknowledgement: IngestorAckPolicy::None,
@@ -312,7 +312,7 @@ fn engagement_during_dispatch(family: IngestorFamily, cause: IngestorQuiesceCaus
                 ))
             }
             IngestorFamily::Paced => nervix_primitives::task::spawn(run_paced_ingestor(
-                source,
+                connector,
                 host,
                 ChannelCadence {
                     due: cadence_receiver,
@@ -321,7 +321,7 @@ fn engagement_during_dispatch(family: IngestorFamily, cause: IngestorQuiesceCaus
                 shutdown_rx,
             )),
             IngestorFamily::Request => nervix_primitives::task::spawn(run_request_ingestor(
-                source,
+                connector,
                 IngestorHost::new(host),
                 shutdown_rx,
             )),
@@ -340,7 +340,7 @@ fn engagement_during_dispatch(family: IngestorFamily, cause: IngestorQuiesceCaus
         }
         first_dispatch
             .await
-            .assured("the source begins its first dispatch");
+            .assured("the ingestor begins its first dispatch");
         let (engaged, engagement_returned) = oneshot::channel();
         let engager = nervix_primitives::task::spawn({
             let quiesce = quiesce.clone();
@@ -448,7 +448,7 @@ fn interrupted_gathering(cause: ReadInterruptionCause) {
         match cause {
             ReadInterruptionCause::Stop => {}
             ReadInterruptionCause::Suspension => {
-                // Only a ingestor the loop has resumed is suspended, so intake is suspended once the
+                // Only an ingestor the loop has resumed is suspended, so intake is suspended once the
                 // loop reads. The batch can never fill, so the loop always reaches the suspension.
                 signals.reading.notified().await;
                 control.suspend_intake();
@@ -459,14 +459,14 @@ fn interrupted_gathering(cause: ReadInterruptionCause) {
         loop_task.await.assured(JOIN);
         let _transport = deliverer
             .await
-            .assured("the deliverer ends once it sent both messages or the source stopped");
+            .assured("the deliverer ends once it sent both messages or the ingestor stopped");
 
         let events = events.events();
         assert_every_taken_position_taken_in_first(&events);
         if let ReadInterruptionCause::Suspension = cause {
             assert!(
                 events.contains(&ReadEvent::Suspended),
-                "the suspension reached the source"
+                "the suspension reached the ingestor"
             );
         }
     });
@@ -509,7 +509,7 @@ fn lost_connection_during_settlement(losses: usize) {
         // which ends the loop without a shutdown.
         loop_task
             .await
-            .assured("the host loop ends when its source closes");
+            .assured("the host loop ends when its ingestor closes");
         loser
             .await
             .assured("the loss task ends after its last loss");
@@ -547,7 +547,7 @@ struct ConfirmationProgress {
     confirmed_batches: AtomicUsize,
 }
 
-/// A ingestor that hands the loop its two messages as one batch, and whose transport takes a round
+/// An ingestor that hands the loop its two messages as one batch, and whose transport takes a round
 /// trip to confirm them.
 struct ConfirmingChannelIngestor {
     queue: Vec<u64>,
@@ -630,7 +630,7 @@ impl IngestorHostServices for GraphHost {
         &mut self,
         _messages: Vec<IngestorIntakeMessage<'_>>,
     ) -> IngestorIntakeResult<()> {
-        panic!("the check's source reads in an acknowledged mode");
+        panic!("the check's ingestor reads in an acknowledged mode");
     }
 
     async fn intake_acknowledged(
@@ -688,19 +688,19 @@ impl IngestorHostServices for GraphHost {
     }
     fn clear_transient_error(&self) {}
     fn report_error(&self, message: String) {
-        panic!("the check's source reported an unexpected error: {message}");
+        panic!("the check's ingestor reported an unexpected error: {message}");
     }
     fn handle_ack_failure(&self, reason: String) {
         panic!("every acknowledgement tree of the check succeeds, but one failed: {reason}");
     }
     fn record_transport_redeliveries(&self, positions: usize) {
-        panic!("a replayable check source discarded {positions} positions after a reconnect");
+        panic!("a replayable check ingestor discarded {positions} positions after a reconnect");
     }
     fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
-        panic!("a check source whose payloads all fit dropped {payloads} for their size");
+        panic!("a check ingestor whose payloads all fit dropped {payloads} for their size");
     }
     fn record_unconfirmed_stop(&self, positions: usize) {
-        panic!("the check's source closes on its own, but {positions} positions were left");
+        panic!("the check's ingestor closes on its own, but {positions} positions were left");
     }
 }
 
@@ -748,7 +748,7 @@ fn drain_observing_a_confirmation() {
                 let roots = batch_roots
                     .recv()
                     .await
-                    .assured("the host hands the graph the roots of the batch the source read");
+                    .assured("the host hands the graph the roots of the batch the ingestor read");
                 let unresolved = StdArc::new(AtomicUsize::new(roots.len()));
                 let mut resolutions = Vec::with_capacity(roots.len());
                 for root in roots {
@@ -794,7 +794,7 @@ fn drain_observing_a_confirmation() {
         // The ingestor closes once its one batch is settled, which ends the loop without a stop.
         loop_task
             .await
-            .assured("the host loop ends when its source closes");
+            .assured("the host loop ends when its ingestor closes");
         graph
             .await
             .assured("the graph ends once it resolved the batch");
@@ -807,7 +807,7 @@ fn drain_observing_a_confirmation() {
         assert_eq!(
             trackers.domain_outstanding_for_ownership_handoff(),
             0,
-            "the batch's work is released once its source confirmed it"
+            "the batch's work is released once its ingestor confirmed it"
         );
         assert_eq!(trackers.ingestor_outstanding_for_ownership_handoff(), 0);
     });
@@ -840,7 +840,7 @@ impl IngestorHostServices for RefusingGraphHost {
         &mut self,
         _messages: Vec<IngestorIntakeMessage<'_>>,
     ) -> IngestorIntakeResult<()> {
-        panic!("the check's source reads in an acknowledged mode");
+        panic!("the check's ingestor reads in an acknowledged mode");
     }
 
     async fn intake_acknowledged(
@@ -910,19 +910,19 @@ impl IngestorHostServices for RefusingGraphHost {
     }
     fn clear_transient_error(&self) {}
     fn report_error(&self, message: String) {
-        panic!("the check's source reported an unexpected error: {message}");
+        panic!("the check's ingestor reported an unexpected error: {message}");
     }
     fn handle_ack_failure(&self, reason: String) {
         panic!("a consumed payload never fails its batch, but the batch failed: {reason}");
     }
     fn record_transport_redeliveries(&self, positions: usize) {
-        panic!("a replayable check source discarded {positions} positions after a reconnect");
+        panic!("a replayable check ingestor discarded {positions} positions after a reconnect");
     }
     fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
-        panic!("a check source whose payloads all fit dropped {payloads} for their size");
+        panic!("a check ingestor whose payloads all fit dropped {payloads} for their size");
     }
     fn record_unconfirmed_stop(&self, positions: usize) {
-        panic!("the check's source closes on its own, but {positions} positions were left");
+        panic!("the check's ingestor closes on its own, but {positions} positions were left");
     }
 }
 
@@ -1016,7 +1016,7 @@ fn drain_observing_a_batch_with_a_refused_payload(queue: &'static [u64]) {
         // The ingestor closes once its one batch is settled, which ends the loop without a stop.
         loop_task
             .await
-            .assured("the host loop ends when its source closes");
+            .assured("the host loop ends when its ingestor closes");
         graph
             .await
             .assured("the graph ends once it resolved the batch");
@@ -1033,7 +1033,7 @@ fn drain_observing_a_batch_with_a_refused_payload(queue: &'static [u64]) {
         assert_eq!(
             trackers.domain_outstanding_for_ownership_handoff(),
             0,
-            "the batch's work is released once its source confirmed it"
+            "the batch's work is released once its ingestor confirmed it"
         );
         assert_eq!(trackers.ingestor_outstanding_for_ownership_handoff(), 0);
     });
@@ -1054,11 +1054,11 @@ fn shuttle_a_drain_waits_for_the_transport_to_confirm_a_batch_with_a_refused_pay
     }
 }
 
-/// Sparse global indices share a logical source while each loop retains its own intake lifetime.
+/// Sparse global indices share a logical ingestor while each loop retains its own intake lifetime.
 fn instance_unit_handoff() {
     shuttle::future::block_on(async {
         let domain = DomainName::try_from("instances").assured("valid domain");
-        let source = IngestorName::try_from("source").assured("valid ingestor");
+        let connector = IngestorName::try_from("ingestor").assured("valid ingestor");
         let metrics = RuntimeMetrics::default();
         let make_control = |index| {
             Arc::new(IngestorQuiesceControl::new(
@@ -1066,7 +1066,7 @@ fn instance_unit_handoff() {
                 metrics.clone(),
                 metrics.register_ingestor_quiesce(
                     &domain,
-                    &source,
+                    &connector,
                     Unit::try_instance(index)
                         .assured("the fixture index fits the execution-unit range"),
                     None,

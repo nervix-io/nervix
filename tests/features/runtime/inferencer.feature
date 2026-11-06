@@ -91,7 +91,7 @@ Feature: Inferencer resources
         ON edge
         PATH '/features'
         TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR feature_source
+      CREATE HTTP ENDPOINT INGESTOR feature_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
         TO features
@@ -195,7 +195,7 @@ Feature: Inferencer resources
         ON edge
         PATH '/features'
         TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR feature_source
+      CREATE HTTP ENDPOINT INGESTOR feature_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
         TO features
@@ -396,7 +396,7 @@ Feature: Inferencer resources
       CREATE RELAY inference_results SCHEMA inference_result UNBRANCHED;
       CREATE VHOST edge infer-execution-time-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/value' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR inference_source
+      CREATE HTTP ENDPOINT INGESTOR inference_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING inference_value_codec
         TIMESTAMP NOW
@@ -458,7 +458,7 @@ Feature: Inferencer resources
       CREATE RELAY transformed_matrices SCHEMA transformed_matrices UNBRANCHED;
       CREATE VHOST edge infer-matrix-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/matrix' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR matrix_source
+      CREATE HTTP ENDPOINT INGESTOR matrix_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING matrices_codec
         TO matrices
@@ -517,7 +517,7 @@ Feature: Inferencer resources
       CREATE RELAY scored_sequences SCHEMA scored_sequences UNBRANCHED;
       CREATE VHOST edge infer-dynamic-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/sequence' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR sequence_source
+      CREATE HTTP ENDPOINT INGESTOR sequence_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sequences_codec
         TO sequences
@@ -578,7 +578,7 @@ Feature: Inferencer resources
       CREATE RELAY scored_sequences SCHEMA scored_sequences UNBRANCHED;
       CREATE VHOST edge infer-dynamic-batch-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/sequence' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR sequence_source
+      CREATE HTTP ENDPOINT INGESTOR sequence_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sequences_codec
         TO sequences
@@ -665,7 +665,7 @@ Feature: Inferencer resources
       CREATE RELAY audited SCHEMA audited UNBRANCHED;
       CREATE VHOST edge infer-per-message-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/features' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR feature_source
+      CREATE HTTP ENDPOINT INGESTOR feature_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
         TO features
@@ -750,7 +750,7 @@ Feature: Inferencer resources
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
       CREATE VHOST edge infer-batch-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/features' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR feature_source
+      CREATE HTTP ENDPOINT INGESTOR feature_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
         TO features
@@ -850,7 +850,7 @@ Feature: Inferencer resources
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_tenant;
       CREATE VHOST edge infer-branch-batch-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/features' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR feature_source
+      CREATE HTTP ENDPOINT INGESTOR feature_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
         TO features
@@ -936,7 +936,7 @@ Feature: Inferencer resources
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
       CREATE VHOST edge infer-default-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/features' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR feature_source
+      CREATE HTTP ENDPOINT INGESTOR feature_ingestor
         FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
         TO features

@@ -40,7 +40,7 @@ Feature: Typed JSON extraction
       CREATE RELAY extraction_errors SCHEMA extraction_error UNBRANCHED;
       CREATE VHOST edge json-extraction-{{test_id}}.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_event_batch_codec
         TO raw_events
@@ -137,7 +137,7 @@ Feature: Typed JSON extraction
       CREATE RELAY reading_errors SCHEMA reading_error UNBRANCHED;
       CREATE VHOST edge json-defects-{{test_id}}.example.com;
       CREATE ENDPOINT document_ingress ON edge PATH '/documents' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR document_source
+      CREATE HTTP ENDPOINT INGESTOR document_ingestor
         FROM document_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_document_batch_codec
         TO raw_documents
@@ -239,7 +239,7 @@ Feature: Typed JSON extraction
       CREATE RELAY routed_errors SCHEMA routed_error UNBRANCHED;
       CREATE VHOST edge json-arms-{{test_id}}.example.com;
       CREATE ENDPOINT routed_ingress ON edge PATH '/routed-documents' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR routed_document_source
+      CREATE HTTP ENDPOINT INGESTOR routed_document_ingestor
         FROM routed_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_document_batch_codec
         TO routed_documents

@@ -3,8 +3,8 @@
 //! Layer: decisions.
 //!
 //! - **Owns.** Resolving an ingestor and the input it reads into one typed start plan, validating
-//!   its source name, source kind, client, codec and route identities together, and deciding a
-//!   client source's acknowledgement window, timeouts and endpoint contract.
+//!   its ingestor name, ingestor kind, client, codec and route identities together, and deciding a
+//!   client ingestor's acknowledgement window, timeouts and endpoint contract.
 //! - **Depends on.** Validated schedule Models, the entrypoint route planner and vocabulary
 //!   values.
 //! - **Must not know.** Tokio, locks, shared maps, connector I/O, node-local resources, or task
@@ -107,7 +107,7 @@ pub(crate) struct IngestorClientSpec {
 }
 
 impl IngestorClientSpec {
-    /// The client a source reads through, once the client it resolved to is the one its statement
+    /// The client an ingestor reads through, once the client it resolved to is the one its statement
     /// names.
     fn resolved(
         ingestor: &IngestorName,
@@ -352,21 +352,21 @@ pub(crate) struct IngestorStartPlan {
 }
 
 /// The plan of what one ingestor reads. A transport's payloads are decoded by its codec; a client
-/// source's batches already carry its input schema, so it names none.
+/// ingestor's batches already carry its input schema, so it names none.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum IngestorInputPlan {
     Transport(TransportInputPlan),
     Client(ClientIngestorStartPlan),
 }
 
-/// A transport source and the codec that decodes its payloads.
+/// A transport ingestor and the codec that decodes its payloads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TransportInputPlan {
     pub(crate) codec: CodecName,
     pub(crate) source: IngestorConnectorPlan,
 }
 
-/// A client source: the schema every submitted batch matches, the policy its producers submit
+/// A client ingestor: the schema every submitted batch matches, the policy its producers submit
 /// under, and the contract they attach to.
 #[derive(Debug, Clone)]
 pub(crate) struct ClientIngestorStartPlan {
@@ -401,8 +401,8 @@ impl PartialEq for ClientIngestorStartPlan {
     }
 }
 
-/// The plan of one ingestor's source, which the composition root maps to the connector that runs
-/// it.
+/// The plan of one ingestor's connector entity, mapped to its concrete implementation by the
+/// composition root.
 /// The topic entity planned for Kafka execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum KafkaIngestorStartPlan {
@@ -513,8 +513,8 @@ impl IngestorStartPlan {
 
     /// Whether replacing this input retires external state that outlives its execution.
     /// Routes and codecs do not identify the MQTT session, so changing them alone retains it.
-    /// A changed owned Pulsar source needs a resolved subscription comparison at composition;
-    /// an absent replacement removes the owned subscription after its source tasks stop.
+    /// A changed owned Pulsar ingestor needs a resolved subscription comparison at composition;
+    /// an absent replacement removes the owned subscription after its ingestor tasks stop.
     pub(crate) fn requires_entity_retirement(&self, replacement: Option<&Self>) -> bool {
         let IngestorInputPlan::Transport(input) = &self.input else {
             return false;
@@ -562,7 +562,7 @@ impl IngestorStartPlan {
     }
 
     /// Decides the start plan of one scheduled ingestor from the node its input resolved to: the
-    /// client or endpoint a transport reads through, or the schema a client source's batches
+    /// client or endpoint a transport reads through, or the schema a client ingestor's batches
     /// carry.
     pub(in crate::registry) fn decide(
         domain: &DomainName,
@@ -655,7 +655,7 @@ impl IngestorStartPlan {
     }
 
     /// The acknowledgement a transport's delivery mode declares. A transport whose statement
-    /// declares no delivery mode acknowledges nothing. A client source acknowledges through its
+    /// declares no delivery mode acknowledges nothing. A client ingestor acknowledges through its
     /// own window and has no transport acknowledgement.
     pub(crate) fn transport_acknowledgement(&self) -> Option<IngestAcknowledgement<'_>> {
         let IngestorInputPlan::Transport(transport) = &self.input else {
@@ -829,7 +829,7 @@ impl ClientIngestorStartPlan {
 }
 
 impl ClientIngestorStartPlan {
-    /// One policy duration of a client source. Validation admitted only positive durations, so a
+    /// One policy duration of a client ingestor. Validation admitted only positive durations, so a
     /// value that does not read as one here is a model the registry did not validate.
     fn duration(
         ingestor: &IngestorName,
@@ -898,7 +898,7 @@ fn client_endpoint_contract(
 }
 
 impl NatsIngestorStartPlan {
-    /// The plan of the NATS entity `source` names, which reads through the NATS client `client`.
+    /// The declared NATS entity's plan, resolved through the NATS client `client`.
     fn decide(
         name: &IngestorName,
         source: &NatsIngestor,
@@ -1302,7 +1302,7 @@ mod tests {
     }
 
     /// The domain one ingestor reads from `source_model` in: its schema, codec, relay and the
-    /// VHOST an endpoint source publishes on.
+    /// VHOST an endpoint ingestor publishes on.
     fn domain_models(source: IngestorEntity, source_model: Model) -> Vec<Model> {
         vec![
             schema("payload"),
@@ -1364,7 +1364,7 @@ mod tests {
         }
     }
 
-    /// One source statement, the model it resolves to, and the source plan and header access they
+    /// One ingestor statement, the model it resolves to, and the ingestor plan and header access they
     /// decide.
     struct IngestorCase {
         source: IngestorEntity,
@@ -1954,7 +1954,7 @@ mod tests {
         assert!(owned.requires_entity_retirement(None));
         assert!(!owned.requires_entity_retirement(Some(owned)));
 
-        // Codec and route changes do not change the source that reads the subscription.
+        // Codec and route changes do not change the ingestor that reads the subscription.
         let mut replacement = owned.clone();
         let mut input = transport_plan(owned).clone();
         input.codec = named("alternate_json");
@@ -1975,7 +1975,7 @@ mod tests {
         assert!(latest.requires_entity_retirement(None));
         assert!(!latest.requires_entity_retirement(Some(&latest)));
 
-        // Changed sources require the composition root to compare their resolved subscriptions.
+        // Changed ingestors require the composition root to compare their resolved subscriptions.
         let mut input = transport_plan(owned).clone();
         let IngestorConnectorPlan::Pulsar(PulsarIngestorStartPlan::Topic(source)) =
             &mut input.source
@@ -2175,7 +2175,7 @@ mod tests {
     #[test]
     fn rejects_a_resolved_source_of_another_kind() {
         let mut models = domain_models(http_case().source, http_case().source_model);
-        // The HTTP source names the client `upstream`; schedule a Kafka client under that name.
+        // The HTTP ingestor names the client `upstream`; schedule a Kafka client under that name.
         models.retain(|model| !matches!(model, Model::ClientHttp(_)));
         models.push(kafka_case().source_model);
 

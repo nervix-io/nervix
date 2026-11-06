@@ -1,4 +1,4 @@
-//! How an Iceberg sink writes the columns its `VALUES` maps into its table's current schema.
+//! How an Iceberg emitter writes the columns its `VALUES` maps into its table's current schema.
 //!
 //! Layer: engines and infrastructure.
 //!
@@ -7,20 +7,20 @@
 //!   schema at every depth: each mapped column into the table column of its name, and a null into
 //!   each optional column `VALUES` leaves out.
 //! - **Depends on.** Arrow arrays and schemas, the `iceberg` crate's schema and its Arrow form, the
-//!   sink's start and commit errors, and `error-stack`.
+//!   emitter's start and commit errors, and `error-stack`.
 //! - **Must not know.** Staging, catalogs, commits, acknowledgements, or the host.
 //!
 //! The Parquet writer pairs a batch's columns with a data file's columns by position, in the
 //! table's column order, while a staged batch carries the mapped columns in `VALUES` order. A
 //! staged batch therefore reaches the writer only as a projection planned against the table lays
-//! it out. The sink plans one when it opens, which refuses a table the mapped columns cannot be
+//! it out. The emitter plans one when it opens, which refuses a table the mapped columns cannot be
 //! written into, and again before every commit writes, against the schema the commit finds.
 
 #![cfg_attr(
     nervix_lint,
     nervix::input(
         plans,
-        reason = "the sink checks the mapped columns its validated plan names"
+        reason = "the emitter checks the mapped columns its validated plan names"
     )
 )]
 #![cfg_attr(
@@ -83,11 +83,11 @@ pub(crate) enum IcebergColumnError {
          mapped into it can produce a null one"
     )]
     NullableNestedIntoRequired { column: String },
-    /// The Iceberg types agree, but the staged values have an Arrow layout the sink does not lay
+    /// The Iceberg types agree, but the staged values have an Arrow layout the emitter does not lay
     /// out as the table's.
     #[error(
-        "mapped column '{column}' holds Arrow {data_type} values, which the Iceberg sink does not \
-         write into a {table} column"
+        "mapped column '{column}' holds Arrow {data_type} values, which the Iceberg emitter does \
+         not write into a {table} column"
     )]
     UnwritableLayout {
         column: String,
@@ -134,7 +134,7 @@ impl IcebergColumnError {
 }
 
 impl IcebergTableEmitter {
-    /// Refuses, when the sink opens, a table the mapped columns `staged` cannot be written into,
+    /// Refuses, when the emitter opens, a table the mapped columns `staged` cannot be written into,
     /// by planning the projection every commit writes them with.
     pub(super) fn validate_table_schema(
         staged: &arrow_schema::Schema,
@@ -371,7 +371,7 @@ impl IcebergMappedColumn<'_> {
 enum IcebergLayoutRefusal {
     /// A value nested in the table type is required, and the staged one can be null.
     NullableNested,
-    /// The sink does not lay the staged Arrow type out as the table's.
+    /// The emitter does not lay the staged Arrow type out as the table's.
     Unwritable,
 }
 

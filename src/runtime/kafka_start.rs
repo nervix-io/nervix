@@ -814,7 +814,7 @@ impl Runtime {
         nervix_lint,
         nervix::context(
             bounded,
-            key = "one source instance and its retained startup offer revision",
+            key = "one ingestor instance and its retained startup offer revision",
             bound = "one synchronous native-state lookup at stream admission; no guard across an \
                      await; the stream retains its admitted charged bytes",
             reason = "start-offer admission resolves its retained body once; stream chunks retain \
@@ -870,7 +870,7 @@ impl Runtime {
         nervix_lint,
         nervix::context(
             bounded,
-            key = "one source instance's canonical generation and selected layout",
+            key = "one ingestor instance's canonical generation and selected layout",
             bound = "two synchronous lookups before and after one admitted checkpoint capture; no \
                      guard across an await; existing snapshot size and progress bounds",
             reason = "one pending-seed admission validates the current layout and native owner \

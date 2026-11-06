@@ -174,7 +174,7 @@ impl OptionDeclaration {
         ]),
     };
 
-    /// `EVERY <duration>`: the domain-time cadence on which a polled source reads.
+    /// `EVERY <duration>`: the domain-time cadence on which a polled ingestor reads.
     pub const EVERY: Self = Self {
         keywords: "EVERY",
         presence: OptionPresence::Required,

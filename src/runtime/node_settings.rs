@@ -66,7 +66,7 @@ impl Runtime {
             IngestAcknowledgement::Request { timeout, .. } => {
                 Self::parse_ack_timeout(domain, ingestor, timeout)?;
                 // Request intake owns this window; there is no broker position for the polling
-                // source loop to confirm.
+                // ingestor loop to confirm.
                 Ok(IngestorAckPolicy::None)
             }
             IngestAcknowledgement::Sequential { timeout, retry } => {
@@ -481,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn declared_acknowledgements_parse_into_the_policy_a_source_loop_runs() {
+    fn declared_acknowledgements_parse_into_the_policy_an_ingestor_loop_runs() {
         let domain = domain("default");
         let ingestor = named("orders_ingestor");
         let retry = RetryPolicy {

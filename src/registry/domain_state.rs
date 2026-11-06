@@ -705,7 +705,7 @@ impl DomainState {
                             }
                         }
                         IngestorInput::Client(client_entity) => {
-                            // A client source's batches carry the schema it names, so that schema
+                            // A client ingestor's batches carry the schema it names, so that schema
                             // is what the ingestor depends on in place of a codec and a client.
                             let schema_node = expect_kind(
                                 domain,
