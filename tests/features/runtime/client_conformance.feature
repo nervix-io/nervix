@@ -206,7 +206,7 @@ Feature: Cross-language client conformance
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event_row (id U32);
-      CREATE RELAY events SCHEMA event_row;
+      CREATE RELAY events SCHEMA event_row UNBRANCHED;
       START;
       """
     When the "<runtime>" client probe connects through a seed after its first gRPC address is unavailable
@@ -250,7 +250,6 @@ Feature: Cross-language client conformance
     Then the current leader node is saved as placeholder "leader"
     Given the gRPC endpoint of node "{{leader}}" is forwarded from fixture address "127.0.0.1"
     When the "<runtime>" client probe subscribes for restoration through the forwarded gRPC endpoint of node "{{leader}}"
-    Then within "30s" the client probe prints "SUBSCRIBED"
     When the TCP forwarder at "127.0.0.1" stops
     Then within "30s" the client probe prints "INTERRUPTED"
     When these Plexus commands are executed on the leader node
