@@ -11,9 +11,8 @@
 //!
 //! Building the grammar constructs the parser of every Plexus statement, which costs far more than
 //! reading a request with it, and a grammar cannot move between threads. A node reads its session
-//! requests on the worker threads of its runtime, so it holds at most one grammar on each of them:
-//! no more than the same requests already held while each built a grammar of its own, which each
-//! worker thread did one request at a time.
+//! requests on the worker threads of its runtime and keeps each thread's grammar between requests,
+//! so it holds at most one grammar on each of its worker threads.
 
 #![cfg_attr(
     nervix_lint,
