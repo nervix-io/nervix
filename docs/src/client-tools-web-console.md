@@ -62,9 +62,28 @@ The console is one screen with three regions:
 - the **execution graph** in the upper right
 - the **REPL** below it, which also hosts any relay subscriptions you open
 
-The top bar carries the websocket connection state, the global **Create** menu, the **Backups**
-button, the domain lifecycle button, the selected clock state, and the theme picker. The clock panel below the domain
-selector shows the selected domain's clock in detail.
+The top bar carries the websocket connection state, the node panel, the global **Create** menu, the
+**Backups** button, the domain lifecycle button, the selected clock state, and the theme picker. The
+clock panel below the domain selector shows the selected domain's clock in detail.
+
+### Following cluster events
+
+The **Events** button beside the connection state counts the cluster events the console has
+received, and opens the node panel that lists them, newest first. They are the membership and
+leadership notices of the node the console is connected to: a node that joined, left or restarted
+as a new incarnation, the node's Raft transitions, and the membership operations it proposes while
+it leads. A membership event repeated within one session is shown once with its count, for example
+`node 'node-3' left ×2`. The panel keeps the events of earlier sessions after a reconnect, up to its
+newest 256 entries; the count on the button keeps every event received.
+
+```text
+node 'node-3' joined (incarnation 1793845627114630656)
+node 'node-3' left
+raft transition: state=Follower leader=node-2 term=3 last_log_index=41 last_applied=41
+```
+
+These events never enter the REPL transcript. Runtime and control-plane failures and committed
+cluster-parameter revisions still appear there as notice lines, beside the command outcomes.
 
 Sidebar entries are counted per kind and each group collapses. Selecting an endpoint runs its
 `DESCRIBE` in the REPL; selecting a resource does the same and opens its version dialog.
@@ -143,8 +162,9 @@ branches. Schema fields are added in declaration order and can be moved or remov
 field selects its exact scalar type, then may wrap it in any sequence of variable vectors and
 fixed arrays; each fixed array needs a positive length. Optional and sensitive flags are separate
 controls. Wire fields select the types of their chosen format and an explicit `STRICT` or `LOOSE`
-mode. JSON offers `string`, `number`, `integer`, `boolean`, and `array`; AVRO offers `boolean`,
-`int`, `long`, `float`, `double`, `string`, `bytes`, and `array`. Codec field encoding controls
+mode. JSON offers `string`, `number`, `integer`, `boolean`, and `array`; CBOR offers `integer`,
+`float`, `boolean`, `text`, `bytes`, and `array`, with native byte strings for `bytes`. AVRO offers
+`boolean`, `int`, `long`, `float`, `double`, `string`, `bytes`, and `array`. Codec field encoding controls
 select `RFC3339` or `BASE64` for explicit text interchange, as described in
 [Schemas And Codecs](schemas-and-codecs.md#codecs).
 A wire schema's format is part of its identity, so JSON, CBOR, and AVRO definitions may
@@ -676,6 +696,15 @@ sends the same execution reference, statement, and archive: a lost connection or
 streams the archive again, from its first byte, until the leader answers. If no answer arrives
 within about ten minutes, the dialog reports the restore's outcome as unknown and names its
 execution reference.
+
+The leader admits a restore as soon as it holds the whole archive, so once an attempt has sent the
+whole archive without an answer the console can read, or the leader has answered that the outcome
+is not known yet, the restore may have run. If the restore then ends without its outcome, because
+the browser can no longer read the file, a reply cannot be read, the leader refuses a later
+stream, or the leader no longer holds the execution reference, the dialog reports the outcome as
+unknown under that reference, with what stopped it, and never as a refusal: a refusal of a later
+stream says nothing about the earlier one. A file the browser cannot read before any attempt has
+sent the whole archive changes nothing, and the dialog reports the restore as refused.
 
 The console never renders what an archive holds beyond the summary a backup reports and the report
 a restore returns.

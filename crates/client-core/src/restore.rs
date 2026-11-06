@@ -1,5 +1,7 @@
 //! Restores: the archive a local file holds, and the stream that carries it to the leader.
 //!
+//! Layer: edges.
+//!
 //! - **Owns.** Reading the archive a `RESTORE` names on this machine, declaring its size and
 //!   BLAKE3 digest, streaming it as restore frames under the restore's execution reference, and the
 //!   routing each reply calls for until the restore's outcome is known.
@@ -29,7 +31,10 @@ use nervix_client_wire::{
     grpc::{ClientRestoreCodec, RESTORE_BACKUP_PATH},
 };
 use nervix_models::{ArchiveDigest, CommandExecutionReference, Restore, RestoreArchive};
-use nervix_primitives::{stream::wrappers::ReceiverStream, sync::mpsc};
+use nervix_primitives::{
+    stream::wrappers::ReceiverStream,
+    sync::{Arc, mpsc},
+};
 use nervix_recovery::Reported as _;
 use tokio::{fs::File, io::AsyncReadExt as _};
 use tonic::{Request, Response, Status, codegen::http::uri::PathAndQuery, transport::Channel};
@@ -38,7 +43,7 @@ use crate::{
     client::{Client, RecoveryDeadline, RecoveryMode, SessionRecovery},
     connection::GrpcConnector,
     error::{ClientError, RequestKind},
-    exchange::SESSION_LIMITS,
+    exchange::{ExchangeEnd, SESSION_LIMITS},
     outcome::{CommandOutcome, Routing},
     upload::{expand_user_path, upload_status_is_retryable},
 };
@@ -176,8 +181,12 @@ impl Client {
                     ));
                 }
             };
+            let (channel, generation) = {
+                let exchange = self.inner.exchange.lock().await;
+                (exchange.channel.clone(), exchange.generation.clone())
+            };
             let sent = RestoreStreamAttempt {
-                channel: self.current_channel().await,
+                channel,
                 start,
                 archive: archive_file,
                 frame_timeout,
@@ -209,18 +218,21 @@ impl Client {
                     return Err(Report::new(ClientError::Restore(status)));
                 }
             };
-            let reply = RestoreReply::decode(response.get_ref())
-                .change_context(ClientError::InvalidRestoreReply)?;
-            if let Some(request_id) = reply.request_id
-                && request_id != RESTORE_REQUEST_ID
-            {
-                return Err(Report::new(ClientError::UnexpectedReply {
-                    request: RequestKind::Restore,
-                }));
-            }
+            let reply = self
+                .validate_restore_reply(response.get_ref(), &generation, reference)
+                .await?;
             let outcome = match reply.disposition {
                 RestoreDisposition::Outcome(outcome) => {
                     if outcome.execution_reference != *reference {
+                        let mut exchange = self.inner.exchange.lock().await;
+                        if Arc::ptr_eq(&exchange.generation, &generation) {
+                            exchange
+                                .interrupt(ExchangeEnd::ExecutionMismatch {
+                                    expected: reference.clone(),
+                                    received: outcome.execution_reference.clone(),
+                                })
+                                .await;
+                        }
                         return Err(Report::new(ClientError::ExecutionReferenceMismatch {
                             expected: reference.clone(),
                             received: outcome.execution_reference,
@@ -246,6 +258,42 @@ impl Client {
             CommandOutcome::failed_locally("restore redirect loop exceeded".to_string());
         exhausted.execution_reference = Some(reference.clone());
         Ok(exhausted)
+    }
+
+    /// An invalid reply cannot establish whether the restore was applied. End its session,
+    /// preserving a replacement installed while the archive was streaming.
+    async fn validate_restore_reply(
+        &self,
+        frame: &VerifiedFrame<RestoreReplyFrame>,
+        generation: &Arc<()>,
+        reference: &CommandExecutionReference,
+    ) -> error_stack::Result<RestoreReply, ClientError> {
+        let validated = RestoreReply::decode(frame)
+            .change_context(ClientError::InvalidRestoreReply)
+            .and_then(|reply| {
+                if reply
+                    .request_id
+                    .is_some_and(|request_id| request_id != RESTORE_REQUEST_ID)
+                {
+                    Err(Report::new(ClientError::UnexpectedReply {
+                        request: RequestKind::Restore,
+                    }))
+                } else {
+                    Ok(reply)
+                }
+            });
+        match validated {
+            Ok(reply) => Ok(reply),
+            Err(report) => {
+                let mut exchange = self.inner.exchange.lock().await;
+                if Arc::ptr_eq(&exchange.generation, generation) {
+                    exchange.interrupt(ExchangeEnd::Closed).await;
+                }
+                Err(report.change_context(ClientError::UncertainCommand {
+                    reference: reference.clone(),
+                }))
+            }
+        }
     }
 }
 

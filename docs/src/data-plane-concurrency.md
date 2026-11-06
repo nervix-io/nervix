@@ -1419,6 +1419,33 @@ consumer detachment. The `shuttle_publish_cancellation_and_ack_race_release_one_
 check also races publisher cancellation against application ACK and verifies retained byte credit
 returns once. Timeout revocation is covered by the ordinary owner and public scenarios.
 
+### Rust client request interruption
+
+Each command waiter retains its expected execution reference in the exchange's existing pending
+registry. The reader compares that reference before delivering the outcome. A mismatch closes the
+registry under the same mutex that removes the waiter, retaining the first typed ending cause.
+Registration racing that end either obtains a waiter that is interrupted or observes the closed
+registry; it cannot leave a request waiting on an ended exchange. The reader routes no later frame
+after the mismatch. Dropping its future, including task abortion, closes the remaining waiters and
+ends its exact event and attachment generation.
+
+The exchange retains its reader handle until joining finishes, then clears it. A later close
+cannot poll that completed join again. Cancelling interruption before the join completes keeps
+the handle available for a later close to finish its cleanup.
+The ordinary `a_cancelled_interruption_keeps_cleanup_owned_until_close_finishes` witness cancels
+interruption while the reader has not yet stopped, then requires close to finish generation
+cleanup. The foreign-restore owner witness also requires recovery to serve a new request.
+
+`shuttle_a_foreign_reply_racing_registration_interrupts_every_waiter` drives the production reader
+and pending registry with registration and cancellation racing the mismatched reply. It requires
+every remaining waiter to be interrupted, the first mismatch cause to survive, and the later
+leadership frame to remain unread. It makes no claim about real network scheduling.
+
+A restore stream captures its channel and session generation together. A foreign restore outcome
+ends that generation only if it still owns the current session, so an intervening replacement is
+not interrupted. Request and recovery state remain with the caller's original execution reference.
+The protocol chapter owns the retry and uncertainty policy.
+
 ### Rust client attachment recovery
 
 The client retains desired producer and consumer handles independently of their wire attachments.
@@ -1445,6 +1472,15 @@ begin a subsequent restore. Public scenarios cover exchange I/O, late open repli
 cleanup and delivery interruption; those network effects are outside these in-process checks.
 [Client Session Protocol](./client-session-protocol.md) and its implementation manual own the
 restoration and application-outcome contract.
+
+Each native restore attempt captures its channel and exchange generation together before sending
+the archive. If its verified reply cannot be decoded or names another transport request, session
+termination checks that generation while holding the client's exchange mutex. It ends only the
+exchange that supplied the stream, interrupts its pending requests and stops its reader; a
+replacement exchange, even on the same channel, remains usable. The real-gRPC `restore_reply`
+owner tests cover both arrival orders and a subsequent reconnect. The public
+`client_restore_reply_validation.feature` scenarios recover a completed restore under the same
+reference after both invalid replies, through the native client and CLI on one and three nodes.
 
 ### Node quiesce accounting
 
@@ -1722,6 +1758,31 @@ consumers that it delivers through. A consumer that registers meanwhile receives
 only, so the acknowledgement shares a publication reserves for its attached consumers always match
 its deliveries, and a routed delivery, which holds no dispatch permit, cannot resolve a share it
 never reserved.
+
+## Failed Authentication Pacing
+
+The control plane's authentication owner keeps one access-ordered `ExpiryMap` of failed names
+behind an async mutex. A bucket holds governor's theoretical arrival mark. Its decision is made from
+one selected monotonic instant through governor's synchronous state-store interface; waits use the
+primitive boundary's timers. Credential verification and quota sleeps hold no map guard. A name
+with an outstanding quota therefore delays only its own attempts.
+
+Each admission operation may reclaim one oldest bucket whose quota has fully replenished. An
+operation adds at most one bucket, after a judged refusal. If the oldest bucket still holds debt,
+its last access was within a complete burst-recovery horizon, and access order places every other
+retained name within that horizon too. Reclaiming one full bucket before an insertion keeps the
+stored count from growing while stale entries remain; growth is limited to the largest recovery
+working set and live attempts. An active bucket is never displaced by a spray of other names.
+Success removes only that name. An admitted attempt shares the bucket's immutable key allocation
+as its receipt. A refusal skips a second charge only when pointer identity names that same active
+bucket; success or full recovery gives a fresh bucket a distinct allocation. No reference-count
+ordering is involved. Node teardown drops the owner and its volatile state.
+
+These are call-admission accesses. The async mutex and timers are outside Deloxide's tracked
+thread-blocking locks. Owner tests and public one- and three-node authentication scenarios verify
+the policy and its waits. The bounded `authentication-quota-clock` property compares every quota
+decision, exact wait and complete arrival mark with a persistent governor limiter. The expiry map's
+operation-sequence oracle and Miri qualify its relinking and allocation lifetimes.
 
 ## Ratchet And Review
 
@@ -2611,6 +2672,10 @@ stressed-restore records require recovery under the original execution reference
 archive with both quiesced domain cuts. The refusal owner's asynchronous mutex and the command's
 retry waits remain outside the detector; the public scenario and typed response-boundary tests
 establish their recovery and definitive-timeout outcomes without claiming an interleaving model.
+The native foreign-command-reply workload reaches pending registration, mismatch termination and
+session recovery on one and three nodes. Its active/order and stress records name the client and
+exchange owners; Deloxide observes their blocking registry locks, while the production-owner
+Shuttle check covers registration racing the reader's termination.
 Async command and reconnect mutexes, physical deadlines and network scheduling remain outside
 its observation; the public scenarios and client-session regressions assert their wait, expiry,
 leader-change and recovery outcomes directly. The bounded native-client case runs inside the
@@ -3010,6 +3075,7 @@ A family of names means each member runs independently through the recipe.
 | Client ingestors (`src/runtime/client_ingestor_shuttle_tests.rs`) | `shuttle_racing_reservations_never_exceed_the_node_budget_and_return_every_byte` races opens that each need more than half the node's producer budget: at most one holds it at a time and every reservation returns its bytes. `shuttle_a_batch_racing_a_quiesce_is_either_counted_by_its_drain_or_refused_undispatched` races the admission fence against an engagement and its drain: no batch is dispatched after the drain concluded. `shuttle_a_closing_producer_answers_every_admitted_batch_once_before_its_release` and `shuttle_an_ending_endpoint_answers_every_batch_once_and_ends_its_producer_last` race a close or an endpoint end against the worker's admission reports and the batches' acknowledgements: every batch is answered exactly once, a close answers each with its real outcome before the release, and an end reports no admitted batch as not admitted and comes last. `shuttle_a_detach_racing_a_clearance_admits_only_a_cleared_batch_and_returns_its_slot` races a forwarded producer's detach against the clearance of its batch while a local producer waits for the window's one slot: the forwarded batch reaches the worker only after its clearance was recorded, and the local batch is admitted whichever comes first, so no slot leaks. `shuttle_an_end_racing_clearances_reports_a_batch_not_admitted_exactly_when_the_worker_never_took_it` races an endpoint end against the clearance of two batches while the worker holds the first without reporting it: each batch is answered once, not admitted exactly when the worker never took it, whether it was still being cleared or cleared and waiting for the worker, and of unknown outcome when it did. |
 | Rust client submission slots (`crates/client-core/src/producer/slots_shuttle_tests.rs`) | `shuttle_a_wait_racing_its_resolution_takes_the_outcome_once_and_returns_the_credit`, `shuttle_a_cancelled_wait_loses_neither_the_outcome_nor_the_credit`, and `shuttle_a_release_racing_its_resolution_returns_the_credit_exactly_once` race a submission's resolution against the application's wait, an aborted wait followed by a new one, and a release: the outcome is taken at most once, a cancelled wait leaves it retrievable, and the credit comes back exactly once. |
 | Rust client attachment recovery (`crates/client-core/src/producer.rs`, `consumer.rs`) | `shuttle_close_fences_a_producer_restore_started_on_the_same_exchange` and `shuttle_close_fences_a_consumer_restore_started_on_the_same_exchange` race close against beginning restoration. `shuttle_close_fences_a_producer_restore_interrupted_by_another_loss` and `shuttle_close_fences_a_consumer_restore_interrupted_by_another_loss` race close against another loss while restoring. Each check uses the production lifecycle owner and requires the final phase to remain closed, with subsequent restoration refused. `shuttle_a_reply_racing_the_end_of_its_exchange_reports_the_gap_once` races a consumer's reply against the end of its exchange: the interruption is reported once, whichever observes the end first. `shuttle_a_read_parked_while_its_consumer_closes_does_not_outlive_the_close` races a read that parks for delivery against the close: the read ends with the close. `shuttle_a_submission_racing_its_producers_end_observes_the_end` races a submission's wait against its producer's end, and `shuttle_a_reader_racing_a_reported_gap_takes_it_without_another_change` (`subscriptions.rs`) races the application's next read against a subscription event the follower reports: each waiter subscribes before it reads, so neither waits for a later change. |
+| Rust client exchange ending (`crates/client-core/src/exchange.rs`, `exchange/shuttle_tests.rs`) | `shuttle_a_closed_request_registry_ends_its_silent_reader` races the production frame reader and a subscription event waiter against closing the request registry. The open registry alone owns its closure sender. Its reader registers once before waiting for frames, so closure before registration or during a silent transport wait ends the reader and wakes the event waiter without a transport frame. The reader finishes routing before ending that exact generation. No request-registry lookup is added per row or frame; the observer lives with the reader. |
 | Rust client domain clock restoration (`crates/client-core/src/domain_clock.rs`) | `shuttle_a_detach_racing_a_restoration_leaves_no_attachment_of_its_clock` races a detach of an interrupted clock against the production restoration decision, with a modeled session that serves both in the order it receives them and applies each reply through the production owner: once the detach is answered the session holds no attachment of the clock and the client does not follow it, whether the restoration attached first, waited for the detach, or found the clock released. |
 | Relay branch presence (`src/runtime/relay_branch_presence_shuttle_tests.rs`) | `shuttle_an_observer_sees_every_owner_step_whole_and_never_an_older_one` races an owner at capacity one through admission, eviction, recreation and release against an observer that registers and reads throughout: every read is a membership the owner published whole and never older than the step the owner had finished. `shuttle_capacity_and_expiry_publish_whole_memberships` keeps every read within the owner's capacity and drops an expired branch from every read after the expiry. `shuttle_a_replaced_owner_never_publishes_over_its_successor` races a predecessor's admissions, expiry and release against its successor's claim: once the claim is visible no read holds a branch only the predecessor admitted, and the successor's branch survives the predecessor's release. |
 | Checkpoint replication (`src/runtime/kafka_offset_state.rs`, `src/runtime/state_replication/checkpoint_announcement_shuttle_tests.rs`) | `shuttle_a_replica_acknowledgement_racing_the_quorum_wait_is_never_missed` races a Kafka offset commit's replica quorum wait against its replica's acknowledgement: the wait registers before it reads, so it completes without its deadline, which a Shuttle timeout only reaches when a check triggers it. `shuttle_an_offer_racing_the_end_of_an_announcement_is_always_announced` races a second offer against the announcer of the first finding its replica caught up: the second revision is always announced and acknowledged. `shuttle_a_retired_replication_ends_its_announcer` ends an announcer whose replicated state goes away while its replica never acknowledges. `shuttle_an_announcement_racing_the_replica_wait_is_never_missed` races an owner's announcement against the replica task's synchronization and wait: an announcement that lands before the wait is kept as its permit. `shuttle_checkpoint_announcement_close_cancels_pending_dispatch` exercises the production task owner with close racing the first poll and close after dispatch starts: both cancel a dispatch that never becomes ready and release its retained announcer. |

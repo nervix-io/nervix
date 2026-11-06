@@ -94,7 +94,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: options, modes, headers, ingest metadata. Consumption declares subscription ownership and, when ingestor-owned, its EARLIEST or LATEST creation position, and the subscription's type; existing cursors prevail. Publication uses a producer receipt. Both directions use the same quoted, case-preserving Pulsar topic names. |
+| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: options, modes, headers, ingest metadata. SUBSCRIPTION, TYPE and INSTANCES configure ingestion only: subscription ownership and an owned subscription's EARLIEST or LATEST position govern creation, while existing cursors prevail. TIMESTAMP and DELIVER AFTER are emitter envelope clauses; an ingestor selects a received time with TIMESTAMP AT. Ingestion reads ordered, repeated properties, while publication keeps the last value written for each property name and uses a producer receipt. Both directions use the same quoted, case-preserving local or fully qualified Pulsar topic names and the same client configuration. |
 | Reference | PULSAR client |  |
 | Locator and validation rule | TOPIC 'orders' (pulsar_topic) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -114,7 +114,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | MQTT TOPIC | Compare `MQTT TOPIC`: locator, options, modes, ingest metadata. Consumption declares its session, inbound QoS and topic filter, and reads the delivered packet's metadata and ordered, repeated user properties. Publication declares its outbound QoS and completion mode, RETAIN, exact MQTT 5 publish properties and ordered, repeated user properties. Both directions keep the written case of topic names. |
+| Entity | MQTT TOPIC | Compare `MQTT TOPIC`: locator, options, modes, ingest metadata. Both directions declare QOS 0, 1 or 2 independently of MODE. Consumption alone declares SESSION: NO ACK accepts every session/QoS pairing, while ACK SEQUENTIAL, ACK PARALLEL and SUSPEND require SESSION PERSISTENT with QOS 1 or 2. Every ingestor joins a Nervix-managed shared subscription, so its broker must support shared subscriptions. Publication pairs QOS 0 with NO ACK and QOS 1 or 2 with an ACK mode; its clean or persistent session follows QoS without a SESSION clause. Consumption reads the delivered packet's metadata and ordered, repeated user properties; publication writes RETAIN, exact MQTT 5 publish properties and ordered, repeated user properties. Both directions keep the written case of topic names. |
 | Reference | MQTT client |  |
 | Locator and validation rule | TOPIC 'devices/+/orders' (mqtt_topic_filter) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2)<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2) |  |
@@ -399,7 +399,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: options, modes, headers, emit envelope/properties. Consumption declares subscription ownership and, when ingestor-owned, its EARLIEST or LATEST creation position, and the subscription's type; existing cursors prevail. Publication uses a producer receipt. Both directions use the same quoted, case-preserving Pulsar topic names. |
+| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: options, modes, headers, emit envelope/properties. SUBSCRIPTION, TYPE and INSTANCES configure ingestion only: subscription ownership and an owned subscription's EARLIEST or LATEST position govern creation, while existing cursors prevail. TIMESTAMP and DELIVER AFTER are emitter envelope clauses; an ingestor selects a received time with TIMESTAMP AT. Ingestion reads ordered, repeated properties, while publication keeps the last value written for each property name and uses a producer receipt. Both directions use the same quoted, case-preserving local or fully qualified Pulsar topic names and the same client configuration. |
 | Reference | PULSAR client |  |
 | Locator and validation rule | TOPIC 'orders' (pulsar_topic) |  |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -483,7 +483,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | MQTT TOPIC | Compare `MQTT TOPIC`: locator, options, modes, emit envelope/properties. Consumption declares its session, inbound QoS and topic filter, and reads the delivered packet's metadata and ordered, repeated user properties. Publication declares its outbound QoS and completion mode, RETAIN, exact MQTT 5 publish properties and ordered, repeated user properties. Both directions keep the written case of topic names. |
+| Entity | MQTT TOPIC | Compare `MQTT TOPIC`: locator, options, modes, emit envelope/properties. Both directions declare QOS 0, 1 or 2 independently of MODE. Consumption alone declares SESSION: NO ACK accepts every session/QoS pairing, while ACK SEQUENTIAL, ACK PARALLEL and SUSPEND require SESSION PERSISTENT with QOS 1 or 2. Every ingestor joins a Nervix-managed shared subscription, so its broker must support shared subscriptions. Publication pairs QOS 0 with NO ACK and QOS 1 or 2 with an ACK mode; its clean or persistent session follows QoS without a SESSION clause. Consumption reads the delivered packet's metadata and ordered, repeated user properties; publication writes RETAIN, exact MQTT 5 publish properties and ordered, repeated user properties. Both directions keep the written case of topic names. |
 | Reference | MQTT client |  |
 | Locator and validation rule | TOPIC 'devices/Orders' (mqtt_topic) |  |
 | Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 0)<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires QOS 1 or 2) |  |

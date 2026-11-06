@@ -1104,15 +1104,7 @@ impl Client {
                     .request_until(request, None, wait, cancellation)
                     .await?
                 {
-                    ReplyBody::Command(outcome) => {
-                        if outcome.execution_reference != execution.reference {
-                            return Err(Report::new(ClientError::ExecutionReferenceMismatch {
-                                expected: execution.reference.clone(),
-                                received: outcome.execution_reference,
-                            }));
-                        }
-                        Ok(CommandOutcome::from(*outcome))
-                    }
+                    ReplyBody::Command(outcome) => Ok(CommandOutcome::from(*outcome)),
                     other => Err(Report::new(ClientError::unexpected_reply(
                         RequestKind::Command,
                         other,
@@ -1355,7 +1347,7 @@ impl Client {
                 timeout.unwrap_or(self.inner.connector.request_timeout()),
                 async {
                     // Register before sending so a prompt reply always finds its waiter.
-                    let Some(mut registered) = exchange.register() else {
+                    let Some(mut registered) = exchange.register_for(&request) else {
                         return Err(Report::new(exchange.pending.lock().failure()));
                     };
                     let message = ClientMessage {
@@ -1387,6 +1379,11 @@ impl Client {
                                 Err(Report::new(ClientError::RequestInterrupted {
                                     request: kind,
                                 }))
+                            }
+                            failure @ ClientError::ExecutionReferenceMismatch { .. } => {
+                                Err(Report::new(failure).change_context(
+                                    ClientError::RequestInterrupted { request: kind },
+                                ))
                             }
                             failure => Err(Report::new(failure)),
                         },
@@ -1466,8 +1463,10 @@ impl Client {
     /// The stream outlives the session. When the session ends, it reports
     /// [`SubscriptionEvent::Interrupted`] for every subscription the session held that the server
     /// had not ended, opens a new session, and opens each of them again as a new generation. An
-    /// opening that session refuses or leaves unanswered is reported as
-    /// [`SubscriptionEvent::RestorationFailed`] and sent again after a growing wait. A subscription
+    /// opening that fails while the session stays open is reported as
+    /// [`SubscriptionEvent::RestorationFailed`] and sent again after a growing wait. An opening
+    /// left unanswered past the request timeout ends
+    /// that session and wakes the reader to open another. A subscription
     /// the server ended is never opened again, and its [`SubscriptionEvent::Ended`] is reported
     /// once, after the events before it, even when its session ended before it was read. With
     /// nothing to restore it waits for the next session the client opens, and delivers the events

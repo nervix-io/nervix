@@ -20,8 +20,9 @@ use futures_util::future::BoxFuture;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection, ChoiceStatus,
-    ChoiceTarget, ChoiceValue, CommandRequest, DomainPaceChoice, NoticeLevel, ServerNotice,
-    SuggestOutcome, SuggestRequest, Suggestion, SuggestionKind, SuggestionStatus, TextEdit,
+    ChoiceTarget, ChoiceValue, CommandRequest, DomainPaceChoice, NoticeKind, NoticeLevel,
+    ServerNotice, SuggestOutcome, SuggestRequest, Suggestion, SuggestionKind, SuggestionStatus,
+    TextEdit,
 };
 use nervix_consensus::{Administrator, CommandExecutionTransactionTarget, Observer, Proposer};
 use nervix_interconnect::Transport;
@@ -48,7 +49,7 @@ use nervix_vm::program::FunctionName;
 use tracing::{debug, warn};
 
 use super::{
-    authentication::AuthRateLimiter,
+    authentication::AuthenticationPacing,
     backup::{CaptureSectionKey, CapturedSectionStage, ServerRetainedBackups},
     client_consumers::ClientConsumerRouter,
     client_producers::ClientProducerRouter,
@@ -110,24 +111,27 @@ impl SessionEvents {
         }
     }
 
-    /// Report a control-plane failure this node recovered from.
-    fn report_error(&self, message: impl Into<String>) {
-        let message = message.into();
-        warn!(error = %message, "server error reported to sessions");
-        self.publish(NoticeLevel::Error, message);
+    /// Report a failure of `kind` recovered from: a control-plane failure of this node, or a runtime
+    /// failure of any node, which a peer's runtime fans out here and traces only at `debug`.
+    pub(in crate::application) fn report_error(&self, kind: NoticeKind, message: String) {
+        warn!(error = %message, ?kind, "server error reported to sessions");
+        self.publish(NoticeLevel::Error, kind, message);
     }
 
-    /// Offer a transition the cluster or consensus bus has already recorded.
-    ///
-    /// Those buses write their own `info` line before handing the text here, so this is a relay
-    /// rather than a report and it logs nothing of its own.
-    pub(in crate::application) fn relay_info(&self, message: String) {
-        self.publish(NoticeLevel::Info, message);
+    /// Offer, as `kind`, an event its owner already recorded in its own `info` line (a live-set
+    /// change, a consensus transition, an installed parameter revision); it logs nothing itself.
+    pub(in crate::application) fn relay_info(&self, kind: NoticeKind, message: String) {
+        self.publish(NoticeLevel::Info, kind, message);
     }
 
-    fn publish(&self, level: NoticeLevel, message: String) {
+    fn publish(&self, level: NoticeLevel, kind: NoticeKind, message: String) {
+        let notice = ServerNotice {
+            level,
+            kind,
+            message,
+        };
         self.sender
-            .send(ServerNotice { level, message })
+            .send(notice)
             .discarded("the record this event carries is written before it is offered");
     }
 
@@ -182,8 +186,7 @@ pub(in crate::application) struct SessionServiceInner {
     /// Routes each client emitter consumer to its current execution owner.
     pub(in crate::application) client_consumers: ClientConsumerRouter,
     pub(in crate::application) service_tasks: ServiceTasks,
-    pub(in crate::application) auth_rate_limiter: AuthRateLimiter,
-    pub(in crate::application) failed_auth_rate_limit_keys: DashMap<String, (), RandomState>,
+    pub(in crate::application) authentication_pacing: AuthenticationPacing,
     /// The series the traffic of this node's client listeners is recorded into.
     pub(in crate::application) traffic: ClientTraffic,
     pub(in crate::application) transaction_bindings: DashMap<String, String, RandomState>,
@@ -1447,7 +1450,9 @@ impl SessionServiceImpl {
 
     /// Report a control-plane failure this node recovered from to the sessions attached to it.
     pub(in crate::application) fn broadcast_error(&self, message: impl Into<String>) {
-        self.inner.events.report_error(message);
+        self.inner
+            .events
+            .report_error(NoticeKind::ControlPlane, message.into());
     }
 
     /// Resolves one structured control against a single observed application revision.

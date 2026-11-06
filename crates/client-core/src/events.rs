@@ -10,9 +10,9 @@
 use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_client_wire::{
-    NoticeLevel, RowConformanceError, RowSchema, ServerNotice, SubscriptionDeliveryLost,
-    SubscriptionEnded, SubscriptionHandle, SubscriptionRows, SubscriptionRowsSkipped, Suggestion,
-    SuggestionKind, SuggestionStatus,
+    NoticeKind, NoticeLevel, RowConformanceError, RowSchema, ServerNotice,
+    SubscriptionDeliveryLost, SubscriptionEnded, SubscriptionHandle, SubscriptionRows,
+    SubscriptionRowsSkipped, Suggestion, SuggestionKind, SuggestionStatus,
 };
 use nervix_models::{RelayName, SubscriptionDeliveryBehavior};
 use nervix_primitives::sync::Arc;
@@ -33,8 +33,8 @@ pub enum SubscriptionEvent {
     Ended(SubscriptionEnded),
     /// The exchange ended, leaving a gap before any restoration on a new session.
     Interrupted(SubscriptionInterruption),
-    /// The current session refused to open the interrupted subscription again, or did not answer.
-    /// The subscription stays interrupted, and the client tries again later.
+    /// Reopening failed while the session stays open. The client retries after the reported wait.
+    /// An unanswered reopening ends its session at the request timeout.
     RestorationFailed(SubscriptionRestorationFailure),
     /// The client could not retain more events for this subscription. Its delivery on this
     /// exchange has ended, while unrelated subscriptions continue.
@@ -92,10 +92,13 @@ impl SubscriptionRowsEvent {
     }
 }
 
-/// A server condition worth an operator's attention that belongs to no request.
+/// A server condition worth an operator's attention that belongs to no request: display text, with
+/// the level it is shown at and the kind of event it reports. A reader routes it by `kind`, never by
+/// its text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerEvent {
     pub level: NoticeLevel,
+    pub kind: NoticeKind,
     pub message: String,
 }
 
@@ -103,6 +106,7 @@ impl From<ServerNotice> for ServerEvent {
     fn from(notice: ServerNotice) -> Self {
         Self {
             level: notice.level,
+            kind: notice.kind,
             message: notice.message,
         }
     }

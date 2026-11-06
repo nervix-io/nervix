@@ -13,6 +13,7 @@ use std::{collections::BTreeMap, time::Duration};
 use cucumber::{then, when};
 use meticulous::OptionExt as _;
 use nervix_approx_into::CheckedApproxInto as _;
+use nervix_primitives::time::Instant;
 
 use super::{ScenarioWorld, expand_placeholders};
 use crate::common::{
@@ -67,21 +68,24 @@ pub(crate) struct AuthenticationBaseline {
 
 /// Credentials a scenario presents that do not authenticate their call.
 #[derive(Debug, Clone, Copy)]
-enum RefusedCredentials {
+enum RefusedCredentials<'a> {
     /// The test user's name with a password that is not its own.
     WrongPassword,
     /// A name no user of the cluster has.
     UnknownUser,
     /// No Basic credentials at all.
     Missing,
+    /// A scenario-selected name with a password that is not its own.
+    NamedUser(&'a str),
 }
 
-impl RefusedCredentials {
+impl RefusedCredentials<'_> {
     fn authorization(self) -> String {
         match self {
             Self::WrongPassword => test_basic_authorization_for_password("not-the-password"),
             Self::UnknownUser => basic_authorization_as("nobody", "not-the-password"),
             Self::Missing => String::new(),
+            Self::NamedUser(username) => basic_authorization_as(username, "not-the-password"),
         }
     }
 }
@@ -91,7 +95,7 @@ impl RefusedCredentials {
 async fn assert_session_refused(
     world: &ScenarioWorld,
     node: &str,
-    credentials: RefusedCredentials,
+    credentials: RefusedCredentials<'_>,
     expected: &str,
 ) {
     let node = expand_placeholders(world, node);
@@ -136,6 +140,49 @@ async fn wrong_password_session_is_refused(
 )]
 async fn unknown_user_session_is_refused(world: &mut ScenarioWorld, node: String, status: String) {
     assert_session_refused(world, &node, RefusedCredentials::UnknownUser, &status).await;
+}
+
+#[then(
+    expr = "a burst of {int} refused native sessions as {string} on node {string} takes at least \
+            {int} seconds"
+)]
+async fn refused_sessions_are_paced(
+    world: &mut ScenarioWorld,
+    attempts: usize,
+    username: String,
+    node: String,
+    seconds: u64,
+) {
+    let credentials = RefusedCredentials::NamedUser(&username);
+    let uppercase = username.to_ascii_uppercase();
+    // The first refusal establishes pacing; measure only the later attempts it governs.
+    assert_session_refused(world, &node, credentials, "Unauthenticated").await;
+    let started = Instant::now();
+    nervix_primitives::time::timeout(CALL_WAIT, async {
+        for attempt in 0..attempts {
+            nervix_primitives::task::consume_budget().await;
+            let presented = if attempt.is_multiple_of(2) {
+                &username
+            } else {
+                &uppercase
+            };
+            assert_session_refused(
+                world,
+                &node,
+                RefusedCredentials::NamedUser(presented),
+                "Unauthenticated",
+            )
+            .await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("node '{node}' did not finish {attempts} refused sessions"));
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_secs(seconds),
+        "{attempts} refused sessions as {username:?} on '{node}' took {elapsed:?}; pacing must \
+         delay the burst by at least {seconds}s"
+    );
 }
 
 #[then(
@@ -232,7 +279,7 @@ async fn credentials_figure(world: &ScenarioWorld, node: &str, metric: &str, cla
 async fn assert_refused_after_one_verification(
     world: &ScenarioWorld,
     node: &str,
-    credentials: RefusedCredentials,
+    credentials: RefusedCredentials<'_>,
 ) {
     let node = expand_placeholders(world, node);
     let jobs = credentials_figure(world, &node, CREDENTIALS_JOBS, CREDENTIALS_JOBS_CLASS).await;

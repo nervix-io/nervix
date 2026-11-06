@@ -32,25 +32,12 @@ fn json_type<'src>()
 fn cbor_type<'src>()
 -> impl Parser<'src, &'src [Token], CborType, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
-        kw(Identifier::String).to(CborType::String),
-        kw(Identifier::Number).to(CborType::Number),
         kw(Identifier::Integer).to(CborType::Integer),
-        kw(Identifier::Object).to(CborType::Object),
-        kw(Identifier::Array).to(CborType::Array),
+        kw(Identifier::Float).to(CborType::Float),
         kw(Identifier::Boolean).to(CborType::Boolean),
-        kw(Identifier::Null).to(CborType::Null),
-        kw(Identifier::U8).to(CborType::U8),
-        kw(Identifier::I8).to(CborType::I8),
-        kw(Identifier::U16).to(CborType::U16),
-        kw(Identifier::I16).to(CborType::I16),
-        kw(Identifier::U32).to(CborType::U32),
-        kw(Identifier::I32).to(CborType::I32),
-        kw(Identifier::U64).to(CborType::U64),
-        kw(Identifier::I64).to(CborType::I64),
-        kw(Identifier::Datetime).to(CborType::Datetime),
-        kw(Identifier::F32).to(CborType::F32),
-        kw(Identifier::F64).to(CborType::F64),
+        kw(Identifier::Text).to(CborType::Text),
         kw(Identifier::Bytes).to(CborType::Bytes),
+        kw(Identifier::Array).to(CborType::Array),
     )
 }
 
@@ -890,7 +877,7 @@ mod tests {
         let input = r#"
             CREATE WIRE CBOR SCHEMA notification MODE LOOSE (
                 user_id integer,
-                payload object OPTIONAL
+                payload bytes OPTIONAL
             );
         "#;
 
@@ -903,6 +890,7 @@ mod tests {
         };
         assert_eq!(schema.strictness, WireSchemaStrictness::Loose);
         assert_eq!(schema.fields[0].ty, CborType::Integer);
+        assert_eq!(schema.fields[1].ty, CborType::Bytes);
         assert!(schema.fields[1].optional);
     }
 
@@ -1090,12 +1078,53 @@ mod tests {
     fn suggests_types_from_cbor_wire_schema_grammar() {
         let input = "CREATE WIRE CBOR SCHEMA s MODE LOOSE (id ";
         let suggestions = suggest_create_wire_schema(input, input.len());
-        assert!(suggestions.contains(&"STRING".to_string()));
-        assert!(suggestions.contains(&"INTEGER".to_string()));
-        assert!(suggestions.contains(&"OBJECT".to_string()));
-        assert!(suggestions.contains(&"U32".to_string()));
-        assert!(suggestions.contains(&"DATETIME".to_string()));
-        assert!(!suggestions.contains(&"BOOL".to_string()));
+        assert_eq!(suggestions.len(), 6);
+        for ty in ["INTEGER", "FLOAT", "BOOLEAN", "TEXT", "BYTES", "ARRAY"] {
+            assert!(suggestions.contains(&ty.to_string()), "missing {ty}");
+        }
+    }
+
+    #[test]
+    fn parses_each_cbor_wire_representation() {
+        let input = "CREATE WIRE CBOR SCHEMA values MODE STRICT (a integer, b float, c boolean, d \
+                     text, e bytes, f array);";
+        let Statement::Create(create) =
+            parse_create_wire_schema(input).expect("all six CBOR types parse")
+        else {
+            panic!("the statement creates a wire schema");
+        };
+        let Model::WireCborSchema(schema) = *create.body else {
+            panic!("the statement declares CBOR");
+        };
+        let types: Vec<_> = schema.fields.iter().map(|field| field.ty).collect();
+        assert_eq!(
+            types,
+            [
+                CborType::Integer,
+                CborType::Float,
+                CborType::Boolean,
+                CborType::Text,
+                CborType::Bytes,
+                CborType::Array,
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_types_outside_the_cbor_wire_vocabulary() {
+        for ty in ["map", "tag", "undefined", "binary"] {
+            let input = format!("CREATE WIRE CBOR SCHEMA s MODE STRICT (payload {ty});");
+            assert!(
+                parse_create_wire_schema(&input).is_err(),
+                "{ty} must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_repeated_cbor_field_optionality() {
+        let input = "CREATE WIRE CBOR SCHEMA s MODE STRICT (payload bytes OPTIONAL OPTIONAL);";
+        assert!(parse_create_wire_schema(input).is_err());
     }
 
     #[test]
@@ -1140,7 +1169,7 @@ mod tests {
 
     #[test]
     fn parses_all_wire_schema_alter_operations_for_each_format() {
-        let cases = [("JSON", "STRING"), ("CBOR", "OBJECT"), ("AVRO", "LONG")];
+        let cases = [("JSON", "STRING"), ("CBOR", "TEXT"), ("AVRO", "LONG")];
         for (format, ty) in cases {
             let input = format!(
                 "ALTER WIRE {format} SCHEMA payload ADD FIELD added {ty} OPTIONAL, DROP FIELD \

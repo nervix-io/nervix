@@ -1509,6 +1509,11 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [PULSAR TOPIC capability and mirror reference](connector-capabilities.md#pulsar-topic-emit).
 <!-- connector-matrix:emit-pulsar-topic:end -->
 
+The emitter uses the same [Pulsar topic names](ingestors.md#pulsar-topic-names) as the ingestor:
+short names use the client's namespace and fully qualified persistent or non-persistent names are
+sent as written. Provision the output topic before starting the emitter. `SUBSCRIPTION`, `TYPE`
+and `INSTANCES` configure consumption and are unavailable on an emitter.
+
 `ACK` waits for each broker receipt, for up to `ACK TIMEOUT` after that record's hand-over. The
 driver uses the same timeout, including values longer than thirty seconds. If a later enqueue
 fails, receipts already given are settled before retry, so confirmed records are not sent again.
@@ -1579,7 +1584,8 @@ Pulsar emitters use the same client config surface as Pulsar ingestors:
 - optional `'namespace'`: the tenant and namespace, written `'tenant/namespace'`, that a short
   topic name is placed in, so `TOPIC 'orders'` writes `persistent://<namespace>/orders`; defaults
   to `public/default`. Fully qualified topic names are sent as written.
-- optional `'auth_token'`: the token the client authenticates with
+- optional `'auth_token'`: the token the client authenticates with; `DESCRIBE CLIENT` and
+  `SHOW CREATE CLIENT` show it redacted
 - optional `'tls_ca_file'`: PEM-encoded CA bundle a `pulsar+ssl://...` connection trusts beside the
   bundled public roots and the host's trust store
 - optional `'tls_cert_file'` and `'tls_key_file'`: the PEM-encoded client certificate the client
@@ -1589,8 +1595,8 @@ Pulsar emitters use the same client config surface as Pulsar ingestors:
 - optional `'tls_hostname_verification_enabled'`: `false` accepts a certificate from a trusted
   authority whatever address it names; defaults to `true`
 
-The [ingestor manual](ingestors.md#pulsar) states what each credential authenticates as and what
-each TLS key relaxes, and `CREATE PULSAR CLIENT` refuses the five TLS keys with a plaintext
+The [Pulsar client reference](ingestors.md#pulsar-client) states what each credential authenticates
+as and what each TLS key relaxes, and `CREATE PULSAR CLIENT` refuses the five TLS keys with a plaintext
 `pulsar://...` address and a `namespace` that is not exactly a tenant and a namespace.
 
 The Pulsar driver makes one attempt at a connection or an operation, and the host owns every retry
@@ -1922,9 +1928,18 @@ option: an emitter without acknowledgement needs no session, and an acknowledged
 it.
 
 Every statement writes its quality of service as `QOS 0`, `QOS 1` or `QOS 2` before `MODE`. Neither
-has a default, and the two pair by what can complete a publish: nothing answers QoS 0, so `QOS 0`
-takes `NO ACK`, and a broker answers QoS 1 and 2, so `QOS 1` and `QOS 2` take `ACK SEQUENTIAL` or
-`ACK PARALLEL MAX <n>`.
+has a default. The legal pairings and their completion points are:
+
+| QoS | Mode families | Record completes when | Session requested |
+| --- | --- | --- | --- |
+| `0` | `NO ACK` | The client accepts the publish | Clean |
+| `1` | `ACK SEQUENTIAL`, `ACK PARALLEL` | The broker answers `PUBACK` | Persistent |
+| `2` | `ACK SEQUENTIAL`, `ACK PARALLEL` | The broker answers `PUBCOMP` | Persistent |
+
+Use the complete mode bodies from the declaration below: every mode has a retry policy, and
+acknowledged modes also require `ACK TIMEOUT`.
+`SESSION` is written only on an ingestor; the emitter derives it from QoS. The ingest-side
+combination of `NO ACK` with QoS 1 or 2 is not an emitter pairing.
 
 <!-- connector-matrix:emit-mqtt-topic:start -->
 ```plexus,ignore
@@ -1966,6 +1981,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-emit).
 <!-- connector-matrix:emit-mqtt-topic:end -->
 
+#### MQTT topics, properties and user properties
+
 `TOPIC` names one literal topic, published to exactly as written, letter case included. It follows
 the [ingestion topic filter rule](ingestors.md#external-names) without the `+` and `#` wildcards,
 so `TOPIC 'devices/+'` is refused when the emitter is created. The client's `addr` names the broker
@@ -2000,6 +2017,8 @@ CREATE refuses an unsupported QoS number with its value and accepted levels, suc
 offers only the modes the written quality of service pairs with, and a statement that writes
 another is refused with the mode underlined and what it writes named, such as
 `MQTT TOPIC emitters name MODE NO ACK only with QOS 0; the statement writes QOS 1`.
+
+#### MQTT alterations and delivery recovery
 
 `ALTER` holds every result to the same pairing, once every operation of the statement has applied.
 `SET MODE` changes the mode within a quality of service, so `SET MODE ACK PARALLEL MAX 8 ...` is
