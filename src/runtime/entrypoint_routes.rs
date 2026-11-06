@@ -112,7 +112,7 @@ pub(super) struct BoundEntryRoute {
 }
 
 /// The output routes of one running ingestor, compiled once when it starts and shared by every
-/// source instance, request and ingest group that dispatches through them.
+/// ingestor instance, request and ingest group that dispatches through them.
 #[derive(Debug)]
 pub(super) struct BoundIngestorRoutes {
     /// Every route in declared order, which is never empty.
@@ -222,7 +222,7 @@ impl ExecutionBuildDeps<'_> {
     }
 
     /// Compiles an ingestor's node filter and routes against its input schema: what its codec
-    /// decodes a transport's payloads into, or the schema a client source's batches carry.
+    /// decodes a transport's payloads into, or the schema a client ingestor's batches carry.
     pub(super) fn bind_ingestor(
         &self,
         ingestor: &IngestorSpec,

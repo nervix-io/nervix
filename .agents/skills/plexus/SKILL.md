@@ -63,15 +63,13 @@ emitter may set `MESSAGE ID <expression>`, which JetStream deduplicates across r
 stream's duplicate window. Read [Emitters → NATS](../../../docs/src/emitters.md#nats) for both
 entities' complete clause order, failure outcomes and retry boundary.
 
-For RabbitMQ consumption choose `MODE NO ACK`, `MODE ACK SEQUENTIAL`, or
-`MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
-Parallel `MAX` is 1 through 65,535 and is the broker prefetch per instance. Each delivery settles
-on its own graph outcome. Automatic consumption has no prefetch or transport acknowledgement;
-work already accepted by the broker can be lost before the graph completes. Read the RabbitMQ
-Ingestors section for the exact clause order, host admission and recovery limits.
+For RabbitMQ consumption, read [Ingestors → RabbitMQ](../../../docs/src/ingestors.md#rabbitmq)
+before choosing a mode: consumer prefetch and per-delivery settlement differ from publisher
+confirms. Follow its metadata, sorted-header, recovery and shared client sections.
 For RabbitMQ publication, read [Emitters → RabbitMQ](../../../docs/src/emitters.md#rabbitmq) for
-`PERSISTENT`, `TIMESTAMP`, exact AMQP `PROPERTIES` types, targeted envelope alterations and the
-durable-queue requirement; property writes and `write_header` have different contracts.
+the queue/default-exchange and named-exchange choices, `MANDATORY`, persistence, exact AMQP
+`PROPERTIES` types and envelope alterations. Do not promise consumer completion from a publisher
+confirm or message durability from routing alone.
 
 For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
 [web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
@@ -321,10 +319,10 @@ During node startup, `SHOW CLUSTER STATUS;` and `DESCRIBE CLUSTER;` remain avail
 Use `ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;`
 for committed Nervix cluster policy changes. Keep it outside domain transactions; it needs no
 selected domain. Read `Domains And Time` → `Duration Literals` for duration spelling, and
-`Node Settings` for the complete parameter set, positive duration bounds,
-existing-model cap refusals, live installation and committed-versus-running inspection. Seed flags
-belong only to the first bootstrap, including when their value equals the default. Later starts,
-including the returning bootstrap node, omit them.
+`Node Settings` for the complete parameter set, one assignment per parameter, positive duration
+bounds, existing-model cap refusals, live installation and committed-versus-running inspection.
+Seed flags belong only to the first bootstrap, including when their value equals the default.
+Later starts, including the returning bootstrap node, omit them.
 `HTTP_HEADER_FIELDS` ranges from 1 to 16,384, leaving capacity for client and transport headers. Committed header byte and field caps also protect
 literal HTTP polling headers, at model creation and when a later cap is lowered.
 

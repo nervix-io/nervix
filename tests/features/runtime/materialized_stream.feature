@@ -32,7 +32,7 @@ Feature: Materialized relay state
         PATH '/state'
         TYPE HTTP;
 
-      CREATE HTTP ENDPOINT INGESTOR root_state_source
+      CREATE HTTP ENDPOINT INGESTOR root_state_ingestor
         FROM root_state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING root_event_codec
         TO root_state
@@ -79,7 +79,7 @@ Feature: Materialized relay state
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge readings-{{test_id}}.example.com;
       CREATE ENDPOINT readings_ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR reading_source
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM readings_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
         TO readings INHERIT ALL BRANCHED BY by_reading_tenant
@@ -286,7 +286,7 @@ Feature: Materialized relay state
       CREATE ENDPOINT first_state_ingress ON edge PATH '/first-state' TYPE HTTP;
       CREATE ENDPOINT second_state_ingress ON edge PATH '/second-state' TYPE HTTP;
       CREATE ENDPOINT dependency_ingress ON edge PATH '/dependency-input' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR first_state_source
+      CREATE HTTP ENDPOINT INGESTOR first_state_ingestor
         FROM first_state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING dependency_event_codec
         TO first_dependency_state
@@ -296,7 +296,7 @@ Feature: Materialized relay state
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR second_state_source
+      CREATE HTTP ENDPOINT INGESTOR second_state_ingestor
         FROM second_state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING dependency_event_codec
         TO second_dependency_state
@@ -306,7 +306,7 @@ Feature: Materialized relay state
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE HTTP ENDPOINT INGESTOR dependency_source
+      CREATE HTTP ENDPOINT INGESTOR dependency_ingestor
         FROM dependency_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING dependency_event_codec
         TO dependency_input
@@ -316,7 +316,7 @@ Feature: Materialized relay state
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT PRODUCER INGESTOR dependency_acknowledged_source
+      CREATE CLIENT PRODUCER INGESTOR dependency_acknowledged_ingestor
         FROM SCHEMA dependency_event
           MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
@@ -342,7 +342,7 @@ Feature: Materialized relay state
       START;
       """
     Given client "dependencies" is connected to the leader node
-    When client "dependencies" opens producer "dependency-input" on ingestor "dependency_acknowledged_source" expecting fields "tenant STRING, value STRING, first_value STRING OPTIONAL, second_value STRING OPTIONAL"
+    When client "dependencies" opens producer "dependency-input" on ingestor "dependency_acknowledged_ingestor" expecting fields "tenant STRING, value STRING, first_value STRING OPTIONAL, second_value STRING OPTIONAL"
     When http payload is posted to node "node-1" with host "http-materialized-order-{{test_id}}.example.com" path "/dependency-input"
       """
       {"tenant":"acme","value":"input-acme"}

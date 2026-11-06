@@ -905,7 +905,7 @@ mixed_hold_checks() {
     mixed_trace_record faults-held "${ordinal}" --arg label "${label}" --arg verdict "${verdict}"
 }
 
-# True when the source runs at most the declared recovery backlog ahead of the sink.
+# True when the source runs at most the declared recovery backlog ahead of the emitter.
 mixed_backlog_within() {
     local source output
     source="$(topic_end_offset chaos_input)" || return 1
@@ -982,7 +982,7 @@ mixed_recover() {
         drain_ms=$(($(epoch_ms) - healed_ms))
     else
         recovery_finding "${mixed_dir}" \
-            "the source stayed more than ${max_recovery_backlog} records ahead of the sink for ${mixed_drain_bound}s after step ${ordinal} healed"
+            "the source stayed more than ${max_recovery_backlog} records ahead of the emitter for ${mixed_drain_bound}s after step ${ordinal} healed"
     fi
     local canaries=()
     local host

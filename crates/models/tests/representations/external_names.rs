@@ -1,7 +1,7 @@
 //! Every external name keeps its text exactly through every representation, and its parser and
 //! decoders accept exactly the text its entity's rule allows.
 //!
-//! An external name is what an external system calls the entity a source reads, case and
+//! An external name is what an external system calls the entity an ingestor reads, case and
 //! punctuation included, so a valid name is the text as written: nothing is normalized. The rule
 //! each kind follows is checked at its boundaries below, and on arbitrary text the decoders agree
 //! with the parser.

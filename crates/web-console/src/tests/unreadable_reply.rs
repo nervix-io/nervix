@@ -1,4 +1,6 @@
-//! Unreadable replies interrupt their session and preserve commands in issue order.
+//! Replies that break the session contract interrupt their session and preserve commands in issue
+//! order: a reply that cannot be decoded or reassembled, and a readable reply of another kind than
+//! its request is answered with (C-11).
 
 use bytes::Bytes;
 
@@ -32,7 +34,75 @@ fn undecodable(request: &ClientMessage) -> VerifiedFrame<ServerFrame> {
     frame
 }
 
-fn preserves_the_whole_command_and_issue_order(split: bool) {
+/// A listing of the command's domain under the command's request identity: a valid reply of
+/// another kind than a command is answered with, as the testing seam answers one.
+fn another_kind(request: &ClientMessage) -> VerifiedFrame<ServerFrame> {
+    let ClientRequest::Command(command) = &request.request else {
+        panic!("the fixture answers a command");
+    };
+    let domain = command
+        .domain
+        .clone()
+        .assured("the fixture's commands name their domain");
+    reply_frame(&Reply {
+        request_id: request.request_id,
+        body: ReplyBody::DomainList(DomainList {
+            domains: vec![DomainInfo {
+                start_version: 1,
+                domain,
+                status: DomainStatus::Running,
+                pace: DomainPace::Unpaced,
+            }],
+        }),
+    })
+}
+
+/// How the reply to a command breaks the session contract.
+#[derive(Clone, Copy, Debug)]
+enum Violation {
+    /// The reply's frame verifies but does not decode.
+    Undecodable,
+    /// A part of a split reply arrives where its first part should.
+    Split,
+    /// The reply decodes as a reply of another kind under the command's request identity.
+    AnotherKind,
+}
+
+impl Violation {
+    /// The frame that answers `request` this way.
+    fn frame(self, request: &ClientMessage) -> VerifiedFrame<ServerFrame> {
+        match self {
+            Self::Undecodable => undecodable(request),
+            Self::Split => suggestion_frames(request.request_id)[1].clone(),
+            Self::AnotherKind => another_kind(request),
+        }
+    }
+
+    /// The cause the console reports for the violation.
+    fn diagnostic(self) -> &'static str {
+        match self {
+            Self::Undecodable => "failed to decode a server message",
+            Self::Split => "failed to reassemble a reply",
+            Self::AnotherKind => UNEXPECTED_REPLY,
+        }
+    }
+}
+
+/// Checks that the terminal shows the violation as its only line: the command is not reported as
+/// failed, and nothing the reply carries is shown.
+fn assert_reported_only(signals: WebConsoleSignals, violation: Violation) {
+    let lines = signals.terminal_lines.get_untracked().into_lines();
+    assert_eq!(lines.len(), 1, "{violation:?} adds one terminal line");
+    let text = &lines[0].line.text;
+    assert!(text.starts_with("error: protocol violation: "), "{text}");
+    assert!(text.contains(violation.diagnostic()), "{text}");
+    assert!(
+        text.contains("pending command outcomes are unknown"),
+        "{text}"
+    );
+}
+
+fn preserves_the_whole_command_and_issue_order(violation: Violation) {
     Owner::new().with(|| {
         let signals = subscription_signals(SubscriptionTabState::Pending);
         let state = RwSignal::new(ConsoleConnectionState::Connected);
@@ -55,15 +125,16 @@ fn preserves_the_whole_command_and_issue_order(split: bool) {
         let second = requests.issue(repl_command("CREATE SCHEMA second ( value I64 );"));
         let first = sent(requests.accept(first));
         let second = sent(requests.accept(second));
-        let step = if split {
-            let parts = suggestion_frames(first.request_id);
-            receive_frame(signals, state, &mut requests, &parts[1])
-        } else {
-            receive_frame(signals, state, &mut requests, &undecodable(&first))
-        };
+        let frame = violation.frame(&first);
+        let step = receive_frame(signals, state, &mut requests, &frame);
         assert!(
             matches!(step, SessionStep::Abandon),
-            "unreadable replies end the session"
+            "{violation:?} ends the session"
+        );
+        assert_reported_only(signals, violation);
+        assert!(
+            signals.domains.get_untracked().is_empty(),
+            "nothing the reply carries is adopted"
         );
         requests.end_connection();
         assert!(requests.in_flight.is_empty());
@@ -82,12 +153,17 @@ fn preserves_the_whole_command_and_issue_order(split: bool) {
 
 #[test]
 fn an_unreadable_reply_preserves_the_whole_command_and_issue_order() {
-    preserves_the_whole_command_and_issue_order(false);
+    preserves_the_whole_command_and_issue_order(Violation::Undecodable);
 }
 
 #[test]
 fn an_unreadable_split_reply_preserves_the_whole_command_and_issue_order() {
-    preserves_the_whole_command_and_issue_order(true);
+    preserves_the_whole_command_and_issue_order(Violation::Split);
+}
+
+#[test]
+fn a_reply_of_another_kind_preserves_the_whole_command_and_issue_order() {
+    preserves_the_whole_command_and_issue_order(Violation::AnotherKind);
 }
 
 #[test]
@@ -138,7 +214,7 @@ fn an_unreadable_joined_reply_keeps_its_command() {
     });
 }
 
-fn visual_create_keeps_waiting_for_its_own_outcome(split: bool) {
+fn visual_create_keeps_waiting_for_its_own_outcome(violation: Violation) {
     Owner::new().with(|| {
         let signals = subscription_signals(SubscriptionTabState::Pending);
         let state = RwSignal::new(ConsoleConnectionState::Connected);
@@ -167,13 +243,10 @@ fn visual_create_keeps_waiting_for_its_own_outcome(split: bool) {
             }),
         });
         let create = sent(requests.accept(create));
-        let frame = if split {
-            suggestion_frames(create.request_id)[1].clone()
-        } else {
-            undecodable(&create)
-        };
+        let frame = violation.frame(&create);
         let step = receive_frame(signals, state, &mut requests, &frame);
         assert!(matches!(step, SessionStep::Abandon));
+        assert_reported_only(signals, violation);
         assert!(signals.selected_resource.get_untracked().is_none());
         requests.end_connection();
         signals.create.connection_lost();
@@ -204,41 +277,17 @@ fn visual_create_keeps_waiting_for_its_own_outcome(split: bool) {
 
 #[test]
 fn an_unreadable_visual_create_keeps_waiting_for_its_own_outcome() {
-    visual_create_keeps_waiting_for_its_own_outcome(false);
+    visual_create_keeps_waiting_for_its_own_outcome(Violation::Undecodable);
 }
 
 #[test]
 fn an_unreadable_split_visual_create_keeps_waiting_for_its_own_outcome() {
-    visual_create_keeps_waiting_for_its_own_outcome(true);
+    visual_create_keeps_waiting_for_its_own_outcome(Violation::Split);
 }
 
 #[test]
-fn an_unexpected_reply_body_interrupts_instead_of_failing_a_command() {
-    Owner::new().with(|| {
-        let signals = subscription_signals(SubscriptionTabState::Pending);
-        let mut requests = SessionRequests::new();
-        requests.confirm_leader();
-        let issued = requests.issue(repl_command("CREATE SCHEMA first ( value I64 );"));
-        let sent = sent(requests.accept(issued));
-        let Routed::Reply(answered) = requests.route(reply(
-            sent.request_id,
-            ReplyBody::DomainList(DomainList {
-                domains: Vec::new(),
-            }),
-        )) else {
-            panic!("the reply answers the issued request");
-        };
-        assert!(matches!(
-            apply_reply(signals, &mut requests, *answered),
-            SessionStep::Abandon
-        ));
-        requests.end_connection();
-        requests.confirm_leader();
-        assert_eq!(
-            sent_commands(&requests.release_held()),
-            sent_commands(&[sent])
-        );
-    });
+fn a_visual_create_answered_with_a_reply_of_another_kind_keeps_waiting_for_its_own_outcome() {
+    visual_create_keeps_waiting_for_its_own_outcome(Violation::AnotherKind);
 }
 
 #[test]

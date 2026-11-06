@@ -227,10 +227,10 @@ struct FaultInjectionState {
     /// One-shot waits, keyed by a stopping node, that the leader spends before it releases the
     /// cordon that node's own graceful shutdown drain set.
     delayed_shutdown_cordon_releases: DashMap<ClusterNodeName, Duration, RandomState>,
-    /// Waits, keyed by an ingestor, that its source hosts spend between learning that a batch was
-    /// acknowledged through the graph and letting the source confirm the batch's positions on its
+    /// Waits, keyed by an ingestor, that its ingestor hosts spend between learning that a batch was
+    /// acknowledged through the graph and letting the connector confirm the batch's positions on its
     /// transport, as a transport slow to answer an acknowledgement would.
-    delayed_source_confirmations: DashMap<DomainNodeRef, Duration, RandomState>,
+    delayed_ingestor_confirmations: DashMap<DomainNodeRef, Duration, RandomState>,
     /// Waits, keyed by the node whose state is written, that a snapshot task spends before the last
     /// write it makes as that state stops, as storage slow to take a large checkpoint would: the
     /// snapshot task of each branch of a deduplicator or window processor once the branch stopped,
@@ -537,7 +537,7 @@ impl Default for FaultInjection {
                 failed_entity_schedule_swaps: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
                 delayed_shutdown_cordon_releases: DashMap::default(),
-                delayed_source_confirmations: DashMap::default(),
+                delayed_ingestor_confirmations: DashMap::default(),
                 delayed_stopped_state_writes: DashMap::default(),
                 delayed_materialized_dependency_reads: DashMap::default(),
                 materialized_snapshot_fetch_holds: DashMap::default(),
@@ -1225,13 +1225,13 @@ impl FaultInjection {
             .insert(stopping_node, delay);
     }
 
-    /// Makes every source host of `ingestor` wait `delay` after a batch was acknowledged through
-    /// the graph before its source confirms the batch's positions on its transport, as a transport
+    /// Makes every ingestor host of `ingestor` wait `delay` after a batch was acknowledged through
+    /// the graph before its connector confirms the batch's positions on its transport, as a transport
     /// slow to answer an acknowledgement would. A host reads the delay as it starts, so a scenario
     /// arms it before the ingestor starts.
-    pub fn delay_source_confirmation(&self, ingestor: DomainNodeRef, delay: Duration) {
+    pub fn delay_ingestor_confirmation(&self, ingestor: DomainNodeRef, delay: Duration) {
         self.inner
-            .delayed_source_confirmations
+            .delayed_ingestor_confirmations
             .insert(ingestor, delay);
     }
 
@@ -2169,8 +2169,8 @@ impl FaultInjection {
         Some(delay)
     }
 
-    pub(crate) fn source_confirmation_delay(&self, ingestor: &DomainNodeRef) -> Option<Duration> {
-        let delay = self.inner.delayed_source_confirmations.get(ingestor)?;
+    pub(crate) fn ingestor_confirmation_delay(&self, ingestor: &DomainNodeRef) -> Option<Duration> {
+        let delay = self.inner.delayed_ingestor_confirmations.get(ingestor)?;
         Some(*delay)
     }
 

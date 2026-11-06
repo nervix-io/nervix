@@ -1,5 +1,5 @@
 [package]
-description = "The Kafka sink connector for Nervix"
+description = "The Kafka emitter connector for Nervix"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-connector-kafka"

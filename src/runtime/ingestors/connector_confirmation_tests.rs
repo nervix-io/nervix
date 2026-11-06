@@ -1,7 +1,7 @@
 //! What a broker ingestor's host reports while the ingestor's transport confirms its positions.
 //!
 //! Layer: test harness.
-//! - **Owns.** A ingestor double whose acknowledgement a test fails or watches, a host double whose
+//! - **Owns.** An ingestor double whose acknowledgement a test fails or watches, a host double whose
 //!   acknowledgement trees are real roots on detached trackers, and the unit tests of the broker
 //!   loop's confirmed progress.
 //! - **Depends on.** The production broker loop, the runtime's batch acknowledgement and the
@@ -83,7 +83,7 @@ impl IngestorMessage for ConfirmingDelivery {
     }
 }
 
-/// A ingestor whose queue the loop reads one message at a time, and whose transport fails a set
+/// An ingestor whose queue the loop reads one message at a time, and whose transport fails a set
 /// number of acknowledgements and rejections before it confirms or takes back the rest.
 struct ConfirmingIngestor {
     queue: VecDeque<u64>,
@@ -209,7 +209,7 @@ impl IngestorHostServices for ConfirmingHost {
         &mut self,
         _messages: Vec<IngestorIntakeMessage<'_>>,
     ) -> IngestorIntakeResult<()> {
-        panic!("the check's source reads in an acknowledged mode");
+        panic!("the check's ingestor reads in an acknowledged mode");
     }
 
     async fn intake_acknowledged(
@@ -276,10 +276,10 @@ impl IngestorHostServices for ConfirmingHost {
         panic!("every acknowledgement tree of the check succeeds, but one failed: {reason}");
     }
     fn record_transport_redeliveries(&self, positions: usize) {
-        panic!("a replayable check source discarded {positions} positions after a reconnect");
+        panic!("a replayable check ingestor discarded {positions} positions after a reconnect");
     }
     fn record_oversized_payloads(&self, payloads: NonZeroUsize) {
-        panic!("a check source whose payloads all fit dropped {payloads} for their size");
+        panic!("a check ingestor whose payloads all fit dropped {payloads} for their size");
     }
     fn record_unconfirmed_stop(&self, positions: usize) {
         self.record
@@ -291,7 +291,7 @@ impl IngestorHostServices for ConfirmingHost {
 
 /// A check's ingestor and host over the same trackers and record.
 struct ConfirmationCheck {
-    source: ConfirmingIngestor,
+    connector: ConfirmingIngestor,
     host: ConfirmingHost,
     trackers: IngestorAckRootTrackers,
     record: Arc<Mutex<ConfirmationRecord>>,
@@ -306,7 +306,7 @@ impl ConfirmationCheck {
         let record = Arc::new(Mutex::new(ConfirmationRecord::default()));
         let (shutdown, loop_shutdown) = watch::channel(false);
         Self {
-            source: ConfirmingIngestor::new(positions, trackers.clone(), record.clone()),
+            connector: ConfirmingIngestor::new(positions, trackers.clone(), record.clone()),
             host: ConfirmingHost {
                 trackers: trackers.clone(),
                 shutdown: loop_shutdown.clone(),
@@ -331,7 +331,7 @@ impl ConfirmationCheck {
     /// Runs the broker loop until its ingestor closes or the check stops it.
     async fn run(self) -> (IngestorAckRootTrackers, Arc<Mutex<ConfirmationRecord>>) {
         run_ingestor_instance_with_retry(
-            self.source,
+            self.connector,
             IngestorHost::new(self.host),
             sequential_policy(PositionClass::Replayable),
             self.loop_shutdown,
@@ -348,7 +348,7 @@ impl ConfirmationCheck {
 #[nervix_primitives::test]
 async fn a_failed_confirmation_is_a_transient_status_until_a_later_one_is_confirmed() {
     let mut check = ConfirmationCheck::reading([1, 2]);
-    check.source.failing_acknowledgements = 1;
+    check.connector.failing_acknowledgements = 1;
 
     let (_trackers, record) = check.run().await;
 
@@ -372,8 +372,8 @@ async fn a_failed_confirmation_is_a_transient_status_until_a_later_one_is_confir
 #[nervix_primitives::test(start_paused = true)]
 async fn a_failed_rejection_is_a_transient_status_until_a_later_confirmation() {
     let mut check = ConfirmationCheck::reading([1]);
-    check.source.failing_acknowledgements = 1;
-    check.source.failing_rejections = 2;
+    check.connector.failing_acknowledgements = 1;
+    check.connector.failing_rejections = 2;
 
     let (_trackers, record) = check.run().await;
 
@@ -457,7 +457,7 @@ async fn a_stop_before_a_batch_resolved_reports_its_positions_unconfirmed() {
 #[nervix_primitives::test]
 async fn individual_settlement_keeps_each_drain_guard_until_its_transport_confirmation() {
     let check = ConfirmationCheck::reading([]);
-    let mut source = check.source;
+    let mut connector = check.connector;
     let mut host = IngestorHost::new(check.host);
     let messages = (1..=3u64)
         .map(|position| ConfirmingDelivery {
@@ -468,7 +468,7 @@ async fn individual_settlement_keeps_each_drain_guard_until_its_transport_confir
     let batch = IndividualBatch::intake(&mut host, messages, Duration::from_secs(1)).await;
     let result = batch
         .settle(
-            &mut source,
+            &mut connector,
             &mut host,
             BatchSettlement {
                 position_class: PositionClass::BrokerRedelivered,

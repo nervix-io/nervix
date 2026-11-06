@@ -21,7 +21,7 @@ Feature: Ingestor quiesce engagement during dispatch
       CREATE KAFKA CLIENT quiesce_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE KAFKA TOPIC INGESTOR quiesce_source
+      CREATE KAFKA TOPIC INGESTOR quiesce_ingestor
         FROM quiesce_kafka TOPIC 'quiesce_dispatch_{{test_id}}'
           OFFSET BY CONSUMER GROUP 'nervix_cucumber_quiesce_dispatch_{{test_id}}' START AT EARLIEST
           MODE NO ACK
@@ -31,17 +31,17 @@ Feature: Ingestor quiesce engagement during dispatch
       START;
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status owner for scheduled "ingestor" "quiesce_source" is saved as placeholder "source_owner"
+    Then the last cluster status owner for scheduled "ingestor" "quiesce_ingestor" is saved as placeholder "source_owner"
     When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION quiesce_seen TO quiesce_output;
       """
-    Given ingestor "quiesce_source" pauses inside dispatch
+    Given ingestor "quiesce_ingestor" pauses inside dispatch
     When Kafka message is published to topic "quiesce_dispatch_{{test_id}}"
       """
       {"id":1}
       """
-    Then ingestor "quiesce_source" reaches the dispatch pause
+    Then ingestor "quiesce_ingestor" reaches the dispatch pause
     Given the entity gate for domain "{{domain}}" pauses after engagement
     When these Plexus commands begin executing in the background
       """
@@ -52,7 +52,7 @@ Feature: Ingestor quiesce engagement during dispatch
       """
       {"id":2}
       """
-    And ingestor "quiesce_source" leaves the dispatch pause
+    And ingestor "quiesce_ingestor" leaves the dispatch pause
     Then within "20s" the relay subscription receives a payload
       """
       "id":1
@@ -62,6 +62,6 @@ Feature: Ingestor quiesce engagement during dispatch
     Then the background Plexus execution succeeds
 
     Examples:
-      | nodes | operation                                                                           |
-      | 1     | ALTER KAFKA TOPIC INGESTOR quiesce_source SET DECODE USING quiesce_event_codec_alt; |
-      | 3     | DRAIN NODE {{source_owner}};                                                        |
+      | nodes | operation                                                                             |
+      | 1     | ALTER KAFKA TOPIC INGESTOR quiesce_ingestor SET DECODE USING quiesce_event_codec_alt; |
+      | 3     | DRAIN NODE {{source_owner}};                                                          |

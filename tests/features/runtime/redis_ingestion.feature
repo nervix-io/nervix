@@ -349,7 +349,7 @@ Feature: Redis ingestion
       """
     Then within "5s" DESCRIBE INGESTOR "redis_notifications" on the leader node contains
       """
-      transient error: ingestor fault injector failed source
+      transient error: ingestor fault injector failed intake
       """
     When ingestor "redis_notifications" leaves fault mode
     And Redis message is published to channel "notifications_reconnect_{{test_id}}"

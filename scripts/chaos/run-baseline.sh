@@ -2660,7 +2660,7 @@ if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}"
         output_has_all_records "${input_end}"; then
         output_wait_timed_out=true
     fi
-    # Preserve an exact ledger even when the sink stayed short of the accepted boundary.
+    # Preserve an exact ledger even when the emitter stayed short of the accepted boundary.
     output_minimum=0
 else
     wait_for "output topic to contain at least ${input_end} records" 120 \
@@ -2706,7 +2706,7 @@ fi
     "${artifact_dir}/results/ledger.json" "${ledger_args[@]}" \
     >"${artifact_dir}/results/ledger.txt"
 if [[ "${output_wait_timed_out}" == true ]]; then
-    printf 'sink output exceeded the %s-second accepted-input boundary\n' "${output_wait_seconds:-120}" >&2
+    printf 'emitter output exceeded the %s-second accepted-input boundary\n' "${output_wait_seconds:-120}" >&2
     exit 124
 fi
 

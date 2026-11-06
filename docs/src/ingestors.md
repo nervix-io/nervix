@@ -1348,7 +1348,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Acknowledgement confirmation | answered |
 | Buffers | a record conversion report after a gathered prefix: at most 1 report per ingestor instance; when full, holds back what fills it<br>messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |
 | Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group commit under ACK: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign and unsubscribe: unbounded<br>destroying a consumer that joined its group, for its LeaveGroup answer: driver default, 5 s per LeaveGroup request |
-| Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. The ingestor supplies group.id, auto.offset.reset and enable.auto.commit, and disables enable.partition.eof and allow.auto.create.topics.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the source's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |
+| Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. The ingestor supplies group.id, auto.offset.reset and enable.auto.commit, and disables enable.partition.eof and allow.auto.create.topics.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the ingestor's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-ingest).
@@ -1813,6 +1813,11 @@ provisions it again.
 
 ### RabbitMQ
 
+`RABBITMQ QUEUE` consumes an externally provisioned queue. To receive messages from an exchange,
+provision a queue and its exchange bindings first, then consume that queue; an exchange is not an
+ingestor entity. [RabbitMQ emitters](emitters.md#rabbitmq) publish either through the default
+exchange to a queue or through a named exchange and a computed routing key.
+
 <!-- connector-matrix:ingest-rabbitmq-queue:start -->
 ```plexus,ignore
 CREATE RABBITMQ QUEUE INGESTOR <name>
@@ -1848,6 +1853,8 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [RABBITMQ QUEUE capability and mirror reference](connector-capabilities.md#rabbitmq-queue-ingest).
 <!-- connector-matrix:ingest-rabbitmq-queue:end -->
 
+#### Queue names, metadata and headers
+
 `QUEUE` names an existing queue and preserves its spelling, including letter case and Unicode.
 Its string literal must contain 1 to 255 UTF-8 bytes, the AMQP short-string limit; a multibyte
 character contributes every byte to that limit. `SHOW CREATE INGESTOR` retains the exact queue
@@ -1869,10 +1876,28 @@ timestamp, a count of whole seconds since the Unix epoch, as that exact `DATETIM
 its message wherever the ingestor's route programs or its `TIMESTAMP AT` read `metadata.timestamp`,
 with code `validation` and operation `admit`, and refuses nothing in an ingestor that reads none.
 
+`read_header` and `read_headers` read the AMQP header table, separately from these basic properties.
+The declared model is `sorted_by_name` with exact names: one value per name, visited in ascending
+byte order, with case-sensitive lookup. It does not preserve publisher insertion order or repeated
+entries of the same name. Copy a header or metadata value into a schema field when downstream
+processing needs it; neither is carried through a relay automatically.
+
+#### Consumption and settlement
 
 Choose `MODE NO ACK`, `MODE ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY …`, or
 `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <duration> ACK TIMEOUT <duration> RETRY POLICY …`.
 `DESCRIBE INGESTOR` prints the complete selected mode.
+
+| Mode | Consumer prefetch per instance | What completes a transport delivery |
+| --- | --- | --- |
+| `NO ACK` | No prefetch request | The broker sends it; no downstream result can requeue it. |
+| `ACK SEQUENTIAL` | 1 | Its graph outcome decides an individual acknowledgement or requeue. |
+| `ACK PARALLEL MAX n` | `n`, from 1 through 65,535 | Each delivery's graph outcome settles it independently of its siblings. |
+
+`ACK TIMEOUT` bounds the absence of graph acknowledgement progress, not total processing time;
+see [Delivery Modes](#delivery-modes). `BATCH TIMEOUT` bounds gathering after the first delivery of
+a parallel read. Neither replaces consumer prefetch. These are consumer controls; an emitter's
+`ACK` waits for publisher confirms and does not acknowledge queue consumption.
 
 `NO ACK` registers an automatically acknowledging consumer, sends no prefetch request and sends
 no delivery acknowledgements or rejections. RabbitMQ considers a delivery complete when it sends
@@ -1895,6 +1920,8 @@ cannot overtake downstream work from that connection.
 A payload its codec refuses is consumed and acknowledged, and its decode rejection follows
 `ON GENERAL ERROR`; see [When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload).
 
+#### Suspension and reconnects
+
 Suspension cancels the consumer and RabbitMQ requeues unacknowledged in-flight deliveries. Other
 consumers on the same queue continue. Queue length, message TTL, overflow, and auto-expiry policies
 remain in force. If auto-expiry deletes the queue, resume reports a source error until an operator
@@ -1910,6 +1937,19 @@ again. RabbitMQ then delivers the message again: a delivery that failed in the g
 and one the graph had already acknowledged is ingested a second time, so delivery across a
 reconnect is at least once.
 
+The acknowledgement confirmation is `written`: Nervix waits for its ACK or requeue frame to be
+written, but AMQP sends no acknowledgement of that consumer settlement. A connection lost at that
+boundary can therefore redeliver a message whose graph work completed. Delivery tags are scoped to
+the channel and cannot be used to settle a replay on a replacement channel.
+
+#### RabbitMQ client
+
+One `RABBITMQ CLIENT` configuration serves queue ingestion and both emitter entities. The
+[generated client key reference](connector-capabilities.md#rabbitmq-client) lists every supported
+key, its value constraints, owner, confidentiality and TLS file role. It is an unpooled client:
+consumer instances and emitters open their own connections. Queue names, exchange names, routing,
+persistence and message properties belong to their entity statements, not to client `CONFIG`.
+
 Each instance resolves the host of the client's `addr` through the node's configured DNS resolver
 every time it connects, so a changed DNS answer takes effect on the next connection, and tries the
 addresses it receives in order. A literal IPv4 address, or an IPv6 address in brackets, is
@@ -1918,7 +1958,8 @@ handshake, opening the channel, setting the prefetch window and starting the con
 client's `connect_timeout_ms`, 30 seconds when it is left out; the broker certificate must name the
 host `addr` names. A connection that fails or runs out of that deadline, including a name that does
 not resolve, is a source error that `DESCRIBE INGESTOR` shows as the transient error, and the
-instance tries again on its `RETRY POLICY` cadence without acknowledging anything.
+instance tries again on its `RETRY POLICY` cadence, or the host's reconnect policy under
+`MODE NO ACK`, without acknowledging anything.
 
 The client's `addr` is an AMQP URI whose scheme is `amqp` or `amqps`, which names a host, and whose
 port, when it names one, is not 0. Lapin would take `localhost` for an address that names no host,
@@ -1936,7 +1977,8 @@ PKCS #1 or SEC1, to a broker that asks for a client certificate. A file that can
 holds no PEM certificate or no private key, fails the connection as a configuration error. A broker
 that requires a client certificate and receives none, or one it does not accept, ends the TLS
 session with an alert: `DESCRIBE INGESTOR` shows that the broker refused the TLS session, naming the
-alert, as the transient error, and the instance tries again on its `RETRY POLICY` cadence.
+alert, as the transient error, and the instance tries again on its `RETRY POLICY` cadence, or the
+host's reconnect policy under `MODE NO ACK`.
 `tls_ca_file`, `tls_cert_file` and `tls_key_file` require an `amqps` address, and certificate and
 key must be supplied together. A client that violates either rule is refused before commit,
 naming the key and its required constraint without repeating the address or file path.
@@ -3287,7 +3329,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | accepted signaling frames retained for source reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |
+| Buffers | accepted signaling frames retained for ingestor reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |
 | Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: `idle_timeout_ms`; when omitted, three ping_interval_ms intervals, or 30 s without configured pings<br>writing a configured ping: fixed 1s<br>close: fixed 1s |
 | Driver limits | The opening upgrade response carries at most 124 header fields, and at most 64 KiB arrives before its head ends; a larger response fails that connection attempt.<br>The response head arrives within 512 reads that, after the 64th, average at least 128 bytes; a peer that trickles it fails that connection attempt. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |

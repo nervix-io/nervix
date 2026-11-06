@@ -13,8 +13,8 @@
     nervix_lint,
     nervix::context(
         lifecycle,
-        reason = "source control and readiness publication are installed or withdrawn with the \
-                  exact source instance"
+        reason = "ingestor control and readiness publication are installed or withdrawn with the \
+                  exact ingestor instance"
     )
 )]
 
@@ -136,10 +136,10 @@ impl IngestorQuiesceReasons {
 struct IngestorQuiesceModes {
     active: IngestQuiesceMode,
     pending: Option<IngestQuiesceMode>,
-    active_supported_by_source: bool,
+    active_supported_by_connector: bool,
 }
 
-/// How a quiesced ingestor treats its source and the payloads that still reach it.
+/// How a quiesced ingestor treats intake and the payloads that still reach it.
 ///
 /// Each variant settles polling, endpoint admission and intake together, so those verdicts cannot
 /// disagree and reading any of them is a match.
@@ -148,15 +148,15 @@ struct IngestorQuiesceModes {
     nervix_lint,
     nervix::context(
         recurring,
-        reason = "the source task checks its retained quiesce state before each admitted payload \
-                  or poll"
+        reason = "the ingestor task checks its retained quiesce state before each admitted \
+                  payload or poll"
     )
 )]
 enum IngestorQuiesceHandling {
-    /// The source stops taking payloads, and a payload it already received still dispatches.
+    /// The ingestor stops taking payloads, and a payload it already received still dispatches.
     Suspend,
-    /// The source stops taking payloads, and a payload that still arrives is shed: an endpoint
-    /// rejects it and any other source drops it.
+    /// The ingestor stops taking payloads, and a payload that still arrives is shed: an endpoint
+    /// rejects it and any other ingestor drops it.
     SuspendAndShed,
     /// Polls stop and every payload that arrives is shed, an endpoint rejecting it with
     /// `retry_after`.
@@ -179,7 +179,7 @@ impl IngestorQuiesceHandling {
         if cause.stops_intake_regardless_of_mode() {
             return Self::Suspend;
         }
-        if !modes.active_supported_by_source {
+        if !modes.active_supported_by_connector {
             return Self::SuspendAndShed;
         }
         if cause == IngestorQuiesceCause::MemoryPressure {
@@ -188,7 +188,7 @@ impl IngestorQuiesceHandling {
         Self::declared_by(&modes.active)
     }
 
-    /// Memory pressure never adds buffered bytes. A suspended source stays suspended, and every
+    /// Memory pressure never adds buffered bytes. A suspended ingestor stays suspended, and every
     /// other mode sheds what arrives, keeping the retry delay a `REJECT` declares.
     fn under_memory_pressure(active: &IngestQuiesceMode) -> Self {
         match active {
@@ -202,7 +202,7 @@ impl IngestorQuiesceHandling {
         }
     }
 
-    /// The handling an entity hold or a domain pause takes from a mode the source honors.
+    /// The handling an entity hold or a domain pause takes from a mode the ingestor honors.
     fn declared_by(active: &IngestQuiesceMode) -> Self {
         match active {
             IngestQuiesceMode::Suspend => Self::Suspend,
@@ -260,12 +260,12 @@ impl IngestorQuiesceHandling {
     nervix_lint,
     nervix::context(
         recurring,
-        reason = "the source task checks its retained quiesce state before each admitted payload \
-                  or poll"
+        reason = "the ingestor task checks its retained quiesce state before each admitted \
+                  payload or poll"
     )
 )]
 enum IngestorQuiesceDecision {
-    /// No reason is engaged: sources poll, endpoints admit and every payload dispatches.
+    /// No reason is engaged: ingestors poll, endpoints admit and every payload dispatches.
     Open,
     Quiesced {
         /// The engaged reason that takes precedence, which `DESCRIBE INGESTOR` reports.
@@ -314,8 +314,8 @@ impl IngestorQuiesceDecision {
     nervix_lint,
     nervix::context(
         recurring,
-        reason = "the source task checks its retained quiesce state before each admitted payload \
-                  or poll"
+        reason = "the ingestor task checks its retained quiesce state before each admitted \
+                  payload or poll"
     )
 )]
 struct IngestorQuiescePublication {
@@ -352,22 +352,22 @@ impl IngestorQuiescePublication {
             if let Some(pending) = modes.pending.take() {
                 modes.active = pending;
             }
-            modes.active_supported_by_source = true;
+            modes.active_supported_by_connector = true;
         }
         Self::new(reasons, modes)
     }
 
     /// While a reason is engaged, the mode in effect when the hold began keeps governing it and
     /// `declared` waits for the release.
-    fn declaring(&self, declared: &IngestQuiesceMode, active_supported_by_source: bool) -> Self {
+    fn declaring(&self, declared: &IngestQuiesceMode, active_supported_by_connector: bool) -> Self {
         let mut modes = self.modes.clone();
         if self.reasons.active().is_some() {
-            modes.active_supported_by_source = active_supported_by_source;
+            modes.active_supported_by_connector = active_supported_by_connector;
             modes.pending = Some(declared.clone());
         } else {
             modes.active = declared.clone();
             modes.pending = None;
-            modes.active_supported_by_source = true;
+            modes.active_supported_by_connector = true;
         }
         Self::new(self.reasons, modes)
     }
@@ -375,7 +375,7 @@ impl IngestorQuiescePublication {
 
 /// One buffered message's ingest metadata, owned.
 ///
-/// A quiesced ingestor replays its payloads after the source messages are gone, so the
+/// A quiesced ingestor replays its payloads after the ingestor messages are gone, so the
 /// buffer owns these values and appends them into the group's builders on replay. It keeps the
 /// value of every field the message's entity declares, whichever of them the ingestor's programs
 /// read, so a replayed message builds the same columns a delivered one would.
@@ -412,7 +412,7 @@ impl BufferedIngestMetadata {
         }
     }
 
-    /// The metadata of a message a paced source returned owned: the values of the fields its
+    /// The metadata of a message a paced ingestor returned owned: the values of the fields its
     /// entity declares, and its headers. A paced transport names no position.
     pub(in crate::runtime) fn polled(
         fields: RetainedIngestMetadata,
@@ -425,7 +425,7 @@ impl BufferedIngestMetadata {
         }
     }
 
-    /// The metadata of a buffered message whose source declares no metadata field and carries no
+    /// The metadata of a buffered message whose ingestor declares no metadata field and carries no
     /// transport headers.
     #[cfg(test)]
     pub(in crate::runtime) fn without_headers() -> Self {
@@ -454,8 +454,8 @@ impl BufferedIngestMetadata {
     nervix_lint,
     nervix::context(
         recurring,
-        reason = "the source task checks its retained quiesce state before each admitted payload \
-                  or poll"
+        reason = "the ingestor task checks its retained quiesce state before each admitted \
+                  payload or poll"
     )
 )]
 pub(in crate::runtime) struct BufferedIngestPayload {
@@ -497,7 +497,7 @@ impl BufferedIngestPayload {
         )
     }
 
-    /// The number of source payloads this buffer holds, which is how many payloads the group it
+    /// The number of ingestor payloads this buffer holds, which is how many payloads the group it
     /// opens accepts.
     pub(in crate::runtime) fn len(&self) -> usize {
         self.payloads.len()
@@ -553,8 +553,8 @@ impl BufferedIngestPayload {
     nervix_lint,
     nervix::context(
         recurring,
-        reason = "the source task checks its retained quiesce state before each admitted payload \
-                  or poll"
+        reason = "the ingestor task checks its retained quiesce state before each admitted \
+                  payload or poll"
     )
 )]
 pub(super) struct IngestorQuiesceBuffer {
@@ -677,7 +677,7 @@ enum RetentionOverflow {
     nervix_lint,
     nervix::context(
         recurring,
-        reason = "the source task delivers one retained payload on each loop turn while its \
+        reason = "the ingestor task delivers one retained payload on each loop turn while its \
                   buffer drains"
     )
 )]
@@ -746,10 +746,10 @@ pub(in crate::runtime) enum IngestorQuiesceIntake {
     nervix_lint,
     nervix::context(
         bounded,
-        key = "source instance and retained payload",
-        bound = "configured MAX SIZE per source instance, counting a payload out for delivery; \
+        key = "ingestor instance and retained payload",
+        bound = "configured MAX SIZE per ingestor instance, counting a payload out for delivery; \
                  replay and termination fences; no guard across an await",
-        reason = "the source retains its quiescence control for the exact intake lifetime"
+        reason = "the ingestor retains its quiescence control for the exact intake lifetime"
     )
 )]
 pub(in crate::runtime) struct IngestorQuiesceControl {
@@ -771,7 +771,7 @@ pub(in crate::runtime) struct IngestorQuiesceControl {
     pub(super) metric_labels: IngestorQuiesceMetrics,
 }
 
-/// The exact publication a source host last observed before it awaited dispatch or a new batch.
+/// The exact publication an ingestor host last observed before it awaited dispatch or a new batch.
 /// Keeping the Arc alive also prevents a later publication from reusing its address.
 #[derive(Debug, Clone)]
 pub(in crate::runtime) struct IngestorQuiesceObservation {
@@ -806,7 +806,7 @@ impl IngestorQuiesceControl {
         let modes = IngestorQuiesceModes {
             active: mode,
             pending: None,
-            active_supported_by_source: true,
+            active_supported_by_connector: true,
         };
         let publication = IngestorQuiescePublication::new(IngestorQuiesceReasons::default(), modes);
         Self {
@@ -845,10 +845,10 @@ impl IngestorQuiesceControl {
     pub(super) fn update_declared_mode(
         &self,
         declared: &IngestQuiesceMode,
-        active_supported_by_source: bool,
+        active_supported_by_connector: bool,
     ) {
         self.published
-            .rcu(|current| current.declaring(declared, active_supported_by_source));
+            .rcu(|current| current.declaring(declared, active_supported_by_connector));
         self.changed.notify_waiters();
     }
 
@@ -908,7 +908,7 @@ impl IngestorQuiesceControl {
         }
     }
 
-    /// Waits for a publication newer than the decision a source host already acted on.
+    /// Waits for a publication newer than the decision an ingestor host already acted on.
     ///
     /// `notify_waiters` does not retain a permit. Register before comparing publications so a
     /// change between that decision and this wait is observed immediately, including one that
@@ -1166,7 +1166,7 @@ pub(super) struct RuntimeReconnectStatus {
     pub(super) retry_at: Instant,
 }
 
-/// What the sources of one ingestor publish about it on this node, for its `DESCRIBE INGESTOR`.
+/// What the concrete instances of one ingestor publish about it on this node, for its `DESCRIBE INGESTOR`.
 #[derive(Debug, Default)]
 pub(super) struct IngestorStatus {
     /// The connector's failure and the retry that follows it, while it has one.
@@ -1256,11 +1256,11 @@ impl Runtime {
     ) -> Arc<IngestorQuiesceControl> {
         let key = ingestor.runtime_key();
         if let Some(control) = self.inner.ingestor_quiescence.get(&key) {
-            let active_supported_by_source =
+            let active_supported_by_connector =
                 ingestor.declared_input.supports_quiesce(&control.mode());
             control.update_declared_mode(
                 ingestor.declared_input.quiesce_mode(),
-                active_supported_by_source,
+                active_supported_by_connector,
             );
             return control.clone();
         }
@@ -1446,7 +1446,7 @@ impl Runtime {
         nervix_lint,
         nervix::context(
             recurring,
-            reason = "the source task checks its retained quiesce state before each admitted \
+            reason = "the ingestor task checks its retained quiesce state before each admitted \
                       payload or poll"
         )
     )]
@@ -1461,7 +1461,7 @@ impl Runtime {
         }
         let backoff = Duration::from_millis(250);
         status.fail(
-            "ingestor fault injector failed source".into(),
+            "ingestor fault injector failed intake".into(),
             Some(RuntimeReconnectStatus {
                 backoff,
                 retry_at: Instant::now() + backoff,
@@ -1619,7 +1619,7 @@ mod tests {
     fn ownership_handoff_stops_new_intake_and_dispatches_already_admitted_payloads() {
         let runtime = Runtime::default();
         let domain = domain("default");
-        let ingestor = named("source");
+        let ingestor = named("paused_ingestor");
         let control =
             test_ingestor_quiesce_control(&runtime, &domain, &ingestor, IngestQuiesceMode::Drop);
         control.engage(IngestorQuiesceCause::OwnershipHandoff);
@@ -1648,7 +1648,7 @@ mod tests {
     fn shutdown_stops_new_intake_whatever_the_declared_quiesce_mode() {
         let runtime = Runtime::default();
         let domain = domain("default");
-        let ingestor = named("source");
+        let ingestor = named("paused_ingestor");
         let control = test_ingestor_quiesce_control(
             &runtime,
             &domain,
@@ -1686,7 +1686,7 @@ mod tests {
     fn quiesce_buffer_enforces_drop_oldest_per_instance() {
         let runtime = Runtime::default();
         let domain = domain("default");
-        let ingestor = named("source");
+        let ingestor = named("paused_ingestor");
         let control = test_ingestor_quiesce_control(
             &runtime,
             &domain,
@@ -1737,7 +1737,7 @@ mod tests {
     fn endpoint_quiesce_buffer_rejects_overflow_without_discarding_acknowledged_payloads() {
         let runtime = Runtime::default();
         let domain = domain("default");
-        let ingestor = named("source");
+        let ingestor = named("paused_ingestor");
         let control = test_ingestor_quiesce_control(
             &runtime,
             &domain,
@@ -1786,10 +1786,10 @@ mod tests {
     }
 
     #[test]
-    fn source_replacement_waits_when_the_active_hold_mode_is_not_supported() {
+    fn connector_replacement_waits_when_the_active_hold_mode_is_not_supported() {
         let runtime = Runtime::default();
         let domain = domain("default");
-        let ingestor = named("source");
+        let ingestor = named("paused_ingestor");
         let control = test_ingestor_quiesce_control(
             &runtime,
             &domain,
@@ -1811,7 +1811,7 @@ mod tests {
     fn memory_pressure_turns_buffer_into_zero_capacity_without_losing_existing_payloads() {
         let runtime = Runtime::default();
         let domain = domain("default");
-        let ingestor = named("source");
+        let ingestor = named("paused_ingestor");
         let control = test_ingestor_quiesce_control(
             &runtime,
             &domain,
@@ -1884,7 +1884,7 @@ mod tests {
         let control = test_ingestor_quiesce_control(
             &runtime,
             &domain("default"),
-            &named("source"),
+            &named("paused_ingestor"),
             IngestQuiesceMode::Buffer {
                 max_size: "1MiB".to_string(),
                 overflow: IngestQuiesceOverflow::DropOldest,
@@ -1933,7 +1933,7 @@ mod tests {
         let control = test_ingestor_quiesce_control(
             &runtime,
             &domain("default"),
-            &named("source"),
+            &named("paused_ingestor"),
             IngestQuiesceMode::Buffer {
                 max_size: "5B".to_string(),
                 overflow: IngestQuiesceOverflow::DropOldest,
@@ -1994,7 +1994,7 @@ mod tests {
         let control = test_ingestor_quiesce_control(
             &runtime,
             &domain("default"),
-            &named("source"),
+            &named("paused_ingestor"),
             IngestQuiesceMode::EndpointBuffer {
                 max_size: "1MiB".to_string(),
             },
@@ -2029,7 +2029,7 @@ mod tests {
         let control = test_ingestor_quiesce_control(
             &runtime,
             &domain("default"),
-            &named("source"),
+            &named("paused_ingestor"),
             IngestQuiesceMode::EndpointBuffer {
                 max_size: "1MiB".to_string(),
             },
@@ -2082,7 +2082,7 @@ mod tests {
     fn reject_quiesce_hints_its_retry_delay_through_a_pause_and_memory_pressure() {
         let runtime = Runtime::default();
         let domain = domain("default");
-        let ingestor = named("source");
+        let ingestor = named("paused_ingestor");
         let control = test_ingestor_quiesce_control(
             &runtime,
             &domain,
@@ -2127,10 +2127,10 @@ mod tests {
     }
 
     #[test]
-    fn memory_pressure_keeps_a_suspended_source_suspended_and_sheds_what_still_arrives() {
+    fn memory_pressure_keeps_a_suspended_ingestor_suspended_and_sheds_what_still_arrives() {
         let runtime = Runtime::default();
         let domain = domain("default");
-        let ingestor = named("source");
+        let ingestor = named("paused_ingestor");
         let control =
             test_ingestor_quiesce_control(&runtime, &domain, &ingestor, IngestQuiesceMode::Suspend);
 
@@ -2174,7 +2174,7 @@ mod tests {
     async fn memory_pressure_pauses_an_ingestor_that_is_still_starting() {
         let runtime = Runtime::default();
         let domain = domain("default");
-        let ingestor = named::<IngestorName>("source");
+        let ingestor = named::<IngestorName>("paused_ingestor");
         let key = DomainNodeUnitRef::new(
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
             Unit::SINGLE,
@@ -2199,7 +2199,7 @@ mod tests {
     async fn memory_pressure_quiesces_registered_ingestors_without_stopping_them() {
         let runtime = Runtime::default();
         let domain = domain("default");
-        let ingestor = named::<IngestorName>("source");
+        let ingestor = named::<IngestorName>("paused_ingestor");
         let key = DomainNodeUnitRef::new(
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
             Unit::SINGLE,
@@ -2310,7 +2310,7 @@ mod tests {
             let metrics = RuntimeMetrics::default();
             let metric_labels = metrics.register_ingestor_quiesce(
                 &domain("default"),
-                &named("source"),
+                &named("paused_ingestor"),
                 nervix_models::Unit::SINGLE,
                 None,
             );
@@ -2495,7 +2495,7 @@ mod tests {
                 let metrics = RuntimeMetrics::default();
                 let metric_labels = metrics.register_ingestor_quiesce(
                     &domain("default"),
-                    &named("source"),
+                    &named("paused_ingestor"),
                     nervix_models::Unit::SINGLE,
                     None,
                 );
@@ -2612,7 +2612,7 @@ mod tests {
                 let metrics = RuntimeMetrics::default();
                 let metric_labels = metrics.register_ingestor_quiesce(
                     &domain("default"),
-                    &named("source"),
+                    &named("paused_ingestor"),
                     nervix_models::Unit::SINGLE,
                     None,
                 );

@@ -248,7 +248,7 @@ fn bolero_entity_presentations_keep_declared_rows_and_complete_configuration() {
                 let presentation = emitter
                     .connector
                     .entity_presentation()
-                    .unwrap_or_else(|error| panic!("the generated sink renders: {error:#}"));
+                    .unwrap_or_else(|error| panic!("the generated emitter renders: {error:#}"));
                 assert_eq!(presentation.phrase(), kind.phrase());
                 assert_presentation_rows(&presentation, "to");
                 statements.push(ClientStatement::Server(Statement::Create(

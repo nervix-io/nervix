@@ -18,7 +18,7 @@ Feature: Altering relay materialized state
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}-materialized-add.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL
@@ -83,7 +83,7 @@ Feature: Altering relay materialized state
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge http-{{test_id}}-materialized-schema.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL
@@ -176,7 +176,7 @@ Feature: Altering relay materialized state
       CREATE RELAY projected SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-materialized-drop.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR event_source
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED
